@@ -125,7 +125,7 @@ inline constexpr CoherentRung kCoherentLadder[] = {
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},  // AWGN@15 measure_ack_fer 2026-06-06 (data4_full floor ~12 dB + ~3 margin); Good@20 measured 2026-06-02
-    {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           kRungDisabledDb}},  // AWGN@12 measure_ack_fer 2026-06-06 (floor ~8 dB + ~4 margin); Good@15 measured 2026-06-02
+    {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           20.0f}},            // AWGN@12 measure_ack_fer 2026-06-06 (floor ~8 dB + ~4 margin); Good@15 measured 2026-06-02; MOD@20 measured 2026-06-09 (genuine moderate R2/3 9/9 PASS @20-24 dB, qso_sweep) — softens the Good/Moderate cliff: a misclassification now costs 1 rung (R3/4->R2/3) not 2 (R3/4->R1/2)
     {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},            // AWGN/Good 10: Good@10 measured + AWGN≤Good monotonicity (was 12/14); MOD 18 unmeasured-lower
     {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,            // FLOOR = OFDM entry floors
                                          kOFDMEntryFloorGoodDb,

@@ -449,10 +449,13 @@ void test_auto_data_mode_boundaries() {
     // tops out at the QPSK R2/3 rung (>=15 dB), never R3/4.
     CHECK(rate == CodeRate::R3_4, "GOOD fading SNR20 auto data mode promotes to QPSK R3/4 (measured 2026-06-02)");
 
-    // fading 0.79 is MODERATE class (>= 0.65), where R2/3 is disabled -> QPSK R1/2.
+    // fading 0.79 is MODERATE class (>= 0.65). R2/3 is now ENABLED on moderate at >= 20 dB
+    // (measured 2026-06-09: genuine moderate R2/3 9/9 PASS @20-24 dB) — so a moderate-classified
+    // channel at SNR20 gets R2/3, not R1/2. This is the SOFTENED Good/Moderate cliff: a
+    // good-channel misclassified as moderate now costs 1 rung (R3/4->R2/3) instead of 2.
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
-          "moderate-lobby estimator spread (fading 0.79) at SNR20 selects QPSK R1/2 (R2/3 disabled)");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "moderate (fading 0.79) at SNR20 selects QPSK R2/3 — softened cliff (measured 2026-06-09)");
 
     recommendDataMode(19.8f, waveform, mod, rate, 0.50f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
@@ -503,8 +506,8 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "Moderate fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.90f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
-          "Moderate fading SNR20 selects coherent QPSK R1/2 (R2/3 disabled on moderate)");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "Moderate fading SNR20 selects coherent QPSK R2/3 (enabled 2026-06-09, softened cliff)");
 
     // Coherent-only OFDM (thread A, 2026-05-31): Poor fading routes to MC-DPSK at ALL
     // SNRs (OFDM retired from Poor). MC-DPSK is differential — so Poor stays differential,

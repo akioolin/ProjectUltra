@@ -10,6 +10,45 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-09 — feat(rate): working adaptive rate ladder (EMA controller via MODE_CHANGE) + R2/3-on-Moderate cliff-softening
+
+**What was broken:** mid-transfer adaptive rate (`ULTRA_RATE_ADAPT=1`) churned monotonically to
+R1/4 and corrupted the transfer. Two root causes: (1) the `RateController` dropped a rung on a
+SINGLE bad group — on the binary ack/nack tone-burst path every fade is a NACK, so it ratcheted
+down faster than the 3-good climb could recover; (2) the rate change was applied UNILATERALLY on
+the sender (`data_code_rate_ = next` + the in-band BURST_HEADER descriptor), which desynced the
+pilot/carrier GEOMETRY between sender and receiver (e.g. QPSK R3/4 = 51 data/8 pilots vs R2/3 =
+47 data/12 pilots) — the receiver kept stale warm-sync state, the LTS `|H|` came out 34 vs ~10,
+garbage LLRs, 0/8 CWs forever -> cascade to R1/4. Separately, the Good/Moderate rate cliff: R2/3
+was DISABLED on the Moderate class, so a fading-classifier misread cost TWO rungs (R3/4->R1/2).
+
+**What changed:**
+- `rate_controller.hpp`: the steering quality is now **EMA-smoothed** (`ema_alpha=0.4`,
+  reset-to-midpoint after a change). A single transient fade only dents the EMA; ~3 sustained bad
+  groups are needed to drop. Fixes the churn at the policy layer.
+- `connection.cpp` (`applyAdaptiveRateFeedback`): the rate change now routes through the
+  **synchronized `requestModeChange()` MODE_CHANGE handshake** (holds local rate until the peer
+  ACKs -> both stations switch together and re-anchor) instead of the unilateral descriptor flip.
+  The EMA controller owns WHEN; the MODE_CHANGE owns HOW.
+- `waveform_selection.hpp`: QPSK R2/3 Moderate anchor `kRungDisabledDb -> 20.0f` (measured
+  2026-06-09: genuine moderate R2/3 9/9 PASS @20-24 dB, qso_sweep). Softens the cliff — a
+  misclassification now costs 1 rung (R3/4->R2/3) not 2 (R3/4->R1/2). Boundary tests updated
+  (`test_waveform_policy.cpp`, `test_connection_policy.cpp`).
+- `gui_qso_scenario.sh`: quote `ACTUAL_DATA_MODE` in summary.env (multi-word "QPSK R2/3" broke
+  `analyze_qso_run.sh`'s `source`); `qso_sweep.sh`: seed 2 added to default SEEDS (CFO-phantom guard).
+
+**Why it works:** the EMA needs sustained evidence (no single-fade churn), and `requestModeChange`
+re-anchors both stations at the new geometry (the descriptor-flip desync is gone). Rate adaptation
+stays DEFAULT-OFF (`ULTRA_RATE_ADAPT`) pending broader validation.
+
+**Test verification:** `ctest -R "RateController|WaveformPolicy|ConnectionPolicy"` PASS (RateController
+37/37 incl. churn-resistance + periodic-fade tests). `ULTRA_LOCK_RATE=0 ULTRA_RATE_ADAPT=1
+gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21`: RESULT=PASS, CRC-clean,
+1560 bps, rate trajectory R3/4->R2/3 (fade) ->R3/4 ->R5/6 (recovery) all via MODE_CHANGE, NO 0/8
+cascade. Genuine-moderate R2/3 reliability: 9/9 PASS @20-24 dB, 6/6 @18-19 (qso_sweep).
+
+---
+
 ## 2026-06-09 — fix(cfo): reject a fade-manufactured phantom chirp CFO by flowing correlation into the CFOTracker
 
 **What was broken:** on a fading channel a multipath-distorted (low-correlation) chirp jitters the

@@ -367,7 +367,7 @@ write_summary() {
     echo "FILE_BYTES=$FILE_BYTES"
     echo "EXIT_AFTER=$EXIT_AFTER"
     echo "ELAPSED_SEC=$elapsed"
-    echo "ACTUAL_DATA_MODE=$actual_data_mode"
+    echo "ACTUAL_DATA_MODE=\"$actual_data_mode\""   # quoted: multi-word (e.g. "QPSK R2/3") must stay source-safe
     echo "ALPHA_MODE_COUNT=$alpha_mode_count"
     echo "BRAVO_MODE_COUNT=$bravo_mode_count"
     echo "ALPHA_UNEXPECTED_MODE_COUNT=$alpha_unexpected_modes"

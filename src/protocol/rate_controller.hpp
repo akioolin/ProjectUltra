@@ -17,9 +17,18 @@
 //
 // Policy (asymmetric, because costs are asymmetric — a failed burst loses the
 // whole burst + a retx, while running one rung slow costs only a little rate):
-//   * fast DOWN: quality < drop_below           -> step down one rung NOW
-//   * slow UP:   quality >= climb_above for K    -> step up one rung
-//   * hysteresis gap (drop_below << climb_above) + the K-streak kill thrash.
+//   * the steering quality is EMA-SMOOTHED (sustained channel state, not a single
+//     transient group) — this is the churn fix (2026-06-09). The pre-smoothing
+//     policy dropped on ONE bad sample; on a fading channel every fade is a NACK,
+//     so it ratcheted monotonically to R1/4 and never climbed back (each fade dropped
+//     a rung while a climb needed 3 consecutive clean groups). On the production
+//     tone-burst path `quality` is binary ack(1.0)/nack(0.0) = the FER signal, so a
+//     single fade must NOT move the rate — only a sustained run of NACKs (ARQ actually
+//     losing) should.
+//   * DOWN:  ema_quality < drop_below            -> step down one rung
+//   * UP:    ema_quality >= climb_above for K     -> step up one rung
+//   * hysteresis gap (drop_below << climb_above) + the EMA inertia + the K-streak +
+//     reset-to-midpoint after any change kill thrash.
 //
 // No PHY/audio/protocol dependencies — unit-tested in tests/test_rate_controller.cpp.
 
@@ -44,6 +53,11 @@ public:
         // gives the recovering channel a longer "rest" before risking a climb
         // back into freshly-arrived fade activity.
         int climb_streak = 3;
+        // EMA weight for the quality low-pass (the churn fix). alpha=0.4 => a single
+        // bad group only pulls ema down ~40% (1.0 -> 0.6, still above drop_below), so a
+        // transient fade does NOT drop the rung; ~3 consecutive bad groups are needed to
+        // cross drop_below. Lower alpha = more inertia (slower, steadier); higher = twitchier.
+        float ema_alpha = 0.4f;
         // Ordered ladder of SUPPORTED rates, lowest throughput first. If left empty
         // the controller fills it with the production OFDM ladder (skips the
         // unsupported R1_3/R5_6/R7_8 enum holes).
@@ -80,16 +94,26 @@ public:
         }
         quality = std::clamp(quality, 0.0f, 1.0f);
 
-        if (quality < cfg_.drop_below) {
+        // Low-pass the per-group quality into a SUSTAINED channel estimate. A single
+        // transient fade (one NACK = 0.0 on the binary path) only dents the EMA; it
+        // takes a run of bad groups to cross drop_below. This is the churn fix.
+        ema_quality_ = ema_initialized_
+                           ? cfg_.ema_alpha * quality + (1.0f - cfg_.ema_alpha) * ema_quality_
+                           : quality;
+        ema_initialized_ = true;
+
+        if (ema_quality_ < cfg_.drop_below) {
             good_streak_ = 0;
             const int next = std::max(0, idx - 1);
+            if (next != idx) resetSmoothingAfterChange();
             return cfg_.ladder[static_cast<size_t>(next)];
         }
-        if (quality >= cfg_.climb_above) {
+        if (ema_quality_ >= cfg_.climb_above) {
             if (++good_streak_ >= cfg_.climb_streak) {
                 good_streak_ = 0;
                 const int next =
                     std::min(static_cast<int>(cfg_.ladder.size()) - 1, idx + 1);
+                if (next != idx) resetSmoothingAfterChange();
                 return cfg_.ladder[static_cast<size_t>(next)];
             }
             return current;  // comfortable, but not enough consecutive good yet
@@ -99,8 +123,13 @@ public:
         return current;
     }
 
-    void reset() { good_streak_ = 0; }
+    void reset() {
+        good_streak_ = 0;
+        ema_quality_ = 0.0f;
+        ema_initialized_ = false;
+    }
     int climbStreak() const { return good_streak_; }
+    float emaQuality() const { return ema_quality_; }
     const Config& config() const { return cfg_; }
 
     // Convenience: map a successful-decode iteration count to a quality in [0,1].
@@ -121,8 +150,18 @@ private:
         return -1;
     }
 
+    // After a rung actually changes, forget the old rung's quality history and start
+    // neutral (the threshold midpoint) so neither bound is immediately within reach —
+    // the new rung must earn fresh evidence before the next move (hysteresis).
+    void resetSmoothingAfterChange() {
+        ema_quality_ = 0.5f * (cfg_.drop_below + cfg_.climb_above);
+        ema_initialized_ = true;
+    }
+
     Config cfg_;
     int good_streak_ = 0;
+    float ema_quality_ = 0.0f;
+    bool ema_initialized_ = false;
 };
 
 }  // namespace protocol

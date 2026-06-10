@@ -1903,17 +1903,20 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     }
     char buf[96];
     if (next != prev) {
-        data_code_rate_ = next;
-        // 2026-05-28: recompute burst ack_timeout for the new rate. Lower
-        // rates take longer per frame; if we leave the old (faster-rate)
-        // timeout in place, alpha will fire premature resends every group
-        // and waste airtime on dup-deliveries (same bug the initial
-        // 9348ms→14000ms fix solved at startup, but stickily across rate
-        // changes too).
-        std::snprintf(buf, sizeof(buf), "rate %s -> %s (q=%.2f)",
+        // Route the adaptive rate change through the SYNCHRONIZED MODE_CHANGE handshake:
+        // requestModeChange() holds the local rate until BRAVO ACKs, so both stations switch
+        // TOGETHER and re-anchor cleanly. The former unilateral `data_code_rate_ = next` flip
+        // (in-band BURST_HEADER descriptor) desynced the pilot/carrier geometry between sender
+        // and receiver — stale warm-sync -> |H| garbage -> 0/8 CWs forever -> churn to R1/4
+        // (2026-06-09). The EMA RateController owns WHEN to change; the MODE_CHANGE owns HOW.
+        const uint8_t reason =
+            isFasterMode(data_modulation_, next, data_modulation_, prev)
+                ? v2::ModeChangeReason::CHANNEL_IMPROVED
+                : v2::ModeChangeReason::CHANNEL_DEGRADED;
+        requestModeChange(data_modulation_, next, measured_snr_db_, reason);
+        std::snprintf(buf, sizeof(buf), "rate %s -> %s via MODE_CHANGE (q=%.2f)",
                       codeRateToString(prev), codeRateToString(next), quality);
         LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-        notifyDataModeChanged(measured_snr_db_, fading_index_);
     } else {
         std::snprintf(buf, sizeof(buf), "hold %s (q=%.2f)", codeRateToString(prev), quality);
     }

@@ -1,5 +1,10 @@
 // Unit tests for RateController — the Phase 5c per-block rate-adaptation policy
 // (design §14.36). Pure state machine; no PHY/protocol dependency.
+//
+// 2026-06-09: the steering quality is now EMA-SMOOTHED so a single transient fade
+// (one NACK on the binary ack/nack path) cannot move the rate — this is the churn
+// fix. The pre-smoothing policy dropped a rung on EVERY bad sample, so on a fading
+// channel it ratcheted monotonically to R1/4 and never climbed back.
 
 #include "protocol/rate_controller.hpp"
 #include "ultra/types.hpp"
@@ -23,67 +28,79 @@ int tests_failed = 0;
         }                                                 \
     } while (0)
 
-void test_failed_group_drops_immediately() {
+// With the default EMA (alpha=0.4) and reset-to-midpoint(0.475) after a change, the
+// thresholds are drop_below=0.25, climb_above=0.70, climb_streak=3.
+
+void test_first_bad_group_acts_no_history() {
+    // The very first sample has no history -> ema = quality directly, so a failed
+    // first group still drops immediately (best evidence available).
     RateController c;
-    // quality 0 (failed decode) at R3/4 -> step down to R2/3 next burst.
     CHECK(c.update(CodeRate::R3_4, 0.0f) == CodeRate::R2_3,
-          "failed group steps R3/4 -> R2/3 immediately");
-    CHECK(c.update(CodeRate::R2_3, 0.0f) == CodeRate::R1_2,
-          "failed group steps R2/3 -> R1/2");
+          "first group (no history) at q=0 drops R3/4 -> R2/3");
 }
 
-void test_drop_is_one_rung_at_a_time() {
+void test_single_transient_fade_does_not_drop() {
+    // THE CHURN FIX. Warm up the EMA at the top rung with good groups, then inject
+    // fades: ONE (and even TWO) consecutive fades must HOLD; only a sustained run
+    // (3rd consecutive) finally drops a rung.
     RateController c;
-    CHECK(c.update(CodeRate::R5_6, 0.10f) == CodeRate::R3_4, "from top: R5/6 -> R3/4");
-    CHECK(c.update(CodeRate::R3_4, 0.10f) == CodeRate::R2_3, "low quality -> one rung down");
-    CHECK(c.update(CodeRate::R2_3, 0.10f) == CodeRate::R1_2, "again one rung down");
-    CHECK(c.update(CodeRate::R1_2, 0.10f) == CodeRate::R1_4, "again one rung down");
-    CHECK(c.update(CodeRate::R1_4, 0.10f) == CodeRate::R1_4, "floor: cannot drop below R1/4");
+    for (int i = 0; i < 4; ++i) c.update(CodeRate::R5_6, 1.0f);  // ema -> ~1.0
+    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R5_6,
+          "1 fade after a healthy run: HOLD (no churn)");
+    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R5_6,
+          "2 consecutive fades: still HOLD");
+    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R3_4,
+          "3 consecutive fades (sustained): NOW drop one rung");
 }
 
-void test_climb_is_slow_needs_consecutive_good() {
-    RateController c;  // climb_streak default 3; ladder {R1/4,R1/2,R2/3,R3/4,R5/6}
-    // 1st and 2nd comfortable groups: hold (streak < 3)
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good group: hold");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good groups: still hold");
-    // 3rd consecutive comfortable group -> climb
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "3 good groups: climb R1/2 -> R2/3");
-    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "streak reset after climb: hold");
-    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "2 good after reset: still hold");
-    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R3_4, "3 good: climb R2/3 -> R3/4");
-    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "1 good at R3/4: hold");
-    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "2 good at R3/4: hold");
-    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R5_6, "3 good: climb R3/4 -> R5/6 (top)");
-    CHECK(c.update(CodeRate::R5_6, 0.95f) == CodeRate::R5_6, "ceiling: cannot climb above R5/6");
-    CHECK(c.update(CodeRate::R5_6, 0.95f) == CodeRate::R5_6, "ceiling: still R5/6");
+void test_periodic_fade_does_not_ratchet_to_floor() {
+    // THE regression that motivated the fix: a fade every 4th group (75% good) must
+    // NEVER ratchet below the starting rung. Pre-fix, each binary NACK dropped a rung
+    // and it walked straight to R1/4.
+    RateController c;
+    CodeRate r = CodeRate::R2_3;
+    bool ratcheted_below_start = false;
+    for (int i = 0; i < 60; ++i) {
+        const float q = (i % 4 == 3) ? 0.0f : 1.0f;  // one fade per four groups
+        r = c.update(r, q);
+        if (r == CodeRate::R1_2 || r == CodeRate::R1_4) ratcheted_below_start = true;
+    }
+    CHECK(!ratcheted_below_start,
+          "75%-good periodic fade never ratchets below the R2/3 start (no churn)");
+    CHECK(r == CodeRate::R3_4 || r == CodeRate::R5_6 || r == CodeRate::R2_3,
+          "ends at or above the start rung");
 }
 
-void test_midzone_holds_and_breaks_climb_streak() {
+void test_sustained_failure_descends_to_floor() {
+    // Unrelenting failure (the rung really IS over capacity) must still descend all
+    // the way to the R1/4 floor — smoothing slows it, it does not stop it.
+    RateController c;
+    CodeRate r = CodeRate::R5_6;
+    for (int i = 0; i < 40; ++i) r = c.update(r, 0.0f);
+    CHECK(r == CodeRate::R1_4, "unrelenting failure descends to the R1/4 floor");
+}
+
+void test_climb_is_slow_and_deliberate() {
     RateController c;  // climb_streak default 3
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good (streak=1)");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good (streak=2)");
-    // a mid-zone group (decoding fine, no margin) must RESET the climb streak
-    CHECK(c.update(CodeRate::R1_2, 0.50f) == CodeRate::R1_2, "mid-zone holds, streak reset");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good after reset (streak=1, no climb)");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good after reset (streak=2, no climb)");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "3 consecutive good -> climb");
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R1_2, "1 good group: hold");
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R1_2, "2 good groups: hold");
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "3 consecutive good: climb");
+    // post-climb the EMA is reset to midpoint, so the next climb takes LONGER than 3
+    // (the EMA must first re-reach climb_above) — deliberately slow.
+    CHECK(c.update(CodeRate::R2_3, 1.0f) == CodeRate::R2_3, "post-climb hold (ema reset below climb_above)");
+    // sustained perfect quality eventually reaches the top rung.
+    CodeRate r = CodeRate::R1_4;
+    for (int i = 0; i < 40; ++i) r = c.update(r, 1.0f);
+    CHECK(r == CodeRate::R5_6, "sustained perfect quality climbs to the top rung");
 }
 
 void test_no_thrash_in_hysteresis_gap() {
     RateController c;
-    // quality sitting between drop_below(0.25) and climb_above(0.70): never moves.
+    // steady mid-quality between drop_below(0.25) and climb_above(0.70): never moves.
     for (int i = 0; i < 20; ++i) {
         CHECK(c.update(CodeRate::R2_3, 0.50f) == CodeRate::R2_3,
               "steady mid-quality never changes rate (no thrash)");
     }
-}
-
-void test_drop_resets_climb_progress() {
-    RateController c;
-    c.update(CodeRate::R2_3, 0.95f);                 // streak = 1
-    CHECK(c.climbStreak() == 1, "one good group banked");
-    CHECK(c.update(CodeRate::R2_3, 0.0f) == CodeRate::R1_2, "fail drops a rung");
-    CHECK(c.climbStreak() == 0, "drop wipes climb progress");
 }
 
 void test_quality_from_iterations() {
@@ -103,12 +120,12 @@ void test_off_ladder_rate_passes_through() {
 }  // namespace
 
 int main() {
-    test_failed_group_drops_immediately();
-    test_drop_is_one_rung_at_a_time();
-    test_climb_is_slow_needs_consecutive_good();
-    test_midzone_holds_and_breaks_climb_streak();
+    test_first_bad_group_acts_no_history();
+    test_single_transient_fade_does_not_drop();
+    test_periodic_fade_does_not_ratchet_to_floor();
+    test_sustained_failure_descends_to_floor();
+    test_climb_is_slow_and_deliberate();
     test_no_thrash_in_hysteresis_gap();
-    test_drop_resets_climb_progress();
     test_quality_from_iterations();
     test_off_ladder_rate_passes_through();
 
