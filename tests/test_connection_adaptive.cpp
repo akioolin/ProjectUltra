@@ -8,6 +8,13 @@
 // regression) and the adaptive ladder is being reworked. Proper ladder
 // coverage will be re-authored against the reworked controller. The cases
 // kept below exercise stable connection plumbing, not the ladder.
+//
+// NOTE (2026-06-09): the old in-Connection adaptive-mode controller
+// (updateAdaptiveModeController + adaptive_target_ hysteresis/lockout state)
+// has now been DELETED outright — rate adaptation lives in the EMA-smoothed
+// RateController (tests/test_rate_controller.cpp) and lands via the
+// synchronized requestModeChange() MODE_CHANGE handshake exercised below. The
+// dead test accessors for that machinery were removed with it.
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
@@ -99,8 +106,6 @@ struct ConnectionAdaptiveTestAccess {
         makeLocalIss(c);
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
         c.configureArqForCurrentDataMode();
-        c.resetAdaptiveModeController();
-        c.adaptive_cooldown_ms_ = 0;
     }
 
     static void makeResponderWithConnectAckRescue(Connection& c,
@@ -180,10 +185,6 @@ struct ConnectionAdaptiveTestAccess {
         CHECK(c.file_transfer_.startSend(path), "startSend should succeed");
     }
 
-    static void updateAdaptive(Connection& c, uint32_t ms) {
-        c.updateAdaptiveModeController(ms);
-    }
-
     static void acknowledgeModeChange(Connection& c) {
         auto ack = v2::ControlFrame::makeAck("K2DEF", "W1ABC",
                                              c.getStats().arq.acks_received + 1);
@@ -227,46 +228,6 @@ struct ConnectionAdaptiveTestAccess {
 
     static uint16_t modeChangeSeq(const Connection& c) {
         return c.mode_change_seq_;
-    }
-
-    static CodeRate adaptiveTargetRate(const Connection& c) {
-        return c.adaptive_target_.rate;
-    }
-
-    static Modulation adaptiveTargetModulation(const Connection& c) {
-        return c.adaptive_target_.modulation;
-    }
-
-    static bool adaptiveTargetPending(const Connection& c) {
-        return c.adaptive_target_.pending;
-    }
-
-    static uint32_t postDowngradeLockoutMs() {
-        return Connection::ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
-    }
-
-    static int cleanWindowsForUpgrade() {
-        return Connection::ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE;
-    }
-
-    static uint32_t downgradeForceMs() {
-        return Connection::ADAPTIVE_DOWNGRADE_FORCE_MS;
-    }
-
-    static uint32_t modeChangeCooldownMs() {
-        return Connection::ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
-    }
-
-    static void setAdaptiveCooldown(Connection& c, uint32_t ms) {
-        c.adaptive_cooldown_ms_ = ms;
-    }
-
-    static uint32_t postDowngradeLockoutRemaining(const Connection& c) {
-        return c.adaptive_post_downgrade_lockout_ms_;
-    }
-
-    static uint32_t downgradeQueueAge(const Connection& c) {
-        return c.adaptive_downgrade_queue_age_ms_;
     }
 
     static size_t arqWindow(const Connection& c) {

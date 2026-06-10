@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-09 — refactor(cleanup): delete the dead in-Connection adaptive-mode controller + the [ADPT] GUI telemetry
+
+**What this removes (all DEAD — superseded by the EMA `RateController` + `requestModeChange()` landed
+earlier today):**
+- `Connection::updateAdaptiveModeController()` and its whole hysteresis state machine
+  (`resetAdaptiveModeController`, `tryIssueAdaptiveModeChangeAtBoundary`, `canIssueAdaptiveModeChange`,
+  `hasAdaptiveUpgradeBacklog`, `adaptiveBacklogFrames`) + the file-scope helpers only they used
+  (`getAdaptiveRetryPressure`, `hasCleanAdaptiveWindow`, `oneStepMoreRobustMode`, `oneStepFasterToward`,
+  `canDowngradeMode`, `downgradeRequiresSeverePressure`, `csiSupportsFasterSameConstellation`,
+  `csiOnlyRequestsSameOrderRegimeChange`, `isFasterRate`, `isMoreRobustRate`, `isMoreRobustMode`,
+  `adaptiveModulationRank`, `statDelta`, `AdaptivePressure`/`AdaptiveMode`/`AdaptiveModeTarget`) +
+  the `adaptive_target_`/`adaptive_*_ms_`/`adaptive_*_windows_` members and `ADAPTIVE_*` constants
+  (`connection.cpp` −635 lines, `connection.hpp`). This machinery was already inert — it early-returned
+  unless a now-deleted env path enabled it, and even when run it CHURNED to R1/4 (the exact failure the
+  EMA controller fixes). KEPT: `applyAdaptiveRateFeedback` (the live entry, now routing through
+  `requestModeChange`), `rate_controller_`, `modeEfficiency`/`isFasterMode` (still used by it), and the
+  `friend ConnectionAdaptiveTestAccess` hook (a separate live MC-DPSK ack test relies on it).
+- The `[ADPT]` GUI advisory telemetry (`App::updateAdaptiveAdvisory` / `resetAdaptiveAdvisory` + the
+  "peer reports … conditions" log block + their `adapt_*` window/virtual-mode state and
+  `modulationBitsPerSymbol`/`modeEfficiency`/`adaptationDirection` helpers; `app.cpp` −186 lines,
+  `app.hpp`). It computed a shadow rate-ladder and logged what it *would* do — drove nothing, pure msgbox
+  noise. The real adaptation is now the receiver-side `RateController` + `MODE_CHANGE`.
+- Gutted the matching dead accessors in `tests/test_connection_adaptive.cpp` (kept all 12 live
+  mode-change/connect-rescue/handshake/full-anchor tests).
+
+**Why it's safe:** every removed symbol was confirmed referenced ONLY by other removed symbols (grep
+sweep across `src/` + `tests/`); nothing in the live mode-change / ARQ / rate-feedback path touched it.
+The infrastructure map did not list it as a stage/knob/waveform, so no map change.
+
+**Test verification:** `cmake --build build` (ultra_gui + tests) clean; `ctest -R
+"ConnectionAdaptive|RateController|MCDPSK|MCDPSKAckTurnaround|WaveformPolicy|ConnectionPolicy"` →
+6/6 PASS.
+
+---
+
 ## 2026-06-09 — feat(rate): working adaptive rate ladder (EMA controller via MODE_CHANGE) + R2/3-on-Moderate cliff-softening
 
 **What was broken:** mid-transfer adaptive rate (`ULTRA_RATE_ADAPT=1`) churned monotonically to

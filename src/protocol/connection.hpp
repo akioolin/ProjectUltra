@@ -735,34 +735,6 @@ private:
     void commitPendingModeChange(const char* outcome);
     void notifyDataModeChanged(float snr_db, float peer_fading_index);
     LadderRungId currentLadderRungId() const;
-    void resetAdaptiveModeController();
-    void updateAdaptiveModeController(uint32_t elapsed_ms);
-    bool tryIssueAdaptiveModeChangeAtBoundary();
-    bool canIssueAdaptiveModeChange(bool is_downgrade) const;
-    bool hasAdaptiveUpgradeBacklog(CodeRate target_rate) const;
-    size_t adaptiveBacklogFrames(CodeRate rate) const;
-
-    struct AdaptiveModeTarget {
-        bool pending = false;
-        Modulation modulation = Modulation::DQPSK;
-        CodeRate rate = CodeRate::R1_4;
-        uint8_t reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
-    };
-    AdaptiveModeTarget adaptive_target_;
-    ARQStats adaptive_last_stats_;
-    uint32_t adaptive_eval_elapsed_ms_ = 0;
-    uint32_t adaptive_cooldown_ms_ = 0;
-    uint32_t adaptive_post_downgrade_lockout_ms_ = 0;
-    uint32_t adaptive_downgrade_queue_age_ms_ = 0;
-    int adaptive_clean_windows_ = 0;
-    int adaptive_pressure_windows_ = 0;
-    static constexpr uint32_t ADAPTIVE_EVAL_INTERVAL_MS = 1000;
-    static constexpr uint32_t ADAPTIVE_MODE_CHANGE_COOLDOWN_MS = 30000;
-    static constexpr uint32_t ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 45000;
-    static constexpr uint32_t ADAPTIVE_DOWNGRADE_FORCE_MS = 6000;
-    static constexpr int ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE = 15;
-    static constexpr int ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE = 2;
-    static constexpr size_t ADAPTIVE_UPGRADE_BACKLOG_WINDOWS = 2;
 
     // Callbacks
     TransmitCallback on_transmit_;

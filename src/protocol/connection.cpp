@@ -108,64 +108,6 @@ bool seqBefore(uint16_t a, uint16_t b) {
     return a != b && static_cast<uint16_t>(b - a) < 0x8000;
 }
 
-int statDelta(int now, int before) {
-    return std::max(0, now - before);
-}
-
-struct AdaptivePressure {
-    bool present = false;
-    bool severe = false;
-};
-
-AdaptivePressure getAdaptiveRetryPressure(const ARQStats& now,
-                                          const ARQStats& before,
-                                          size_t window_size) {
-    const int retransmissions =
-        statDelta(now.retransmissions, before.retransmissions);
-    const int timeouts = statDelta(now.timeouts, before.timeouts);
-    const int failed = statDelta(now.failed, before.failed);
-    const int holes = statDelta(now.hole_events, before.hole_events);
-
-    AdaptivePressure pressure;
-    pressure.present =
-        timeouts > 0 || failed > 0 || retransmissions >= 2 || holes >= 2;
-
-    // A whole ARQ window timing out is not ordinary fading noise; it means the
-    // current mode has stopped delivering a usable feedback loop. Step down one
-    // rung immediately, then let the post-change dwell prove recovery.
-    const int full_window = static_cast<int>(std::max<size_t>(1, window_size));
-    pressure.severe = failed > 0 || timeouts >= full_window;
-    return pressure;
-}
-
-bool hasCleanAdaptiveWindow(const ARQStats& now,
-                            const ARQStats& before,
-                            bool tx_window_idle) {
-    const bool no_error_activity =
-        statDelta(now.retransmissions, before.retransmissions) == 0 &&
-        statDelta(now.timeouts, before.timeouts) == 0 &&
-        statDelta(now.failed, before.failed) == 0 &&
-        statDelta(now.hole_events, before.hole_events) == 0;
-
-    if (!no_error_activity) {
-        return false;
-    }
-
-    // No new ARQ event while DATA is still outstanding is not a clean receive
-    // window; it is an unresolved fade/ACK wait. Count clean time only when the
-    // peer ACKs progress or when the transmit window is genuinely idle.
-    return statDelta(now.acks_received, before.acks_received) > 0 ||
-           tx_window_idle;
-}
-
-bool isFasterRate(CodeRate candidate, CodeRate current) {
-    return ofdmCodeRateValue(candidate) > ofdmCodeRateValue(current);
-}
-
-bool isMoreRobustRate(CodeRate candidate, CodeRate current) {
-    return ofdmCodeRateValue(candidate) < ofdmCodeRateValue(current);
-}
-
 float modeEfficiency(Modulation mod, CodeRate rate) {
     return estimateWideOFDMRawBps(mod, rate);
 }
@@ -174,34 +116,6 @@ bool isFasterMode(Modulation candidate_mod, CodeRate candidate_rate,
                   Modulation current_mod, CodeRate current_rate) {
     return modeEfficiency(candidate_mod, candidate_rate) >
            modeEfficiency(current_mod, current_rate) + 0.05f;
-}
-
-int adaptiveModulationRank(Modulation mod) {
-    switch (mod) {
-        case Modulation::DQPSK: return 0;
-        case Modulation::QPSK:  return 1;
-        case Modulation::D8PSK:
-        case Modulation::QAM8:  return 2;
-        case Modulation::QAM16: return 3;
-        case Modulation::QAM32: return 4;
-        case Modulation::QAM64: return 5;
-        case Modulation::QAM256: return 6;
-        default: return 0;
-    }
-}
-
-bool isMoreRobustMode(Modulation candidate_mod, CodeRate candidate_rate,
-                      Modulation current_mod, CodeRate current_rate) {
-    const float candidate_eff = modeEfficiency(candidate_mod, candidate_rate);
-    const float current_eff = modeEfficiency(current_mod, current_rate);
-    if (candidate_eff < current_eff - 0.05f) {
-        return true;
-    }
-    if (candidate_eff > current_eff + 0.05f) {
-        return false;
-    }
-    return adaptiveModulationRank(candidate_mod) <
-           adaptiveModulationRank(current_mod);
 }
 
 bool isNormalArqAckFrame(const Bytes& frame_data) {
@@ -229,110 +143,6 @@ bool expectsFullOFDMAnchorAfterTx(const Bytes& frame_data) {
            type == v2::FrameType::FILE_CANCEL;
 }
 
-CodeRate oneStepMoreRobust(CodeRate rate) {
-    if (const auto* previous = previousOFDMRateDescriptor(rate)) {
-        return previous->rate;
-    }
-    return rate;
-}
-
-struct AdaptiveMode {
-    Modulation modulation = Modulation::DQPSK;
-    CodeRate rate = CodeRate::R1_4;
-};
-
-AdaptiveMode oneStepMoreRobustMode(Modulation mod, CodeRate rate) {
-    if (isFasterRate(rate, fallbackOFDMCodeRateDescriptor().rate)) {
-        return {mod, oneStepMoreRobust(rate)};
-    }
-
-    switch (mod) {
-        case Modulation::QAM256:
-        case Modulation::QAM64:
-        case Modulation::QAM32:
-            return {Modulation::QAM16, rate};
-        case Modulation::QAM16:
-            return {mod, rate};
-        case Modulation::D8PSK:
-        case Modulation::QAM8:
-            return {Modulation::QPSK, rate};
-        case Modulation::QPSK:
-            return {Modulation::DQPSK, rate};
-        default:
-            break;
-    }
-
-    if (isFasterRate(rate, fallbackOFDMCodeRateDescriptor().rate)) {
-        return {mod, oneStepMoreRobust(rate)};
-    }
-    return {mod, rate};
-}
-
-AdaptiveMode oneStepFasterToward(Modulation current_mod, CodeRate current_rate,
-                                  Modulation recommended_mod, CodeRate recommended_rate) {
-    if (!isFasterMode(recommended_mod, recommended_rate, current_mod, current_rate)) {
-        return {current_mod, current_rate};
-    }
-
-    if (const auto* next = nextOFDMRateDescriptorToward(current_rate, recommended_rate);
-        next != nullptr && next->rate != current_rate) {
-        return {current_mod, next->rate};
-    }
-
-    if (current_mod == Modulation::DQPSK &&
-        adaptiveModulationRank(recommended_mod) >= adaptiveModulationRank(Modulation::D8PSK)) {
-        return {Modulation::D8PSK, current_rate};
-    }
-    if (current_mod == Modulation::QPSK &&
-        adaptiveModulationRank(recommended_mod) >= adaptiveModulationRank(Modulation::D8PSK)) {
-        return {Modulation::D8PSK, current_rate};
-    }
-    if ((current_mod == Modulation::D8PSK || current_mod == Modulation::QAM8) &&
-        adaptiveModulationRank(recommended_mod) >= adaptiveModulationRank(Modulation::QAM16)) {
-        return {Modulation::QAM16, recommended_rate};
-    }
-
-    return {recommended_mod, recommended_rate};
-}
-
-bool canDowngradeMode(Modulation mod, CodeRate rate) {
-    const AdaptiveMode target = oneStepMoreRobustMode(mod, rate);
-    return target.modulation != mod || target.rate != rate;
-}
-
-bool downgradeRequiresSeverePressure(Modulation current_mod,
-                                      CodeRate current_rate,
-                                      const AdaptiveMode& target) {
-    // D8PSK R1/2 is the differential high-throughput landing for GOOD fading.
-    // Sparse ARQ pressure there is usually a faded ACK/data pocket, not enough
-    // evidence to abandon a mode with 8PSK throughput for same-rate coherent
-    // QPSK. Only a full-window/failed-frame event proves the rung is unusable.
-    return current_mod == Modulation::D8PSK &&
-           target.modulation == Modulation::QPSK &&
-           target.rate == current_rate;
-}
-
-bool csiSupportsFasterSameConstellation(Modulation recommended_mod,
-                                        CodeRate recommended_rate,
-                                        Modulation current_mod,
-                                        CodeRate current_rate) {
-    return recommended_mod == current_mod &&
-           isFasterRate(recommended_rate, current_rate);
-}
-
-bool isSameConstellationOrderChange(Modulation recommended_mod,
-                                    Modulation current_mod) {
-    return recommended_mod != current_mod &&
-           getBitsPerSymbol(recommended_mod) == getBitsPerSymbol(current_mod);
-}
-
-bool csiOnlyRequestsSameOrderRegimeChange(Modulation recommended_mod,
-                                          CodeRate recommended_rate,
-                                          Modulation current_mod,
-                                          CodeRate current_rate) {
-    return isSameConstellationOrderChange(recommended_mod, current_mod) &&
-           !isMoreRobustRate(recommended_rate, current_rate);
-}
 }
 
 const char* connectionStateToString(ConnectionState state) {
@@ -786,7 +596,6 @@ void Connection::abortTxNow() {
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retx_remaining_ = 0;
-    resetAdaptiveModeController();
 
     // Stop transient connection attempts immediately.
     if (state_ == ConnectionState::PROBING ||
@@ -1660,7 +1469,6 @@ void Connection::clearFileTransferArqState() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-    resetAdaptiveModeController();
 }
 
 void Connection::cancelFileTransfer() {
@@ -2354,10 +2162,6 @@ void Connection::runDeferredArqRefill() {
         return;
     }
 
-    if (tryIssueAdaptiveModeChangeAtBoundary()) {
-        return;
-    }
-
     const bool refill_file = deferred_file_refill_;
     const bool refill_fragments = deferred_fragment_refill_;
     deferred_file_refill_ = false;
@@ -2389,425 +2193,6 @@ void Connection::runDeferredArqRefill() {
     }
 
     sendNextQueuedPayloadIfReady();
-}
-
-void Connection::resetAdaptiveModeController() {
-    adaptive_target_ = AdaptiveModeTarget{};
-    adaptive_last_stats_ = arq_.getStats();
-    adaptive_eval_elapsed_ms_ = 0;
-    adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
-    adaptive_post_downgrade_lockout_ms_ = 0;
-    adaptive_downgrade_queue_age_ms_ = 0;
-    adaptive_clean_windows_ = 0;
-    adaptive_pressure_windows_ = 0;
-}
-
-bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
-    if (state_ != ConnectionState::CONNECTED || !isOFDMMode(negotiated_mode_)) {
-        return false;
-    }
-    if (!local_data_turn_ || peer_data_turn_requested_ || data_turn_tx_guard_ms_ > 0) {
-        return false;
-    }
-    if (config_.forced_modulation != Modulation::AUTO ||
-        config_.forced_code_rate != CodeRate::AUTO) {
-        return false;
-    }
-    if (mode_change_pending_ || disconnect_pending_) {
-        return false;
-    }
-    if (file_transfer_.getState() != FileTransferState::SENDING) {
-        return false;
-    }
-    if (!is_initiator_ && !handshake_confirmed_) {
-        return false;
-    }
-    if (!pending_tx_fragments_.empty()) {
-        return false;
-    }
-
-    const size_t available_slots = arq_.getAvailableSlots();
-    const size_t window_size = arq_.getWindowSize();
-    if (is_downgrade) {
-        const bool target_changes_modulation =
-            adaptive_target_.pending &&
-            adaptive_target_.modulation != data_modulation_;
-        if (target_changes_modulation) {
-            // Changing modulation also changes the demodulator, pilot layout,
-            // and coherent-vs-differential control profile. Keep those regime
-            // changes on a fully drained ARQ boundary; only same-regime
-            // code-rate downgrades may use the half-window recovery path.
-            return available_slots == window_size;
-        }
-        // Downgrades are recovery-oriented for sustained backlog, but a file
-        // tail smaller than one ARQ window should drain in the current mode.
-        // Injecting MODE_CHANGE into a short repair tail steals the ACK/DATA
-        // turn and can starve the last few frames. The boundary is derived from
-        // the active ARQ window, not from an SNR/rate constant.
-        const CodeRate target_rate =
-            adaptive_target_.pending ? adaptive_target_.rate : data_code_rate_;
-        if (adaptiveBacklogFrames(target_rate) < window_size) {
-            return available_slots == window_size;
-        }
-        return available_slots * 2 >= window_size;
-    }
-
-    // Upgrades keep the strict boundary so in-flight DATA at the old, more
-    // robust rate clears before switching to a faster rate.
-    return available_slots == window_size;
-}
-
-size_t Connection::adaptiveBacklogFrames(CodeRate rate) const {
-    size_t frames = 0;
-    const size_t capacity = v2::getFixedFramePayloadCapacity(rate, data_frame_cw_count_);
-    const size_t file_data_payload =
-        capacity > FileTransferController::FILE_DATA_OVERHEAD
-            ? capacity - FileTransferController::FILE_DATA_OVERHEAD
-            : capacity;
-
-    if (file_transfer_.getState() == FileTransferState::SENDING) {
-        frames += file_transfer_.pendingChunkCount();
-
-        const size_t remaining = file_transfer_.remainingTxBytes();
-        if (remaining > 0 && file_data_payload > 0) {
-            frames += (remaining + file_data_payload - 1) / file_data_payload;
-        } else if (file_transfer_.hasMoreChunks()) {
-            frames += 1;
-        }
-    }
-
-    if (!pending_tx_fragments_.empty() &&
-        acked_fragment_count_ < pending_tx_fragments_.size()) {
-        frames += pending_tx_fragments_.size() - acked_fragment_count_;
-    }
-
-    return frames;
-}
-
-bool Connection::hasAdaptiveUpgradeBacklog(CodeRate target_rate) const {
-    if (file_transfer_.getState() != FileTransferState::SENDING) {
-        return false;
-    }
-    return adaptiveBacklogFrames(target_rate) >=
-           arq_.getWindowSize() * ADAPTIVE_UPGRADE_BACKLOG_WINDOWS;
-}
-
-bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
-    if (!adaptive_target_.pending) {
-        return false;
-    }
-
-    const bool is_downgrade =
-        isMoreRobustMode(adaptive_target_.modulation, adaptive_target_.rate,
-                         data_modulation_, data_code_rate_);
-    const bool downgrade_stuck =
-        is_downgrade &&
-        adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS;
-    const bool boundary_ready = canIssueAdaptiveModeChange(is_downgrade);
-    const size_t backlog_frames = adaptiveBacklogFrames(adaptive_target_.rate);
-    const bool backlog_can_absorb_mode_change = backlog_frames >= arq_.getWindowSize();
-    const bool target_changes_modulation =
-        adaptive_target_.modulation != data_modulation_;
-    const bool force_downgrade =
-        downgrade_stuck &&
-        backlog_can_absorb_mode_change &&
-        !target_changes_modulation &&
-        !boundary_ready &&
-        state_ == ConnectionState::CONNECTED &&
-        isOFDMMode(negotiated_mode_) &&
-        config_.forced_modulation == Modulation::AUTO &&
-        config_.forced_code_rate == CodeRate::AUTO &&
-        !mode_change_pending_ &&
-        !disconnect_pending_ &&
-        file_transfer_.getState() == FileTransferState::SENDING &&
-        (is_initiator_ || handshake_confirmed_) &&
-        pending_tx_fragments_.empty();
-    if (!boundary_ready && !force_downgrade) {
-        return false;
-    }
-
-    if (backlog_frames == 0) {
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_downgrade_queue_age_ms_ = 0;
-        return false;
-    }
-
-    const bool is_upgrade =
-        isFasterMode(adaptive_target_.modulation, adaptive_target_.rate,
-                     data_modulation_, data_code_rate_);
-    if (is_upgrade && !hasAdaptiveUpgradeBacklog(adaptive_target_.rate)) {
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_downgrade_queue_age_ms_ = 0;
-        return false;
-    }
-
-    if (adaptive_target_.modulation == data_modulation_ &&
-        adaptive_target_.rate == data_code_rate_) {
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_downgrade_queue_age_ms_ = 0;
-        return false;
-    }
-
-    if (force_downgrade) {
-        LOG_MODEM(WARN,
-                  "Connection: Forced downgrade after %ums queue age (sustained backlog): %s %s -> %s %s",
-                  adaptive_downgrade_queue_age_ms_,
-                  modulationToString(data_modulation_),
-                  codeRateToString(data_code_rate_),
-                  modulationToString(adaptive_target_.modulation),
-                  codeRateToString(adaptive_target_.rate));
-    }
-
-    LOG_MODEM(INFO, "Connection: Adaptive MODE_CHANGE at TX boundary: %s %s -> %s %s (SNR=%.1f (%s), fading=%.2f, backlog=%zu frames)",
-              modulationToString(data_modulation_), codeRateToString(data_code_rate_),
-              modulationToString(adaptive_target_.modulation),
-              codeRateToString(adaptive_target_.rate),
-              measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_,
-              backlog_frames);
-
-    requestModeChange(adaptive_target_.modulation,
-                      adaptive_target_.rate,
-                      measured_snr_db_,
-                      adaptive_target_.reason);
-    adaptive_target_ = AdaptiveModeTarget{};
-    adaptive_downgrade_queue_age_ms_ = 0;
-    adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
-    adaptive_clean_windows_ = 0;
-    adaptive_pressure_windows_ = 0;
-    if (is_downgrade && mode_change_pending_) {
-        adaptive_post_downgrade_lockout_ms_ = ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
-    }
-    return mode_change_pending_;
-}
-
-void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
-    // DISABLED for the one-way burst file design (§14.20/§14.25). Mid-transfer
-    // adaptive rate renegotiation (MODE_CHANGE on backlog) is old interactive-era
-    // machinery that actively FIGHTS the target: it downgraded R3/4 -> R2/3 on a
-    // transient burst backlog, defeating the whole point of the burst-interleaver
-    // rework (make R3/4 survive Good fading). The negotiated rate is now fixed for
-    // the session; the self-describing burst descriptor declares per-burst params,
-    // and deep-fade bursts are recovered by interleave depth + whole-burst ARQ, NOT
-    // by retreating in rate. Reliability on R3/4 is a PHY/interleave problem, not a
-    // rate-selection one.
-    (void)elapsed_ms;
-    resetAdaptiveModeController();
-    return;
-
-    if (adaptive_cooldown_ms_ > 0) {
-        if (elapsed_ms >= adaptive_cooldown_ms_) {
-            adaptive_cooldown_ms_ = 0;
-        } else {
-            adaptive_cooldown_ms_ -= elapsed_ms;
-        }
-    }
-    if (adaptive_post_downgrade_lockout_ms_ > 0) {
-        if (elapsed_ms >= adaptive_post_downgrade_lockout_ms_) {
-            adaptive_post_downgrade_lockout_ms_ = 0;
-        } else {
-            adaptive_post_downgrade_lockout_ms_ -= elapsed_ms;
-        }
-    }
-
-    if (state_ != ConnectionState::CONNECTED || !isOFDMMode(negotiated_mode_)) {
-        resetAdaptiveModeController();
-        return;
-    }
-    if (config_.forced_modulation != Modulation::AUTO ||
-        config_.forced_code_rate != CodeRate::AUTO) {
-        adaptive_last_stats_ = arq_.getStats();
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_post_downgrade_lockout_ms_ = 0;
-        adaptive_downgrade_queue_age_ms_ = 0;
-        adaptive_clean_windows_ = 0;
-        adaptive_pressure_windows_ = 0;
-        return;
-    }
-    if (file_transfer_.getState() != FileTransferState::SENDING) {
-        adaptive_last_stats_ = arq_.getStats();
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_post_downgrade_lockout_ms_ = 0;
-        adaptive_downgrade_queue_age_ms_ = 0;
-        adaptive_clean_windows_ = 0;
-        adaptive_pressure_windows_ = 0;
-        return;
-    }
-    if (mode_change_pending_) {
-        adaptive_last_stats_ = arq_.getStats();
-        adaptive_target_ = AdaptiveModeTarget{};
-        adaptive_downgrade_queue_age_ms_ = 0;
-        adaptive_clean_windows_ = 0;
-        adaptive_pressure_windows_ = 0;
-        return;
-    }
-
-    if (adaptive_target_.pending &&
-        isMoreRobustMode(adaptive_target_.modulation, adaptive_target_.rate,
-                         data_modulation_, data_code_rate_)) {
-        adaptive_downgrade_queue_age_ms_ += elapsed_ms;
-        if (adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS &&
-            tryIssueAdaptiveModeChangeAtBoundary()) {
-            return;
-        }
-    } else {
-        adaptive_downgrade_queue_age_ms_ = 0;
-    }
-
-    adaptive_eval_elapsed_ms_ += elapsed_ms;
-    if (adaptive_eval_elapsed_ms_ < ADAPTIVE_EVAL_INTERVAL_MS) {
-        return;
-    }
-    adaptive_eval_elapsed_ms_ = 0;
-
-    const ARQStats current_stats = arq_.getStats();
-    const AdaptivePressure retry_pressure =
-        getAdaptiveRetryPressure(current_stats, adaptive_last_stats_,
-                                 arq_.getWindowSize());
-    const bool tx_window_idle =
-        arq_.getAvailableSlots() == arq_.getWindowSize();
-    const bool clean_window =
-        hasCleanAdaptiveWindow(current_stats, adaptive_last_stats_, tx_window_idle);
-    adaptive_last_stats_ = current_stats;
-    if (retry_pressure.present) {
-        adaptive_pressure_windows_++;
-    } else if (clean_window) {
-        adaptive_pressure_windows_ = 0;
-    }
-
-    Modulation recommended_mod = data_modulation_;
-    CodeRate recommended_rate = data_code_rate_;
-    recommendDataMode(measured_snr_db_, negotiated_mode_,
-                      recommended_mod, recommended_rate, fading_index_);
-
-    if (adaptive_target_.pending) {
-        const bool target_is_downgrade =
-            isMoreRobustMode(adaptive_target_.modulation, adaptive_target_.rate,
-                             data_modulation_, data_code_rate_);
-        if (!target_is_downgrade && retry_pressure.present) {
-            LOG_MODEM(INFO,
-                      "Connection: Adaptive upgrade canceled by retry pressure before boundary: %s %s -> %s %s",
-                      modulationToString(data_modulation_),
-                      codeRateToString(data_code_rate_),
-                      modulationToString(adaptive_target_.modulation),
-                      codeRateToString(adaptive_target_.rate));
-            adaptive_target_ = AdaptiveModeTarget{};
-            adaptive_clean_windows_ = 0;
-            adaptive_downgrade_queue_age_ms_ = 0;
-            return;
-        }
-
-        tryIssueAdaptiveModeChangeAtBoundary();
-        return;
-    }
-
-    if (adaptive_cooldown_ms_ == 0 &&
-        retry_pressure.present &&
-        canDowngradeMode(data_modulation_, data_code_rate_)) {
-        AdaptiveMode target = oneStepMoreRobustMode(data_modulation_, data_code_rate_);
-        const bool severe_required =
-            downgradeRequiresSeverePressure(data_modulation_, data_code_rate_, target) ||
-            csiSupportsFasterSameConstellation(recommended_mod, recommended_rate,
-                                               data_modulation_, data_code_rate_) ||
-            (target.modulation == data_modulation_ &&
-             csiOnlyRequestsSameOrderRegimeChange(recommended_mod, recommended_rate,
-                                                  data_modulation_, data_code_rate_));
-        const bool downgrade_pressure_ready =
-            retry_pressure.severe ||
-            (!severe_required &&
-             adaptive_pressure_windows_ >= ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE);
-        if (!downgrade_pressure_ready) {
-            if (severe_required) {
-                LOG_MODEM(INFO,
-                          "Connection: Holding %s %s despite retry pressure (recommended=%s %s, severe=%d, pressure_windows=%d); waiting for severe evidence before overriding CSI",
-                          modulationToString(data_modulation_),
-                          codeRateToString(data_code_rate_),
-                          modulationToString(recommended_mod),
-                          codeRateToString(recommended_rate),
-                          retry_pressure.severe ? 1 : 0,
-                          adaptive_pressure_windows_);
-            }
-            return;
-        }
-        const bool recommended_is_safe_downgrade =
-            isMoreRobustMode(recommended_mod, recommended_rate,
-                             data_modulation_, data_code_rate_) &&
-            getBitsPerSymbol(recommended_mod) <= getBitsPerSymbol(data_modulation_);
-        if (recommended_is_safe_downgrade) {
-            AdaptiveMode recommended_target{recommended_mod, recommended_rate};
-            const bool preserve_d8psk_rate_ladder =
-                data_modulation_ == Modulation::D8PSK &&
-                target.modulation == data_modulation_ &&
-                recommended_target.modulation != data_modulation_;
-            const bool preserve_same_order_code_rate_step =
-                !retry_pressure.severe &&
-                target.modulation == data_modulation_ &&
-                isSameConstellationOrderChange(recommended_target.modulation,
-                                               data_modulation_);
-            if (!preserve_d8psk_rate_ladder &&
-                !preserve_same_order_code_rate_step &&
-                !isMoreRobustMode(recommended_target.modulation, recommended_target.rate,
-                                  target.modulation, target.rate)) {
-                target = recommended_target;
-            }
-        }
-
-        adaptive_clean_windows_ = 0;
-        adaptive_target_.pending = true;
-        adaptive_target_.modulation = target.modulation;
-        adaptive_target_.rate = target.rate;
-        adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_DEGRADED;
-        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s %s -> %s %s (recommended=%s %s, SNR=%.1f (%s), fading=%.2f, severe=%d, pressure_windows=%d)",
-                  modulationToString(data_modulation_),
-                  codeRateToString(data_code_rate_),
-                  modulationToString(adaptive_target_.modulation),
-                  codeRateToString(adaptive_target_.rate),
-                  modulationToString(recommended_mod),
-                  codeRateToString(recommended_rate),
-                  measured_snr_db_, snrSourceToString(measured_snr_source_),
-                  fading_index_,
-                  retry_pressure.severe ? 1 : 0,
-                  adaptive_pressure_windows_);
-        tryIssueAdaptiveModeChangeAtBoundary();
-        return;
-    }
-
-    if (clean_window) {
-        adaptive_clean_windows_++;
-    } else {
-        adaptive_clean_windows_ = 0;
-    }
-
-    if (adaptive_cooldown_ms_ == 0 &&
-        adaptive_post_downgrade_lockout_ms_ == 0 &&
-        !adaptive_target_.pending &&
-        adaptive_clean_windows_ >= ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE &&
-        isFasterMode(recommended_mod, recommended_rate,
-                     data_modulation_, data_code_rate_) &&
-        canIssueAdaptiveModeChange(false) &&
-        hasAdaptiveUpgradeBacklog(recommended_rate)) {
-        AdaptiveMode target =
-            oneStepFasterToward(data_modulation_, data_code_rate_,
-                                recommended_mod, recommended_rate);
-        if (target.modulation == data_modulation_ &&
-            target.rate == data_code_rate_) {
-            return;
-        }
-        adaptive_target_.pending = true;
-        adaptive_target_.modulation = target.modulation;
-        adaptive_target_.rate = target.rate;
-        adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
-        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s %s -> %s %s (recommended=%s %s, SNR=%.1f (%s), fading=%.2f, clean=%d, backlog=%zu frames)",
-                  modulationToString(data_modulation_),
-                  codeRateToString(data_code_rate_),
-                  modulationToString(adaptive_target_.modulation),
-                  codeRateToString(adaptive_target_.rate),
-                  modulationToString(recommended_mod),
-                  codeRateToString(recommended_rate),
-                  measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_,
-                  adaptive_clean_windows_,
-                  adaptiveBacklogFrames(recommended_rate));
-        tryIssueAdaptiveModeChangeAtBoundary();
-    }
 }
 
 // =============================================================================
@@ -3016,11 +2401,6 @@ void Connection::tick(uint32_t elapsed_ms) {
                         mode_change_timeout_ms_ = 0;
                         mode_change_retry_count_ = 0;
                         pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-                        adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
-                        adaptive_target_ = AdaptiveModeTarget{};
-                        adaptive_downgrade_queue_age_ms_ = 0;
-                        adaptive_clean_windows_ = 0;
-                        adaptive_pressure_windows_ = 0;
                         runDeferredArqRefill();
                     } else {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
@@ -3066,7 +2446,6 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
-            updateAdaptiveModeController(elapsed_ms);
             maybeYieldDataTurn();
             runDeferredArqRefill();
             sendNextQueuedPayloadIfReady();
@@ -3866,7 +3245,6 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         // this, the next burst at the new rate will fire premature
         // resends every group.
     }
-    resetAdaptiveModeController();
 
     if (refill_file) {
         deferred_file_refill_ = true;
@@ -3878,21 +3256,12 @@ void Connection::commitPendingModeChange(const char* outcome) {
         return;
     }
 
-    const bool was_downgrade =
-        isMoreRobustMode(pending_modulation_, pending_code_rate_,
-                         data_modulation_, data_code_rate_);
     LOG_MODEM(INFO, "Connection: MODE_CHANGE %s, applying %s %s",
               outcome,
               modulationToString(pending_modulation_),
               codeRateToString(pending_code_rate_));
     applyDataMode(pending_modulation_, pending_code_rate_,
                   pending_cw_count_, pending_ladder_rung_id_);
-    if (was_downgrade) {
-        adaptive_post_downgrade_lockout_ms_ =
-            ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
-        adaptive_clean_windows_ = 0;
-        adaptive_pressure_windows_ = 0;
-    }
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
@@ -3939,7 +3308,6 @@ void Connection::enterConnected() {
     arq_.setCallsigns(local_call_, remote_call_);
     arq_.reset();
     configureArqForCurrentDataMode();
-    resetAdaptiveModeController();
     mode_change_ack_repeat_jobs_.clear();
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s, data_turn=%s)",
@@ -4000,7 +3368,6 @@ void Connection::enterDisconnected(const std::string& reason) {
     deferred_fragment_refill_ = false;
     arq_.reset();
     soft_combine_harq_.clear();
-    resetAdaptiveModeController();
     file_transfer_.cancel();
     queued_file_path_.reset();
     queued_payloads_.clear();
@@ -4217,7 +3584,6 @@ ConnectionStats Connection::getStats() const {
 void Connection::resetStats() {
     stats_ = ConnectionStats{};
     arq_.resetStats();
-    resetAdaptiveModeController();
 }
 
 void Connection::setSoftCombiningHARQ(bool enable) {
@@ -4291,7 +3657,6 @@ void Connection::reset() {
     deferred_fragment_refill_ = false;
     arq_.reset();
     soft_combine_harq_.clear();
-    resetAdaptiveModeController();
     file_transfer_.cancel();
     queued_file_path_.reset();
     queued_payloads_.clear();
