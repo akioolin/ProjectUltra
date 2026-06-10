@@ -805,7 +805,15 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // ~sqrt(N), no IDFT sidelobes — find the 0.5-correlation bandwidth Bc, map to RMS delay
     // spread. Single-snapshot, receiver-side, from the connect frame; feeds
     // last_delay_spread_ms as the frequency-selectivity base for rate selection.
-    {
+    //
+    // REFINEMENT (2026-06-09): measure ONLY on a full preamble (>=2 raw LTS symbols). The
+    // warm/light data preambles carry an equalized/smoothed H that reads artificially flat
+    // (the frequency correlation never crosses 0.5 -> coh_bw pins high -> tau under-read), which
+    // is what dragged the per-run median down and overlapped good/moderate. Also reject a
+    // physically-implausible blow-up (coh_bw < kMinPlausibleCohBwHz): a deep fade can decorrelate
+    // adjacent carriers and crash coh_bw to ~34 Hz (~4.6 ms "delay") — keep the prior good value.
+    constexpr float kMinPlausibleCohBwHz = 80.0f;  // ~2 ms delay-spread ceiling (beyond Poor HF)
+    if (valid_symbols >= 2) {
         const float df_hz = static_cast<float>(config.sample_rate) /
                             static_cast<float>(config.fft_size);
         const int n_fft = static_cast<int>(config.fft_size);
@@ -861,10 +869,16 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                                   ? 1000.0f / (2.0f * static_cast<float>(M_PI) * coh_bw_hz)
                                   : 0.0f;
         }
-        last_delay_spread_ms = delay_spread_ms;
-        LOG_DEMOD(INFO, "LTS delay spread: tau_rms=%.3f ms coh_bw=%.0f Hz carriers=%zu "
-                  "[vs fading_index=%.3f]",
-                  delay_spread_ms, coh_bw_hz, car.size(), last_fading_index);
+        if (coh_bw_hz >= kMinPlausibleCohBwHz) {
+            last_delay_spread_ms = delay_spread_ms;
+            LOG_DEMOD(INFO, "LTS delay spread: tau_rms=%.3f ms coh_bw=%.0f Hz carriers=%zu "
+                      "[vs fading_index=%.3f]",
+                      delay_spread_ms, coh_bw_hz, car.size(), last_fading_index);
+        } else {
+            LOG_DEMOD(INFO, "LTS delay spread: REJECTED coh_bw=%.0f Hz (< %.0f, fade/noise "
+                      "artifact) carriers=%zu — keeping prior %.3f ms",
+                      coh_bw_hz, kMinPlausibleCohBwHz, car.size(), last_delay_spread_ms);
+        }
     }
 
     // Mark that we have a valid channel estimate (for smoothing factor selection)
