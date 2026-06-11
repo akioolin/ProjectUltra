@@ -1711,20 +1711,41 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     }
     char buf[96];
     if (next != prev) {
-        // Route the adaptive rate change through the SYNCHRONIZED MODE_CHANGE handshake:
-        // requestModeChange() holds the local rate until BRAVO ACKs, so both stations switch
-        // TOGETHER and re-anchor cleanly. The former unilateral `data_code_rate_ = next` flip
-        // (in-band BURST_HEADER descriptor) desynced the pilot/carrier geometry between sender
-        // and receiver — stale warm-sync -> |H| garbage -> 0/8 CWs forever -> churn to R1/4
-        // (2026-06-09). The EMA RateController owns WHEN to change; the MODE_CHANGE owns HOW.
-        const uint8_t reason =
-            isFasterMode(data_modulation_, next, data_modulation_, prev)
-                ? v2::ModeChangeReason::CHANNEL_IMPROVED
-                : v2::ModeChangeReason::CHANNEL_DEGRADED;
-        requestModeChange(data_modulation_, next, measured_snr_db_, reason);
-        std::snprintf(buf, sizeof(buf), "rate %s -> %s via MODE_CHANGE (q=%.2f)",
-                      codeRateToString(prev), codeRateToString(next), quality);
-        LOG_MODEM(INFO, "Connection: adaptive %s", buf);
+        // OPTION A (2026-06-10): a mid-FILE rate change must land at a CLEAN send boundary —
+        // one with no in-flight/pending file chunks. applyDataMode() re-encodes pending chunks
+        // via requeuePendingChunks(), which REWINDS the file send cursor by the whole in-flight
+        // window and re-sends already-delivered data. On a clean channel that's just wasted
+        // airtime (survivable), but coincident with a fade the redundant re-sends starve the
+        // real remaining chunks and the transfer strands (~75%, Good@20 seeds 2/99, 2026-06-09).
+        // requestModeChange() holds the rate until BRAVO ACKs and runDeferredArqRefill() is gated
+        // on mode_change_pending_, so NO new chunks submit between issue and apply — a change
+        // ISSUED at a clean boundary is also APPLIED at one (the window stays drained until the
+        // ACK -> requeuePendingChunks() is a no-op -> nothing re-sent). When the window is busy,
+        // HOLD: applyAdaptiveRateFeedback runs on every group ack, and the EMA controller
+        // re-asserts the decision on a later ack that lands at a clean boundary (a full-ack tick).
+        // This also correctly THROTTLES rate churn during a fade (partial acks keep us busy).
+        const bool file_send_window_busy =
+            file_transfer_.getState() == FileTransferState::SENDING &&
+            (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+        if (file_send_window_busy) {
+            std::snprintf(buf, sizeof(buf), "hold %s for clean boundary (want %s, q=%.2f)",
+                          codeRateToString(prev), codeRateToString(next), quality);
+        } else {
+            // Route the adaptive rate change through the SYNCHRONIZED MODE_CHANGE handshake:
+            // requestModeChange() holds the local rate until BRAVO ACKs, so both stations switch
+            // TOGETHER and re-anchor cleanly. The former unilateral `data_code_rate_ = next` flip
+            // (in-band BURST_HEADER descriptor) desynced the pilot/carrier geometry between sender
+            // and receiver — stale warm-sync -> |H| garbage -> 0/8 CWs forever -> churn to R1/4
+            // (2026-06-09). The EMA RateController owns WHEN to change; the MODE_CHANGE owns HOW.
+            const uint8_t reason =
+                isFasterMode(data_modulation_, next, data_modulation_, prev)
+                    ? v2::ModeChangeReason::CHANNEL_IMPROVED
+                    : v2::ModeChangeReason::CHANNEL_DEGRADED;
+            requestModeChange(data_modulation_, next, measured_snr_db_, reason);
+            std::snprintf(buf, sizeof(buf), "rate %s -> %s via MODE_CHANGE (q=%.2f)",
+                          codeRateToString(prev), codeRateToString(next), quality);
+            LOG_MODEM(INFO, "Connection: adaptive %s", buf);
+        }
     } else {
         std::snprintf(buf, sizeof(buf), "hold %s (q=%.2f)", codeRateToString(prev), quality);
     }

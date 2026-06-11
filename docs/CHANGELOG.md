@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-10 — fix(rate): defer a mid-file adaptive MODE_CHANGE to a clean send boundary (no cursor rewind)
+
+**What was broken:** with the adaptive ladder on (`ULTRA_RATE_ADAPT=1`), a rate change that fired
+mid-file would land while the ARQ send window still held in-flight file chunks. `applyDataMode()`
+then calls `FileTransferController::requeuePendingChunks()`, which **rewinds the file send cursor**
+back to the first un-acked chunk (`(chunks_acked_-1)*chunk_size_`) and resets `chunks_sent_` — so the
+sender re-encodes and re-sends data BRAVO already has. On a clean channel that's just wasted airtime
+(survivable), but coincident with a fade the redundant re-sends starve the real remaining chunks and
+the transfer strands (Good@20 seeds 2/99 froze at ~75% and never CRC-completed, 2026-06-09).
+
+**Root cause:** wiring adaptive rate through `requestModeChange()` (2026-06-09) made rate changes
+happen *mid-burst with in-flight chunks* for the first time — before, rate was locked during files so
+`requeuePendingChunks()` never fired mid-transfer.
+
+**Fix (`connection.cpp` `applyAdaptiveRateFeedback`):** only ISSUE the adaptive MODE_CHANGE at a CLEAN
+send boundary — one with no in-flight/pending file chunks (`!file_transfer_.hasPendingChunks()` &&
+`arq_.getTxInFlightBytes()==0`). `requestModeChange()` holds the rate until the peer ACKs and
+`runDeferredArqRefill()` is gated on `mode_change_pending_` (no new chunks submit meanwhile), so a
+change issued at a clean boundary is also APPLIED at one → `requeuePendingChunks()` is a no-op →
+nothing re-sent. When the window is busy, HOLD; the EMA controller re-asserts the decision on a later
+ack that lands clean. Bonus: this correctly THROTTLES rate churn during fades (partial acks keep us
+busy, so we don't thrash the rate).
+
+**Test verification (clean A/B, pre-fix vs with-fix binaries, same seeds, Moderate@18 — a
+drop-inducing point):** rewind events **11 → 0** across the 4 seeds; mid-file rate changes (churn)
+cut ~4× (6/6/8/4 → 2/2/1/2); seed 2 flipped **FAIL → PASS** (1330 bps). Good@20 5-seed adaptive sweep:
+5/5 PASS, 0 rewinds (benign realization, no group failures). KNOWN-SEPARATE: at Moderate@18 two seeds
+still fail with "max retries exceeded" — a frame stuck in a deep fade null at a too-fragile rate; that
+is a distinct deep-fade/rate-escape issue (fails in BOTH variants), not the rewind. Rate adaptation
+stays DEFAULT-OFF (`ULTRA_RATE_ADAPT`).
+
+---
+
 ## 2026-06-09 — refactor(cleanup): delete the dead in-Connection adaptive-mode controller + the [ADPT] GUI telemetry
 
 **What this removes (all DEAD — superseded by the EMA `RateController` + `requestModeChange()` landed
