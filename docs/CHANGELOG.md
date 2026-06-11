@@ -10,6 +10,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-11 — feat(rate): ssthresh ceiling in the RateController + the clean-boundary gate is the right architecture (investigation)
+
+**The controller fix (the code change):** `RateController` now keeps an **ssthresh-style ceiling**.
+A DROP caps the ceiling just below the rung that failed; the controller only climbs back into (and
+past) that rung after a sustained good run (`ceiling_reprobe_climbs` climb-eligible windows pinned at
+the ceiling). This kills the **R3/4<->R5/6 oscillation** where the EMA climbed back into the top rung
+every 3 good groups, hit the next fade, dropped, and repeated — thrashing the rate ~15x in one
+transfer and burning the whole airtime budget (Good@20 seeds 7/42 with the gate removed). New unit
+test `test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung`; full suite 9/9.
+
+**The architecture conclusion (why the gate stays):** this came out of trying to *remove* the
+clean-boundary gate (the 2026-06-10 fix) and instead fix the underlying mid-file rewind at the source.
+Two gate-less attempts were built and A/B'd, both rejected:
+- *Escape-drop carve-out* — a stuck frame keeps the send window busy forever, so the gate blocked the
+  very drop needed to escape a deep fade; dropping to the floor then couldn't climb back (gate defers
+  the climb) and crawled to a timeout. Rejected.
+- *Abort-coordinate the requeue* (abort the ARQ in-flight together with the file rewind) — fixed the
+  sender-side counter desync but **renumbered the seq space**: `abortPendingTx` jumps `tx_base_seq_`
+  forward, so the receiver's in-order ARQ was left waiting forever for an abandoned seq (logs: BRAVO
+  `rx_base` pinned at seq 27 for 470 s while ALPHA hammered seq 70-72 → max-retries). Rejected.
+
+The root issue is fundamental: a **mid-stream rate drop shrinks the chunk size, which renumbers seqs**,
+and the receiver's ARQ is **in-order**. File transfer is offset-keyed and *could* tolerate that, but
+**burst transport also carries messaging**, which is a sequential fragment stream and CANNOT skip or
+reorder seqs — so "deliver/complete by offset" is file-only and breaks messaging. The clean-boundary
+gate sidesteps the whole problem **by construction**: it only issues a rate change when the in-flight
+window is empty (and `mode_change_pending_` keeps it empty until the peer ACK), so `requeuePendingChunks`
+never fires, nothing is re-chunked, no seq is renumbered — correct for file AND messaging with zero ARQ
+surgery. The only general alternative (per-frame rate memory so retransmits use their original geometry)
+is a large protocol change for marginally-more-responsive adaptation — not worth it.
+
+**Verified (gate + ssthresh, Good@20 5-seed adaptive sweep, ULTRA_RATE_ADAPT=1 ULTRA_LOCK_RATE=0):**
+**5/5 PASS, 0 requeues across all seeds** (the gate prevents the re-chunk entirely), 1-2 rate changes
+per transfer (vs 14-15 gate-less), no max-retry deaths, 1290-1910 bps. Gate-less + ssthresh was 3/5
+(seeds 42/99 hit the seq-renumber deadlock). Rate adaptation stays DEFAULT-OFF (`ULTRA_RATE_ADAPT`).
+
+---
+
 ## 2026-06-10 — fix(rate): defer a mid-file adaptive MODE_CHANGE to a clean send boundary (no cursor rewind)
 
 **What was broken:** with the adaptive ladder on (`ULTRA_RATE_ADAPT=1`), a rate change that fired

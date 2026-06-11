@@ -117,6 +117,33 @@ void test_off_ladder_rate_passes_through() {
     CHECK(c.update(CodeRate::R1_3, 0.0f) == CodeRate::R1_3, "off-ladder rate passes through");
 }
 
+void test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung() {
+    // THE OSCILLATION FIX (2026-06-11). Without ssthresh, dropping off the top rung on a fade and
+    // then climbing straight back into it (every climb_streak=3 good groups) thrashed the rate
+    // R3/4<->R5/6 ~15x in one transfer and burned the whole airtime budget (Good@20 seed 7/42).
+    RateController c;
+    CodeRate r = CodeRate::R1_4;
+    for (int i = 0; i < 40; ++i) r = c.update(r, 1.0f);
+    CHECK(r == CodeRate::R5_6, "warm up to the top rung on sustained good");
+
+    // exactly one sustained-fade window drops ONE rung off the top (ema 1.0 -> <drop_below in 3).
+    r = c.update(r, 0.0f);
+    r = c.update(r, 0.0f);
+    r = c.update(r, 0.0f);
+    CHECK(r == CodeRate::R3_4, "a sustained fade drops R5/6 -> R3/4");
+    CHECK(c.ceilingRate() == CodeRate::R3_4, "the drop caps the ssthresh ceiling at R3/4");
+
+    // good channel again: the OLD controller would re-climb to R5/6 by the ~4th good group.
+    // ssthresh must HOLD below the failed rung across several good groups.
+    for (int i = 0; i < 6; ++i) r = c.update(r, 1.0f);
+    CHECK(r == CodeRate::R3_4,
+          "ssthresh holds below the failed rung — 6 good groups do NOT bounce back to R5/6");
+
+    // but a sustained good run DOES eventually re-probe the ceiling upward (channel may recover).
+    for (int i = 0; i < 30; ++i) r = c.update(r, 1.0f);
+    CHECK(r == CodeRate::R5_6, "after a long good run the ceiling re-probes back to the top rung");
+}
+
 }  // namespace
 
 int main() {
@@ -128,6 +155,7 @@ int main() {
     test_no_thrash_in_hysteresis_gap();
     test_quality_from_iterations();
     test_off_ladder_rate_passes_through();
+    test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung();
 
     if (tests_failed != 0) {
         std::cout << "RateController: " << (tests_run - tests_failed) << "/" << tests_run

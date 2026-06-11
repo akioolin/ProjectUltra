@@ -58,6 +58,13 @@ public:
         // transient fade does NOT drop the rung; ~3 consecutive bad groups are needed to
         // cross drop_below. Lower alpha = more inertia (slower, steadier); higher = twitchier.
         float ema_alpha = 0.4f;
+        // ssthresh re-probe (2026-06-11): after a DROP caps the ceiling just below the rung that
+        // failed, the controller may climb back UP to (and past) that rung only after this many
+        // climb-eligible events while pinned at the ceiling. With climb_streak=3 that is ~6 good
+        // groups per re-probe — so a rung that keeps failing on a fading channel is retried
+        // occasionally, not every 3 groups. This kills the R3/4<->R5/6 oscillation that, ungated,
+        // thrashed the rate ~15x in one transfer (Good@20 seed 7/42) and burned the whole budget.
+        int ceiling_reprobe_climbs = 2;
         // Ordered ladder of SUPPORTED rates, lowest throughput first. If left empty
         // the controller fills it with the production OFDM ladder (skips the
         // unsupported R1_3/R5_6/R7_8 enum holes).
@@ -81,6 +88,7 @@ public:
             cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3,
                            CodeRate::R3_4, CodeRate::R5_6};
         }
+        ceiling_idx_ = static_cast<int>(cfg_.ladder.size()) - 1;  // start unrestricted
     }
 
     // Feed one decoded group's outcome; returns the rate for the NEXT burst.
@@ -102,19 +110,44 @@ public:
                            : quality;
         ema_initialized_ = true;
 
+        const int top = static_cast<int>(cfg_.ladder.size()) - 1;
+
         if (ema_quality_ < cfg_.drop_below) {
             good_streak_ = 0;
             const int next = std::max(0, idx - 1);
-            if (next != idx) resetSmoothingAfterChange();
+            if (next != idx) {
+                // ssthresh: rung `idx` just proved too aggressive for the channel. Cap the ceiling
+                // just below it so the climb branch won't bounce straight back into it; the ceiling
+                // re-probes upward only after a sustained good run (below). A rung that keeps
+                // failing is thus retried ~once per (ceiling_reprobe_climbs x climb_streak) good
+                // groups instead of every climb_streak — the fix for the R3/4<->R5/6 oscillation.
+                ceiling_idx_ = std::max(0, idx - 1);
+                reprobe_credit_ = 0;
+                resetSmoothingAfterChange();
+            }
             return cfg_.ladder[static_cast<size_t>(next)];
         }
         if (ema_quality_ >= cfg_.climb_above) {
             if (++good_streak_ >= cfg_.climb_streak) {
                 good_streak_ = 0;
-                const int next =
-                    std::min(static_cast<int>(cfg_.ladder.size()) - 1, idx + 1);
-                if (next != idx) resetSmoothingAfterChange();
-                return cfg_.ladder[static_cast<size_t>(next)];
+                if (idx + 1 <= ceiling_idx_) {
+                    // headroom below the ssthresh ceiling — climb normally.
+                    reprobe_credit_ = 0;
+                    const int next = std::min(top, idx + 1);
+                    if (next != idx) resetSmoothingAfterChange();
+                    return cfg_.ladder[static_cast<size_t>(next)];
+                }
+                // Pinned at the ceiling but the channel is comfortable — earn re-probe credit, and
+                // only after enough of it lift the ceiling one rung and climb (cautiously retry a
+                // rung that previously failed).
+                if (ceiling_idx_ < top && ++reprobe_credit_ >= cfg_.ceiling_reprobe_climbs) {
+                    reprobe_credit_ = 0;
+                    ceiling_idx_ = std::min(top, ceiling_idx_ + 1);
+                    const int next = std::min(top, idx + 1);
+                    if (next != idx) resetSmoothingAfterChange();
+                    return cfg_.ladder[static_cast<size_t>(next)];
+                }
+                return current;  // capped at the ceiling
             }
             return current;  // comfortable, but not enough consecutive good yet
         }
@@ -127,9 +160,13 @@ public:
         good_streak_ = 0;
         ema_quality_ = 0.0f;
         ema_initialized_ = false;
+        ceiling_idx_ = static_cast<int>(cfg_.ladder.size()) - 1;
+        reprobe_credit_ = 0;
     }
     int climbStreak() const { return good_streak_; }
     float emaQuality() const { return ema_quality_; }
+    // Current ssthresh ceiling rung (highest rate the controller will climb to right now).
+    CodeRate ceilingRate() const { return cfg_.ladder[static_cast<size_t>(ceiling_idx_)]; }
     const Config& config() const { return cfg_; }
 
     // Convenience: map a successful-decode iteration count to a quality in [0,1].
@@ -162,6 +199,10 @@ private:
     int good_streak_ = 0;
     float ema_quality_ = 0.0f;
     bool ema_initialized_ = false;
+    // ssthresh ceiling: the highest ladder index the controller will climb to right now. Lowered
+    // on a drop (to one below the rung that failed), re-probed upward after a sustained good run.
+    int ceiling_idx_ = 0;            // set to top-of-ladder in the constructor / reset()
+    int reprobe_credit_ = 0;         // climb-eligible events accrued while pinned at the ceiling
 };
 
 }  // namespace protocol
