@@ -55,6 +55,10 @@ public:
     bool isReadyToSend() const override;
     size_t getAvailableSlots() const override;
     size_t getTxInFlightBytes() const;
+    // Highest retransmit count among active un-acked TX slots (0 if nothing in flight). The
+    // rate controller polls this to detect a frame STUCK at a too-aggressive rate (the fade
+    // troughs keep killing it) so it can escape-drop to a more robust rung before max_retries.
+    int maxInFlightRetryCount() const;
 
     bool lastRxHadMoreData() const override { return last_rx_more_data_; }
     uint8_t lastRxFlags() const override { return last_rx_flags_; }

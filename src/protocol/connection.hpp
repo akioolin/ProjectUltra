@@ -608,6 +608,13 @@ private:
     // default OFF. The SENDER runs the controller on the receiver's per-group decode
     // headroom (carried on the GROUP_ACK; a GROUP_NACK feeds quality 0 -> step down).
     void applyAdaptiveRateFeedback(float quality);
+    // Operator has actually enabled mid-transfer rate MOVES (ULTRA_RATE_ADAPT set, not
+    // ULTRA_LOCK_RATE; feature on). adaptive_rate_enabled_/ULTRA_ADAPTIVE_RATE only enables the
+    // feedback computation + GUI bar; this gates the rate physically changing.
+    bool rateAdaptationActive() const;
+    // Polled from tick(): a frame stuck at a too-aggressive rate (the fade troughs keep killing it,
+    // so it produces no group ACK and the clean-boundary gate can't help) escape-drops one rung.
+    void maybeEscapeStuckFrame();
     bool adaptive_rate_enabled_ = false;
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK

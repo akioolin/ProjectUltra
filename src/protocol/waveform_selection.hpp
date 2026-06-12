@@ -132,6 +132,39 @@ inline constexpr CoherentRung kCoherentLadder[] = {
                                          kOFDMEntryFloorModerateDb}},
 };
 
+// ── Phase 1 (2026-06-12): env-gated experimental QAM16 ladder ──────────────────
+// ULTRA_ENABLE_QAM16_LADDER=1 lets the AUTO path SELECT 16QAM (vs ULTRA_FORCE_DATA_MOD,
+// which bypasses the ladder entirely). Default OFF → the default kCoherentLadder above
+// is used unchanged (byte-identical behavior). The experimental ladder enables ONLY the
+// 16QAM R1/2 Good rung at its measured-clean floor (Good@18: Phase 0a 5/5 PASS, 0
+// CW-fails — fable_analysis/07 + data_phase0a_sweep_2026-06-12.tsv). 16QAM AWGN/Moderate
+// and the higher-rate 16QAM rungs stay DISABLED: R2/3+ are damage-bound on Good until the
+// dense-rung margins work lands (fable_analysis Phase 2b). The CodeRate RateController WILL
+// still probe up into 16QAM R2/3 within the fixed modulation and ssthresh-pin back — that
+// is the behavior this gate exists to observe, not yet to ship. Lateral vs QPSK R3/4 today
+// (16QAM R1/2 ≈ QPSK R3/4, Phase 0a); the value is exercising the real CONNECT-negotiation
+// + RX-accept + adaptive path, which the forced knob cannot.
+inline bool qam16LadderEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_ENABLE_QAM16_LADDER");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return on;
+}
+
+inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
+    // mod              rate            AWGN             GOOD             MODERATE
+    {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, 18.0f,           kRungDisabledDb}},  // EXPERIMENTAL zero-margin anchor: Good@18 measured 5/5 PASS, 0 CW-fail (Phase 0a) — this is the measured FLOOR, NOT floor+2dB like the QPSK rungs. Acceptable while env-gated/observed; raise to ~20 (margin parity) before this graduates to default, and beware Moderate-misclassified-as-Good landing here.
+    {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           20.0f}},
+    {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},
+    {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,
+                                         kOFDMEntryFloorGoodDb,
+                                         kOFDMEntryFloorModerateDb}},
+};
+
 struct CoherentPick {
     Modulation mod;
     CodeRate rate;
@@ -146,12 +179,36 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
         return {Modulation::QPSK, CodeRate::R1_4};
     }
     const int cls = static_cast<int>(classifyFading(fading_index));
-    for (const auto& rung : kCoherentLadder) {
-        if (snr_db >= rung.min_snr_db[cls]) {
-            return {rung.mod, rung.rate};
+    // Default = kCoherentLadder (QPSK-only auto). ULTRA_ENABLE_QAM16_LADDER swaps in the
+    // experimental ladder with the measured 16QAM R1/2 Good rung enabled — default OFF.
+    const CoherentRung* rungs = kCoherentLadder;
+    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
+    if (qam16LadderEnabled()) {
+        rungs = kCoherentLadderQAM16Exp;
+        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (snr_db >= rungs[i].min_snr_db[cls]) {
+            return {rungs[i].mod, rungs[i].rate};
         }
     }
     return {Modulation::QPSK, CodeRate::R1_4};
+}
+
+// Highest GUI-validated code rate for a given coherent modulation — a per-modulation
+// ceiling for the adaptive RateController, which is otherwise modulation-BLIND (it walks
+// {R1/4..R5/6} at whatever modulation was fixed at CONNECT). Without this, a clean stretch
+// promotes the connect-time 16QAM R1/2 up into the measured DAMAGE-BOUND 16QAM R2/3/R3/4
+// (Phase 0a: 55-70% frame loss, 1-of-3 link-death — fable_analysis/07) BEFORE the reactive
+// ssthresh can cap it, taking a frame into a fade at the over-climbed rung. QAM16 is capped
+// at R1/2 (the only Good-clean QAM16 rung measured to date); RAISE this per rung as the
+// dense-rung margins work (fable_analysis Phase 2b) validates QAM16 R2/3+ on the GUI gate.
+// Non-QAM16 modulations keep the full ladder (R5_6 = no cap = current behavior).
+inline CodeRate maxValidatedCoherentRate(Modulation mod) {
+    switch (mod) {
+        case Modulation::QAM16: return CodeRate::R1_2;
+        default:                return CodeRate::R5_6;
+    }
 }
 
 inline float estimateWideOFDMRawBps(Modulation mod, CodeRate rate) {

@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-12 — feat(rate): env-gated 16QAM auto-ladder rung + per-modulation rate cap (Phase 1 of the 3086-bps campaign)
+
+**Context:** the Fable audit (`fable_analysis/`) found the auto rate ladder structurally cannot
+SELECT 16QAM/8PSK at all — `kCoherentLadder` had all QAM16 rungs `kRungDisabledDb` and the
+RateController is CodeRate-only. Phase 0a re-measurement (5-seed GUI sweep, `fable_analysis/07` +
+`data_phase0a_sweep_2026-06-12.tsv`) showed the old "16QAM structurally undecodable on Good@20"
+wall is GONE: forced 16QAM R1/2 Good@20 = **5/5 PASS, 0 CW-fails on 4/5**, and holds at Good@18.
+(Also: 16QAM R1/2 BEATS 8PSK R3/4 on goodput AND reliability despite 8PSK's higher raw rate —
+8PSK is a confirmed throughput dead end; 16QAM R2/3/R3/4 remain damage-bound, 55-70% loss.)
+
+**What changed:**
+1. `tools/gui_qso_scenario.sh` — `--expect-mod any|coherent` disables ONLY the unexpected-modulation
+   watchdog (PASS still requires CRC-clean delivery), so a run whose modulation legitimately varies
+   isn't false-killed. `modulation_bits` maps `any`/`coherent`→2 (conservative timeout budget).
+2. `src/protocol/waveform_selection.hpp` — `qam16LadderEnabled()` reads `ULTRA_ENABLE_QAM16_LADDER`
+   (default OFF). When ON, `selectCoherentOFDM()` walks `kCoherentLadderQAM16Exp` (identical to the
+   default ladder except the {QAM16,R1/2} GOOD anchor is enabled at the Phase-0a measured floor,
+   18 dB). Default OFF → the default `kCoherentLadder` is walked unchanged (byte-identical).
+3. `src/protocol/waveform_selection.hpp` + `connection.cpp` — `maxValidatedCoherentRate(mod)` caps the
+   adaptive climb per modulation (QAM16→R1/2; else R5/6, no cap). The clamp mirrors the existing
+   `ULTRA_MAX_OFDM_RATE` clamp in `applyAdaptiveRateFeedback`.
+
+**Why the cap (root cause caught in adversarial review):** modulation is fixed at CONNECT; the
+RateController then adapts CODE RATE within it. It is modulation-BLIND, so with the gate on +
+`ULTRA_RATE_ADAPT=1` a clean stretch promotes 16QAM R1/2 up into the damage-bound 16QAM R2/3/R3/4
+BEFORE the reactive ssthresh can cap it — taking a frame into a fade at the over-climbed rung (the
+seed-7 R3/4 FAIL mode). Verified live: pre-cap the gated+adaptive trajectory climbed R1/2→R2/3
+(1450 bps); post-cap it pins at R1/2 (1830/1740 bps — higher, no wasted damage-rung probe). This is
+the CLAUDE.md modulation-adaptive-by-design fix; raise the QAM16 cap per rung as Phase 2b validates
+16QAM R2/3+ on the GUI gate.
+
+**Test verification:**
+- `ctest -R "ConnectionPolicy|ConnectionAdaptive|WaveformPolicy|RateController|SelectiveRepeatPolicy"`
+  → 5/5 PASS (default ladder behavior unchanged).
+- GUI gate (`gui_qso_scenario.sh`, Good@20): gate OFF → QPSK R3/4 selected (default unbroken, 1970 bps);
+  `ULTRA_ENABLE_QAM16_LADDER=1` → 16QAM R1/2 auto-selected end-to-end + delivered (CRC-clean); gated +
+  `ULTRA_RATE_ADAPT=1` → trajectory pinned at 16QAM R1/2 (cap holds), seeds 42/7 PASS.
+- Adversarial review (3-lens): default-path proven byte-identical; negotiation carries the mod on the
+  wire (CONNECT_ACK `initial_modulation`, initiator adopts verbatim; BURST_HEADER self-declares mod so
+  RX follows it); no rate-only caller computes wrong airtime/timeout/window.
+
+**Default behavior unchanged** — everything is behind `ULTRA_ENABLE_QAM16_LADDER` (default OFF).
+Deferred (logged, not blocking): the two-ladder duplication footgun (derive or static_assert the shared
+QPSK tail before this graduates to default); raise the 18 dB anchor to ~20 dB for +2 margin parity
+before default; cosmetic CONNECT-log bps hardcoded to DQPSK in `estimateWideOFDMRawBps`.
+
+---
+
 ## 2026-06-11 — feat(rate): ssthresh ceiling in the RateController + the clean-boundary gate is the right architecture (investigation)
 
 **The controller fix (the code change):** `RateController` now keeps an **ssthresh-style ceiling**.

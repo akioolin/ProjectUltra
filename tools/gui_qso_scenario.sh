@@ -45,7 +45,7 @@ usage() {
 modulation_bits() {
   awk -v mod="$1" '
     BEGIN {
-      table = "16QAM 4\nQAM16 4\n8PSK 3\nQAM8 3\nQPSK 2\nDQPSK 2\nD8PSK 3\nDBPSK 1\nBPSK 1"
+      table = "16QAM 4\nQAM16 4\n8PSK 3\nQAM8 3\nQPSK 2\nDQPSK 2\nD8PSK 3\nDBPSK 1\nBPSK 1\nany 2\ncoherent 2"
       n = split(table, rows, "\n")
       for (i = 1; i <= n; ++i) {
         split(rows[i], f, " ")
@@ -250,7 +250,14 @@ collect_metrics() {
   # meaningless. Worse, the per-EXPECT_MOD pattern's catch-all (e.g. DQPSK -> the '*' case)
   # false-matches the NORMAL "Data mode set to:" / "MODE_CHANGE: OFDM" lines, so the live
   # poll loop kills the run ~2 s after handshake before any data flows. Disable when forced.
-  if [[ -n "${ULTRA_FORCE_DATA_MOD:-}" || -n "${ULTRA_FORCE_WAVEFORM:-}" ]]; then
+  #
+  # --expect-mod any|coherent (2026-06-12, Phase 1): the adaptive ladder is ALLOWED to
+  # vary/promote the modulation (e.g. QPSK -> 16QAM under ULTRA_ENABLE_QAM16_LADDER), so a
+  # modulation change is EXPECTED, not a failure. Same disable so the watchdog doesn't
+  # false-kill a legitimate promotion. PASS still requires CRC-clean delivery + Transfer
+  # complete; only the modulation-pinning check is relaxed.
+  if [[ -n "${ULTRA_FORCE_DATA_MOD:-}" || -n "${ULTRA_FORCE_WAVEFORM:-}" \
+        || "$EXPECT_MOD" == "any" || "$EXPECT_MOD" == "coherent" ]]; then
     alpha_unexpected_modes=0
     bravo_unexpected_modes=0
   fi

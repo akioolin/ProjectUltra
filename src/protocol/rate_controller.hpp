@@ -139,8 +139,10 @@ public:
                 }
                 // Pinned at the ceiling but the channel is comfortable — earn re-probe credit, and
                 // only after enough of it lift the ceiling one rung and climb (cautiously retry a
-                // rung that previously failed).
-                if (ceiling_idx_ < top && ++reprobe_credit_ >= cfg_.ceiling_reprobe_climbs) {
+                // rung that previously failed). A STICKY ceiling (set by an escape-drop) never
+                // re-probes — see noteRungFailed.
+                if (!ceiling_sticky_ && ceiling_idx_ < top &&
+                    ++reprobe_credit_ >= cfg_.ceiling_reprobe_climbs) {
                     reprobe_credit_ = 0;
                     ceiling_idx_ = std::min(top, ceiling_idx_ + 1);
                     const int next = std::min(top, idx + 1);
@@ -162,12 +164,39 @@ public:
         ema_initialized_ = false;
         ceiling_idx_ = static_cast<int>(cfg_.ladder.size()) - 1;
         reprobe_credit_ = 0;
+        ceiling_sticky_ = false;
     }
     int climbStreak() const { return good_streak_; }
     float emaQuality() const { return ema_quality_; }
     // Current ssthresh ceiling rung (highest rate the controller will climb to right now).
     CodeRate ceilingRate() const { return cfg_.ladder[static_cast<size_t>(ceiling_idx_)]; }
     const Config& config() const { return cfg_; }
+
+    // One rung MORE ROBUST than `r` (lower throughput), or `r` itself if already at the floor /
+    // off-ladder. Used by the connection's stuck-frame escape-drop.
+    CodeRate moreRobustRung(CodeRate r) const {
+        const int idx = ladderIndex(r);
+        if (idx <= 0) return r;  // floor or off-ladder
+        return cfg_.ladder[static_cast<size_t>(idx - 1)];
+    }
+    bool isAtFloor(CodeRate r) const { return ladderIndex(r) <= 0; }
+
+    // EXTERNAL ssthresh signal: a rung was forced down out-of-band (the stuck-frame escape-drop
+    // in the connection, which bypasses update()). Cap the ceiling just below the failed rung so
+    // the controller does not immediately climb the rate back into the fade that just killed a
+    // frame — same effect a normal update()-driven drop has, but triggered from the ARQ/tick path.
+    void noteRungFailed(CodeRate failed_rung) {
+        const int idx = ladderIndex(failed_rung);
+        if (idx < 0) return;
+        ceiling_idx_ = std::min(ceiling_idx_, std::max(0, idx - 1));
+        reprobe_credit_ = 0;
+        // STICKY: an escape-drop means a frame literally DIED-but-for-the-escape at this rung on a
+        // fading channel. Unlike a normal update()-driven drop, do NOT re-probe back up into it —
+        // R1/4 always looks great (q~1.0) so the re-probe would climb straight back and re-stall,
+        // oscillating R1/4<->R1/2 forever (Moderate@18). Stay robust for the rest of the connection
+        // (reset() clears it); reliability beats reclaiming a rung that just killed a frame.
+        ceiling_sticky_ = true;
+    }
 
     // Convenience: map a successful-decode iteration count to a quality in [0,1].
     // 0 iters = max headroom (1.0); at/above max_iters or a failed decode = 0.0.
@@ -203,6 +232,7 @@ private:
     // on a drop (to one below the rung that failed), re-probed upward after a sustained good run.
     int ceiling_idx_ = 0;            // set to top-of-ladder in the constructor / reset()
     int reprobe_credit_ = 0;         // climb-eligible events accrued while pinned at the ceiling
+    bool ceiling_sticky_ = false;    // an escape-drop set the ceiling — never re-probe back up
 };
 
 }  // namespace protocol

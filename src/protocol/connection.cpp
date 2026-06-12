@@ -1657,6 +1657,49 @@ bool Connection::onToneBurstAck(
     return false;
 }
 
+// Retransmit depth at which a stuck in-flight frame triggers a one-rung ESCAPE-drop. 5 is well
+// above the 1-3 retx a frame needs at a SUSTAINABLE rate on a fading channel, and well below
+// max_retries (15) — so a frame the current (over-climbed) rate genuinely cannot push through
+// drops to a robust rung before it dies, but ordinary Moderate retx don't trip it.
+static constexpr int kStuckRetransmitEscape = 5;
+
+bool Connection::rateAdaptationActive() const {
+    if (!adaptive_rate_enabled_) return false;
+    const char* e = std::getenv("ULTRA_RATE_ADAPT");
+    const bool adapt = e != nullptr && std::atoi(e) != 0;
+    const char* l = std::getenv("ULTRA_LOCK_RATE");
+    const bool locked = l != nullptr && std::atoi(l) != 0;
+    return adapt && !locked;
+}
+
+void Connection::maybeEscapeStuckFrame() {
+    if (!rateAdaptationActive()) return;
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (mode_change_pending_) return;             // a rate change is already in flight
+    if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
+    if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
+    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
+    if (arq_.maxInFlightRetryCount() < kStuckRetransmitEscape) return;
+
+    // A frame has been retransmitted kStuckRetransmitEscape times at the current rate: the fade
+    // troughs are killing it. It produces NO group ACK, so the ack-driven RateController never sees
+    // it, and the clean-boundary gate defers any change because the stuck frame keeps the window
+    // busy — so without this it grinds to max_retries and fails the whole transfer (Moderate@18:
+    // adapt climbed R1/4->R3/4, a frame stuck 248 retx and died; locked R1/4 completed). Force a
+    // ONE-rung drop to a more robust rate so the frame can punch through. requestModeChange
+    // re-anchors both stations; setCodeRate re-sends the in-flight frames at the new rate KEEPING
+    // their seqs (tx_next=tx_base) so there is no receiver seq-hole; ssthresh (noteRungFailed) stops
+    // the controller from immediately climbing back into the rung that just failed.
+    const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
+    if (robust == data_code_rate_) return;
+    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (frame stuck, %d retx at current rate)",
+              codeRateToString(data_code_rate_), codeRateToString(robust),
+              arq_.maxInFlightRetryCount());
+    rate_controller_.noteRungFailed(data_code_rate_);
+    requestModeChange(data_modulation_, robust, measured_snr_db_,
+                      v2::ModeChangeReason::CHANNEL_DEGRADED);
+}
+
 void Connection::applyAdaptiveRateFeedback(float quality) {
     // §14.36 Phase 5c: the SENDER runs the rate controller on the receiver's
     // decode-headroom feedback (carried on the GROUP_ACK; a GROUP_NACK feeds 0).
@@ -1681,15 +1724,11 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     // ULTRA_RATE_ADAPT=1. Until then the graded quality still drives the GUI "Adapt:" bar
     // (last_group_quality_, set above) + the action text, so we can SEE what the controller WOULD
     // do without it moving the rate. ULTRA_LOCK_RATE=1 also pins it (legacy lock; kept).
-    const bool rate_adapt_active = [] {
-        const char* e = std::getenv("ULTRA_RATE_ADAPT");
-        return e != nullptr && std::atoi(e) != 0;
-    }();
-    const bool rate_locked = [] {
-        const char* l = std::getenv("ULTRA_LOCK_RATE");
-        return l != nullptr && std::atoi(l) != 0;
-    }();
-    if (!rate_adapt_active || rate_locked) {
+    if (!rateAdaptationActive()) {
+        const bool rate_locked = [] {
+            const char* l = std::getenv("ULTRA_LOCK_RATE");
+            return l != nullptr && std::atoi(l) != 0;
+        }();
         char buf[96];
         std::snprintf(buf, sizeof(buf), "%s %s (q=%.2f)",
                       rate_locked ? "lock" : "off", codeRateToString(data_code_rate_), quality);
@@ -1708,6 +1747,16 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         if (cap != CodeRate::R5_6 && next > cap) {
             next = cap;
         }
+    }
+    // Per-modulation validated-rate cap (2026-06-12, Phase 1). The RateController is
+    // modulation-blind: it would climb the connect-time 16QAM R1/2 up into the measured
+    // damage-bound 16QAM R2/3/R3/4 (Phase 0a) before the REACTIVE ssthresh can cap it —
+    // taking a frame into a fade at the over-climbed rung (the seed-7 R3/4 FAIL mode).
+    // Cap the CLIMB at the highest GUI-validated rate for the active modulation. Drops
+    // (escape-drop / ssthresh) go DOWN and are unaffected. No-op for QPSK (cap = R5_6).
+    const CodeRate mod_cap = maxValidatedCoherentRate(data_modulation_);
+    if (next > mod_cap) {
+        next = mod_cap;
     }
     char buf[96];
     if (next != prev) {
@@ -2467,6 +2516,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
+            maybeEscapeStuckFrame();
             maybeYieldDataTurn();
             runDeferredArqRefill();
             sendNextQueuedPayloadIfReady();

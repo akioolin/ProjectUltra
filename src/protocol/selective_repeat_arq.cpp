@@ -386,6 +386,16 @@ size_t SelectiveRepeatARQ::getTxInFlightBytes() const {
     return bytes;
 }
 
+int SelectiveRepeatARQ::maxInFlightRetryCount() const {
+    int max_retry = 0;
+    for (const auto& slot : tx_window_) {
+        if (slot.active && !slot.acked && slot.retry_count > max_retry) {
+            max_retry = slot.retry_count;
+        }
+    }
+    return max_retry;
+}
+
 void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
     if (frame_data.size() < 2) {
         return;
