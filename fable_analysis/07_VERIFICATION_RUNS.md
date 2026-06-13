@@ -147,6 +147,45 @@ harness option, `ULTRA_ENABLE_QAM16_LADDER` ladder gate, `maxValidatedCoherentRa
   The per-mod cap pins it at R1/2: 2/2 seeds stay R1/2 AND goodput *rises* (1450 → 1830/1740)
   because no airtime is wasted probing the losing rung. ctest policy/rate suite 5/5 green.
 
+## Phase 2b — the ε²_H LLR term (Opus, 2026-06-12) — FIRST VALIDATED WALL-MOVER
+
+The production per-carrier channel-estimate-error term (`02 §5`), built and A/B'd on the GUI
+gate. `ULTRA_HERR_LLR_K` (default 0 = off, byte-identical) folds the Wiener `error_var` into the
+LLR noise numerator: `nv = (σ² + k·err_var·|H|²)/(|H|²+σ²)`. Raw data:
+`data_phase2b_epsH_ab_2026-06-12.tsv` + `_noregress_2026-06-12.tsv`.
+
+**Pilot first (the handicap, not the wall):** `data_phase2b_r23_pilot_2026-06-12.tsv` — 16QAM R2/3
+sp5 vs sp8, 3 seeds: sp8 wins 3/3 (+48% mean goodput, ~40% fewer retx). The "R2/3 worse than R3/4"
+anomaly *was* the dense sp5 pilots. But sp8 R2/3 is still ~50% loss → the pilot spacing was a
+handicap, not the margins wall. (Landable fix; needs a QPSK-R2/3 no-regress check since the
+`ULTRA_R23_PILOT_SPACING` knob is shared.)
+
+**ε²_H A/B — forced 16QAM R2/3 sp8 Good@20, k=0 vs k=1.0, 3/3 seeds:**
+
+| seed | off (k=0) | on (k=1.0) | Δ goodput | Δ loss |
+|---|---|---|---|---|
+| 42 | 1250 / 49% | 1510 / 37% | +20% | −12pts |
+| 7 | 1050 / 53% | 1410 / 43% | +34% | −10pts |
+| 2 | 940 / 65% | 970 / 56% | +3% | −9pts |
+| **mean** | **1080 / 55%** | **1297 / 45%** | **+20%** | **−10pts** |
+
+Every seed improved; loss down a consistent ~10pts including the hard seed-2. The mechanism is
+exactly as designed (02 §1): stop asserting confidence on carriers the Wiener already knows it
+estimated poorly → the LDPC stops choking on confident-wrong bits. **This is the first lever all
+campaign to move the actual per-carrier-H-accuracy wall, not a handicap.**
+
+**No-regress (k=0 vs k=1.0):** QPSK R3/4 Good flat (+0%, −2% noise); 16QAM R1/2 Good *improves*
+(+3%, +8%); **QPSK R3/4 AWGN unchanged + clean (0 retx both)** — ε²_H correctly inert on a flat
+channel (the spurious-flat-down-weighting mode that sank the relative-fade gate on AWGN@30 does
+NOT recur here). `ctest` OFDM/LDPC/equalizer suite 14/14. Committed env-gated (default off).
+
+**Honest status:** 16QAM R2/3 + ε²_H is ~1297 bps / ~45% loss — better, but still *below* clean
+16QAM R1/2 (~1550). So the cap stays at R1/2; ε²_H must STACK with more levers (k-tune; extend the
+relative-null CSI gate to 16QAM — `02 §4.1`; the **stuck-tail / in-order-hole** fix — seed 2's
+final 312-B partial frame stalled ~25s on 4 attempts, the seed-2 bottleneck) before R2/3 beats
+R1/2 and the cap lifts. Progress, not yet the full unlock — but the wall is now demonstrably
+movable.
+
 ## Reading of the results so far
 
 1. **The May-29 "16QAM is structurally undecodable on Good@20" verdict is STALE.**

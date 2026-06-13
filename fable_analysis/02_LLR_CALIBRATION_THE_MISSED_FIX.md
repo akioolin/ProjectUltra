@@ -20,6 +20,18 @@
 > §3's counter-evidence predicted. Any production attempt MUST be the pilot-anchored
 > smoothed ε²_H form (§5), gated on a multi-seed A/B, and is now priority *after* the
 > ladder/airtime work, not before.
+>
+> ## 2026-06-12 UPDATE 2 — the pilot-anchored eps_H form is now BUILT + VALIDATED
+> The section-5 production fix is implemented (`ULTRA_HERR_LLR_K`, default off) and GUI-A/B'd:
+> **16QAM R2/3 sp8 Good@20, 3/3 seeds, loss 55%->45%, +20% goodput**; QPSK/AWGN no-regress
+> (AWGN inert as predicted — err_var~0 on flat); ctest 14/14. Committed env-gated. The
+> structural thesis below is CONFIRMED: wiring the discarded Wiener error_var into the LLR
+> noise model moves the per-carrier-H-accuracy wall. It is NOT yet the full unlock — 16QAM
+> R2/3 is still ~45% loss / ~1297 bps (< clean R1/2 ~1550) — so it must STACK with section-4's
+> other 16QAM-asymmetry fixes (relative-null CSI for QAM16, MMSE-bias slicer, LLR-scale) and
+> the stuck-tail ARQ fix before a dense rung beats R1/2 and the cap lifts. Full result:
+> `07_VERIFICATION_RUNS.md` Phase 2b + `data_phase2b_epsH_*.tsv`.
+>
 > Lesson for the project: **diagnoses decay; re-anchor measured walls after every
 > intervening fix before building on them** (the May-29 "structural ~10-14 dB penalty"
 > was true on the May-29 stack, and silently stopped being true within ten days).

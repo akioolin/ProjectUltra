@@ -67,6 +67,11 @@ struct OFDMDemodulator::Impl {
 
     // Channel estimate (per carrier)
     std::vector<Complex> channel_estimate;
+    // 2026-06-12 Phase 2b: per-carrier NORMALIZED channel-estimate error variance (the
+    // Wiener interpolator's MMSE residual in [0,1], or the 0.04 non-Wiener fallback),
+    // populated in updateChannelEstimate, consumed in equalize() as the eps_H LLR term
+    // (ULTRA_HERR_LLR_K). Indexed by fft carrier, parallel to channel_estimate.
+    std::vector<float> per_carrier_h_error_var_;
     // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): a frozen copy of the full-band LTS
     // channel estimate, re-applied to every data symbol to bypass sparse-pilot
     // re-interpolation. On a frozen/noiseless channel the LTS H is the exact true H

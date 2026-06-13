@@ -51,6 +51,7 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     interp_h_clean_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     interp_pilot_logical_pos_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
     channel_estimate.resize(cfg.fft_size, Complex(1, 0));
+    per_carrier_h_error_var_.assign(cfg.fft_size, 0.0f);  // Phase 2b eps_H term; 0 = no inflation
     wiener_pilot_history_.resize(static_cast<size_t>(cfg.num_carriers));
     wiener_time_estimate_.resize(static_cast<size_t>(cfg.num_carriers), Complex(0, 0));
     wiener_time_error_var_.resize(static_cast<size_t>(cfg.num_carriers), 1.0f);

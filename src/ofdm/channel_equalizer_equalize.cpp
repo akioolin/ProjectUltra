@@ -445,6 +445,23 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     const float reliability_noise_var = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
     const bool soft_gray_zone_csi = useSoftGrayZoneCsi(mod);
 
+    // 2026-06-12 Phase 2b: per-carrier channel-estimate-error LLR term (eps_H). The MMSE
+    // carrier_noise_var below models THERMAL noise only (sigma^2/(|H|^2+sigma^2)); on a
+    // fading channel the true post-eq residual is dominated by per-carrier H-ESTIMATE
+    // error, which the demapper otherwise asserts at full confidence -> confident-wrong
+    // LLRs that poison the LDPC (fatal for tight 16QAM, absorbed by QPSK's margins).
+    // ULTRA_HERR_LLR_K (default 0 = OFF, byte-identical) scales the pilot-anchored Wiener
+    // error_var into the noise NUMERATOR: nv = (sigma^2 + k*err_var*|H|^2)/(|H|^2+sigma^2).
+    // Production form of the (net-negative) single-symbol ULTRA_LLR_NOISE_EMP_FLOOR —
+    // pilot-anchored, not single-symbol. k=1 is the principled value; A/B on the GUI gate.
+    static const float kHerrLlrK = []() {
+        if (const char* env = std::getenv("ULTRA_HERR_LLR_K")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f) return v;
+        }
+        return 0.0f;
+    }();
+
     // Relative-depth anti-poison: reference the frame's mean |H|² so deep
     // frequency-selective nulls (which the global-noise-var gates miss at high avg SNR)
     // get their LLR confidence cut. Scoped to QPSK/QAM8 — the rungs that had NO gray-zone
@@ -504,8 +521,14 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             } else {
                 equalized[i] = std::conj(h) * received / mmse_denom;
-                // MMSE post-equalization noise variance: σ²/(|H|²+σ²)
-                carrier_noise_var[i] = noise_variance / mmse_denom;
+                // MMSE post-equalization noise variance: σ²/(|H|²+σ²), plus the optional
+                // per-carrier eps_H estimate-error term (ULTRA_HERR_LLR_K; k=0 -> unchanged).
+                float h_err_var = 0.0f;
+                if (kHerrLlrK > 0.0f &&
+                    static_cast<size_t>(idx) < per_carrier_h_error_var_.size()) {
+                    h_err_var = kHerrLlrK * per_carrier_h_error_var_[idx] * h_power;
+                }
+                carrier_noise_var[i] = (noise_variance + h_err_var) / mmse_denom;
                 carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
             }
         }

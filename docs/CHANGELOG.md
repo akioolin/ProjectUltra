@@ -10,6 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-12 — feat(ofdm): per-carrier channel-estimate-error LLR term (ε²_H) — Phase 2b, the first validated wall-mover
+
+**The wall (from the Fable audit, `fable_analysis/02`):** the coherent-OFDM LLR noise model
+`carrier_noise_var = σ²/(|H|²+σ²)` is THERMAL-only. On a frequency-selective fading channel the
+true post-equalization residual is dominated by per-carrier H-ESTIMATE error, which the demapper
+otherwise asserts at full confidence → confident-wrong LLRs that poison the LDPC (fatal for tight
+16QAM near the nulls, absorbed by QPSK's 45° margin). The corrective per-carrier quantity — the
+Wiener interpolator's own normalized MMSE residual (`error_var`) — was already computed and then
+DISCARDED on the LLR path (it fed only the fading-gated DD-Kalman, `pilot.cpp:1009-1014`).
+
+**What changed:** the Wiener `error_var` is now persisted per data carrier
+(`per_carrier_h_error_var_`, populated in `updateChannelEstimate`, `channel_equalizer_pilot.cpp`)
+and folded into the LLR noise NUMERATOR in `equalize()` (`channel_equalizer_equalize.cpp`):
+`nv = (σ² + k·err_var·|H|²)/(|H|²+σ²)`. Gated behind `ULTRA_HERR_LLR_K` (default 0 = OFF =
+byte-identical; k=1 is the principled value — `err_var` IS the normalized variance). This is the
+PILOT-ANCHORED production form of the (net-negative) single-symbol `ULTRA_LLR_NOISE_EMP_FLOOR`,
+the difference being it uses the smoothed Wiener residual, not a per-symbol hard-decision distance.
+Modulation-agnostic by construction (the CLAUDE.md adaptivity rule).
+
+**Why it's safe (env-gated, but also neutral-or-better):** on a flat/good channel `error_var ≈ 0`,
+so ε²_H ≈ 0 and the term is inert — exactly the spurious-flat-channel-down-weighting failure mode
+that sank the relative-fade gate on AWGN@30. Confirmed empirically (below).
+
+**Test verification (GUI gate, `gui_qso_scenario.sh`, k=0 vs k=1.0, file:line data in
+`fable_analysis/data_phase2b_epsH_*.tsv`):**
+- **Target — forced 16QAM R2/3 sp8, Good@20, 3/3 seeds {42,7,2}:** frame loss **55% → 45%**
+  (every seed: 49→37, 53→43, 65→56), goodput **+20% mean** (1080→1297), retx ~−35%.
+- **No-regress:** QPSK R3/4 Good flat (+0%, −2% noise); 16QAM R1/2 Good IMPROVES (+3%, +8%);
+  **QPSK R3/4 AWGN unchanged and clean (0 retx both)** — ε²_H correctly does not fire on a flat
+  channel.
+- `ctest -R "OFDM|SoftCombine|*LDPC|CarrierLDPC|Waveform|Wiener|PilotPattern|LinkAdaptation|
+  StreamingDecode|ChannelIdleNoise"` → 14/14 PASS (k=0 default byte-identical).
+
+**Status / next:** first lever all-campaign to move the actual 16QAM wall (not a handicap). But
+16QAM R2/3 is still ~45% loss (damage-bound) and ~1297 bps — still BELOW the clean 16QAM R1/2
+(~1550), so the per-mod cap stays at R1/2 for now; this lever must STACK with others (k-tune,
+extending the relative-null CSI gate to 16QAM, and the stuck-tail / in-order-hole fix observed on
+seed 2) before R2/3 beats R1/2 and the cap can lift. `ULTRA_HERR_LLR_K` ships default-OFF pending
+that wider stacking + a full-matrix (Moderate, more seeds) sweep.
+
+---
+
 ## 2026-06-12 — feat(rate): env-gated 16QAM auto-ladder rung + per-modulation rate cap (Phase 1 of the 3086-bps campaign)
 
 **Context:** the Fable audit (`fable_analysis/`) found the auto rate ladder structurally cannot

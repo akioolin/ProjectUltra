@@ -1,0 +1,8 @@
+cell	seed	RESULT	goodput	retx	cwfail	deint_fail	deint_ok	elapsed
+herr_off	42	PASS	1250	54	16	52	55	171
+herr_on	42	PASS	1510	33	8	32	54	147
+herr_off	7	PASS	1050	61	0	61	54	196
+herr_on	7	PASS	1410	41	0	41	54	154
+herr_off	2	PASS	940	99	0	99	54	215
+herr_on	2	PASS	970	68	0	68	54	212
+P2C_DONE

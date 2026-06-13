@@ -1,0 +1,8 @@
+cell	seed	RESULT	goodput	retx	cwfail	deint_fail	deint_ok	elapsed
+r23_sp5	42	PASS	950	72	8	75	54	214
+r23_sp8	42	PASS	1160	62	16	61	54	182
+r23_sp5	7	PASS	740	108	0	108	54	264
+r23_sp8	7	PASS	1470	46	16	48	54	151
+r23_sp5	2	PASS	930	95	8	84	60	216
+r23_sp8	2	PASS	1240	54	0	54	54	173
+P2B_DONE

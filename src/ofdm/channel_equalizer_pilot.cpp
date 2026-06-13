@@ -979,6 +979,19 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                     &wiener_error_var);
             }
 
+            // 2026-06-12 Phase 2b: persist the per-carrier normalized H-estimate error
+            // variance for the eps_H LLR term in equalize() (ULTRA_HERR_LLR_K). Wiener
+            // returns the normalized MMSE residual in [0,1]; the non-Wiener path uses the
+            // same 0.04 (=0.20^2) floor the DD-Kalman fallback uses below. Always written
+            // (the consume side gates on the env knob, so default behavior is unchanged).
+            if (info.fft_idx >= 0 &&
+                static_cast<size_t>(info.fft_idx) < per_carrier_h_error_var_.size()) {
+                per_carrier_h_error_var_[info.fft_idx] =
+                    use_wiener_interpolation
+                        ? std::clamp(wiener_error_var, 0.0f, 1.0f)
+                        : 0.04f;
+            }
+
             if (use_coherent_dd) {
                 // Coherent 8PSK/16-QAM DD tracking. Each data carrier is a scalar
                 // complex Kalman state H[k]. The previous H is predicted with a
