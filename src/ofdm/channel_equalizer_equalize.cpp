@@ -453,7 +453,10 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     // ULTRA_HERR_LLR_K (default 0 = OFF, byte-identical) scales the pilot-anchored Wiener
     // error_var into the noise NUMERATOR: nv = (sigma^2 + k*err_var*|H|^2)/(|H|^2+sigma^2).
     // Production form of the (net-negative) single-symbol ULTRA_LLR_NOISE_EMP_FLOOR —
-    // pilot-anchored, not single-symbol. k=1 is the principled value; A/B on the GUI gate.
+    // pilot-anchored, not single-symbol. k=1.0 is the VALIDATED value: a k-tune (0.5/1.0/2.0)
+    // on 16QAM R2/3 sp8 Good@20 peaks at 1.0; k=2.0 over-inflates (suppresses good carriers ->
+    // LDPC starves, CW-fails spike), k=0.5 under-weights. The Wiener error_var IS a calibrated
+    // variance, so trust it 1:1. data_phase2b_epsH_ktune_2026-06-12.tsv.
     static const float kHerrLlrK = []() {
         if (const char* env = std::getenv("ULTRA_HERR_LLR_K")) {
             const float v = static_cast<float>(std::atof(env));

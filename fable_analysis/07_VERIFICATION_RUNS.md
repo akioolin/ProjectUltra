@@ -174,6 +174,14 @@ exactly as designed (02 §1): stop asserting confidence on carriers the Wiener a
 estimated poorly → the LDPC stops choking on confident-wrong bits. **This is the first lever all
 campaign to move the actual per-carrier-H-accuracy wall, not a handicap.**
 
+**k-tune (`data_phase2b_epsH_ktune`):** swept k ∈ {0.5, 1.0, 2.0} on 16QAM R2/3 sp8 Good@20.
+**k=1.0 is the peak**, both seeds: seed 42 = 1160/1310/1110, seed 7 = 1070/1620/750. k=2.0
+*over-inflates* (CW-fails spike — same over-suppression signature as the rejected rel-fade
+stack); k=0.5 under-weights. Theoretically clean: the Wiener `error_var` is a calibrated
+variance, so the right scale is 1:1 (k=1.0), not tuned. **k=1.0 locked as the value.** (The
+relative-null-CSI-for-QAM16 gate stacked on ε²_H was tested and REJECTED — it over-inflates
+too, hurting 2/2 seeds; ε²_H is the sufficient mechanism, see CHANGELOG / memory dead-end.)
+
 **No-regress (k=0 vs k=1.0):** QPSK R3/4 Good flat (+0%, −2% noise); 16QAM R1/2 Good *improves*
 (+3%, +8%); **QPSK R3/4 AWGN unchanged + clean (0 retx both)** — ε²_H correctly inert on a flat
 channel (the spurious-flat-down-weighting mode that sank the relative-fade gate on AWGN@30 does

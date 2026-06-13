@@ -50,6 +50,16 @@ extending the relative-null CSI gate to 16QAM, and the stuck-tail / in-order-hol
 seed 2) before R2/3 beats R1/2 and the cap can lift. `ULTRA_HERR_LLR_K` ships default-OFF pending
 that wider stacking + a full-matrix (Moderate, more seeds) sweep.
 
+**Follow-up (same day): k=1.0 validated; rel-fade-for-QAM16 stack rejected.** A k-tune
+(0.5/1.0/2.0) on 16QAM R2/3 sp8 Good@20 PEAKS at k=1.0 both seeds (seed42 1160/1310/1110;
+seed7 1070/1620/750); k=2.0 over-inflates (CW-fails spike). The Wiener error_var is a
+calibrated variance → trust it 1:1; k=1.0 locked as the value. Separately, extending the
+relative-null CSI gate to QAM16 *stacked on* ε²_H (ULTRA_REL_FADE_QAM16, replacing softGrayZone
+to dodge the AWGN double-count) was built, A/B'd, and REVERTED — it over-inflates too (−20/−21%
+goodput, CW-fails 8→32 on 2/2 seeds): ε²_H already down-weights the carriers that matter, so the
+cruder frame-mean gate on top starves the LDPC. Vindicates the "unify, don't stack gates" thesis.
+Data: `fable_analysis/data_phase2b_epsH_ktune_2026-06-12.tsv`.
+
 ---
 
 ## 2026-06-12 — feat(rate): env-gated 16QAM auto-ladder rung + per-modulation rate cap (Phase 1 of the 3086-bps campaign)
