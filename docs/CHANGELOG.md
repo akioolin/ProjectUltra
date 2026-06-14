@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-14 — diag(ofdm): ULTRA_NULL_DIAG per-relative-depth-bin reliability (Phase 2b forensics)
+
+**What:** new RX diagnostic (`ULTRA_NULL_DIAG`, default off / byte-identical) in
+`channel_equalizer_equalize.cpp` that bins data carriers by relative null depth
+(|H|²/frame-mean-|H|²) and logs per-bin `err_var`, thermal-nv, ε²_H-nv, and final nv. Built to
+test the "confident-wrong in nulls" hypothesis for damage-bound 16QAM.
+
+**What it found (16QAM R2/3 Good@20, ε²_H=1.0+sp8 → 1880 bps/20 fails):** (1) `total_nv` is
+monotonic with depth — deep nulls are ALREADY erased (3.13 ≈ 195× norm), so the deep-null
+confident-wrong framing is FALSIFIED. (2) ε²_H's `err_var` is ~constant 0.003 across all depths —
+it reflects pilot-interpolation geometry, not per-carrier mis-estimation, so ε²_H acts as a
+near-uniform mild inflation, not a null-targeter. (3) The only candidate population was the fade
+bin (~15-18 dB carriers).
+
+**Decision (design panel, 4-agent):** do NOT pursue the modulation-aware fade de-weight — the
+available lever is arithmetically ≤1.21× (fade total_nv/norm 2.07 vs ideal-thermal 2.51), likely
+≤1.0× once the downstream demap ce_margin/CARRIER_ADAPTIVE_K stack is counted, and it would
+double-count `softGrayZone` / starve the R2/3 LDPC (the k=2.0 lesson). The residual fails are
+irreducible deep-fade frames; the lever is DIVERSITY (frequency interleave vs the ~4.2 s Good
+coherence time), not LLR re-weighting. Diagnostic kept as a tool.
+
 ## 2026-06-14 — feat(ofdm): codify R2/3 pilot spacing 5→8 (Phase 2b baseline)
 
 **What:** `recommendedPilotSpacing` default for coherent R2/3 was **5** (dense) while R3/4 was

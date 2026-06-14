@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <sstream>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
 #include "genie_tx_capture.hpp"
@@ -482,6 +483,21 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         frame_mean_h_power /= static_cast<float>(data_carrier_indices.size());
     }
 
+    // ULTRA_NULL_DIAG (Phase 2b fading-null forensics, default off): per-relative-depth-bin
+    // reliability summary on the RX. Reveals whether carriers in relative nulls get an
+    // appropriately HIGH noise-var (-> erasure LLRs) or stay overconfident, and whether the
+    // eps_H error_var actually flags them. Bins by |H|^2 / frame-mean-|H|^2.
+    static const bool null_diag = []() {
+        const char* e = std::getenv("ULTRA_NULL_DIAG");
+        return e && e[0] && !(e[0] == '0' && e[1] == '\0');
+    }();
+    float diag_mean_h_power = frame_mean_h_power;
+    if (null_diag && diag_mean_h_power <= 0.0f && !data_carrier_indices.empty()) {
+        for (int didx : data_carrier_indices) diag_mean_h_power += std::norm(channel_estimate[didx]);
+        diag_mean_h_power /= static_cast<float>(data_carrier_indices.size());
+    }
+    double nd_cnt[5] = {0}, nd_err[5] = {0}, nd_therm[5] = {0}, nd_eps[5] = {0}, nd_tot[5] = {0};
+
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
         int idx = data_carrier_indices[i];
         Complex received = freq_domain[idx];
@@ -553,6 +569,40 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
             h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * reliability_noise_var) {
             carrier_erasure_flags_[i] = 1;
             carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
+        }
+
+        if (null_diag && diag_mean_h_power > 0.0f) {
+            const float depth = h_power / diag_mean_h_power;  // |H|^2 relative to frame mean
+            const int b = depth < 0.1f ? 0 : depth < 0.3f ? 1 : depth < 0.7f ? 2
+                          : depth < 1.5f ? 3 : 4;
+            const float denom = h_power + noise_variance;
+            const float ev = (static_cast<size_t>(idx) < per_carrier_h_error_var_.size())
+                                 ? per_carrier_h_error_var_[idx] : 0.0f;
+            nd_cnt[b] += 1.0;
+            nd_err[b] += ev;                                  // eps_H normalized error_var
+            nd_therm[b] += noise_variance / denom;            // thermal nv part
+            nd_eps[b] += kHerrLlrK * ev * h_power / denom;    // eps_H nv contribution
+            nd_tot[b] += carrier_noise_var[i];                // final nv (post all inflations)
+        }
+    }
+
+    if (null_diag && diag_mean_h_power > 0.0f) {
+        static int nd_symcount = 0;
+        if ((++nd_symcount % 20) == 1) {  // throttle ~every 20th symbol
+            std::ostringstream oss;
+            const char* nm[5] = {"deep", "null", "fade", "norm", "strong"};
+            oss << "mod=" << static_cast<int>(mod) << " mean_hp=" << diag_mean_h_power;
+            for (int b = 0; b < 5; ++b) {
+                oss << " " << nm[b] << "[n=" << static_cast<int>(nd_cnt[b]);
+                if (nd_cnt[b] > 0) {
+                    oss << " ev=" << (nd_err[b] / nd_cnt[b])
+                        << " therm=" << (nd_therm[b] / nd_cnt[b])
+                        << " eps=" << (nd_eps[b] / nd_cnt[b])
+                        << " tot=" << (nd_tot[b] / nd_cnt[b]);
+                }
+                oss << "]";
+            }
+            LOG_DEMOD(WARN, "[NULLDIAG] %s", oss.str().c_str());
         }
     }
 
