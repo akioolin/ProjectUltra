@@ -50,10 +50,14 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
                 }
                 return envSpacing("ULTRA_R34_PILOT_SPACING", 8);
             case CodeRate::R2_3:
-                // Per the industry-leader's L12 (3000 bps slot at R2/3), the
-                // production target wants the sparsest pilots that still hold
-                // the worst-fade-seed within the rate's FEC margin.
-                return envSpacing("ULTRA_R23_PILOT_SPACING", 5);
+                // Sparse pilots (8, matching R3/4) — the rate controller only sits at
+                // R2/3 on clean channels. GUI-measured 2026-06-14 (gui_qso_scenario,
+                // Good@20, 5 seeds {42,43,44,7,2}): vs the old dense default (5), sp8 is
+                // +45% on 16QAM R2/3 (873->1270, worst sp8 seed 1090 > best sp5 seed 950)
+                // and +3% / no-regress on QPSK R2/3 (1610->1664). The denser default was
+                // leaving data carriers (hence throughput) on the table without a
+                // worst-seed robustness payoff. ULTRA_R23_PILOT_SPACING still overrides.
+                return envSpacing("ULTRA_R23_PILOT_SPACING", 8);
             case CodeRate::R1_2:
             case CodeRate::R1_4:
             case CodeRate::R1_3:

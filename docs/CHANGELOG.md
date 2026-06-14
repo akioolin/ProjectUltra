@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-14 — feat(ofdm): codify R2/3 pilot spacing 5→8 (Phase 2b baseline)
+
+**What:** `recommendedPilotSpacing` default for coherent R2/3 was **5** (dense) while R3/4 was
+already 8. The conservative dense default was leaving data carriers — hence throughput — on the
+table without a worst-seed robustness payoff (the rate controller only sits at R2/3 on clean
+channels). Changed the R2/3 default to **8** (`include/ultra/ofdm_link_adaptation.hpp`).
+`ULTRA_R23_PILOT_SPACING` still overrides. TX and RX both derive spacing from this one function
+(via `configurePilotsForCodeRate`), so they stay in sync — no wire change.
+
+**Why (GUI-measured, gui_qso_scenario, Good@20, 5 seeds {42,43,44,7,2}):**
+- 16QAM R2/3: **+45%** (sp5 mean 873 → sp8 mean 1270; worst sp8 seed 1090 > best sp5 seed 950).
+- QPSK R2/3: **+3% / no-regress** (sp5 mean 1610 → sp8 mean 1664; 4/5 seeds favor sp8).
+
+This is the roadmap's "isolate the R2/3<R3/4 anomaly first" item — a config divergence worth
+hundreds of bps. It is a *baseline* improvement for Phase 2b (every later 16QAM-R2/3 experiment
+now builds on the better rung), NOT the unlock: 16QAM R2/3 Good@20 is still damage-bound at sp8
+(~1270, ~45% CW loss). Measured ceiling: forced 16QAM R2/3 AWGN@30 delivers **2850 bps, 0 CW-fail
+clean** — the rung is structurally sound; the entire Good@20 gap is fading-null damage.
+
 ## 2026-06-14 — feat(airtime): Phase 2a warm SHORT-DUAL descriptor anchor + R3/4 channel gate
 
 **What was costly (Fable audit airtime lever):** every OFDM-wideband burst prepends the descriptor
