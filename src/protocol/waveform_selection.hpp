@@ -155,7 +155,7 @@ inline bool qam16LadderEnabled() {
 inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
     // mod              rate            AWGN             GOOD             MODERATE
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
-    {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, 20.0f,           kRungDisabledDb}},  // 2026-06-14: Good@20 + cross-frame TIME interleave (auto-on for QAM16) = ~1790 bps, 6/6 PASS — beats the R1/2 rung (~1550). EXPERIMENTAL zero-margin anchor (measured FLOOR, not floor+2); raise to ~22 for margin parity before default, beware Moderate-misclassified-as-Good. Below 20 -> R1/2@18.
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, 18.0f,           kRungDisabledDb}},  // EXPERIMENTAL zero-margin anchor: Good@18 measured 5/5 PASS, 0 CW-fail (Phase 0a) — this is the measured FLOOR, NOT floor+2dB like the QPSK rungs. Acceptable while env-gated/observed; raise to ~20 (margin parity) before this graduates to default, and beware Moderate-misclassified-as-Good landing here.
     {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},
     {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           20.0f}},
@@ -206,7 +206,11 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
 // Non-QAM16 modulations keep the full ladder (R5_6 = no cap = current behavior).
 inline CodeRate maxValidatedCoherentRate(Modulation mod) {
     switch (mod) {
-        case Modulation::QAM16: return CodeRate::R1_2;
+        // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (auto-on for QAM16 via
+        // burstCrossFrameInterleaveOn) makes 16QAM R2/3 Good@20 viable at ~1790 bps GUI-measured
+        // (6/6 seeds), now ABOVE the R1/2 clean rung (~1550). Capped at R2/3, NOT R3/4 — 16QAM
+        // R3/4 stays damage-bound even with interleave; AWGN@30 ceiling is ~2850.
+        case Modulation::QAM16: return CodeRate::R2_3;
         default:                return CodeRate::R5_6;
     }
 }

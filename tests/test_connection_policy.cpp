@@ -564,10 +564,12 @@ void test_recommend_cw_count() {
     CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
                                      WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 8,
           "Good coherent QPSK R2/3 keeps cw=8 inside the true Good coherence time");
-    // Moderate (fading_index ~0.90): 0.5 Hz -> 846 ms coherence caps cw=8 (~1392 ms)
-    // down to cw=4 (720 ms) so a single fade event cannot take the whole frame.
+    // Moderate (fading_index ~0.90): 0.5 Hz -> 846 ms coherence caps cw=8 (1272 ms at sp8)
+    // down to cw=5 (816 ms, fits) so a single fade event cannot take the whole frame. (Was cw=4
+    // at the old dense sp5 pilots; the 2026-06-14 R2/3 sp8 default shortens the frame, so the cap
+    // fits one more CW inside coherence — more Moderate throughput at the same robustness.)
     CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
-                                     WaveformMode::OFDM_CHIRP, 0.90f, 20.0f) == 4,
+                                     WaveformMode::OFDM_CHIRP, 0.90f, 20.0f) == 5,
           "Moderate coherent QPSK R2/3 caps frame length inside coherence time");
     CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
                                      WaveformMode::OFDM_CHIRP, 0.0f, 27.0f) == 8,

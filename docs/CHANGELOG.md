@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-14 — feat(diversity): cross-frame TIME interleave for 16QAM + lift QAM16 cap to R2/3 (Phase 2b keystone)
+
+**The win:** 16QAM R2/3 Good@20 goes from damage-bound ~1270 bps to **~2033-2240 bps** — now ABOVE
+QPSK R3/4 (~1860) and the R1/2 clean rung (~1550). First structural recovery of the 16QAM-on-Good
+gap; the auto ladder now selects 16QAM R2/3 on Good.
+
+**Root cause (4-agent panel + frequency-diversity audit, file:line-verified):** the LLR-calibration
+lever is EXHAUSTED (≤1.21× headroom, double-counts softGrayZone, starves the LDPC — panel rejected
+the modulation-aware fade de-weight). FREQUENCY diversity is structurally maxed — each N=648 CW
+already touches all 59 carriers, so a contiguous W-carrier null hits ~W/59 of EVERY codeword no
+matter the permutation (a ~15-carrier trough = ~25% erasure > R2/3's ~15-18% correction → fatal).
+The unharvested axis is TIME: each CW was confined to one ~1.4 s frame = one frozen null (frame <<
+Tc 4.2 s), but the burst spans ~5 frames ≈ 1.7 Tc, so the null decorrelates across the burst.
+
+**What changed (3 coupled changes; QPSK/8PSK/AWGN byte-identical):**
+- `connection_policy::burstCrossFrameInterleaveOn(mod)` — now mod-gated: cross-frame `BurstInterleaver`
+  (TIME diversity, whole-group ACK/NACK) defaults ON for dense coherent mods (≥16QAM, ≥4 bits/symbol),
+  OFF (per-frame SR-ARQ) for QPSK/8PSK/BPSK. `ULTRA_BURST_INTERLEAVE` still force-overrides. Consumed
+  at the single propagation point `modem_mode.cpp` (passes `data_modulation_`).
+- `maxValidatedCoherentRate(QAM16)` R1/2 → R2/3 (`waveform_selection.hpp`).
+- `kCoherentLadderQAM16Exp` 16QAM R2/3 Good rung enabled at the measured @20 anchor (was disabled).
+
+**Why it works / why safe:** spreading each CW across the burst's ~5 frames turns a static-null
+codeword WIPE into a recoverable ~1/5 NICK. 16QAM is only SELECTED on benign channels, so the
+whole-group-ACK cost (lost per-frame SR masks) is ~0 there. QPSK/8PSK keep per-frame SR-ARQ —
+their margin absorbs nulls and they serve the lossier channels where fine-grained retransmit is the
+robustness lever.
+
+**Test verification:**
+- GUI keystone A/B (paired off/on, 16QAM R2/3 Good@20, 6 seeds): **+47%, 6/6 seeds favor ON**,
+  deint-fails ~halved.
+- GUI safety: QPSK R3/4 Good@20 flat (no-regress), 16QAM R2/3 AWGN@30 clean 2980/0 (whole-group-ACK
+  cost ~0 on flat).
+- GUI codify verify (default, no env): forced 16QAM R2/3 → ACTUAL_MODE 16QAM R2/3, ~2033 mean;
+  QPSK R3/4 → 1970/1720 (no-regress); ADAPTIVE (ULTRA_ENABLE_QAM16_LADDER=1) → ladder auto-picks
+  16QAM R2/3, ~2240.
+- ctest: WaveformPolicy + ConnectionPolicy + Streaming + Rate 15/15. (Also fixes two test
+  expectations the 8d0fa4a sp8 commit left stale: QAM16 R2/3 pilot spacing 5→8; Moderate QPSK R2/3
+  coherence cw-cap 4→5 — sp8's shorter frame fits one more CW inside the 846 ms coherence.)
+
 ## 2026-06-14 — diag(ofdm): ULTRA_NULL_DIAG per-relative-depth-bin reliability (Phase 2b forensics)
 
 **What:** new RX diagnostic (`ULTRA_NULL_DIAG`, default off / byte-identical) in

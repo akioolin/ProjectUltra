@@ -112,11 +112,22 @@ inline size_t burstInterleaveGroupFrames() {
 // offset-skip bug). Invariant: interleave OFF -> per-frame SR masks; ON -> whole-group
 // ACK/NACK. Default OFF for ALL modulations/rates "for now"; re-enable for Moderate/Poor
 // time-diversity later. Override: ULTRA_BURST_INTERLEAVE=1 (force ON), =0 (force OFF).
-inline bool burstCrossFrameInterleaveOn() {
+inline bool burstCrossFrameInterleaveOn(Modulation mod) {
     if (const char* env = std::getenv("ULTRA_BURST_INTERLEAVE")) {
-        return env[0] == '1';
+        return env[0] == '1';  // explicit override forces ON/OFF for ALL modulations (testing)
     }
-    return false;  // default OFF — the SR-ARQ per-frame profile
+    // Default: cross-frame TIME interleave ON for DENSE coherent mods (>=16QAM, >=4 bits/symbol),
+    // OFF (per-frame SR-ARQ) for QPSK/8PSK/BPSK. GUI-measured 2026-06-14: +47% on 16QAM R2/3
+    // Good@20 (6/6 seeds, deint-fails ~halved). MECHANISM: a dense constellation's tight rings
+    // cannot absorb a frequency-null codeword-wipe (frame << coherence time -> the null is frozen
+    // within a frame); the burst spans ~1.7 coherence times, so spreading each codeword across the
+    // burst's frames turns a static-null WIPE into a recoverable ~1/N NICK. Frequency interleaving
+    // is already structurally maxed (each CW touches all 59 carriers) — TIME diversity is the only
+    // remaining axis. Safe because 16QAM is only SELECTED on benign channels, so the whole-group-
+    // ACK cost (lost per-frame SR masks) is ~0 there (no-regress measured on AWGN@30 + QPSK R3/4
+    // Good@20). QPSK/8PSK stay per-frame SR-ARQ — their margin absorbs nulls and they serve the
+    // lossier channels where fine-grained retransmit is the proven robustness lever.
+    return ofdm_link_adaptation::isCoherentModulation(mod) && getBitsPerSymbol(mod) >= 4;
 }
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;

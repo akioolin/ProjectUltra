@@ -303,7 +303,8 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     // SR-ARQ), the same source of truth the connection's ARQ semantics and the on-wire
     // descriptor bit derive from, so encoder/ARQ/descriptor can never disagree.
     const bool burst_interleave_on =
-        file_class_composite && protocol::connection_policy::burstCrossFrameInterleaveOn();
+        file_class_composite &&
+        protocol::connection_policy::burstCrossFrameInterleaveOn(data_modulation_);
     const int burst_group =
         static_cast<int>(protocol::connection_policy::burstInterleaveGroupFrames());
     if (streaming_encoder_) {

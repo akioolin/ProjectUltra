@@ -347,8 +347,8 @@ void test_ofdm_chirp_qam16_configuration() {
           "OFDM_CHIRP QAM16 configuration should keep requested rate");
     CHECK(waveform.getConfig().use_pilots,
           "OFDM_CHIRP QAM16 should use pilot-aided coherent demodulation");
-    CHECK(waveform.getPilotSpacing() == 5,
-          "OFDM_CHIRP QAM16 R2/3 should use dense coherent pilot spacing");
+    CHECK(waveform.getPilotSpacing() == 8,
+          "OFDM_CHIRP QAM16 R2/3 uses sparse pilot spacing 8 (2026-06-14 R2/3 sp8 default)");
     CHECK(waveform.getCapabilities().requires_pilots,
           "OFDM_CHIRP capabilities should advertise pilots when QAM16 is active");
 }
