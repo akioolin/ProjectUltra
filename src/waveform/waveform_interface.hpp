@@ -95,6 +95,14 @@ public:
     // Default: falls back to full preamble for waveforms that don't support it
     virtual Samples generateDataPreamble() { return generatePreamble(); }
 
+    // 2026-06-12 Phase 2a: SHORT single-chirp WARM re-anchor for the per-burst BURST_HEADER
+    // descriptor. When sync is warm the CFO is already tracked, so the full up+down dual chirp
+    // (needed only for cold CFO estimation) can collapse to a single short up-chirp — reclaiming
+    // ~600 ms-1 s of airtime per burst. Default = full anchor (non-OFDM / feature off).
+    // OFDMChirpWaveform overrides; gated by ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS.
+    virtual Samples generateShortAnchorPreamble() { return generatePreamble(); }
+    virtual bool shortAnchorEnabled() const { return false; }
+
     // (R4: generateShortDataPreamble removed — the adaptive short re-anchor was superseded
     //  by the warm-sync hand-off, now the production default.)
 

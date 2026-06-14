@@ -439,6 +439,30 @@ inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
     return fading_index >= kFadingAwgnMax;
 }
 
+// Channel gate for the Phase 2a warm SHORT-DUAL descriptor anchor
+// (ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS). The short anchor reclaims ~400-600 ms/burst of chirp
+// airtime but trades ~1.5-3 dB of matched-filter margin vs the full 500 ms dual. GUI-measured
+// (2026-06-13, gui_qso_scenario): on fading that margin loss produces a fat tail of
+// descriptor-miss / fade-alignment storms whose worst-case seed RELOCATES with chirp duration
+// but never disappears (250 ms cratered Moderate seed 2 @88 retx; 350 ms fixed it but cratered
+// seed 43 @44 retx/96 CW-fail and dragged Good seed 2 to -18%). It is a clean win ONLY on benign
+// Good/AWGN (250 ms = +7.2%, 3/3 seeds, 0 CW-fail, no crater).
+//
+// Gate on the rate ladder's TOP RUNG (R3/4): the ladder only sustains R3/4 at high SNR + shallow
+// fading (entry floors + adaptive hysteresis), so it is a robust SENDER-SIDE proxy for "benign"
+// — and unlike the raw fading_index it does NOT suffer the Good/Moderate classifier blindness
+// (the measured fading distributions for the two classes overlap). When the channel degrades the
+// ladder drops below R3/4 and the short anchor auto-reverts to the full dual chirp, mid-session.
+inline bool shouldUseWarmShortAnchorDescriptor(WaveformMode waveform,
+                                               Modulation modulation,
+                                               CodeRate rate) {
+    if (waveform != WaveformMode::OFDM_CHIRP ||
+        !ofdm_link_adaptation::isCoherentModulation(modulation)) {
+        return false;
+    }
+    return rate == CodeRate::R3_4;
+}
+
 inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
                                            CodeRate rate,
                                            int cw_count = v2::kDefaultFixedFrameCodewords,

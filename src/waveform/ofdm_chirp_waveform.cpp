@@ -178,6 +178,12 @@ void OFDMChirpWaveform::initComponents() {
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
     demodulator_->setRXCarrierErasureEnabled(rx_carrier_erasure_enabled_);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(getChirpConfig());
+    if (shortAnchorEnabled() && mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        // Phase 2a: a SECOND short-config ChirpSync (short DUAL chirp, 250+50+250+50) for the warm
+        // BURST_HEADER descriptor. Kept separate so cold PING/CONNECT acquisition keeps the full
+        // 500 ms dual chirp. Both TX generate and RX detect route through this instance.
+        short_anchor_chirp_sync_ = std::make_unique<sync::ChirpSync>(getShortAnchorChirpConfig());
+    }
     invalidateDataSyncTemplate();
 }
 
@@ -235,6 +241,43 @@ sync::ChirpConfig OFDMChirpWaveform::getChirpConfig() const {
     cfg.gap_ms = 100.0f;
     cfg.use_dual_chirp = true;  // For CFO estimation
     cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
+    return cfg;
+}
+
+float OFDMChirpWaveform::shortAnchorChirpMs() {
+    // ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS: per-chirp duration (ms) of the warm BURST_HEADER
+    // descriptor's SHORT DUAL anchor. 0/unset = OFF (full 500 ms dual anchor, byte-identical).
+    // A/B value = 250: a 250+50+250+50 dual (vs the full 500+100+500+100) reclaims ~600 ms/burst
+    // while KEEPING CFO/timing separation and fade robustness (see getShortAnchorChirpConfig).
+    // Clamp [50,600].
+    static const float ms = []() {
+        if (const char* env = std::getenv("ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v >= 50.0f && v <= 600.0f) return v;
+        }
+        return 0.0f;
+    }();
+    return ms;
+}
+
+bool OFDMChirpWaveform::shortAnchorEnabled() const {
+    return shortAnchorChirpMs() > 0.0f;
+}
+
+sync::ChirpConfig OFDMChirpWaveform::getShortAnchorChirpConfig() const {
+    sync::ChirpConfig cfg = getChirpConfig();
+    // Short DUAL chirp (keep up+down). A single chirp couples CFO and timing — its peak shifts by
+    // ~CFO * Fs/chirp_rate samples with no way to separate the two (chirp_sync.hpp:201-203) — so it
+    // mislocates the descriptor under residual CFO and is fragile on fading. The dual differencing
+    // keeps timing CFO-immune (up/down shifts cancel) and still MEASURES the CFO. Halving the
+    // per-chirp duration costs ~3 dB of matched-filter gain, affordable against the warm
+    // descriptor's large SNR surplus over the -5 dB cold floor; CFO readout coarsens to
+    // ~Fs*T/B samples/Hz but the per-frame LTS residual refines it to 0.3 Hz. Trim the inter-chirp
+    // gap to 50 ms (it only separates the two correlation windows) so the short dual reclaims
+    // ~the same airtime a single chirp would have, without the single-chirp fragility.
+    cfg.use_dual_chirp = true;
+    cfg.duration_ms = shortAnchorChirpMs();  // per-chirp duration (250 ms in the A/B)
+    cfg.gap_ms = 50.0f;
     return cfg;
 }
 
@@ -337,6 +380,22 @@ Samples OFDMChirpWaveform::generatePreamble() {
     return preamble;
 }
 
+Samples OFDMChirpWaveform::generateShortAnchorPreamble() {
+    // Phase 2a warm re-anchor: [SHORT dual chirp][2 LTS]. Falls back to the full anchor
+    // if the short instance isn't built (feature off). The 2 LTS are unchanged, so the RX
+    // channel estimate / burst-marker detection are identical to the full anchor.
+    if (!short_anchor_chirp_sync_ || !modulator_) {
+        return generatePreamble();
+    }
+    Samples chirp = short_anchor_chirp_sync_->generate();
+    Samples training = modulator_->generateTrainingSymbols(2);
+    Samples preamble;
+    preamble.reserve(chirp.size() + training.size());
+    preamble.insert(preamble.end(), chirp.begin(), chirp.end());
+    preamble.insert(preamble.end(), training.begin(), training.end());
+    return preamble;
+}
+
 Samples OFDMChirpWaveform::generateDataPreamble() {
     if (!modulator_) {
         return Samples();
@@ -406,8 +465,24 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
     burst_interleave_latched_ = false;
     burst_interleaved_detected_ = false;
 
-    // Use dual chirp detection for CFO-tolerant sync
+    // Full dual detector FIRST — correct for cold acquisition and session-first/resend full
+    // anchors. It cleanly FAILS on a short single chirp (no down-chirp/gap to match) rather than
+    // mislocating one, so trying it first is safe for both anchor types.
     auto chirp_result = chirp_sync_->detectDualChirp(samples, threshold);
+    bool short_anchor = false;
+    sync::ChirpSync* cs = chirp_sync_.get();
+    // Phase 2a: on a full-detector MISS, the descriptor may be the SHORT single up-chirp warm
+    // re-anchor. Fall back to the short detector (a 2nd correlation only on the miss path).
+    // No per-burst signaling needed: full-anchor descriptors match the full detector, short ones
+    // match here. (The 2 LTS after either chirp re-validate timing identically.)
+    if (!chirp_result.success && short_anchor_chirp_sync_) {
+        auto short_result = short_anchor_chirp_sync_->detectDualChirp(samples, threshold);
+        if (short_result.success) {
+            chirp_result = short_result;
+            cs = short_anchor_chirp_sync_.get();
+            short_anchor = true;
+        }
+    }
 
     result.detected = chirp_result.success;
     result.correlation = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
@@ -429,12 +504,14 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         //   down_chirp: shifts by +CFO × cfo_to_samples
         // Using up_chirp_start + fixed_offset gives growing error with CFO.
         // Using down_chirp_start gives more accurate training position.
-        size_t chirp_samples = chirp_sync_->getChirpSamples();
-        size_t gap_samples = static_cast<size_t>(config_.sample_rate * 100.0f / 1000.0f);
+        size_t chirp_samples = cs->getChirpSamples();
+        // Gap is per-instance: full anchor 100 ms, short warm anchor 50 ms. Read it from the
+        // matched chirp config so the [down-chirp][gap] -> training offset is exact for both.
+        size_t gap_samples = static_cast<size_t>(config_.sample_rate * cs->getConfig().gap_ms / 1000.0f);
 
-        // Training starts after down chirp + gap
-        result.start_sample = chirp_result.down_chirp_start +
-                              chirp_samples + gap_samples;
+        // Training starts after [down-chirp][gap]. Both the full anchor and the short warm anchor
+        // are DUAL chirps, so down_chirp_start is CFO-robust (up/down peak shifts cancel) for both.
+        result.start_sample = chirp_result.down_chirp_start + chirp_samples + gap_samples;
         // NOTE: Do NOT add training_samples - process() needs them for channel estimation
 
         // Store training start position for CFO phase calculation in process()
@@ -474,8 +551,9 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         }
 
         LOG_MODEM(INFO,
-                  "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d%s",
+                  "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d%s%s",
                   chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample,
+                  short_anchor ? " [SHORT-ANCHOR]" : "",
                   burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
     }
 

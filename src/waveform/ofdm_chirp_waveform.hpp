@@ -143,11 +143,19 @@ public:
     // Get chirp sync for direct access
     sync::ChirpSync* getChirpSync() { return chirp_sync_.get(); }
 
+    // Phase 2a short-anchor (see waveform_interface.hpp). Gated by ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS.
+    // detectSync() auto-falls-back to the short detector on a full-detector miss, so no RX
+    // routing flag is needed.
+    Samples generateShortAnchorPreamble() override;
+    bool shortAnchorEnabled() const override;
+
     Symbol getLastDataCarrierSymbolsForTesting() const;
 
 private:
     void initComponents();
     sync::ChirpConfig getChirpConfig() const;
+    sync::ChirpConfig getShortAnchorChirpConfig() const;   // short DUAL chirp, warm re-anchor
+    static float shortAnchorChirpMs();                     // ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS (0=off)
     void configurePilotsForCodeRate(CodeRate rate);
     bool carrierLdpcPlumbingEligible() const;
     bool carrierLdpcCodewordCountSupported(size_t codeword_count) const;
@@ -159,6 +167,7 @@ private:
     std::unique_ptr<OFDMModulator> modulator_;
     std::unique_ptr<OFDMDemodulator> demodulator_;
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
+    std::unique_ptr<sync::ChirpSync> short_anchor_chirp_sync_;  // short dual chirp (warm descriptor)
     HilbertTransform data_sync_hilbert_{65};
     std::vector<Complex> data_sync_analytic_scratch_;
     std::vector<Complex> data_sync_template_analytic_;

@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-14 — feat(airtime): Phase 2a warm SHORT-DUAL descriptor anchor + R3/4 channel gate
+
+**What was costly (Fable audit airtime lever):** every OFDM-wideband burst prepends the descriptor
+(BURST_HEADER) with the FULL acquisition anchor — a dual 500 ms chirp (up+gap+down+gap = 1200 ms)
++ 2 LTS — even mid-stream when sync is already WARM. ~600 ms/burst of that is reclaimable on benign
+channels.
+
+**What changed (env-gated, default OFF; 7 files):**
+- New `IWaveform::generateShortAnchorPreamble()` / `shortAnchorEnabled()` (`waveform_interface.hpp`);
+  `OFDMChirpWaveform` builds a 2nd `short_anchor_chirp_sync_` and a short-detect fallback in
+  `detectSync()` (`ofdm_chirp_waveform.{hpp,cpp}`). Knob `ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS`
+  (per-chirp ms, clamp [50,600], 0=off).
+- `StreamingEncoder::encodeFrame(..., prefer_short_anchor)`; the warm descriptor requests the short
+  anchor (`streaming_encoder.{hpp,cpp}`).
+- Channel gate `connection_policy::shouldUseWarmShortAnchorDescriptor(waveform,mod,rate)` =
+  coherent OFDM_CHIRP **at R3/4 only**; consumed at the descriptor-emit site.
+
+**Why a short DUAL (250+50+250+50), and why gated to R3/4 (both GUI-measured, not assumed):**
+- A *single* short chirp couples CFO and timing (no down-chirp to difference) → mislocates the
+  descriptor under residual CFO. Measured: single-500 craters Moderate seed 7 (680 bps, 73 retx,
+  **8 CW-fail**). The short *dual* keeps the up/down differencing → **0 CW-fail across all runs**,
+  Moderate seed 7 → neutral.
+- Shortening still costs ~1.5-3 dB of matched-filter margin; on fading that opens a fat tail of
+  descriptor-miss / fade-alignment storms whose worst-case seed **relocates with duration but never
+  disappears** (250 ms craters Moderate seed 2 @88 retx; 350 ms fixed it but cratered seed 43 @44
+  retx/96 CW-fail and dragged Good seed 2 to −18%). So duration tuning can't make it channel-blind.
+  Clean win only on benign Good/AWGN: **250 ms = +7.2%, 3/3 seeds, 0 CW-fail, no crater**. The gate
+  keys on R3/4 (the ladder's top rung — robust sender-side "benign" proxy, unlike the raw
+  `fading_index` whose Good/Moderate distributions overlap); auto-reverts to full dual when the
+  ladder drops off R3/4. A short-anchor miss self-heals: the timeout resend forces the full chirp.
+
+**Test verification:**
+- `ctest -R '^ConnectionPolicy$'` → 213/213 (new `test_warm_short_anchor_descriptor_gate`: fires
+  on coherent OFDM_CHIRP R3/4; suppressed on R2/3, R1/2, R1/4, QAM16-R1/2, DQPSK, OFDM_NARROW,
+  MC_DPSK).
+- `gui_qso_scenario.sh` (knob=250, lid open): Good@20 R3/4 → **GATE=ON**, descriptor 38880 samples,
+  **2110 bps** (~+7% vs full-dual ~1980); Moderate@14 R1/2 → **GATE=OFF**, descriptor 67680 (full
+  dual), **1040 bps** ≈ baseline (ungated-250 cratered here at 660/88 retx — gate suppresses it).
+- Default OFF / byte-identical when unset; stays env-gated until proven across the full
+  mod×rate×channel matrix (16QAM is R1/2 today → gated off; revisit when 16QAM-on-Good is the rung).
+
 ## 2026-06-12 — feat(ofdm): per-carrier channel-estimate-error LLR term (ε²_H) — Phase 2b, the first validated wall-mover
 
 **The wall (from the Fable audit, `fable_analysis/02`):** the coherent-OFDM LLR noise model

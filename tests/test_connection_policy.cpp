@@ -598,6 +598,51 @@ void test_variable_frame_payload_capacity() {
     }
 }
 
+// Phase 2a: the warm SHORT-DUAL descriptor anchor is GUI-measured to be a clean win only on
+// benign Good/AWGN and to crater on fading (the bad seed relocates with chirp duration but never
+// disappears). shouldUseWarmShortAnchorDescriptor gates it to the rate ladder's top rung (R3/4)
+// on coherent wideband OFDM — a robust sender-side "benign" proxy that auto-reverts to the full
+// dual chirp the moment the ladder drops off R3/4. This pins that gate so it can't silently widen.
+void test_warm_short_anchor_descriptor_gate() {
+    using WF = protocol::WaveformMode;
+
+    // Fires only on coherent wideband OFDM at the TOP rung.
+    CHECK(connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R3_4),
+          "short anchor must fire on OFDM_CHIRP coherent QPSK R3/4 (benign top rung)");
+    CHECK(connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QAM8, CodeRate::R3_4),
+          "short anchor fires on any coherent modulation at R3/4 (8PSK R3/4)");
+
+    // Suppressed below the top rung — R2/3, R1/2, R1/4 indicate a less-benign channel. Note
+    // QAM16's validated rung is R1/2, so 16QAM bursts are gated OFF here (full dual) today.
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R2_3),
+          "short anchor must NOT fire below R3/4 (R2/3)");
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_2),
+          "short anchor must NOT fire below R3/4 (R1/2 == Moderate / 16QAM rung)");
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QAM16, CodeRate::R1_2),
+          "short anchor must NOT fire on the 16QAM R1/2 rung (gated off today)");
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4),
+          "short anchor must NOT fire below R3/4 (R1/4)");
+
+    // Suppressed for differential modulation (no coherent burst path) ...
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::DQPSK, CodeRate::R3_4),
+          "short anchor must NOT fire on differential DQPSK even at R3/4");
+
+    // ... and for non-wideband-OFDM waveforms (narrowband / MC-DPSK have their own anchors).
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_NARROW, Modulation::QPSK, CodeRate::R3_4),
+          "short anchor must NOT fire on OFDM_NARROW");
+    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::MC_DPSK, Modulation::QPSK, CodeRate::R3_4),
+          "short anchor must NOT fire on MC_DPSK");
+}
+
 }  // namespace
 
 int main() {
@@ -611,6 +656,7 @@ int main() {
     test_auto_data_mode_boundaries();
     test_recommend_cw_count();
     test_variable_frame_payload_capacity();
+    test_warm_short_anchor_descriptor_gate();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

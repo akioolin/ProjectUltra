@@ -83,8 +83,9 @@ public:
     // ========================================================================
 
     // Encode frame data -> audio samples (preamble + modulated data)
-    // Uses full preamble (chirp sync)
-    std::vector<float> encodeFrame(const Bytes& frame_data);
+    // Uses full preamble (chirp sync); prefer_short_anchor uses the Phase 2a short single-chirp
+    // warm re-anchor (for the BURST_HEADER descriptor when sync is warm).
+    std::vector<float> encodeFrame(const Bytes& frame_data, bool prefer_short_anchor = false);
 
     // Encode frame with light preamble (for connected mode, faster turnaround)
     // Only works if waveform supports data preamble

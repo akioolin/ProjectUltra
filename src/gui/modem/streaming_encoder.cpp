@@ -9,6 +9,7 @@
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
+#include "protocol/connection_policy.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/phy_diagnostics.hpp"
@@ -285,7 +286,7 @@ void StreamingEncoder::setNarrowbandControl(bool narrowband) {
 // ENCODING
 // ============================================================================
 
-std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
+std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool prefer_short_anchor) {
     if (!waveform_) {
         LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
         return {};
@@ -315,8 +316,9 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
     // Encode frame bytes (LDPC + interleaving)
     Bytes encoded = encodeFrameBytes(frame_data);
 
-    // Generate full preamble
-    Samples preamble = waveform_->generatePreamble();
+    // Generate preamble (full dual chirp, or the Phase 2a short single-chirp warm re-anchor)
+    Samples preamble = prefer_short_anchor ? waveform_->generateShortAnchorPreamble()
+                                           : waveform_->generatePreamble();
 
     // Modulate
     Samples modulated = waveform_->modulate(encoded);
@@ -545,7 +547,26 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             modulation_, code_rate_, flags,
             /*lifting_z=*/ldpc_lifting_z_);
         Bytes descriptor_bytes = descriptor.serialize();
-        std::vector<float> descriptor_samples = encodeFrame(descriptor_bytes);
+        // Phase 2a: the descriptor carries the per-burst anchor. When sync is WARM (NOT the
+        // session-first burst and NOT a resend — same predicate the group-start uses at :568),
+        // emit the SHORT DUAL chirp anchor instead of the full 500ms dual chirp. Session-first and
+        // resends keep the full dual chirp (cold re-acquire / lost-tail rescue); a short-anchor
+        // miss therefore self-heals — the timeout resend re-anchors at full strength. The §14.25
+        // fixed-stride risk does NOT apply: the descriptor is a self-locating control frame and
+        // the burst member stride is chirp-free (getMinSamplesForCWCount).
+        const bool warm_descriptor =
+            !(force_full_preamble_once_ || force_burst_group_start_full_preamble_);
+        // Channel-gate the short anchor to the rate ladder's top rung (R3/4 == benign Good/AWGN).
+        // GUI-measured: shortening the warm chirp craters on fading at every duration (the bad
+        // seed just relocates); R3/4 is the robust sender-side "benign" proxy. See
+        // connection_policy::shouldUseWarmShortAnchorDescriptor. Auto-reverts to full dual when
+        // the ladder drops off R3/4.
+        const bool descriptor_short_anchor =
+            warm_descriptor && waveform_ && waveform_->shortAnchorEnabled() &&
+            protocol::connection_policy::shouldUseWarmShortAnchorDescriptor(
+                waveform_->getMode(), modulation_, code_rate_);
+        std::vector<float> descriptor_samples =
+            encodeFrame(descriptor_bytes, descriptor_short_anchor);
         if (!descriptor_samples.empty()) {
             result.insert(result.end(), descriptor_samples.begin(), descriptor_samples.end());
             LOG_MODEM(INFO,
