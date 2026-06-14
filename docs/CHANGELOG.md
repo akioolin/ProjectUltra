@@ -10,6 +10,24 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-14 — feat(airtime): extend the warm short-anchor to 16QAM (dense coherent mods)
+
+**What:** `shouldUseWarmShortAnchorDescriptor` now fires on dense coherent mods (≥16QAM, ≥4
+bits/symbol) in addition to QPSK R3/4 — both are benign-channel operating points the ladder only
+selects at high SNR + shallow fading (where the shortened chirp doesn't crater). 16QAM is
+Good-selected, so 16QAM at any rate qualifies.
+
+**Why:** the descriptor-chirp reclaim is proportionally BIGGER on 16QAM — a denser payload packs the
+burst's data into fewer symbols, so the fixed chirp anchor is a larger fraction of the burst.
+
+**Verification (GUI, 16QAM R2/3 Good@20, paired off/on, 5 seeds, cross-frame interleave default-on):**
+short anchor (250 ms) = **+10.3% mean, 4/5 seeds**, descriptor shrinks 67680→38880 all seeds, **no
+crater** (deint-fails flat; composes cleanly with the whole-group-ACK interleave path). Bigger than
+QPSK R3/4's +7.2%, as predicted. Stacks on the keystone: 16QAM R2/3 Good@20 sp8 ~1270 → +interleave
+~2033 → +short-anchor ≈ ~2240 (~78% of the 2850 AWGN ceiling). ConnectionPolicy unit test updated
+(16QAM now FIRES; QPSK still gated to R3/4; differential/narrowband/MC-DPSK still excluded).
+Still env-gated by `ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS` (default off → byte-identical).
+
 ## 2026-06-14 — feat(diversity): cross-frame TIME interleave for 16QAM + lift QAM16 cap to R2/3 (Phase 2b keystone)
 
 **The win:** 16QAM R2/3 Good@20 goes from damage-bound ~1270 bps to **~2033-2240 bps** — now ABOVE

@@ -616,20 +616,25 @@ void test_warm_short_anchor_descriptor_gate() {
               WF::OFDM_CHIRP, Modulation::QAM8, CodeRate::R3_4),
           "short anchor fires on any coherent modulation at R3/4 (8PSK R3/4)");
 
-    // Suppressed below the top rung — R2/3, R1/2, R1/4 indicate a less-benign channel. Note
-    // QAM16's validated rung is R1/2, so 16QAM bursts are gated OFF here (full dual) today.
+    // QPSK is suppressed below its top rung — R2/3, R1/2, R1/4 indicate a less-benign channel.
     CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
               WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R2_3),
-          "short anchor must NOT fire below R3/4 (R2/3)");
+          "short anchor must NOT fire on QPSK below R3/4 (R2/3)");
     CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
               WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_2),
-          "short anchor must NOT fire below R3/4 (R1/2 == Moderate / 16QAM rung)");
-    CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
-              WF::OFDM_CHIRP, Modulation::QAM16, CodeRate::R1_2),
-          "short anchor must NOT fire on the 16QAM R1/2 rung (gated off today)");
+          "short anchor must NOT fire on QPSK below R3/4 (R1/2)");
     CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(
               WF::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4),
-          "short anchor must NOT fire below R3/4 (R1/4)");
+          "short anchor must NOT fire on QPSK below R3/4 (R1/4)");
+
+    // 2026-06-14: FIRES on dense coherent mods (>=16QAM) at ANY rate — 16QAM is benign-selected
+    // (Good-only), and the descriptor-chirp reclaim is proportionally bigger on the denser payload.
+    CHECK(connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QAM16, CodeRate::R2_3),
+          "short anchor FIRES on 16QAM R2/3 (dense mod, benign-selected)");
+    CHECK(connection_policy::shouldUseWarmShortAnchorDescriptor(
+              WF::OFDM_CHIRP, Modulation::QAM16, CodeRate::R1_2),
+          "short anchor FIRES on 16QAM R1/2 (dense mod, benign-selected)");
 
     // Suppressed for differential modulation (no coherent burst path) ...
     CHECK(!connection_policy::shouldUseWarmShortAnchorDescriptor(

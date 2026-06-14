@@ -459,11 +459,16 @@ inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
 // seed 43 @44 retx/96 CW-fail and dragged Good seed 2 to -18%). It is a clean win ONLY on benign
 // Good/AWGN (250 ms = +7.2%, 3/3 seeds, 0 CW-fail, no crater).
 //
-// Gate on the rate ladder's TOP RUNG (R3/4): the ladder only sustains R3/4 at high SNR + shallow
-// fading (entry floors + adaptive hysteresis), so it is a robust SENDER-SIDE proxy for "benign"
-// — and unlike the raw fading_index it does NOT suffer the Good/Moderate classifier blindness
-// (the measured fading distributions for the two classes overlap). When the channel degrades the
-// ladder drops below R3/4 and the short anchor auto-reverts to the full dual chirp, mid-session.
+// Gate on BENIGN-channel operating points (robust SENDER-SIDE proxies the ladder only sustains
+// at high SNR + shallow fading, unlike the raw fading_index which suffers the Good/Moderate
+// classifier blindness — the measured fading distributions overlap):
+//   - QPSK R3/4: the ladder's top rung (entry floors + adaptive hysteresis), OR
+//   - dense coherent mods (>=16QAM, 2026-06-14): the ladder only SELECTS these on benign Good
+//     channels, so 16QAM at any rate IS a benign operating point. The reclaim is proportionally
+//     BIGGER here — a denser payload packs the burst's data into fewer symbols, so the fixed
+//     descriptor chirp is a larger fraction of the burst.
+// When the channel degrades the ladder drops below R3/4 / off 16QAM and the short anchor
+// auto-reverts to the full dual chirp, mid-session.
 inline bool shouldUseWarmShortAnchorDescriptor(WaveformMode waveform,
                                                Modulation modulation,
                                                CodeRate rate) {
@@ -471,7 +476,7 @@ inline bool shouldUseWarmShortAnchorDescriptor(WaveformMode waveform,
         !ofdm_link_adaptation::isCoherentModulation(modulation)) {
         return false;
     }
-    return rate == CodeRate::R3_4;
+    return rate == CodeRate::R3_4 || getBitsPerSymbol(modulation) >= 4;
 }
 
 inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
