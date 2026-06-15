@@ -303,6 +303,51 @@ void testRatiometricFloorSurvivesLongBusySignal() {
     assert(detector.quietThreshold() < 0.080f);
 }
 
+// Regression for the IONOS hardware lockup: the floor seeds LOW (the band noise
+// is not yet flowing when audio opens / device warmup), then the real in-band
+// WGN rises above floor x multiplier. The one-way admission gate rejects every
+// real sample as "signal", starves the floor window, and latches the cached
+// floor below the noise -> permanent false-busy (every pre-connection TX is
+// CCA-deferred, collapsing the half-duplex handshake). The sustained-elevation
+// relearn must detect that the elevation is a risen floor (not a time-bounded
+// signal) and re-seed, returning the detector to IDLE on the steady noise.
+void testRelearnsRisenNoiseFloorAfterLowSeed() {
+    ChannelBusyDetectorConfig cfg = ultra::audio::ratiometricHfCarrierSenseConfig();
+    cfg.quiet_hold_ms = 30;
+    cfg.rms_window_ms = 30;
+    cfg.noise_floor_window_ms = 500;
+    cfg.min_noise_floor_observations = 5;
+    cfg.max_wait_for_idle_ms = 50;
+    cfg.noise_floor_relearn_after_ms = 1000;  // scaled-down for a fast test
+    ChannelBusyDetector detector(cfg);
+
+    int t = 0;
+    // (a) seed the floor LOW on a quiet channel.
+    for (; t < 600; t += 20) observe(detector, 0.004f, t);
+    assert(isIdleAtMs(detector, t));
+    const float low_thr = detector.quietThreshold();
+    assert(low_thr < 0.012f);  // threshold tracked the low seed
+
+    // (b) the band noise rises to 0.02 and STAYS there. Before relearn fires the
+    //     latch keeps it busy (this is exactly the hardware false-busy).
+    const int rise_start = t;
+    for (; t < rise_start + 800; t += 20) observe(detector, 0.020f, t);
+    assert(!isIdleAtMs(detector, t));  // latched busy on the noise (pre-relearn)
+
+    // (c) once the elevation persists past relearn_after, the floor re-seeds and
+    //     the detector returns to idle on the steady noise.
+    for (; t < rise_start + 3000; t += 20) observe(detector, 0.020f, t);
+    assert(isIdleAtMs(detector, t));  // unstuck
+    const float new_thr = detector.quietThreshold();
+    assert(new_thr > 1.6f * 0.020f && new_thr < 2.6f * 0.020f);  // re-tracked ~2x floor
+
+    // (d) a genuine signal a few dB above the NEW floor is still detected busy.
+    observe(detector, 0.060f, t); t += 20;
+    observe(detector, 0.060f, t); t += 20;
+    observe(detector, 0.060f, t);
+    assert(!isIdleAtMs(detector, t));
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -335,6 +380,7 @@ int main() {
     testNoisyIdleCanSeedBelowSignalSampleCeiling();
     testRatiometricCarrierSenseAcrossLevelsAndSignal();
     testRatiometricFloorSurvivesLongBusySignal();
+    testRelearnsRisenNoiseFloorAfterLowSeed();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

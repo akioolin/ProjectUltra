@@ -70,6 +70,7 @@ void ChannelBusyDetector::reset(TimePoint now) {
         std::chrono::milliseconds(config_.quiet_hold_ms + config_.max_wait_for_idle_ms);
     quiet_since_ = now - initial_quiet_age;
     last_busy_at_ = quiet_since_;
+    busy_since_ = TimePoint{};
     cv_.notify_all();
 }
 
@@ -109,6 +110,10 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
         rms_window_sum_ = 0.0;
         last_busy_at_ = now;
         quiet_since_ = TimePoint{};
+        // Our own keyed TX is not a channel-noise observation: do not let it
+        // accrue toward the sustained-elevation relearn (it would relearn the
+        // floor up to our own signal level).
+        busy_since_ = TimePoint{};
         cv_.notify_all();
         if (was_quiet && csDebugEnabled()) {
             LOG_MODEM(WARN, "CS quiet->busy (local TX blackout) rms=%.4f", current_rms_);
@@ -138,6 +143,30 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
     }
 
     if (window_rms > threshold) {
+        // Sustained-elevation relearn ("squelch unstick"). A real transmission is
+        // time-bounded; a risen noise floor is not. If the channel has read busy
+        // continuously for longer than the longest legitimate transmission, the
+        // elevation is the noise floor itself moving up (the one-way admission
+        // gate has starved the floor window and latched the cached floor below
+        // the true noise -> permanent false-busy). Drop the stale floor so the
+        // next samples re-bootstrap to the new level.
+        if (config_.noise_floor_relearn_after_ms > 0) {
+            if (busy_since_ == TimePoint{}) {
+                busy_since_ = now;
+            } else if (now - busy_since_ >= std::chrono::milliseconds(
+                                                config_.noise_floor_relearn_after_ms)) {
+                noise_floor_window_.clear();
+                cached_noise_floor_valid_ = false;
+                cached_noise_floor_rms_ = 0.0f;
+                busy_since_ = now;  // re-arm; re-bootstrap over the next window
+                if (csDebugEnabled()) {
+                    LOG_MODEM(WARN,
+                              "CS relearn: floor latched below noise, re-seeding "
+                              "(window_rms=%.4f thresh=%.4f)",
+                              window_rms, threshold);
+                }
+            }
+        }
         last_busy_at_ = now;
         quiet_since_ = TimePoint{};
         cv_.notify_all();
@@ -148,6 +177,7 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
         return;
     }
 
+    busy_since_ = TimePoint{};  // back to quiet: reset the relearn timer
     if (quiet_since_ == TimePoint{}) {
         quiet_since_ = now;
         if (csDebugEnabled()) {

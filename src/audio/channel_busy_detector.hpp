@@ -33,6 +33,20 @@ struct ChannelBusyDetectorConfig {
     float receive_band_low_hz = 50.0f;
     float receive_band_high_hz = 2950.0f;
     uint32_t max_wait_for_idle_ms = 15000;
+    // Sustained-elevation relearn ("squelch unstick"). The ratiometric admission
+    // gate (a sample is only learned as noise if it is <= floor x multiplier)
+    // keeps a transient signal out of the floor, but it is ONE-WAY: if the floor
+    // seeds LOW (device warmup / band noise not yet flowing at session start) and
+    // the real in-band noise then rises above floor x multiplier, every real
+    // sample is rejected as "signal", the window starves, and the cached floor
+    // latches forever -> permanent false-busy on a noisy band. A real signal is
+    // time-bounded; a risen noise floor is not. So if the channel reads BUSY
+    // continuously for longer than the longest legitimate continuous
+    // transmission, the elevation is the noise floor moving up, not a signal:
+    // force-relearn the floor to the new level. 0 disables (legacy/default cfg).
+    // MUST exceed kMaxBurstAirtimeMs (<=12000) so a real OFDM burst is never
+    // mistaken for a floor rise.
+    uint32_t noise_floor_relearn_after_ms = 0;
 };
 
 // Ratiometric, level-independent carrier-sense calibration for HF channels.
@@ -54,6 +68,9 @@ inline ChannelBusyDetectorConfig ratiometricHfCarrierSenseConfig() {
     config.quiet_noise_multiplier = 2.0f;
     config.noise_floor_bootstrap_rms_ceiling = 2.0f;
     config.noise_floor_estimate_rms_ceiling = 0.0f;
+    // 13 s > kMaxBurstAirtimeMs ceiling (12 s): a real burst never trips relearn,
+    // but a latched-low floor on a steady (e.g. WGN) band recovers within 13 s.
+    config.noise_floor_relearn_after_ms = 13000;
     return config;
 }
 
@@ -115,6 +132,9 @@ private:
     bool cached_noise_floor_valid_ = false;
     TimePoint last_busy_at_{};
     TimePoint quiet_since_{};
+    // Start of the current uninterrupted busy stretch (unset = currently quiet).
+    // Drives the sustained-elevation relearn in noise_floor_relearn_after_ms.
+    TimePoint busy_since_{};
 };
 
 }  // namespace ultra::audio
