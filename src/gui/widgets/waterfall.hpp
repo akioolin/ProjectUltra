@@ -2,6 +2,7 @@
 
 #include "ultra/dsp.hpp"
 #include "imgui.h"
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -67,6 +68,16 @@ private:
     std::vector<uint32_t> waterfall_data_;  // ABGR pixels
     int history_depth_ = 200;
     int current_line_ = 0;
+
+    // Wall-clock row pacing. Audio is delivered in bursts (one soundcard
+    // period — ~170 ms — at a time), but the waterfall should scroll at a
+    // steady ~sample_rate/hop rows per second. We emit rows metered by
+    // elapsed wall time and let input_buffer_ act as a small jitter buffer;
+    // a large backlog (a whole TX burst dumped at once, or recovery from a
+    // render stall) is drained fast so TX still appears promptly.
+    std::chrono::steady_clock::time_point last_fft_time_{};
+    bool fft_clock_started_ = false;
+    double row_credit_ = 0.0;
 
     // Display parameters
     float sample_rate_ = 48000.0f;

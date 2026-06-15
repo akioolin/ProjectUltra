@@ -4,6 +4,7 @@
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "sim/awgn.hpp"
 #include "ultra/logging.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
@@ -12,6 +13,20 @@ namespace ultra {
 namespace gui {
 
 AudioEngine::AudioEngine() {
+    // ULTRA_AUDIO_BUFFER overrides the per-period audio buffer (samples). The
+    // device double-buffers, so total latency ≈ 2× this. Smaller = lower
+    // half-duplex T/R turnaround latency (faster ACK round-trip → higher file
+    // goodput) but more underrun risk on slow hosts. Default 8192 (~170 ms @
+    // 48 kHz). Read here (before initialize()/openOutput()) so it always applies.
+    if (const char* env = std::getenv("ULTRA_AUDIO_BUFFER")) {
+        const int n = std::atoi(env);
+        if (n >= 64 && n <= 16384) {
+            setBufferSize(n);
+            LOG_INFO("AUDIO", "AudioEngine: ULTRA_AUDIO_BUFFER=%d (requested period)", n);
+        } else {
+            LOG_WARN("AUDIO", "AudioEngine: ignoring ULTRA_AUDIO_BUFFER=%s (out of [64,16384])", env);
+        }
+    }
 }
 
 AudioEngine::~AudioEngine() {

@@ -220,12 +220,49 @@ void WaterfallWidget::addSamples(const float* samples, size_t count) {
 }
 
 void WaterfallWidget::processFFT() {
-    // Process multiple FFTs to drain the buffer (important for TX signal display)
-    // Limit iterations to prevent blocking the UI for too long
-    constexpr int MAX_FFTS_PER_FRAME = 500;  // ~5 seconds of audio at 50% overlap
-    int ffts_processed = 0;
+    // Decouple scroll speed from audio-chunk delivery. Audio arrives in bursts
+    // (a soundcard period — ~170 ms — at once), but we want a steady
+    // sample_rate/hop rows per second so the waterfall scrolls smoothly instead
+    // of jumping ~8 rows every ~170 ms. We meter row emission by wall-clock time;
+    // input_buffer_ is a small jitter buffer (cushion). A large backlog — a whole
+    // TX burst dumped in one call, or recovery from a render stall — is drained
+    // fast (up to MAX_FFTS_PER_FRAME) so TX still appears promptly.
+    const int hop = fft_size_ / 2;  // 50% overlap
+    if (hop <= 0) return;
+    const double rows_per_sec = static_cast<double>(sample_rate_) / hop;
 
-    while (ffts_processed < MAX_FFTS_PER_FRAME) {
+    auto now = std::chrono::steady_clock::now();
+    if (!fft_clock_started_) {
+        last_fft_time_ = now;
+        fft_clock_started_ = true;
+    }
+    double dt = std::chrono::duration<double>(now - last_fft_time_).count();
+    last_fft_time_ = now;
+    dt = std::clamp(dt, 0.0, 0.10);  // clamp long gaps (stalls) so we don't burst
+    row_credit_ += dt * rows_per_sec;
+
+    constexpr int MAX_FFTS_PER_FRAME = 500;  // hard cap (≈ a large TX burst)
+    constexpr int kCatchupSlackRows = 16;    // ~0.34 s of backlog before fast-draining
+    const int cushion_samples = static_cast<int>(sample_rate_ * 0.25);  // 250 ms jitter buffer
+
+    // Decide this frame's row budget under the lock (reads buffer occupancy).
+    int budget;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        int avail = (static_cast<int>(input_buffer_.size()) - cushion_samples) / hop;
+        if (avail < 0) avail = 0;  // keep the cushion buffered
+        const int paced = static_cast<int>(row_credit_);
+        budget = (avail > paced + kCatchupSlackRows)
+                     ? std::min(avail, MAX_FFTS_PER_FRAME)  // large backlog → drain fast
+                     : std::min(paced, avail);              // normal → smooth pacing
+    }
+    if (budget <= 0) {
+        if (row_credit_ > 4.0) row_credit_ = 4.0;  // don't hoard credit while starved
+        return;
+    }
+
+    int ffts_processed = 0;
+    while (ffts_processed < budget) {
         std::vector<float> samples;
 
         {
@@ -294,6 +331,11 @@ void WaterfallWidget::processFFT() {
         texture_dirty_ = true;
         ffts_processed++;
     }
+
+    // Consume wall-clock credit only for the paced portion; any extra rows came
+    // from the fast catch-up path and shouldn't count against the steady cadence.
+    row_credit_ -= std::min<double>(ffts_processed, row_credit_);
+    if (row_credit_ > 4.0) row_credit_ = 4.0;
 }
 
 void WaterfallWidget::createTexture() {
