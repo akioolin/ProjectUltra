@@ -88,6 +88,14 @@ inline PingFrameDecision evaluatePingFrame(
     // data-bearing MC-DPSK frame, a failure is a frame failure, not evidence
     // that the peer sent a PING. This keeps faded CONNECT frames from eliciting
     // false PONGs while preserving low-SNR PING acquisition.
+    //
+    // NOTE: this is the POST-4-CW-decode ping classifier (streaming_ofdm_decode
+    // PATH2, after the full fixed CONNECT decode has already FAILED). At that
+    // point an absolute data_rms floor is acceptable as a last-resort tie-break
+    // for a low-level noisy ping whose 4-CW decode produced nothing. The
+    // *pre*-decode WAIT decision must NOT use this absolute floor (it would skip
+    // the 4-CW CONNECT decode for a low-level-but-real CONNECT) — it gates on
+    // ping_by_silence (ratiometric) only. See streaming_ofdm_decode.cpp ~1290.
     const bool payload_energy_absent =
         decision.ping_by_silence || decision.data_rms <= kPingChirpLockMaxDataRMS;
     decision.ping_by_chirp_lock =

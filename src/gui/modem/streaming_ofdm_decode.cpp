@@ -1164,18 +1164,44 @@ void StreamingDecoder::decodeCurrentFrame() {
         const auto llr_quality = signal_policy::evaluatePreSyncLLR(
             soft_bits.data(), soft_bits.size(), v2::LDPC_CODEWORD_BITS);
         if (llr_quality.reject_as_false_lock) {
-            if (allow_ping_detection &&
-                tryEmitPingByChirpLock("pre_ldpc_llr_reject", false)) {
+            // RATIOMETRIC guard (same principle as the 06-14 CONNECT-as-PING fix at
+            // the wait gate ~line 1290): a weak 1-CW peek is only PING/false-lock
+            // evidence when the frame is ratiometrically SILENT. For MC-DPSK, a weak
+            // 1-CW peek on a DATA-BEARING frame (data_rms ~ training_rms, ratio not
+            // silent) is almost always a multi-CW CONNECT/CONNECT_ACK we simply
+            // cannot decode from a single CW yet — NOT a bare-chirp PING. Emitting a
+            // PING here (tryEmitPingByChirpLock runs with ldpc_attempted=false, whose
+            // ping_by_chirp_lock short-circuits to true) fires BEFORE the ratiometric
+            // 4-CW wait gate, so on a quieter analog chain (real soundcards/IONOS) the
+            // initiator PONGed the Pi5's low-level CONNECT_ACK instead of decoding it.
+            // Let a data-bearing MC-DPSK frame fall through to the wait gate (full 4-CW
+            // decode); a genuine silent PING still pings, and OFDM keeps the original
+            // false-lock rejection.
+            bool data_bearing_mcdpsk = false;
+            if (!is_ofdm && allow_ping_detection) {
+                const auto reject_ping = evaluatePingDecision(false, false, false);
+                data_bearing_mcdpsk = !reject_ping.ping_by_silence;
+                if (data_bearing_mcdpsk) {
+                    LOG_MODEM(INFO, "[%s] MC-DPSK weak 1-CW LLRs but data-bearing "
+                              "(ratio=%.2f >= silence) — not a PING; falling through to "
+                              "fixed-frame wait", log_prefix_.c_str(), reject_ping.ratio);
+                }
+            }
+            if (!data_bearing_mcdpsk) {
+                if (allow_ping_detection &&
+                    tryEmitPingByChirpLock("pre_ldpc_llr_reject", false)) {
+                    return;
+                }
+                LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
+                          "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
+                          log_prefix_.c_str(), llr_quality.mean_abs,
+                          llr_quality.near_zero_count, llr_quality.count,
+                          llr_quality.near_zero_fraction * 100.0f, soft_bits.size());
+                advancePastFalseOFDMLock();
+                state_ = DecoderState::SEARCHING;
                 return;
             }
-            LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
-                      "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
-                      log_prefix_.c_str(), llr_quality.mean_abs,
-                      llr_quality.near_zero_count, llr_quality.count,
-                      llr_quality.near_zero_fraction * 100.0f, soft_bits.size());
-            advancePastFalseOFDMLock();
-            state_ = DecoderState::SEARCHING;
-            return;
+            // data_bearing_mcdpsk: fall through to the CW0 peek / 4-CW wait gate below.
         }
     }
 
@@ -1292,7 +1318,20 @@ void StreamingDecoder::decodeCurrentFrame() {
                     return true;
                 }
                 const auto ping_decision = evaluatePingDecision(true, false, false);
-                return !ping_decision.is_ping;
+                // Gate the 4-CW CONNECT decode on the RATIOMETRIC silence test
+                // only — NOT the full is_ping (which also fires on an absolute
+                // data_rms<=0.16 floor via ping_by_chirp_lock). A real CONNECT on
+                // a quieter analog chain (real soundcards/IONOS deliver ~half the
+                // OTASim-calibrated in-band RMS) has data_rms~=training_rms (not
+                // silent) yet a low absolute level; gating on is_ping skipped its
+                // 4-CW decode entirely and PONGed it as a ping, so the handshake
+                // never completed on hardware. A genuine bare-chirp PING is
+                // ratiometrically silent (ping_by_silence), so it still short-
+                // circuits here; an ambiguous low-level frame instead ATTEMPTS the
+                // 4-CW decode, and the post-decode PATH2 fallback (which keeps the
+                // absolute floor) re-classifies it as a ping only if that decode
+                // also fails. Correctness (try to decode) over a fast false PONG.
+                return !ping_decision.ping_by_silence;
             }();
             if (wait_for_fixed_connect) {
                 pending_total_cw_ = v2::kDefaultFixedFrameCodewords;
