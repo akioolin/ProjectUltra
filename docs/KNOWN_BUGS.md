@@ -25,6 +25,42 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   has clock-offset + carrier-jitter tracking (default on) that recovers SLOW jitter and is a proven no-op
   / no-harm otherwise. So this is no longer purely an equipment fault — re-test with the current build
   before concluding a card swap is needed.
+- **LIVE IONOS BRINGUP 2026-06-15 — DEFINITIVE ISOLATION (the re-test above, run on real hardware).**
+  Worked the full Mac↔IONOS↔Pi5 path knob-by-knob and eliminated everything except the card:
+  - **Wiring:** one direction (Pi5→Mac) was dead (Mac RX rms 0.0004 = digital silence) until a CABLE
+    SWAP — then both directions carried signal. (So part of the original failure was a bad cable, not
+    the modem at all.)
+  - **IONOS input CLIPPING (the big one):** the Pi5's transmit was overdriving the IONOS input — the
+    panel read `Lvl=2000 mvp-p` RED with `CF=1.01 [0.05 dB] (PEP/Pavg)` = the multi-carrier signal
+    arriving as a HARD-CLIPPED SQUARE WAVE (a clean MC-DPSK signal is CF≈10 dB). That clipping, not the
+    DAC, was garbling the CONNECT_ACK at high level. Gain staging: the IONOS CH-IN gain (factory default
+    1; had been run at 5–20) and the **Pi5 ALSA `Speaker` volume are the real level knobs** — see tx_drive
+    note below. Nominal IONOS input max is 1800 mvp-p; the modem's ~10–12 dB crest factor means target the
+    *average* well under that (peaks clip first).
+  - **CONNECT_ACK→PING misclassification (software, FIXED):** once clipping was removed, the Mac decoded
+    the low-level CONNECT_ACK to garbage AND then mis-classified it as a PING via the
+    `pre_ldpc_llr_reject` path (ldpc_attempted=false short-circuits `ping_by_chirp_lock`), firing BEFORE
+    the 06-14 ratiometric 4-CW wait gate. FIXED (CHANGELOG 2026-06-15): a ratiometric guard lets a
+    data-bearing (ratio≈1) MC-DPSK frame fall through to the full 4-CW decode instead of being pinged.
+    HW-confirmed the Mac now attempts the 4-CW decode (`got 2592 soft bits`); PingDetector + 16/16
+    regression still pass.
+  - **Level matched, decode STILL fails → THE CARD.** With wiring, clipping, and classification all
+    fixed, swept the Mac's RX: at 0.08 (low), **0.16 (matched to the Pi5's working 0.17), and 0.20**, the
+    4-CW CONNECT_ACK decodes to GARBAGE every time — while the SoundBlaster→Pi5 CONNECT decodes fine at
+    0.17. Same level, clean, green, no clipping; only the transmitting card differs. **Definitive: the
+    cheap Pi5 USB dongle's TX is the limit** (its measured tilt+distortion+jitter), beyond what the
+    clock/slow-jitter trackers recover.
+  - **tx_drive is NOT a software bug (correction of an in-flight claim).** On the Pi5, changing tx_drive
+    (0.10/0.20/0.70) barely moved the level — but the AUDIO-category log shows the per-burst hardware
+    normalization is APPLIED, not bypassed (no `normalization bypassed fragment` warning), and tx_drive
+    DID work on the Mac (0.7 clipped to 2000). So the software is correct; the Pi5 cheap card's analog
+    output just doesn't respond linearly to the digital level (saturation/compression — same hardware
+    trait as the decode distortion).
+  - **VARA paradox / forward path:** the user runs this exact dongle with a commercial HF modem, so the
+    card is usable by a *robust-enough* handshake. Our 4-CW DQPSK R1/4 CONNECT_ACK simply isn't as
+    robust. Two paths: (a) swap to the SGTL5000 I2S HAT (on hand) for an immediate working QSO;
+    (b) earn cheap-card tolerance in software — DBPSK control frames (double the phase margin vs jitter)
+    + per-carrier SNR weighting (handle tilt) + more control-frame FEC. See docs/CHEAP_CARD_ROBUSTNESS_PLAN.
 - **Root cause (tone-test measured, /tmp/measure_pi5_tx.sh + measure_mac_tx.sh + analyze_tone.py):**
   the Pi5's cheap "USB Audio Device" **DAC/playback** is the problem. Same IONOS, same two cards,
   TX/RX roles swapped — only the transmitting card differs:

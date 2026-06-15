@@ -10,6 +10,80 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-15 — feat(gui): smooth waterfall scroll + `ULTRA_AUDIO_BUFFER` knob; full Mac↔IONOS↔Pi5 QSO proven on pi5tnc
+
+**Context:** First complete real-hardware QSO on the new `pi5tnc` box (Pi5 + Fe-Pi/SGTL5000 clean codec,
+Debian Trixie) over the IONOS channel sim (WGN S:N=20). Full handshake (PING/PONG → CONNECT → CONNECT_ACK
+→ MODE_CHANGE OFDM QPSK R3/4) + 21,504-byte file **CRC-clean**, 0 retx, ~1.4–1.5 kbps, 2/2 runs. The
+CONNECT_ACK decode that failed on the cheap USB dongle works on the clean codec → BUG-IONOS-PI5-CHEAP-DAC
+resolved by hardware (the software cheap-card path, `docs/CHEAP_CARD_ROBUSTNESS_PLAN.md`, is now optional).
+Bringup runbook: `docs/PI5TNC_SETUP.md`.
+
+**1. Waterfall scroll jitter (cosmetic) — FIXED (`waterfall.cpp/.hpp`).**
+- *Broke:* on live audio the waterfall lurched ~8 rows every ~170 ms instead of scrolling smoothly.
+- *Root cause:* `processFFT()` drained the *entire* input buffer every render frame, so the ~170 ms
+  soundcard period (`period=8192`) dumped ~8 FFT rows at once, then 0 for ~10 frames.
+- *Fix:* emit rows metered by wall-clock (`row_credit_ += dt × sample_rate/hop`), with the input buffer as
+  a ~250 ms jitter buffer + a fast catch-up path so a large backlog (a whole TX burst dumped at once, or
+  render-stall recovery) still drains promptly. Mode-agnostic (no sim/live special-case). Verified on the
+  live QSO: smooth scroll, decode unaffected (CRC-clean).
+
+**2. `ULTRA_AUDIO_BUFFER` knob (`audio_engine.cpp`) — NEW.**
+- SDL audio buffer was hardcoded `buffer_size_ = 8192` (~170 ms; device double-buffers → ~341 ms each way).
+  That latency dominates the half-duplex T/R turnaround: a live-vs-sim timeline diff (modem-category logs)
+  showed **identical 10 bursts / 74.7 s on-air airtime**, but live turnaround **3.6 s** vs sim **1.1 s** —
+  the entire ~23 s goodput gap is turnaround, not data; ~1.3 s of it is the 4× buffer crossings per round.
+- Wired `ULTRA_AUDIO_BUFFER` (read in `AudioEngine` ctor, clamp [64,16384]) to sweep without a rebuild.
+  Default unchanged (8192). Buffer-size sweep pending.
+- *Lesson logged:* `--log-category all` on the live path (per-symbol SYNC/DEMOD logging) starves the Pi5
+  real-time decode thread → handshake fails (`False chirp lock rejected, near_zero=93.5%`); use
+  `--log-category modem` for live diagnostics. The logger's WARN/ERROR-only flush + the operator-event
+  queue cover *normal* logging, not the `all`-firehose.
+
+**Test verification:** Mac + Pi5 `ultra_gui` build clean; live `pi5tnc` QSO 2/2 CRC-clean (QPSK R3/4,
+~1.5 kbps); targeted `ctest -R 'PingDetector|ChannelBusy|MCDPSK|StreamingMCDPSK'` green.
+
+---
+
+## 2026-06-15 — fix(connect): ratiometric pre_ldpc_llr_reject (stop mis-pinging a data-bearing CONNECT_ACK) + live IONOS bringup
+
+**What broke (symptom):** On the live Mac↔IONOS↔Pi5 handshake, after fixing wiring + clipping, the Mac
+decoded the Pi5's low-level CONNECT_ACK to garbage and then emitted a PING/PONG instead of CONNECTing —
+so the initiator never connected. `[8P9QC] PING check PATH2: ... reason=pre_ldpc_llr_reject, path2=1` →
+`Detected PING/PONG` on a 1-CW peek (`got 648 soft bits`).
+
+**Root cause:** `streaming_ofdm_decode.cpp` ~line 1166 — when the 1-CW peek LLRs look weak
+(`evaluatePreSyncLLR.reject_as_false_lock`, expected for a 4-CW *interleaved* frame), it called
+`tryEmitPingByChirpLock("pre_ldpc_llr_reject", /*ldpc_attempted=*/false)`. With `ldpc_attempted=false`
+the policy's `(!ldpc_decode_attempted || payload_energy_absent)` clause is vacuously true, so
+`ping_by_chirp_lock` fires for ANY chirp-locked-but-undecoded frame — regardless of level or ratio — and
+this runs BEFORE the 06-14 ratiometric 4-CW wait gate (~line 1290). A real CONNECT (RX 0.17, strong
+1-CW LLRs) skips this and reaches the wait gate; a low-level CONNECT_ACK (RX 0.08, weak 1-CW LLRs) trips
+it and gets PONGed → never decoded.
+
+**What changed (`streaming_ofdm_decode.cpp`):** ratiometric guard at the `reject_as_false_lock` block —
+for MC-DPSK, only ping/re-search when the frame is ratiometrically SILENT (`ping_by_silence`); a
+DATA-BEARING frame (ratio not silent) falls through to the fixed-frame wait gate and gets its full 4-CW
+decode. Same principle as the 06-14 CONNECT-as-PING fix, at the call site (a policy-level change broke
+the ping-detector tests in 06-14, so the call site is the right place). OFDM keeps the original
+false-lock rejection.
+
+**Test verification:**
+- `ctest -R 'PingDetector|StreamingMCDPSK|MCDPSK|Connection|Streaming|Waveform'` → **16/16 pass**
+  (PingDetector — the 06-14 tripwire — still passes; no regression).
+- HW-confirmed: the Mac now attempts the full 4-CW CONNECT_ACK decode (`got 2592 soft bits`) instead of
+  `Detected PING/PONG`.
+
+**Live IONOS bringup (DEFINITIVE) — see BUG-IONOS-PI5-CHEAP-DAC.** Worked the full hardware path
+knob-by-knob: a CABLE swap restored the dead Pi5→Mac direction; the IONOS input was CLIPPING the Pi5's
+TX (`Lvl=2000` red, `CF=1.01` = hard-clipped square — the gain-staging culprit); this ratiometric fix
+cleared the classification; then at MATCHED clean levels (Mac RX 0.16–0.20 vs the Pi5's working 0.17)
+the 4-CW CONNECT_ACK still decoded to garbage — isolating the **cheap Pi5 USB dongle's TX** as the
+genuine limit (tilt+distortion+jitter). Correction of an in-flight claim: **tx_drive is NOT bypassed on
+the Pi5** (AUDIO log shows the per-burst normalization is applied; it works on the Mac) — the cheap
+card's analog output just doesn't respond linearly to it. Forward path to cheap-card tolerance (VARA
+parity): `docs/CHEAP_CARD_ROBUSTNESS_PLAN.md`.
+
 ## 2026-06-15 — feat(mc-dpsk): receiver sample-clock + carrier-jitter tracking (tolerate cheap soundcards) + refute the "bad-clock" diagnosis
 
 **Context / why:** Follow-up to BUG-IONOS-PI5-CHEAP-DAC. The user pushed back on the prior conclusion
