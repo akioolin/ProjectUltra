@@ -658,7 +658,8 @@ void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
         mc_dpsk_config_.chirp_f_start != config.chirp_f_start ||
         mc_dpsk_config_.chirp_f_end != config.chirp_f_end ||
         mc_dpsk_config_.chirp_duration_ms != config.chirp_duration_ms ||
-        mc_dpsk_config_.use_dual_chirp != config.use_dual_chirp;
+        mc_dpsk_config_.use_dual_chirp != config.use_dual_chirp ||
+        mc_dpsk_config_.track_clock_offset != config.track_clock_offset;
     if (!changed) return;
 
     mc_dpsk_config_ = config;

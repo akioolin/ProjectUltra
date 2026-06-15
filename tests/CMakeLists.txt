@@ -452,6 +452,19 @@ target_include_directories(test_streaming_mc_dpsk PRIVATE
 target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core ota_channel_core)
 add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
+# MC-DPSK sample-clock-offset (ppm) tolerance — proves the differential demod's
+# clock/CFO tracking recovers a frame that an untracked fixed symbol grid loses.
+add_executable(test_mcdpsk_clock_offset
+    test_mcdpsk_clock_offset.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_mcdpsk_clock_offset PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_mcdpsk_clock_offset PRIVATE ultra_core ota_channel_core)
+add_test(NAME MCDPSKClockOffset COMMAND test_mcdpsk_clock_offset)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.

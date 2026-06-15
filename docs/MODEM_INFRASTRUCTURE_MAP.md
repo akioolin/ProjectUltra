@@ -53,7 +53,7 @@ it's post-decode delivery/routing only.
 | Per-carrier adaptive LLR scaling | mag-EMA var tracking, fading carriers inflate noise | `ofdm_symbol_demap.cpp:303` | per symbol | 🟢 |
 | Soft demap → LLRs | dispatch to `soft_demap::demap{…}` (coherent: BPSK/QPSK/QAM8–256) | `ofdm_symbol_demap.cpp:373` | per symbol | 🟢 (coherent-only since thread A — the differential DBPSK/DQPSK/D8PSK cases, the DD phase tracking, and the 2-pass D8PSK/DQPSK helpers were deleted) |
 | Noise-variance estimate | guard-bin / `|H1−H2|²/4`; empirical floor off | `channel_equalizer_lts.cpp:662` | preamble + carried | 🟢 (`ULTRA_LLR_NOISE_EMP_FLOOR` diag, off) |
-| MC-DPSK soft decode (Mode 1) | differential demod → LLRs → LDPC | `streaming_ofdm_decode.cpp:2290` (`decodeMCDPSKFrame`) | below-OFDM-floor/heavy fade | 🟢 (INVARIANT: `reset()`+`setCFO(frame.cfo_hz)` per frame) |
+| MC-DPSK soft decode (Mode 1) | differential demod → LLRs → LDPC | `streaming_ofdm_decode.cpp:2290` (`decodeMCDPSKFrame`); demod core `multi_carrier_dpsk.hpp::demodulateSoft` | below-OFDM-floor/heavy fade | 🟢 (INVARIANT: `reset()`+`setCFO(frame.cfo_hz)` per frame). 2026-06-15: residual-carrier tracking added in `demodulateSoft` — (a) clock-offset+dial regression (per-carrier residual vs carrier freq), (b) decision-free M-th-power common-phase jitter tracker (coherence/activity/lock-gated). Config flag `MultiCarrierDPSKConfig::track_clock_offset` (default true); strict deadband no-op when idle (no-op on the shared-clock sim). Tolerates real soundcard ppm + slow carrier jitter. |
 
 **CFO correction chain (the load-bearing invariant — 5 stages, all 🟢):**
 1. Chirp coarse CFO — `chirp_sync.hpp:457` (gap-error). Coarse; ±2 Hz on fading.

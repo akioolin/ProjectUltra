@@ -10,6 +10,129 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-15 — feat(mc-dpsk): receiver sample-clock + carrier-jitter tracking (tolerate cheap soundcards) + refute the "bad-clock" diagnosis
+
+**Context / why:** Follow-up to BUG-IONOS-PI5-CHEAP-DAC. The user pushed back on the prior conclusion
+("the Pi5's cheap USB dongle clock is bad / −1800..−3000 ppm, swap the card") — that exact dongle runs
+digital modes fine with a commercial HF modem, so the gap is likely ours. A 4-thread investigation +
+controlled in-sim impairment discrimination (`tests/test_mcdpsk_clock_offset.cpp`) established what
+actually breaks the MC-DPSK 4-CW CONNECT on a real soundcard pair — and it is NOT what was blamed:
+
+- **Sample-CLOCK offset is NOT the bottleneck.** A controlled ppm sweep through the real
+  StreamingEncoder→AWGN→StreamingDecoder path decodes CRC-clean at ±1000 ppm (5/6/8 dB) with OR without
+  any correction — the R1/4 LDPC absorbs it. The "−3000 ppm wandering crystal" was a measurement
+  artifact: a quartz crystal cannot wander ~1200 ppm run-to-run, and the values map to an integer ALSA
+  buffer-period drop over the 7.1 s frame (USB starvation on the headless Pi), not the crystal.
+- **Band tilt is NOT the bottleneck.** 8-carrier frequency diversity + LDPC ride through 20 dB of tilt.
+- **Slow carrier JITTER is the bottleneck.** The cheap DAC's measured ±7 Hz oscillator jitter pushes
+  the DQPSK differential past its ±45° decision boundary (±53.8°/symbol) → payload garbage while the
+  wideband chirp survives — exactly the observed "PING works, CONNECT doesn't" asymmetry.
+
+**What changed (`src/psk/multi_carrier_dpsk.hpp`, `MultiCarrierDPSKDemodulator::demodulateSoft`):**
+two residual-carrier trackers, both geometry/decision-derived (no per-modulation magic constant), both
+deadband-gated to a STRICT no-op when there is nothing to correct (existing AWGN/sim behavior is
+byte-identical — `StreamingMCDPSK` unchanged):
+1. **Clock-offset + residual-CFO tracker.** A sample-clock offset rotates each carrier's per-symbol
+   differential phase PROPORTIONALLY to carrier frequency; a dial CFO rotates all carriers equally. A
+   magnitude-weighted least-squares fit of per-carrier residual phase vs carrier frequency separates the
+   two (slope = clock, intercept = dial) and removes the fitted per-carrier rotation. Satisfies the
+   "no shared timebase" invariant; headroom beyond the LDPC's intrinsic ±1000 ppm tolerance.
+2. **Carrier-jitter tracker.** Decision-FREE M-th-power (M=4 DQPSK / 2 DBPSK) common-phase estimate
+   (data annihilated → no decision-directed cycle slips), 7-tap moving-average smoothed across symbols,
+   then unwrapped. Applied only when three independent physically-grounded gates agree: coherence
+   (common jitter vs per-carrier fading), activity (real swing vs clean-channel noise), sanity+lock
+   (bounded, slow enough to track). Recovers SLOW jitter; fast/near-aliasing jitter falls below the
+   gates → discarded → untracked fallback (so it can help but provably never hurt).
+   `MultiCarrierDPSKConfig::track_clock_offset` (default true) enables both; threaded through
+   `StreamingDecoder::setMCDPSKConfig` (added to its change-detection).
+
+**Why it's safe (proven, not asserted):** `tests/test_mcdpsk_clock_offset.cpp` injects controlled clock
+offset, band tilt, and ±7 Hz carrier jitter through the real encode→AWGN→decode path and asserts (a)
+recovery of slow jitter (7 Hz @1 Hz: FAIL→PASS) and clock offset to ±700 ppm, and (b) the SAFETY
+INVARIANT that tracking never breaks a frame the untracked demod decoded (verified across fast/aliasing
+jitter and clean channels). It also prints the clock/tilt/jitter discrimination table used above.
+
+**Test verification:**
+- `ctest --test-dir build -R 'MCDPSK|Streaming|Connection|Narrow|Waveform'` → **15/15 pass** (incl. new
+  `MCDPSKClockOffset`; `StreamingMCDPSK` byte-identical = no-regression).
+- `./build/tests/test_mcdpsk_clock_offset` → PASS (clock ±700 ppm tolerated; jitter 7 Hz @1 Hz recovered;
+  no-harm invariant holds on all cases incl. 5 Hz/7 Hz @3 Hz and 7 Hz @10 Hz).
+- gui_qso_scenario full-protocol gate (two real `ultra_gui -sim` stations over `ota_simulator serve`):
+  **AWGN@20 PASS** (QPSK R3/4, both stations CONNECTED, 21 KB file CRC-clean, 2000 bps) and **Good@20
+  fading PASS** (QPSK R3/4, CRC-clean, 1970 bps). The Good run is the safety proof that the jitter
+  tracker's coherence gate does NOT chase per-carrier fading — the MC-DPSK handshake completes over
+  fading. (Note: pass the mode the ladder actually negotiates via `--expect-mod/--expect-rate`; the
+  harness `hard_failure_reason()` aborts the whole run early on ANY mode mismatch — an earlier "FAIL"
+  was that, a wrong `--expect 16QAM R2/3` on an AWGN@20 link that negotiates QPSK R3/4, NOT a modem
+  bug. A baseline build with this change stashed fails identically, confirming no regression.)
+
+**Still open / honest scope:** the cheap card's FAST jitter (≥~3 Hz @ ±7 Hz) is below the trackable
+regime (8 carriers at low SNR) — recovery there is a safe no-op, so a genuinely bad DAC may still want a
+card swap as a backstop; the realistic slow-drift jitter IS now recovered. The simulator/OTASim still
+does not model a per-station clock/jitter axis end-to-end (only the unit test does) — tracked as a
+fidelity follow-up so this class of "works in sim, fails on the cable" bug cannot hide again.
+
+## 2026-06-14 — fix(connect): low-level MC-DPSK CONNECT mis-classified as PING on a real (IONOS) channel
+
+**What broke (symptom):** First Mac↔IONOS↔Pi5 hardware QSO never completed CONNECT. The receiver
+detected the chirp at a strong 27.9 dB but logged `RX PING` and PONGed instead of decoding the
+4-CW CONNECT and sending CONNECT_ACK — the handshake looped PING↔PONG forever. OTASim (higher,
+calibrated signal level) masked it completely.
+
+**Root cause (file:line-verified, A/B'd OTASim-vs-hardware with `--log-category modem,sync`):** the
+MC-DPSK connect decode is two-stage — try a 1-CW peek, and on CW0 fail **wait for the full 4-CW
+fixed CONNECT frame** (`streaming_ofdm_decode.cpp` ~line 1290). The "wait vs treat-as-ping" gate
+used the FULL `is_ping`, whose `ping_by_chirp_lock` path fires on an **absolute** RMS floor
+(`payload_energy_absent = ping_by_silence || data_rms <= kPingChirpLockMaxDataRMS(0.16)`). Real
+soundcards/IONOS deliver ~half the OTASim-calibrated in-band RMS, so a genuine CONNECT arrives with
+`data_rms ~= training_rms` (ratio ~1, NOT silent) yet `data_rms <= 0.16` → wrongly judged
+"payload absent" → the decoder **skipped the 4-CW decode entirely** and emitted a PING. OTASim's
+`data_rms > 0.16` took the wait-for-4-CW path → decoded → worked. Classic hardcoded-absolute-level
+footgun (CLAUDE.md adaptivity rule).
+
+**Fix:** gate the *pre-decode* 4-CW wait on the RATIOMETRIC `ping_by_silence` only
+(`return !ping_decision.ping_by_silence`), not the absolute-floor `is_ping`. A real bare-chirp PING
+is ratiometrically silent (data ≪ training) so it still short-circuits; an ambiguous low-level frame
+instead ATTEMPTS the 4-CW decode. The **post-decode** PATH2 ping fallback (after the 4-CW decode has
+actually failed) KEEPS the absolute floor as a last-resort tie-break, so a low-level *noisy* PING is
+still re-classified as PING once its 4-CW decode fails — level-independent for CONNECT, robust for
+PING. (`streaming_frame_policy.hpp` unchanged in behavior; comment added.)
+
+**Verification:** `test_ping_detector` 4/4 (ota_ping_1/2 → PING via post-decode PATH2; sim_ping →
+PING; ota_noise → NO_PING), `test_streaming_frame_policy` 38/38, targeted ctest 15/15 (Connection,
+Streaming*, MCDPSK, FrameV2). **Hardware-proven:** Mac→Pi5 CONNECT now decodes 4/4 CWs and delivers
+(`RX << CONNECT`, Pi5 reaches CONNECTED). OTASim BRAVO still decodes CONNECT (no regression). The
+data/OFDM path is untouched (change is in the `!is_ofdm` MC-DPSK branch).
+
+**Still open (HARDWARE, not code):** the reverse direction (Pi5→Mac CONNECT_ACK) fails because that
+direction's *payload* SNR is only ~8 dB (Mac input noise floor 0.030 = 8× the Pi5's 0.0037; signal
+0.075) vs Mac→Pi5's ~16 dB — an IONOS routing/level asymmetry. Mac input-gain changes scale signal
+and noise together (no SNR change → confirmed amplified-IONOS-noise, not self-noise); Pi5 output
+raises are IONOS-compressed. Needs physical balancing of the L/R-into-IONOS levels so both directions
+get ~equal SNR. Tracked as BUG-IONOS-LEVEL-ASYM.
+
+## 2026-06-14 — fix(cca): adaptive noise-floor RELEARN so carrier-sense recovers on a risen noise bed
+
+**What broke (symptom):** On the IONOS WGN bed, the ratiometric carrier-sense (`ChannelBusyDetector`)
+could read BUSY indefinitely (`rms=0.020 > thresh=0.0077`), CCA-deferring every pre-connection TX.
+
+**Root cause:** the noise-floor admission gate is one-way — a sample is only learned as noise if
+`rms <= floor x multiplier`. If the floor seeds LOW (device warmup / band noise not yet flowing at
+session start) and the real in-band noise then rises above `floor x mult`, every real sample is
+rejected as "signal", the floor window starves, and `cached_noise_floor_valid_` latches the cached
+floor below the true noise forever (`channel_busy_detector.cpp:137`, never reset).
+
+**Fix:** sustained-elevation relearn ("squelch unstick"). A real transmission is time-bounded; a
+risen noise floor is not. If the channel reads BUSY continuously for `noise_floor_relearn_after_ms`
+(13000 ms in `ratiometricHfCarrierSenseConfig`, > the 12000 ms `kMaxBurstAirtimeMs` ceiling so a
+real OFDM burst never trips it), drop the stale floor + re-bootstrap to the new level. `busy_since_`
+is reset on quiet and on local-TX blackout (our own TX must not relearn the floor up to our signal).
+
+**Verification:** `test_channel_busy_detector` passes incl. new `testRelearnsRisenNoiseFloorAfterLowSeed`
+(seed low → noise rises → latched busy → relearn → idle on the risen floor; existing 8 s-busy
+"signal survives" test stays green since 13 s > 8 s). Note: on the IONOS run the floor actually
+calibrated fine (relearn count 0) — this is a robustness backstop, not the CONNECT fix.
+
 ## 2026-06-14 — feat(airtime): extend the warm short-anchor to 16QAM (dense coherent mods)
 
 **What:** `shouldUseWarmShortAnchorDescriptor` now fires on dense coherent mods (≥16QAM, ≥4

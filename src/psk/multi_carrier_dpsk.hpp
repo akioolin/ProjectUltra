@@ -53,6 +53,15 @@ struct MultiCarrierDPSKConfig {
     // TX CFO for simulation (simulates radio tuning error)
     float tx_cfo_hz = 0.0f;
 
+    // Receiver sample-clock + residual-CFO tracking in the differential demod.
+    // Two stations never share a sample clock (independent soundcard crystals, ppm
+    // offset). That offset rotates each carrier's per-symbol differential phase
+    // PROPORTIONALLY to carrier frequency (a dial CFO rotates all carriers equally);
+    // the demod fits/removes both before soft-bit mapping so a normal cheap-card ppm
+    // offset is a non-event -- like any commercial soundcard modem. Default ON; a
+    // deadband makes it a strict no-op when there is nothing to correct.
+    bool track_clock_offset = true;
+
     // Get carrier frequencies (evenly spaced)
     std::vector<float> getCarrierFreqs() const {
         std::vector<float> freqs(num_carriers);
@@ -552,6 +561,222 @@ public:
             }
         }
 
+        // --- Sample-clock-offset + residual-CFO tracking (multi-carrier-native) ---
+        // A transmit/receive sample-CLOCK mismatch (ppm) is physically distinct from a
+        // dial/carrier-frequency offset. A clock offset eps rotates each carrier's
+        // per-symbol differential phase by 2*pi*f_c*eps*T_sym -- PROPORTIONAL to the
+        // carrier frequency f_c -- whereas a dial CFO rotates every carrier by the SAME
+        // constant. The upstream single-band CFO correction removes only the constant
+        // part, leaving a frequency-proportional residual that this fixed integer symbol
+        // grid cannot otherwise track, so the tail of a multi-second frame decodes to
+        // garbage on a real soundcard pair (the asymmetric handshake failure that never
+        // appears in the shared-clock simulator, where both stations share one clock).
+        //
+        // Recover it with NO per-modulation magic constant: decision-direct each carrier's
+        // mean residual differential phase (circular mean, wrap-robust), then do a
+        // magnitude-weighted least-squares fit  residual(f) = a + b*f  across carriers.
+        // Intercept a = residual dial-CFO term; slope b = clock offset. Subtract the FITTED
+        // per-carrier rotation theta_c = a + b*f_c from every symbol -- removing both terms
+        // by construction for DBPSK/DQPSK/D8PSK alike. Deadband-gated: when the fit is ~0
+        // (the simulator, or a well-clocked pair) theta_c == 0 and this is a strict no-op,
+        // so existing behavior and tests are unchanged.
+        std::vector<float> theta_c(config_.num_carriers, 0.0f);
+        bool clock_corr_active = false;
+        if (config_.track_clock_offset && num_symbols >= 8 && config_.num_carriers >= 3) {
+            const float two_pi = 2.0f * (float)M_PI;
+            const float quad = (float)M_PI / 2.0f;
+            std::vector<float> resid(config_.num_carriers, 0.0f);
+            std::vector<float> wgt(config_.num_carriers, 0.0f);
+            for (int c = 0; c < config_.num_carriers; c++) {
+                Complex acc(0.0f, 0.0f);
+                for (int sym = 0; sym < num_symbols; sym++) {
+                    float phase = cached_phases[sym * config_.num_carriers + c];
+                    float r;
+                    if (config_.bits_per_symbol == 2) {
+                        float shifted = phase - (float)M_PI / 4.0f;
+                        float k = std::round(shifted / quad);
+                        r = phase - (k * quad + (float)M_PI / 4.0f);
+                    } else {
+                        float k = std::round(phase / (float)M_PI);
+                        r = phase - k * (float)M_PI;
+                    }
+                    while (r > (float)M_PI) r -= two_pi;
+                    while (r < -(float)M_PI) r += two_pi;
+                    acc += std::polar(1.0f, r);
+                }
+                resid[c] = std::arg(acc);
+                // Weight by signal strength AND estimate concentration (|R|/N in [0,1]):
+                // faded or noisy carriers (low concentration) contribute little to the fit.
+                float conc = std::abs(acc) / (float)num_symbols;
+                float mag = carrier_mag_sum[c] / (float)num_symbols;
+                wgt[c] = mag * conc;
+            }
+            double Sw = 0, Sx = 0, Sy = 0, Sxx = 0, Sxy = 0;
+            int used = 0;
+            for (int c = 0; c < config_.num_carriers; c++) {
+                if (wgt[c] <= 1e-6f) continue;
+                double w = wgt[c], x = carrier_freqs_[c], y = resid[c];
+                Sw += w; Sx += w * x; Sy += w * y; Sxx += w * x * x; Sxy += w * x * y;
+                used++;
+            }
+            if (used >= 3 && Sw > 0.0) {
+                double denom = Sw * Sxx - Sx * Sx;
+                if (std::abs(denom) > 1e-9) {
+                    double b = (Sw * Sxy - Sx * Sy) / denom;  // rad / Hz / symbol (clock)
+                    double a = (Sy - b * Sx) / Sw;            // rad / symbol      (dial CFO)
+                    float max_theta = 0.0f;
+                    for (int c = 0; c < config_.num_carriers; c++) {
+                        theta_c[c] = (float)(a + b * carrier_freqs_[c]);
+                        max_theta = std::max(max_theta, std::abs(theta_c[c]));
+                    }
+                    // Deadband ~2 deg/symbol (~0.26 Hz CFO, ~100 ppm at the band edge):
+                    // below this the fixed grid already tolerates the offset, so do nothing.
+                    constexpr float kClockDeadbandRad = 0.035f;
+                    if (max_theta >= kClockDeadbandRad) {
+                        clock_corr_active = true;
+                        float t_sym = (float)config_.samples_per_symbol / config_.sample_rate;
+                        LOG_DEMOD(DEBUG,
+                                  "MC-DPSK clock-track ACTIVE: dial=%.2f Hz, edge rotation=%.1f deg/sym",
+                                  (double)((float)a / (two_pi * t_sym)),
+                                  (double)(max_theta * 180.0f / (float)M_PI));
+                    } else {
+                        std::fill(theta_c.begin(), theta_c.end(), 0.0f);
+                    }
+                }
+            }
+        }
+
+        // --- Per-symbol common-phase tracking (slow carrier jitter) ---
+        // A cheap transmitter's oscillator/clock jitter wanders the carrier phase across
+        // the frame (measured ~+-7 Hz on a real USB dongle). It is COMMON to all carriers
+        // and time-varying, so the per-frame theta_c above cannot remove it; left in place
+        // it pushes the DQPSK differential past its +-45 deg decision boundary on the slow
+        // swings and corrupts the payload while the short chirp survives. Track the common
+        // differential phase decision-directed per symbol with a full-gain first-order loop
+        // (re-anchors each symbol => drift-free, low lag). Three independent, physically
+        // grounded gates decide whether to APPLY the result -- so it can help but never hurt
+        // a frame the untracked demod would have decoded:
+        //   * coherence  (mean |sum|/sum_w across carriers): a true common jitter is coherent
+        //     across carriers (~1); per-carrier FADING is incoherent (~0) -> require high
+        //     coherence, so this tracks jitter without chasing a fading channel.
+        //   * activity   (RMS of the tracked phase): real jitter swings; a clean channel's
+        //     few-degree decision-noise wobble does not -> deadband => strict no-op on clean.
+        //   * lock       (RMS of the per-symbol prediction residual): a slow jitter tracks
+        //     (small residual); jitter near/above the symbol rate cannot be followed (large
+        //     residual) -> discard, so near-aliasing fast jitter falls back to untracked.
+        std::vector<float> psi_per_sym(num_symbols, 0.0f);
+        bool jitter_corr_active = false;
+        if (config_.track_clock_offset && num_symbols >= 8 && config_.num_carriers >= 3) {
+            const float two_pi = 2.0f * (float)M_PI;
+            // Decision-FREE M-th-power common-phase estimate: raising the differential to
+            // the M-th power (M=4 for DQPSK, 2 for DBPSK) annihilates the data modulation,
+            // leaving M*(common phase) + a known data constant -- no decisions, so no
+            // decision-directed cycle slips. Then LOW-PASS the M-th-power phasor across
+            // symbols (centered moving average) BEFORE unwrapping: a narrow window cuts the
+            // M-th-power noise (~sqrt(W), so the slow swing unwraps cleanly without
+            // noise-induced slips) AND attenuates jitter near/above the symbol rate so it
+            // cannot be mis-tracked -- it simply falls below the activity deadband and
+            // becomes a no-op. Unwrap toward the previous estimate (slow jitter moves < the
+            // M-th-power ambiguity per symbol, so the unwrap is unambiguous).
+            const int Mpow = (config_.bits_per_symbol == 2) ? 4 : 2;
+            const float Mf = (float)Mpow;
+            const float data_const = (config_.bits_per_symbol == 2) ? (float)M_PI : 0.0f;
+            const float ambig = two_pi / Mf;        // unwrap ambiguity: pi/2 (DQPSK), pi (DBPSK)
+            float wsum = 0.0f;
+            for (int c = 0; c < config_.num_carriers; c++) wsum += carrier_mag_sum[c];
+            std::vector<Complex> Z(num_symbols, Complex(0.0f, 0.0f));
+            for (int sym = 0; sym < num_symbols; sym++) {
+                Complex z(0.0f, 0.0f);
+                for (int c = 0; c < config_.num_carriers; c++) {
+                    float ang = Mf * (cached_phases[sym * config_.num_carriers + c] - theta_c[c]);
+                    z += carrier_mag_sum[c] * std::polar(1.0f, ang);
+                }
+                Z[sym] = z;
+            }
+            constexpr int kSmoothHalf = 3;          // +-3 => 7-tap MA, first null ~ baud/7
+            float psi = 0.0f;
+            double conc_sum = 0.0, dpsi_sq = 0.0, psi_sq = 0.0;
+            for (int sym = 0; sym < num_symbols; sym++) {
+                Complex zs(0.0f, 0.0f);
+                int cnt = 0;
+                for (int j = -kSmoothHalf; j <= kSmoothHalf; j++) {
+                    int s = sym + j;
+                    if (s >= 0 && s < num_symbols) { zs += Z[s]; ++cnt; }
+                }
+                float conc = (wsum > 1e-9f) ? std::abs(zs) / ((float)cnt * wsum) : 0.0f;
+                float raw = (std::abs(zs) > 1e-12f) ? (std::arg(zs) - data_const) / Mf : psi;
+                float cand = raw, d = cand - psi;
+                while (d > ambig * 0.5f) { cand -= ambig; d -= ambig; }
+                while (d < -ambig * 0.5f) { cand += ambig; d += ambig; }
+                float dpsi = cand - psi;
+                psi = cand;
+                psi_per_sym[sym] = psi;
+                conc_sum += conc;
+                dpsi_sq += (double)dpsi * dpsi;
+                psi_sq += (double)psi * psi;
+            }
+            const float inv_n = 1.0f / (float)num_symbols;
+            float mean_conc = (float)(conc_sum * inv_n);
+            float rms_dpsi = (float)std::sqrt(dpsi_sq * inv_n);
+            float rms_psi = (float)std::sqrt(psi_sq * inv_n);
+            // Apply the correction only when the smoothed M-th-power estimate is trustworthy:
+            //   * coherence (mean |sum|/sum_w): high for a true common jitter the loop is
+            //     following; LOW for jitter the smoother attenuates / cannot resolve and for
+            //     per-carrier fading -> discard => those fall back to untracked (no harm).
+            //   * activity (RMS of psi): real swing present, else clean-channel no-op.
+            //   * sanity (RMS of psi bounded): a true +-7 Hz jitter is <=~38 deg RMS; a much
+            //     larger value means the unwrap slipped/diverged -> discard.
+            //   * lock (RMS unwrap step small): per-symbol estimate is smooth.
+            // Net: helps slow carrier jitter, provably never corrupts a frame the untracked
+            // demod would have decoded.
+            constexpr float kCoherenceMin    = 0.40f;  // trackable common jitter vs fading/aliased
+            constexpr float kActivityRad     = 0.12f;  // ~7 deg RMS: a real swing is present
+            constexpr float kMaxSanePsiRad   = 1.05f;  // ~60 deg RMS ceiling (>physical => diverged)
+            constexpr float kLockResidualRad = 0.70f;  // small unwrap step => trackable/slow
+            if (mean_conc >= kCoherenceMin && rms_psi >= kActivityRad &&
+                rms_psi <= kMaxSanePsiRad && rms_dpsi <= kLockResidualRad) {
+                jitter_corr_active = true;
+                LOG_DEMOD(DEBUG,
+                          "MC-DPSK jitter-track ACTIVE: phaseRMS=%.1f deg coh=%.2f lockResid=%.1f deg",
+                          (double)(rms_psi * 180.0f / (float)M_PI), (double)mean_conc,
+                          (double)(rms_dpsi * 180.0f / (float)M_PI));
+            } else {
+                std::fill(psi_per_sym.begin(), psi_per_sym.end(), 0.0f);
+            }
+        }
+
+        // When residual correction is active, recompute the phase-noise variance from the
+        // CORRECTED residuals so the LLR scale stays calibrated (lower residual noise ->
+        // higher confidence). When inactive this is skipped and pass-1's value is used.
+        if (clock_corr_active || jitter_corr_active) {
+            float corr_noise_sum = 0.0f;
+            int corr_noise_count = 0;
+            for (int sym = 0; sym < num_symbols; sym++) {
+                for (int c = 0; c < config_.num_carriers; c++) {
+                    float phase = cached_phases[sym * config_.num_carriers + c]
+                                  - theta_c[c] - psi_per_sym[sym];
+                    while (phase > (float)M_PI) phase -= 2.0f * (float)M_PI;
+                    while (phase < -(float)M_PI) phase += 2.0f * (float)M_PI;
+                    float phase_error;
+                    if (config_.bits_per_symbol == 2) {
+                        float shifted = phase - (float)M_PI / 4.0f;
+                        float nearest_idx = std::round(shifted / ((float)M_PI / 2.0f));
+                        float ideal = nearest_idx * (float)M_PI / 2.0f + (float)M_PI / 4.0f;
+                        phase_error = phase - ideal;
+                    } else {
+                        float nearest_idx = std::round(phase / (float)M_PI);
+                        phase_error = phase - nearest_idx * (float)M_PI;
+                    }
+                    while (phase_error > (float)M_PI) phase_error -= 2.0f * (float)M_PI;
+                    while (phase_error < -(float)M_PI) phase_error += 2.0f * (float)M_PI;
+                    corr_noise_sum += phase_error * phase_error;
+                    corr_noise_count++;
+                }
+            }
+            noise_sum = corr_noise_sum;
+            noise_count = corr_noise_count;
+        }
+
         // Compute SNR-proportional scale from phase noise variance
         float phase_noise_var = (noise_count > 0) ? noise_sum / noise_count : 0.5f;
         phase_noise_var = std::max(0.01f, phase_noise_var);   // Floor: prevents inf at high SNR
@@ -559,10 +784,15 @@ public:
         scale = std::min(scale, 20.0f);                        // Cap: prevents overconfident LLRs
 
 
-        // Pass 2: Compute soft bits using calibrated scale
+        // Pass 2: Compute soft bits using calibrated scale. theta_c removes the fitted
+        // dial+clock per-carrier rotation; psi_per_sym removes the tracked common-phase
+        // jitter. Both are zero when their deadband says there is nothing to correct.
         for (int sym = 0; sym < num_symbols; sym++) {
             for (int c = 0; c < config_.num_carriers; c++) {
-                float phase = cached_phases[sym * config_.num_carriers + c];
+                float phase = cached_phases[sym * config_.num_carriers + c]
+                              - theta_c[c] - psi_per_sym[sym];
+                while (phase > (float)M_PI) phase -= 2.0f * (float)M_PI;
+                while (phase < -(float)M_PI) phase += 2.0f * (float)M_PI;
 
                 if (config_.bits_per_symbol == 2) {
                     float sb0 = scale * std::sin(phase);

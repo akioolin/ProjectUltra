@@ -1,12 +1,54 @@
 # Known Bugs
 
-Last updated: 2026-05-23
+Last updated: 2026-06-14
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
+- Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First
+  Mac↔IONOS↔Pi5 bringup. After the CONNECT-decode code fix (CHANGELOG 2026-06-14), Mac→Pi5 completes
+  (CONNECT decodes 4/4, Pi5 CONNECTED) but Pi5→Mac CONNECT_ACK never decodes → initiator never
+  CONNECTED → no file transfer.
+- **UPDATE 2026-06-15 — the "bad clock, swap the card" diagnosis was RE-EXAMINED and largely REFUTED;
+  the real lever is carrier JITTER, and a software mitigation now recovers the slow-jitter regime.**
+  In-sim impairment discrimination through the real encode→AWGN→decode path (`test_mcdpsk_clock_offset`,
+  CHANGELOG 2026-06-15) showed: (1) sample-CLOCK offset is NOT the bottleneck — R1/4 LDPC decodes CRC-
+  clean to ±1000 ppm with or without correction, and the prior "−1800..−3000 ppm wandering" figure was a
+  measurement artifact (a crystal cannot wander ~1200 ppm run-to-run; the values match an integer ALSA
+  buffer-period drop = USB starvation on the headless Pi); (2) band TILT is NOT the bottleneck (frequency
+  diversity + LDPC ride through 20 dB); (3) the cheap DAC's ±7 Hz carrier JITTER IS the bottleneck (it
+  exceeds the DQPSK ±45°/symbol decision margin → payload garbage, chirp survives). The MC-DPSK demod now
+  has clock-offset + carrier-jitter tracking (default on) that recovers SLOW jitter and is a proven no-op
+  / no-harm otherwise. So this is no longer purely an equipment fault — re-test with the current build
+  before concluding a card swap is needed.
+- **Root cause (tone-test measured, /tmp/measure_pi5_tx.sh + measure_mac_tx.sh + analyze_tone.py):**
+  the Pi5's cheap "USB Audio Device" **DAC/playback** is the problem. Same IONOS, same two cards,
+  TX/RX roles swapped — only the transmitting card differs:
+  | metric | Pi5 cheap card TX (fails) | Mac SoundBlaster TX (clean) |
+  | band flatness across 0.5-2.6 kHz | **14.8 dB tilt** | 5.7 dB |
+  | 2nd-harmonic distortion | **-17.8 dB** | -36.7 dB |
+  | freq accuracy (jitter) | **±7 Hz** | ±0.5 Hz |
+  The cheap DAC's 15 dB band tilt starves the edge MC-DPSK carriers + the distortion/jitter smear the
+  DPSK phase → the multi-carrier 4-CW payload fails to decode, while the robust band-sweeping chirp
+  shrugs it off (CFO≈0, chirp decodes) — hence PING works, CONNECT payload doesn't. The cheap card's
+  **ADC/record is fine** (reverse dir clean), so it's specifically the TX path.
+- Of the three measured TX impairments, the discrimination (above) shows tilt is absorbed by diversity
+  and a stable clock offset is absorbed by LDPC; the **jitter** is what crosses the DQPSK margin. The
+  measurement was also taken on the Pi5 host, so part of the apparent jitter/tilt may be Pi-side USB
+  starvation rather than the DAC itself (re-measure driving the cheap card from an unloaded host to
+  separate DAC-intrinsic defects from host starvation — recommended experiment).
+- **Fix order (revised 2026-06-15):** (1) re-test Pi5→Mac with the current build — the new MC-DPSK
+  clock+jitter tracking may already close it if the real jitter is slow; (2) if it still fails, capture
+  a Pi5-TX CONNECT recording and decode it offline to confirm jitter rate vs an ALSA-drop discontinuity;
+  (3) swap the Pi5's cheap USB soundcard as a BACKSTOP only if the residual jitter is fast/large enough
+  to be below the trackable regime. Earlier "balance the L/R levels" framing was wrong/incomplete. HW
+  knobs the bringup harness sets: Pi5 `callsign=PI5`, `tx_drive=0.7`, ALSA Speaker −3 dBFS; Mac
+  `tx_drive=0.7`, input vol 60. Run the gui_qso gate LID-OPEN on an unloaded machine (lid/throttle →
+  ALPHA audio starvation `SKIP unsearched < min` → false FAIL).
 
 ### BUG-TNC-B2F-002: post-burst non-burst FF frame not delivered (blocks bulk-accum-to-burst B2F) — LAYERED
 - Status: **FIXED 2026-06-05.** ROOT CAUSE (LAYER 2, finally isolated): the ENCODER did not revert
