@@ -222,6 +222,15 @@ private:
     std::atomic<uint64_t> operator_events_tx_submitted_{0};
     std::atomic<uint64_t> operator_events_tx_delivered_{0};
     std::atomic<uint64_t> operator_events_tx_failed_{0};
+
+    // Latest in-band decode SNR, cached lock-free off the modem RX path
+    // (after_rx_data hook) so the tone-burst ACK callback can pick its §15.5
+    // staircase symbol duration WITHOUT calling protocol_ — the ACK callback is
+    // invoked while protocol_ holds ProtocolEngineMutex, and getMeasuredSNR()
+    // re-locks it, so a direct call self-deadlocks. Atomics → no lock either side.
+    std::atomic<float> cached_inband_snr_db_{12.0f};
+    std::atomic<SNRSource> cached_inband_snr_source_{SNRSource::NONE};
+
     bool operator_log_file_suppressed_ = false;
     uint32_t operator_log_slow_ms_ = 0;
     size_t operator_event_drain_limit_ = 128;

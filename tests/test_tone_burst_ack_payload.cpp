@@ -325,6 +325,32 @@ void test_costas_autocorrelation_peak() {
     EXPECT(max_sidelobe < N / 2);  // sidelobes must be substantially lower
 }
 
+void test_symbol_ms_staircase() {
+    std::printf("[test] symbol_ms_staircase\n");
+    // §15.5 staircase: symbolMsForSNR maps measured in-band SNR -> symbol
+    // duration (shorter ACK at high SNR, longer for robust detection at low SNR).
+    EXPECT_EQ(symbolMsForSNR(25.0f), kSymbolMsHighSNR);   // >= 18 dB -> 12 ms
+    EXPECT_EQ(symbolMsForSNR(18.0f), kSymbolMsHighSNR);   // boundary inclusive
+    EXPECT_EQ(symbolMsForSNR(17.9f), kSymbolMsMidSNR);    // 12-18 dB -> 25 ms
+    EXPECT_EQ(symbolMsForSNR(12.0f), kSymbolMsMidSNR);    // boundary inclusive
+    EXPECT_EQ(symbolMsForSNR(11.9f), kSymbolMsLowSNR);    // 5-12 dB -> 50 ms
+    EXPECT_EQ(symbolMsForSNR(5.0f),  kSymbolMsLowSNR);    // boundary inclusive
+    EXPECT_EQ(symbolMsForSNR(4.9f),  kSymbolMsMargSNR);   // -5..5 dB -> 100 ms
+    EXPECT_EQ(symbolMsForSNR(-5.0f), kSymbolMsMargSNR);   // boundary inclusive
+    EXPECT_EQ(symbolMsForSNR(-5.1f), kSymbolMsWeakSNR);   // < -5 dB -> 200 ms
+    EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsWeakSNR);
+
+    // Monotonic non-increasing: a better channel never yields a LONGER ACK.
+    uint32_t prev = symbolMsForSNR(-30.0f);
+    for (float s = -30.0f; s <= 30.0f; s += 0.5f) {
+        uint32_t cur = symbolMsForSNR(s);
+        EXPECT(cur <= prev);
+        prev = cur;
+    }
+    // The ~20 dB hardware operating point uses the short tier (675 -> 324 ms).
+    EXPECT_EQ(symbolMsForSNR(20.0f), kSymbolMsHighSNR);
+}
+
 }  // namespace
 
 int main() {
@@ -339,6 +365,7 @@ int main() {
     test_on_air_includes_costas_prefix();
     test_single_dibit_error_recovery();
     test_costas_autocorrelation_peak();
+    test_symbol_ms_staircase();
     if (g_failures > 0) {
         std::fprintf(stderr, "\n%d test assertion(s) failed\n", g_failures);
         return 1;

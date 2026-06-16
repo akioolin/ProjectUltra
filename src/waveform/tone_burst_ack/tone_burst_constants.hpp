@@ -90,6 +90,20 @@ inline constexpr uint32_t kSymbolMsLowSNR = 50;    // SNR 5-12 dB
 inline constexpr uint32_t kSymbolMsMargSNR = 100;  // SNR -5 to 5 dB
 inline constexpr uint32_t kSymbolMsWeakSNR = 200;  // SNR < -5 dB
 
+// §15.5 staircase selector: map a measured in-band SNR to the symbol duration.
+// Shorter symbols at high SNR shrink the ACK airtime (lower half-duplex
+// turnaround); longer symbols at low SNR add matched-filter integration for
+// robust detection. The receiver's ACK monitor scans ALL durations, so the
+// two ends need not pre-agree. Thresholds mirror the kSymbolMs* comments above;
+// monotonic non-increasing, so it only shortens as SNR rises.
+inline constexpr uint32_t symbolMsForSNR(float snr_db) {
+    if (snr_db >= 18.0f) return kSymbolMsHighSNR;   // 12 ms -> 324 ms airtime
+    if (snr_db >= 12.0f) return kSymbolMsMidSNR;    // 25 ms -> 675 ms (baseline)
+    if (snr_db >= 5.0f)  return kSymbolMsLowSNR;    // 50 ms -> 1350 ms
+    if (snr_db >= -5.0f) return kSymbolMsMargSNR;   // 100 ms -> 2700 ms
+    return kSymbolMsWeakSNR;                         // 200 ms -> 5400 ms
+}
+
 // ============================================================================
 // Costas sync pattern (4 symbols, ORDER-4 COSTAS ARRAY)
 // ============================================================================

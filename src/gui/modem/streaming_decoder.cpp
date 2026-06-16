@@ -173,8 +173,17 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
         tba_cfg.armed_only = true;
         tba_cfg.detect_interval_samples = 0;          // polling off
         tba_cfg.detect_interval_samples_armed = 4800; // 100 ms when armed
+        // Scan the §15.5 staircase durations the sender may emit — the ACK
+        // symbol duration is now SNR-adaptive (12 ms at high SNR ... 100 ms at
+        // low). Before the staircase this was 25 ms ONLY; a shorter (12 ms) ACK
+        // was then invisible to this monitor -> missed ACK -> timeout retx. The
+        // detector tries each in order and stops at the first CRC-passing decode,
+        // so the common 25 ms case still resolves quickly.
         tba_cfg.symbol_durations_ms = {
-            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms only
+            ultra::waveform::tone_burst_ack::kSymbolMsHighSNR,   // 12 ms (324 ms ACK)
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms (675 ms baseline)
+            ultra::waveform::tone_burst_ack::kSymbolMsLowSNR,    // 50 ms
+            ultra::waveform::tone_burst_ack::kSymbolMsMargSNR,   // 100 ms
         };
         tba_cfg.sweep_step_samples = 32;
         tba_cfg.buffer_capacity_samples = 90000;  // ~1.9 s

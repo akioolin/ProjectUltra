@@ -488,8 +488,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // reactions to a decoded frame (monitor-mode log) ride the after_rx_data hook;
     // ping/status stay GUI-owned below.
     ModemProtocolFrontendHooks modem_hooks;
-    modem_hooks.after_rx_data = [this](const Bytes& data, float /*snr_db*/, float /*fading*/,
-                                       SNRSource /*snr_source*/, bool /*used_for_quality*/) {
+    modem_hooks.after_rx_data = [this](const Bytes& data, float snr_db, float /*fading*/,
+                                       SNRSource snr_source, bool /*used_for_quality*/) {
+        // Cache the latest in-band decode SNR (lock-free) so the tone-burst ACK
+        // callback can pick its §15.5 staircase symbol duration without calling
+        // protocol_ (which holds its mutex while invoking that callback; re-entry
+        // self-deadlocks). The ACK callback gates on the source being trusted.
+        cached_inband_snr_db_.store(snr_db, std::memory_order_relaxed);
+        cached_inband_snr_source_.store(snr_source, std::memory_order_relaxed);
         // Monitor mode: surface every decoded frame's payload in the RX log regardless of
         // addressing (the protocol layer would otherwise drop frames whose dst hash doesn't
         // match local call, making the GUI silent on OTA captures from peers).
@@ -623,7 +629,23 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // the actual goodput delta.
     protocol_.setTransmitToneBurstAckCallback(
         [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
-            auto samples = modem_.transmitToneBurstAck(tba);
+            // §15.5 staircase: scale the ACK symbol duration to the latest in-band
+            // SNR — a shorter ACK at high SNR cuts the per-turnaround airtime
+            // (675 ms -> 324 ms at >=18 dB); a longer ACK at low SNR adds
+            // matched-filter integration so it isn't missed (a missed ACK costs a
+            // full retransmit). Read the LOCK-FREE cached SNR (written off the
+            // modem RX path); NEVER call protocol_ here — this callback runs while
+            // protocol_ holds its mutex, so re-entry self-deadlocks. Only a
+            // trusted physical in-band source shortens; otherwise safe baseline.
+            // The data-sender's monitor scans every staircase duration, so a
+            // conservative (longer) choice is always decodable.
+            uint32_t symbol_ms = ultra::waveform::tone_burst_ack::kBaselineSymbolMs;
+            const SNRSource src = cached_inband_snr_source_.load(std::memory_order_relaxed);
+            if (src == SNRSource::IDLE_IN_BAND || src == SNRSource::OFDM_BROADBAND) {
+                symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
+                    cached_inband_snr_db_.load(std::memory_order_relaxed));
+            }
+            auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
                 // Carry the same in_qso_data flag as the OFDM ACK (false —
                 // ACKs are control frames, not in-QSO data).

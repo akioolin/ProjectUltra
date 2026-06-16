@@ -10,6 +10,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-15 — feat(ack): SNR-adaptive tone-burst ACK duration (§15.5 staircase) — deadlock-free, hardware-proven
+
+**What changed:** the tone-burst ACK symbol duration is now scaled to the measured in-band SNR
+(the §15.5 staircase that was designed but never wired). A high-SNR link uses a **shorter ACK
+(675 ms → 324 ms at ≥18 dB)**, cutting the half-duplex T/R turnaround; low SNR keeps the longer,
+more-integrable ACK so it isn't missed (a missed ACK costs a full retransmit). The data-sender's
+monitor scans **every** staircase duration, so the two ends need not pre-agree.
+
+**Why it matters (measured):** a live-vs-sim timeline diff showed the entire real-hardware
+throughput gap is the per-turnaround ACK round-trip, of which the 675 ms baseline ACK airtime is a
+fixed slice. Shrinking it at high SNR is a direct, robustness-positive turnaround win.
+
+**Two traps hit + fixed (the reason this is a careful entry):**
+1. **Reentrancy deadlock.** First cut called `protocol_.getMeasuredSNR()` from inside the ACK
+   callback — but that callback is invoked while `protocol_` holds `ProtocolEngineMutex`, and the
+   getter re-locks it → self-deadlock → the whole GUI froze (RX overruns were the *symptom*).
+   Fix: read a **lock-free `std::atomic` SNR cache** (`cached_inband_snr_db_`/`_source_` in `App`)
+   written off the modem `after_rx_data` hook; the ACK callback never touches `protocol_`.
+2. **Monitor blind to the new duration.** The production ACK monitor
+   (`streaming_decoder.cpp`) scanned **25 ms ONLY** (fine when the sender always sent 25 ms). The
+   shorter 324 ms ACK was invisible → missed → 55 timeout-retx in a sim run. Fix: scan the
+   staircase set `{12, 25, 50, 100} ms` (detector stops at the first CRC-passing decode).
+
+**Files:** `tone_burst_constants.hpp` (`symbolMsForSNR` selector), `app.hpp`/`app.cpp` (atomic SNR
+cache + ACK callback), `streaming_decoder.cpp` (monitor scan set), `test_tone_burst_ack_payload.cpp`
+(staircase mapping test).
+
+**Test verification:**
+- `ctest -R 'ToneBurst|StreamingDecoderToneBurst|StreamingMCDPSK|PingDetector'` → **7/7** (incl the
+  ToneBurstAck Monitor + Watterson fading detection and the production-decoder monitor).
+- OTASim `gui_qso_scenario.sh --channel awgn --snr-db 20` → **RESULT=PASS**, ACK 324 ms, **0 retx**
+  (was 55 before the monitor fix), turnaround **1.10 → 0.71 s**, goodput **2.0 → 2.1 kbps**.
+- **Live Mac↔IONOS↔Pi5** (both stations updated): **0 overruns** (deadlock-free on real HW), ACK
+  324 ms every burst, **0 data retx over 15 bursts** (2 runs; the lone "retx" was a DISCONNECT
+  teardown retransmit, not an ACK miss), CRC-clean, turnaround **3.6 → 3.04 s**.
+
+---
+
 ## 2026-06-15 — feat(gui): smooth waterfall scroll + `ULTRA_AUDIO_BUFFER` knob; full Mac↔IONOS↔Pi5 QSO proven on pi5tnc
 
 **Context:** First complete real-hardware QSO on the new `pi5tnc` box (Pi5 + Fe-Pi/SGTL5000 clean codec,
