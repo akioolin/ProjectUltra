@@ -31,7 +31,7 @@ it's post-decode delivery/routing only.
 |------|---------|-------|------|-------|
 | Ring-buffer write + overflow recovery | audio→buffer, force-reset on overflow | `streaming_decoder.cpp` (`feedAudio`) → `sync_controller_.ring_.writeSamplesToRingLocked`; **ring now owned by `sync::SyncRingBuffer` inside SyncController** (§7 C3) | every callback | 🟢 |
 | Activity RMS gate | presence detector (HIGH 0.030/LOW 0.010) | `streaming_decoder.cpp:412` | every callback | 🟢 (instrumentation) |
-| Tone-burst ACK monitor | reverse-channel FSK ACK detect (armed-only) | `streaming_decoder.cpp:404` | event-gated | 🟢 (§15 ACK) |
+| Tone-burst ACK monitor | reverse-channel FSK ACK detect (armed-only); scans the §15.5 SNR staircase durations `{12,25,50,100}` ms (2026-06-15 — was 25 ms-only, blind to the shorter SNR-adaptive ACK) | `streaming_decoder.cpp:404` | event-gated | 🟢 (§15 ACK) |
 | RMS/signal-presence search gate | per-mode adaptive gate w/ noise-floor tracker | `sync_controller.cpp::acquireSearchWindow` (§7 C3: moved out of searchForSync) | SEARCHING hop (~100 ms) | 🟢 |
 | Warm/light search-window planning | predict next-frame arrival, shrink LTS window | `sync_controller.cpp::acquireSearchWindow` → `::planWarmSearch` → `arrival_policy::planWarmSearchWindow` | connected light preamble | 🟢 core (warm-handoff now default; flag removed) |
 | Connected light-LTS dispatch + §16.4 re-anchor | run detectDataSync, accept (pos-gate), arm full-chirp on reject streak | `sync_controller.cpp::detectConnectedLightSync` (§7 C3: moved from searchForSync) | connected data acq | 🟢 |
@@ -85,7 +85,7 @@ it's post-decode delivery/routing only.
 | Short re-anchor preamble `[short-chirp][LTS×2]` | `ofdm_chirp_waveform.cpp:364` | fading data re-anchor | 🟡 gated `adaptive_short_data_preamble_`; force-off when warm-handoff on |
 | Per-burst LDPC Z push to demod | `ofdm_chirp_waveform.hpp:69` (`setActiveLDPCLiftingZ`) | burst encode | 🟢 (INVARIANT: must propagate Z to demod or deinterleaver gets 1296≠3888 bits → throws) |
 | `encodeBurstLight()` — **the burst engine** | `streaming_encoder.cpp:429` | OFDM file/multi-frame burst | 🟢 (transport env-gated) |
-| `encodeToneBurstAck()` — 4-FSK reverse ACK | `streaming_encoder.cpp:733` | reverse channel | 🟡 (§15; wired, not default transport) |
+| `encodeToneBurstAck()` — 4-FSK reverse ACK | `streaming_encoder.cpp:733` | reverse channel | 🟢 (§15; symbol duration SNR-adaptive via §15.5 staircase `symbolMsForSNR`, picked at `app.cpp` ACK callback off a lock-free in-band-SNR cache — 675→324 ms at ≥18 dB) |
 | PAPR reduction | `streaming_encoder.cpp:108` | post-modulate | 🟡 PARKED (skipped for all coherent mods → inert on data path) |
 
 **Production OFDM data config** (`StreamingEncoder()` ctor `streaming_encoder.cpp:64`):
