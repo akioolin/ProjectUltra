@@ -843,26 +843,33 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // Wire up modem ping detection to protocol
     modem_.setPingReceivedCallback([this](float snr) {
-        float display_snr = snr;
-
-        // Note: Fading index not shown here - it's only reliable after decoding data frames
+        // The PONG-detection `snr` is the chirp-correlation CONFIDENCE (SYNC_QUALITY) — it
+        // over-reads and is NOT the link SNR (CLAUDE.md: operator-facing SNR = receiver in-band
+        // SNR; only IDLE_IN_BAND/OFDM_BROADBAND are physical). Show the physical in-band SNR when
+        // the receiver has one; otherwise report the contact with NO dB rather than print the sync
+        // proxy as if it were the SNR (that mis-showed ~26 dB on a ~20 dB IONOS link).
+        const auto phys = selectOperatorSNRDisplay(modem_.getStats());
+        char snr_phrase[56];
+        if (phys.valid) {
+            snprintf(snr_phrase, sizeof(snr_phrase), " (SNR=%.0f dB %s)",
+                     phys.snr_db, snrSourceDisplayLabel(phys.source));
+        } else {
+            snr_phrase[0] = '\0';  // no trustworthy in-band SNR at handshake yet
+        }
         // Check state to show appropriate message
         if (protocol_.getState() == protocol::ConnectionState::PROBING) {
-            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB (%s))",
-                   display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
-            // Add to message log so user sees it in the app
-            char buf[112];
-            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB (%s))",
-                     display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
+            guiLog("RX PONG: Remote station responded!%s", snr_phrase);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[PONG] Station responded%s", snr_phrase);
             appendRxLogLine(buf);
         } else {
-            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB (%s))",
-                   display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
+            guiLog("MODEM: Detected PING/PONG%s", snr_phrase);
         }
-        char diag_fields[96];
+        // diag keeps BOTH the sync-corr confidence and the physical in-band SNR for analysis.
+        char diag_fields[160];
         std::snprintf(diag_fields, sizeof(diag_fields),
-                      "{\"snr_db\":%.1f,\"snr_source\":\"%s\"}", display_snr,
-                      snrSourceToString(SNRSource::SYNC_QUALITY));
+                      "{\"sync_corr_snr_db\":%.1f,\"inband_snr_db\":%.1f,\"inband_valid\":%s}",
+                      snr, phys.valid ? phys.snr_db : -1.0f, phys.valid ? "true" : "false");
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "protocol", "ping.rx", diag_fields);
         // If narrowband chirp detected, set session-scoped override so negotiateMode() picks OFDM_NARROW
@@ -2194,7 +2201,10 @@ void App::render() {
     } else {
         snprintf(goodput_text, sizeof(goodput_text), "n/a");
     }
-    const auto status_snr = selectOperatorSNRDisplay(mstats);
+    const bool status_connected =
+        protocol_.getState() == protocol::ConnectionState::CONNECTED;
+    const auto status_snr = updateSnrBallistics(
+        selectOperatorSNRDisplay(mstats, status_connected), status_connected);
     char status_snr_text[64];
     if (status_snr.valid) {
         snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
@@ -3363,13 +3373,66 @@ void App::stopTxNow(const char* reason) {
     appendRxLogLine("[SYS] TX stopped immediately");
 }
 
+OperatorSNRDisplay App::updateSnrBallistics(const OperatorSNRDisplay& raw, bool connected) {
+    // Idle/disconnected: no ballistics — the live idle reading is what to show, and the
+    // last connected value is stale. Reset so a new connection warms from scratch.
+    if (!connected) {
+        snr_ballistics_valid_ = false;
+        snr_ballistics_have_raw_ = false;
+        return raw;
+    }
+
+    // Advance the EMA at most once per UI frame (both the channel-status meter and the
+    // bottom status line call this in the same frame; only the first advances). And only
+    // fold a NEW measurement: between bursts the modem holds the same per-burst sample, so
+    // updating every frame would converge to it and defeat the smoothing.
+    const int frame = ImGui::GetFrameCount();
+    if (frame != snr_ballistics_frame_) {
+        snr_ballistics_frame_ = frame;
+        if (raw.valid) {
+            const bool new_sample =
+                !snr_ballistics_have_raw_ || raw.snr_db != snr_ballistics_last_raw_db_;
+            if (new_sample) {
+                snr_ballistics_last_raw_db_ = raw.snr_db;
+                snr_ballistics_have_raw_ = true;
+                if (!snr_ballistics_valid_) {
+                    snr_ballistics_db_ = raw.snr_db;  // snap on the first sample
+                } else {
+                    // Mild asymmetry: respond a little faster to a DROP than a rise, so a
+                    // genuine fade is shown promptly and we never hold a stale-optimistic
+                    // reading, while per-burst spikes are damped. ~3-5 samples to settle.
+                    const float alpha = (raw.snr_db < snr_ballistics_db_) ? 0.35f : 0.22f;
+                    snr_ballistics_db_ += alpha * (raw.snr_db - snr_ballistics_db_);
+                }
+                snr_ballistics_valid_ = true;
+                snr_ballistics_source_ = raw.source;
+            }
+        }
+        // raw invalid while connected (between-burst gap): HOLD the smoothed value.
+    }
+
+    if (!snr_ballistics_valid_) {
+        return raw;  // not warmed yet — show whatever raw says (likely "-- dB")
+    }
+    OperatorSNRDisplay out;
+    out.valid = true;
+    out.snr_db = snr_ballistics_db_;
+    out.source = snr_ballistics_source_;
+    return out;
+}
+
 void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
                                      const protocol::ConnectionStats& conn_stats) {
     // Compact horizontal Channel Status display
     ImGui::BeginChild("ChannelStatus", ImVec2(0, 140), false);
 
     auto conn_state = protocol_.getState();
-    const auto operator_snr = selectOperatorSNRDisplay(stats);
+    // During an active connection, show the OFDM in-band DECODE SNR (the real link SNR) and hold it
+    // through between-burst gaps; when idle/disconnected, prefer the live idle reading (the last
+    // OFDM value is stale then).
+    const bool prefer_ofdm_snr = (conn_state == protocol::ConnectionState::CONNECTED);
+    const auto operator_snr =
+        updateSnrBallistics(selectOperatorSNRDisplay(stats, prefer_ofdm_snr), prefer_ofdm_snr);
 
     // Row 1: Connection state + Channel Quality (only when connected) + SNR bar
     if (conn_state == protocol::ConnectionState::DISCONNECTED) {

@@ -10,6 +10,62 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-17 — fix(arq)+fix(gui): ACK-listen deadline ignored the escalated full-chirp resend (resend storm) + S-meter ballistics on the SNR meter
+
+Two fixes from a 5-analyst + adversarial-synth diagnosis of an IONOS MPM (Moderate) 50 KB transfer.
+Both address operator-observed symptoms. ctest 80/81 (only the pre-existing `UltraTncSimAudio` fails —
+unrelated). RX/sender display + ARQ-timing; the deadline fix is sender-side (needs the SENDER rebuilt).
+
+### 1. fix(arq): ACK-listen deadline under-budgets the §16.4 reliability-mode (full-chirp) resend
+**Broken:** on IONOS MPM the sender resent the same burst group 2–6× before its tone-burst ACK
+registered; the operator saw the receiver's ACK "mixed into the received resend", with 30–110 s stalls
+on a single group. The receiver decodes fine and ACKs promptly (verified — it ACKs on both success AND
+failed/partial groups); the failing direction is the sender MISSING the ACK.
+**Root cause:** `Connection::unifiedBurstAckTimeoutMs()` derives the ACK-listen deadline from
+`wideOFDMBurstAirtimeMs()`, which models ONE first-frame full anchor + light/short continuations. But
+when warm-sync goes cold the §16.4 escalation forces the encoder into RELIABILITY mode, prepending a
+SECOND full chirp+LTS at the group start (on top of the descriptor's own anchor) — `+1×
+kWideOFDMFullAnchorExtraMs` (≈1.2 s) that the deadline never budgeted. The full-vs-light on-air burst
+delta in the Pi5 log = 57600 samples = exactly `kWideOFDMFullAnchorExtraMs`, confirming the omission.
+The tone-burst-ACK listen window floors to this deadline, so on escalated resends the window collapsed
+to ~0.67 s of margin; the ARQ `retransmitFrame(TIMEOUT)` path then re-keys the instant the RTO expires
+with NO carrier-sense (verified — none on that path) — half-duplex, the sender cannot hear an ACK while
+keyed, so it transmits THROUGH the inbound ACK and clobbers it. Self-reinforcing: one slipped ACK →
+light rejects → escalate → +1.2 s burst → window shrinks → more slips.
+**Fixed:** `unifiedBurstAckTimeoutMs()` now adds one `kWideOFDMFullAnchorExtraMs` reserve so the
+deadline always covers the worst-case reliability burst (`src/protocol/connection.cpp` ~3196). Safe and
+conservative: free on clean cycles (the monitor auto-disarms the instant an ACK decodes), and only
+delays a resend on a genuinely lost ACK — restoring the ~1.9 s listen margin the light-burst path had.
+**Note:** this is the verified core of the "ACK collision" fix. The complementary carrier-sense
+listen-before-resend grace (defer re-key if a partial tone burst is on the channel) is a fast-follow —
+it needs a channel-busy signal wired from the tone-burst monitor into the ARQ retransmit path
+(production `isChannelBusy` is currently unwired); deferred until the deadline fix is rig-measured.
+
+### 2. fix(gui): S-meter ballistics on the operator SNR meter (stop the per-burst flicker)
+**Broken:** during a transfer the connected SNR meter "jumped to 26 dB, dropped to 14" — read as
+"messed up". The meter source is correct (`ofdm_broadband` = the documented in-band 3 kHz operator SNR,
+`channel_equalizer_lts.cpp` `broadbandToInBandSnrDb`, made level-independent for the IONOS cheap card);
+the issue is it painted the RAW per-burst estimate at frame rate with no S-meter ballistics, so genuine
+fade-to-fade motion + estimator variance (10–29 dB on this run) looked like flicker.
+**NOT changed (corrected the diagnosis):** the workflow recommended repointing the meter to
+`ofdm_internal` (post-EQ decode margin). Verified against the code that this is WRONG for this project —
+`ofdm_internal` is an uncalibrated post-EQ pilot EMA "for display/rate-adaptation", reset to 0 dB per
+acquisition, and NOT in-band-referenced; switching to it would break the documented in-band 3 kHz
+operator convention. `broadband` is the right quantity; only the ballistics were missing.
+**Fixed:** `App::updateSnrBallistics()` (`src/gui/app.cpp`, members in `app.hpp`) EMA-smooths the
+connected meter (mild asymmetry: α 0.35 falling / 0.22 rising, so a real fade shows promptly but spikes
+damp) and HOLDS the value across between-burst gaps. Advances at most once per ImGui frame and only on a
+NEW measurement (the per-burst sample is held constant between bursts, so a naive every-frame EMA would
+just snap to it). DISPLAY-LAYER ONLY — never feeds rate selection (which keeps the raw physical source).
+Wired at both the channel-status meter and the bottom status line; idle/disconnected pass through raw.
+
+**Test verification:** `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4`
+→ 80/80 meaningful pass (`SelectiveRepeatARQ`, `ToneBurstAckMonitor`, `ToneBurstAckWatterson`,
+`SNRSourceRouting` all pass; only pre-existing `UltraTncSimAudio` fails). Rig (IONOS MPM, both stations
+lockstep) verification PENDING — the deadline fix needs the sender (Pi5) rebuilt.
+
+---
+
 ## 2026-06-17 — fix(coherence)+feat(gui,arq): disc was DEAD on every half-duplex transfer + RX-label wiring + SACK-mask widen
 
 Three related changes. RX-side except the SACK wire widen. ctest 80/81 (only the pre-existing

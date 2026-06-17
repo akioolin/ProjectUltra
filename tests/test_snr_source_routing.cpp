@@ -71,6 +71,28 @@ void idleMeterPrefersInBandSource() {
           "operator display should label idle in-band source");
 }
 
+void connectedMeterPrefersOfdmOverBetweenBurstIdle() {
+    // During an ACTIVE connection (prefer_ofdm_broadband=true), a between-burst snapshot has
+    // snr_source=IDLE_IN_BAND (the idle noise-floor estimate that under-reads to ~10 dB on a noisy
+    // band) plus a fresh last-burst OFDM SNR (~22 dB). The meter must show the OFDM decode SNR (the
+    // real link SNR), held steady across the gap — NOT the under-reading idle value. (Contrast
+    // idleMeterPrefersInBandSource, which is the DISCONNECTED case where the OFDM value is stale.)
+    LoopbackStats stats;
+    stats.snr_db = 10.2f;
+    stats.snr_source = SNRSource::IDLE_IN_BAND;
+    stats.has_idle_in_band_snr_db = true;
+    stats.idle_in_band_snr_db = 10.2f;
+    stats.has_ofdm_broadband_snr_db = true;
+    stats.ofdm_broadband_snr_db = 22.1f;
+
+    const auto display = selectOperatorSNRDisplay(stats, /*prefer_ofdm_broadband=*/true);
+    check(display.valid, "connected meter should be displayable");
+    check(display.snr_db == 22.1f,
+          "connected meter must prefer the OFDM decode SNR over the between-burst idle value");
+    check(display.source == SNRSource::OFDM_BROADBAND,
+          "connected meter should label OFDM broadband");
+}
+
 void connectedMCDPSKKeepsConnectedSourceForConsumers() {
     LoopbackStats stats;
     stats.snr_db = 8.5f;
@@ -104,6 +126,7 @@ int main() {
     try {
         connectedOFDMKeepsBroadbandSourceForConsumers();
         idleMeterPrefersInBandSource();
+        connectedMeterPrefersOfdmOverBetweenBurstIdle();
         connectedMCDPSKKeepsConnectedSourceForConsumers();
         chirpOnlyDoesNotLookLikeAnSNRMeter();
     } catch (const std::exception& e) {

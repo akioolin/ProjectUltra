@@ -45,7 +45,19 @@ inline bool isOperatorPhysicalSNRSource(SNRSource source) {
            source == SNRSource::MCDPSK_IN_BAND;
 }
 
-inline OperatorSNRDisplay selectOperatorSNRDisplay(const LoopbackStats& stats) {
+// prefer_ofdm_broadband: set during an ACTIVE OFDM connection so the meter shows the OFDM in-band
+// DECODE SNR whenever it is available — the real link SNR the decoder sees (~22 dB on the IONOS
+// link that ran R5/6) — held steady across between-burst gaps (where snr_source momentarily flips
+// to the idle noise-floor estimate that under-reads to ~10 dB on a noisy band). When IDLE/
+// disconnected (default false) the OFDM value is STALE, so prefer the LIVE current source (idle)
+// over it — see test_snr_source_routing::idleMeterPrefersInBandSource. sync_quality is never a
+// physical SNR and never drives the meter.
+inline OperatorSNRDisplay selectOperatorSNRDisplay(const LoopbackStats& stats,
+                                                   bool prefer_ofdm_broadband = false) {
+    if (prefer_ofdm_broadband &&
+        stats.has_ofdm_broadband_snr_db && std::isfinite(stats.ofdm_broadband_snr_db)) {
+        return {true, stats.ofdm_broadband_snr_db, SNRSource::OFDM_BROADBAND};
+    }
     if (isOperatorPhysicalSNRSource(stats.snr_source) &&
         std::isfinite(stats.snr_db)) {
         return {true, stats.snr_db, stats.snr_source};

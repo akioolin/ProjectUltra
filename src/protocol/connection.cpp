@@ -3194,7 +3194,23 @@ uint32_t Connection::unifiedBurstAckTimeoutMs(size_t burst_frames) const {
     // timeout); 1-CW control airtime + any re-anchor.
     const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
     constexpr uint32_t kRoundTripSlackMs = 1500;  // T/R turnaround + jitter cushion
-    return burst_ms + decode_margin_ms + ack_return_ms + kRoundTripSlackMs;
+    // §16.4 escalation reserve: when warm-sync goes cold the encoder re-keys a
+    // RELIABILITY-mode burst that prepends a SECOND full chirp+LTS at the group start
+    // (on top of the descriptor's own anchor), inflating the on-air burst by one full
+    // anchor (~1.2 s) beyond what wideOFDMBurstAirtimeMs() models above (a single
+    // first-frame anchor + light/short continuations). If the deadline does not cover
+    // that extra anchor, the tone-burst-ACK listen window (which floors to this timeout)
+    // collapses and the sender re-keys THROUGH the receiver's inbound ACK — half-duplex,
+    // it cannot hear an ACK while keyed — clobbering it and triggering a resend storm
+    // (observed on IONOS MPM: a single slipped ACK escalates to full-chirp -> window
+    // shrinks -> more slips, 30-110 s stalls). Budget the worst-case reliability burst
+    // unconditionally: it is free on clean cycles (the monitor auto-disarms the instant
+    // an ACK decodes) and only delays a resend on a genuinely lost ACK, which is the
+    // correct conservative behavior.
+    const uint32_t reliability_full_anchor_ms =
+        connection_policy::kWideOFDMFullAnchorExtraMs;
+    return burst_ms + decode_margin_ms + ack_return_ms + kRoundTripSlackMs +
+           reliability_full_anchor_ms;
 }
 
 size_t Connection::prepareUnifiedBurstWindow() {

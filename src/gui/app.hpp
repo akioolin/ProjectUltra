@@ -114,6 +114,19 @@ private:
     bool connected_peer_snr_valid_ = false;
     float connected_peer_snr_db_ = 0.0f;
 
+    // S-meter ballistics for the operator SNR meter. The connected meter shows the
+    // per-burst in-band SNR (broadband, the documented 3 kHz operator convention), which
+    // on a fading channel legitimately swings several dB burst-to-burst; painted raw at
+    // frame rate it reads as "jumping / messed up". These hold the EMA-smoothed value and
+    // freeze it across between-burst gaps so the meter behaves like a real radio's S-meter.
+    // DISPLAY-LAYER ONLY — never feeds rate selection (which uses the raw physical source).
+    bool snr_ballistics_valid_ = false;
+    float snr_ballistics_db_ = 0.0f;
+    SNRSource snr_ballistics_source_ = SNRSource::NONE;
+    float snr_ballistics_last_raw_db_ = 0.0f;  // last raw sample folded into the EMA
+    bool snr_ballistics_have_raw_ = false;
+    int snr_ballistics_frame_ = -1;            // ImGui frame of the last EMA advance
+
     // Operate mode state
     char tx_text_buffer_[256] = "Hello from ProjectUltra!";
     std::deque<std::string> rx_log_;
@@ -333,6 +346,11 @@ private:
     void renderOperateTab();
     void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
                                     const protocol::ConnectionStats& conn_stats);
+    // Apply S-meter ballistics (EMA smooth + hold-across-gaps) to the operator SNR meter
+    // while connected; pass the raw reading through unchanged when idle. Advances the EMA
+    // at most once per ImGui frame and only on a NEW measurement, so the per-burst sample
+    // (held constant between bursts) is smoothed instead of snapping. Display-layer only.
+    OperatorSNRDisplay updateSnrBallistics(const OperatorSNRDisplay& raw, bool connected);
     void initAudio();
     void initOtaAudio();
     void stopOtaAudio();
