@@ -117,6 +117,19 @@ struct OFDMDemodulator::Impl {
     mutable float last_pilot_frequency_cv = 0.0f;
     mutable float last_pilot_temporal_cv = 0.0f;
     mutable float last_pilot_symbol_mean_cv = 0.0f;
+    // NOTE: the Doppler-coherence (Good/Moderate) estimator is hosted in the StreamingDecoder,
+    // NOT here — burst transport rebuilds this demodulator every group, which would wipe the
+    // pool. The decoder feeds it one per-frame |H|^2 snapshot from getLastLTSChannelMagnitude().
+    // See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
+
+    // Wiener correlation-model parameters. Default to the env-aware values (robustDopplerHz/
+    // robustDelaySpreadS, Moderate-HF 0.5 Hz / 1.0 ms). When the decoder has a valid Doppler-
+    // coherence verdict it pushes the channel-class-derived values here (Good => 0.1 Hz / 0.5 ms,
+    // less pessimistic forgetting), closing ADAPTIVITY_AUDIT Case #2. override_active_ false =>
+    // use the env-aware default (preserves ULTRA_WIENER_* knobs).
+    bool wiener_params_override_active_ = false;
+    float wiener_doppler_hz_override_ = 0.5f;
+    float wiener_delay_spread_s_override_ = 1.0e-3f;
 
     // 2026-05-28: runtime LDPC codeword block size. Default 648 (Z=27 legacy).
     // Set to 1944 via OFDMDemodulator::setActiveLDPCBlockSize when a burst

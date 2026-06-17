@@ -208,6 +208,10 @@ public:
     virtual float getLastLTSChannelMagnitude() const { return 1.0f; }
     virtual float getLastLTSResidualCFOHz() const { return 0.0f; }
 
+    // Push measured Wiener correlation-model params (Doppler Hz / delay spread s) from the
+    // channel-class verdict (OFDM only; non-OFDM modes ignore). See the design doc.
+    virtual void setWienerChannelParams(float /*doppler_hz*/, float /*delay_spread_s*/) {}
+
     // Check if channel appears to be fading
     virtual bool isFading() const { return getFadingIndex() > 0.65f; }
 

@@ -669,6 +669,17 @@ float OFDMDemodulator::getLastPilotSymbolMeanCV() const {
     return impl_->last_pilot_symbol_mean_cv;
 }
 
+void OFDMDemodulator::setWienerChannelParams(float doppler_hz, float delay_spread_s) {
+    // Sanity-bound to the same ranges the env knobs accept; ignore implausible values.
+    if (doppler_hz > 0.0f && doppler_hz < 10.0f &&
+        delay_spread_s > 0.0f && delay_spread_s < 0.01f) {
+        impl_->wiener_doppler_hz_override_ = doppler_hz;
+        impl_->wiener_delay_spread_s_override_ = delay_spread_s;
+        impl_->wiener_params_override_active_ = true;
+    }
+}
+
+
 float OFDMDemodulator::getLastLTSSignalPower() const {
     return impl_->last_lts_signal_power;
 }

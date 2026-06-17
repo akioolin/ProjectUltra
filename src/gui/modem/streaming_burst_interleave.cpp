@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <limits>
@@ -312,11 +313,59 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         }
         next_rms = std::sqrt(next_rms / check_len);
     }
-    constexpr float BURST_ERASURE_RMS_THRESHOLD = 0.015f;
-    if (next_rms < BURST_ERASURE_RMS_THRESHOLD) {
-        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f), inserting erasure",
+    // Calibration instrumentation (ULTRA_BURST_RMS_DIAG): emit per-frame the gate inputs
+    // for EVERY collected frame (kept and erased) so the relative-gate threshold can be set
+    // from the measured kept-vs-dead separation instead of an assumed constant.
+    static const bool kBurstRmsDiag = [] {
+        const char* e = std::getenv("ULTRA_BURST_RMS_DIAG");
+        return e && e[0] == '1';
+    }();
+    if (kBurstRmsDiag) {
+        const float nf = sync_controller_.ring_.noise_floor_;
+        LOG_MODEM(INFO,
+                  "[%s] burst-rms-diag frame=%zu/%d next_rms=%.5f anchor_rms=%.5f "
+                  "noise_floor=%.5f next/anchor=%.3f next/noise=%.2f",
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size,
+                  next_rms, burst_anchor_rms_, nf,
+                  burst_anchor_rms_ > 0.0f ? next_rms / burst_anchor_rms_ : 0.0f,
+                  nf > 0.0f ? next_rms / nf : 0.0f);
+    }
+    // Erasure gate, operating-level-RELATIVE (replaces a fixed absolute 0.015 broadband-RMS
+    // floor). The old absolute value implicitly meant "~25 dB below the typical SIM anchor
+    // (~0.27 RMS)". On a lower-RX-level channel (real HF, a peak-limited/cheap TX) the whole
+    // burst rides several dB lower, so a fixed 0.015 becomes only a few dB below the anchor
+    // and erases NORMALLY-faded, RECOVERABLE data frames. Measured on IONOS MPG (pi5_full.log):
+    // the chirp anchor (frame 1) decodes but data frames 2-6 are erased at RMS 0.004-0.0145
+    // every group -> all-zero-LLR -> "header invalid" -> ARQ retransmit storm -> stall, while
+    // the IDENTICAL transfer passes in sim where the anchor is ~0.27 and the same frames ride
+    // ~0.10-0.30. Scaling the gate off THIS group's anchor RMS (chirp-dominated, ~constant-
+    // envelope, the most stable per-group RX-level reference) tracks the operating point.
+    // k = 0.055 reproduces the historical 0.015 at the sim anchor 0.27 (=> zero sim regression,
+    // verified) and scales down with the RX level; a small absolute floor still erases an
+    // essentially-dead/missing frame in the degenerate (uncaptured/near-zero) anchor case
+    // without re-imposing the absolute-level bug. This is the per-group-adaptive form of the
+    // gate; the cheap-card per-carrier decodability of the now-KEPT weak frames is a separate
+    // lever (see docs/KNOWN_BUGS.md BUG-IONOS-PI5-CHEAP-DAC / per-carrier LLR work).
+    constexpr float kBurstErasureAnchorFrac = 0.055f;  // ~25 dB below the group anchor
+    constexpr float kBurstErasureAbsFloor = 0.005f;    // essentially-silence backstop
+    // ULTRA_BURST_ERASURE_ABSOLUTE=1 forces the legacy fixed 0.015 gate (A/B harness for the
+    // relative-gate benefit; default uses the operating-level-relative gate).
+    static const bool kBurstErasureAbsolute = [] {
+        const char* e = std::getenv("ULTRA_BURST_ERASURE_ABSOLUTE");
+        return e && e[0] == '1';
+    }();
+    const float erase_thresh =
+        kBurstErasureAbsolute
+            ? 0.015f
+        : (std::isfinite(burst_anchor_rms_) && burst_anchor_rms_ > 0.0f)
+            ? std::max(kBurstErasureAnchorFrac * burst_anchor_rms_, kBurstErasureAbsFloor)
+            : 0.015f;  // no anchor captured (should not happen mid-group) -> legacy absolute
+    if (next_rms < erase_thresh) {
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f < %.4f "
+                  "[%.3f*anchor %.4f]), inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
-                  burst_group_size, next_rms);
+                  burst_group_size, next_rms, erase_thresh,
+                  kBurstErasureAnchorFrac, burst_anchor_rms_);
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);

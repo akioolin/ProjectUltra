@@ -206,6 +206,9 @@ public:
     // Set channel quality including fading detection
     void setChannelQuality(float snr_db, float fading_index,
                            SNRSource source = SNRSource::NONE);
+    // Set the OFDM Doppler-coherence verdict (Good/Moderate discriminator), measured
+    // separately from fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
+    void setChannelCoherence(float coherence_score, bool valid);
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
 

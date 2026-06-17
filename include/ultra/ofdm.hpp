@@ -174,6 +174,11 @@ public:
     float getLastLTSChannelMagnitude() const;
     float getLastLTSResidualCFOHz() const;
 
+    // Override the Wiener correlation-model parameters (Doppler Hz / delay spread s) from a
+    // measured channel-class verdict (ADAPTIVITY_AUDIT Case #2). Until set, the env-aware
+    // Moderate-HF default is used. The StreamingDecoder pushes the coherence-derived values.
+    void setWienerChannelParams(float doppler_hz, float delay_spread_s);
+
     // RX-local carrier erasure is only LDPC-safe for multi-codeword OFDM
     // frames. Callers that know they are decoding a 1-CW control frame must
     // leave this disabled.

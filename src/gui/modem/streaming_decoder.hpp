@@ -35,6 +35,7 @@
 
 #include "waveform/waveform_interface.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
+#include "ofdm/doppler_coherence_estimator.hpp"
 #include "idle_noise_snr_estimator.hpp"
 #include "ultra/dsp.hpp"
 #include "waveform/waveform_factory.hpp"
@@ -98,6 +99,9 @@ struct DecodeResult {
     float pilot_symbol_mean_cv = 0.0f;
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
+    float doppler_coherence_score = 0.0f;  // |H|^2 autocorr @~1s lag; high=Good slow fading
+    float doppler_hz = 0.0f;               // RMS Doppler spread (Hz), regression-derived
+    bool doppler_coherence_valid = false;  // enough pooled data for a trustworthy verdict
     float ping_training_rms = 0.0f;
     float ping_data_rms = 0.0f;
     float ping_data_to_training_ratio = 0.0f;
@@ -365,6 +369,14 @@ public:
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
+
+    // Channel coherence-TIME (Doppler) discriminator: separates Good (slow fading, high
+    // score) from Moderate (fast, low score) where fading_index is blind. Trust the score
+    // only when getLastDopplerCoherenceValid() is true (enough pooled data); else fall back
+    // to fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
+    float getLastDopplerCoherenceScore() const { return last_doppler_coherence_score_.load(); }
+    float getLastMeasuredDopplerHz() const { return last_doppler_hz_.load(); }
+    bool getLastDopplerCoherenceValid() const { return last_doppler_coherence_valid_.load(); }
 
     // Get last residual-derived OFDM in-band SNR estimate. Returns false
     // until an OFDM LTS/pilot residual has landed.
@@ -654,6 +666,23 @@ private:
     std::atomic<bool> audio_activity_{false};
     std::atomic<uint64_t> audio_activity_events_{0};
 
+    // RX operating-level AGC (ULTRA_RX_AGC, default off). A SLOW, AMPLIFY-ONLY normalizer that
+    // raises a low received operating level toward the modem reference so the absolute-amplitude
+    // thresholds (burst erasure gate, sync RMS floor, CCA quiet gate) work regardless of gain
+    // staging / channel attenuation. Tracks the SIGNAL level over seconds (gated on activity so it
+    // never chases idle noise or fade nulls), engages only below a deadband (so a normally-leveled
+    // signal — every TX-normalized sim run — is an exact no-op), is slewed slowly so the gain never
+    // moves within a burst (which would flatten fading / corrupt the constellation), and only ever
+    // amplifies (a hot signal already clears every low threshold). Applied to the ring-buffer path
+    // only; the §15 tone-burst ACK monitor stays on raw audio. Single audio thread → no lock needed.
+    float agc_level_est_ = 0.5f;    // smoothed active-signal broadband RMS. Init HIGH so the
+                                    // amplify-only gain never engages until the EMA has converged
+                                    // DOWN and confirmed a genuinely low operating level (a normal-
+                                    // level sim run stays above the engage point → exact no-op; a
+                                    // transient noise blip can't trigger spurious amplification)
+    float agc_gain_ = 1.0f;         // current applied gain (slewed; always >= 1)
+    uint64_t agc_log_counter_ = 0;  // throttle the engaged-gain log
+
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;
@@ -716,6 +745,13 @@ private:
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<float> last_fading_index_{0.0f};
+    mutable std::atomic<float> last_doppler_coherence_score_{0.0f};
+    mutable std::atomic<float> last_doppler_hz_{0.0f};
+    mutable std::atomic<bool> last_doppler_coherence_valid_{false};
+    // Good/Moderate discriminator, HOSTED HERE (persists across the per-group OFDM demodulator
+    // recreation that burst transport performs). Fed one per-frame |H|^2 snapshot from the
+    // OFDM LTS channel magnitude in populateDecodeMetrics. See the design doc.
+    mutable DopplerCoherenceEstimator doppler_coherence_;
     // (§7 C-FD-1: pre_correction_cfo_ moved into frame_demodulator_ — read via preCorrectionCfo().)
     uint64_t overflow_events_ = 0;
 
@@ -749,6 +785,10 @@ private:
     size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
     float burst_snr_ = 0.0f;             // Chirp sync-quality score
     float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
+    float burst_anchor_rms_ = 0.0f;      // group anchor (chirp-dominated, low-PAPR) sample
+                                         // RMS — the relative-erasure-gate reference; tracks
+                                         // the per-group RX operating level so the gate is
+                                         // not pinned to an absolute sim-reference amplitude
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
     int burst_group_size_ = 8;
     static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin

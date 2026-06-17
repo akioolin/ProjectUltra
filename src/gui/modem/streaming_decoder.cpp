@@ -293,10 +293,10 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     // (chirp + data) should produce one low->high then one high->low. Compare
     // these to successful sync events to know if frames are arriving at the
     // soundcard but the chirp-search isn't catching them.
+    float sum_sq = 0.0f;
+    for (size_t i = 0; i < count; ++i) sum_sq += samples[i] * samples[i];
+    const float chunk_rms = std::sqrt(sum_sq / static_cast<float>(count));
     {
-        float sum_sq = 0.0f;
-        for (size_t i = 0; i < count; ++i) sum_sq += samples[i] * samples[i];
-        const float chunk_rms = std::sqrt(sum_sq / static_cast<float>(count));
         constexpr float ACTIVITY_GATE_HIGH = 0.030f;  // signal threshold
         constexpr float ACTIVITY_GATE_LOW  = 0.010f;  // silence threshold
         bool was_active = audio_activity_.load(std::memory_order_relaxed);
@@ -311,6 +311,50 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         } else if (was_active && chunk_rms < ACTIVITY_GATE_LOW) {
             audio_activity_.store(false, std::memory_order_relaxed);
             // No log on departure to keep noise down — "arrived" events are enough.
+        }
+    }
+
+    // RX operating-level AGC (ULTRA_RX_AGC, default off) — see member docs in streaming_decoder.hpp.
+    // SLOW, AMPLIFY-ONLY: raises a low operating level toward the modem reference so the downstream
+    // absolute gates work; a normally-leveled signal (every TX-normalized sim run) is an exact no-op.
+    // Applied to the ring path only (the §15 ACK monitor above already consumed raw audio).
+    static const bool kRxAgc = [] {
+        const char* e = std::getenv("ULTRA_RX_AGC");
+        return e && e[0] == '1';
+    }();
+    const float* write_samples = samples;
+    std::vector<float> agc_scaled;
+    if (kRxAgc) {
+        constexpr float kAgcTargetRms   = 0.176f;  // measured sim active-chunk broadband operating
+                                                   // level (the point the absolute gates are
+                                                   // calibrated at); deadband keeps it an exact no-op
+        constexpr float kAgcActivityRms = 0.030f;  // update the level estimate only when signal present
+        constexpr float kAgcLevelAlpha  = 0.02f;   // slow level EMA (tracks over seconds of active audio)
+        constexpr float kAgcGainSlew    = 0.03f;   // slow gain slew (never jumps within a burst)
+        constexpr float kAgcEngageRatio = 3.0f;    // only amplify when level < target/3 (i.e. > 9.5 dB
+                                                   // below reference) — a SEVERE deficit where the
+                                                   // absolute gates genuinely break. This excludes the
+                                                   // modem's lower MC-DPSK handshake operating level
+                                                   // (~0.09 in sim → ratio ~1.9 < 3 → exact no-op) while
+                                                   // still catching a low channel like IONOS (~0.05)
+        constexpr float kAgcGainMax     = 6.0f;    // clamp correction to ~+15.6 dB
+        if (chunk_rms > kAgcActivityRms) {
+            agc_level_est_ =
+                (1.0f - kAgcLevelAlpha) * agc_level_est_ + kAgcLevelAlpha * chunk_rms;
+        }
+        const float ratio = kAgcTargetRms / std::max(agc_level_est_, 1e-4f);
+        const float target_gain =
+            (ratio > kAgcEngageRatio) ? std::clamp(ratio, 1.0f, kAgcGainMax) : 1.0f;
+        agc_gain_ = (1.0f - kAgcGainSlew) * agc_gain_ + kAgcGainSlew * target_gain;
+        if (agc_gain_ > 1.001f) {
+            agc_scaled.assign(samples, samples + count);
+            for (float& s : agc_scaled) s *= agc_gain_;
+            write_samples = agc_scaled.data();
+            if ((agc_log_counter_++ % 64) == 0) {
+                LOG_MODEM(INFO, "[%s] RX-AGC engaged: level_est=%.4f gain=%.2f (+%.1f dB)",
+                          log_prefix_.c_str(), agc_level_est_, agc_gain_,
+                          20.0f * std::log10(std::max(agc_gain_, 1e-6f)));
+            }
         }
     }
 
@@ -367,7 +411,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         }
     }
 
-    sync_controller_.ring_.writeSamplesToRingLocked(samples, count);
+    sync_controller_.ring_.writeSamplesToRingLocked(write_samples, count);
 
     sync_controller_.ring_.total_fed_ += count;
 
@@ -1100,11 +1144,17 @@ void StreamingDecoder::reset() {
     }
 
     sync_controller_.ring_.noise_floor_ = 0.001f;
+    agc_level_est_ = 0.5f;  // RX-AGC: re-arm HIGH → gain 1 (no-op) until a low level is confirmed
+    agc_gain_ = 1.0f;
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);
     cfo_tracker_.store(0.0f);
     last_fading_index_.store(0.0f);
+    doppler_coherence_.reset();  // Good/Moderate discriminator: fresh per connection/reset
+    last_doppler_coherence_score_.store(0.0f);
+    last_doppler_hz_.store(0.0f);
+    last_doppler_coherence_valid_.store(false);
 }
 
 void StreamingDecoder::stop() {

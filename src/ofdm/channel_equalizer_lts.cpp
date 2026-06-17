@@ -85,9 +85,34 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     if (noise_reference_only) {
         const float corrected_noise_power =
             std::max(noise_power_reference_scale, 1.0e-6f) * noise_power;
-        const float broadband_snr_db = 10.0f * std::log10(
-            static_cast<float>(config.fft_size * sim::kModemReferencePower) /
+        // LEVEL-INDEPENDENT calibration. The old form used a FIXED
+        //   broadband_snr = fft_size * kModemReferencePower / corrected_noise
+        // which ASSUMES the received signal sits at the sim's calibrated reference power.
+        // On real hardware the RX operating level differs from that reference (e.g. ~12 dB
+        // low on IONOS), so it credited signal power the signal lacked and over-read SNR by
+        // exactly that deficit. Instead, take the MEASURED per-carrier signal/noise ratio
+        // (signal_power is the LTS |H|² already passed in; both terms scale with the operating
+        // level, so the ratio is invariant) and apply the SAME constant measurement-gain
+        // offset the fitted-gain path below uses to reach the in-band operator convention.
+        // In the sim (signal at reference, |H|² ≈ output_scale²·0.25·cp) this is unchanged.
+        const float snr_per_carrier_db = 10.0f * std::log10(
+            std::max(signal_power, 1.0e-12f) /
             std::max(corrected_noise_power, 1.0e-12f));
+        const double carrier_signal_power =
+            static_cast<double>(config.output_scale) *
+            static_cast<double>(config.output_scale) * 0.25;
+        const double cp_reference =
+            static_cast<double>(config.fft_size + config.getCyclicPrefix()) /
+            static_cast<double>(config.fft_size);
+        const double measurement_gain =
+            (carrier_signal_power /
+             (static_cast<double>(config.fft_size) * sim::kModemReferencePower)) *
+            cp_reference;
+        if (!(measurement_gain > 0.0)) {
+            return;
+        }
+        const float broadband_snr_db =
+            snr_per_carrier_db - 10.0f * std::log10(static_cast<float>(measurement_gain));
         const float in_band_snr_db =
             sim::broadbandToInBandSnrDb(broadband_snr_db);
 

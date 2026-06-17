@@ -203,8 +203,13 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             remote_pref != WaveformMode::AUTO ||
             config_.preferred_mode != WaveformMode::AUTO ||
             narrowband_override_ != WaveformMode::AUTO;
+        // Rate/channel decisions use the Doppler-coherence-refined fading index: equals the
+        // raw fading_index until enough OFDM data has pooled (so this CONNECT-time pick, with
+        // no prior OFDM data, is unchanged), then honors the Good/Moderate coherence verdict.
+        const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
+            fading_index_, coherence_score_, coherence_valid_);
         const auto selected_rung = rate_selection_snr_valid
-            ? connection_policy::selectLadderRung(snr_db, fading_index_)
+            ? connection_policy::selectLadderRung(snr_db, rate_fading)
             : connection_policy::ladderRungForId(LadderRungId::ROBUST);
         const bool ladder_selected =
             rate_selection_snr_valid &&
@@ -237,7 +242,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // If waveform is AUTO, select based on SNR/fading first
         if (negotiated_mode_ == WaveformMode::AUTO) {
-            auto rec = recommendWaveformAndRate(snr_db, fading_index_);
+            auto rec = recommendWaveformAndRate(snr_db, rate_fading);
             negotiated_mode_ = rec.waveform;
             LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on SNR=%.1f (%s), fading=%.2f",
                       waveformModeToString(negotiated_mode_), snr_db,
@@ -246,7 +251,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Get recommended mode based on SNR, fading AND the negotiated waveform
         // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
-        recommendDataModeForWaveform(snr_db, snr_source, fading_index_,
+        recommendDataModeForWaveform(snr_db, snr_source, rate_fading,
                                      negotiated_mode_, rec_mod, rec_rate);
 
         LadderRungId rung_id = LadderRungId::UNKNOWN;
@@ -261,7 +266,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
         // Start one step more robust when channel is borderline.
         if (isOFDMMode(negotiated_mode_)) {
-            CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate, rec_mod);
+            CodeRate capped = capInitialOFDMRate(snr_db, rate_fading, rec_rate, rec_mod);
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                           codeRateToString(rec_rate), codeRateToString(capped), snr_db,
@@ -909,7 +914,9 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
               snr, snrSourceToString(measured_snr_source_), fading_index_,
               connection_policy::fadingLabel(fading_index_));
 
-    auto rec = recommendWaveformAndRate(snr, fading_index_);
+    auto rec = recommendWaveformAndRate(
+        snr, connection_policy::coherenceAdjustedFadingIndex(fading_index_, coherence_score_,
+                                                             coherence_valid_));
 
     // Check if selected mode is supported by both sides
     if (selected == rec.waveform &&

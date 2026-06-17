@@ -1238,8 +1238,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         const auto cfo_update = cfo_tracker_.ingestPilotResidual(
             frame_demodulator_.preCorrectionCfo(), residual_cfo, current_cfo, /*clamp_drift=*/true);
         burst_cfo_ = cfo_update.accepted_cfo;
+        const float anchor_rms = sampleRMS(frame_buffer);
+        burst_anchor_rms_ = anchor_rms;  // relative-erasure-gate reference for this group
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
-                                   sampleRMS(frame_buffer),
+                                   anchor_rms,
                                    frame_demodulator_.preCorrectionCfo(), residual_cfo,
                                    cfo_update.accepted_cfo);
 

@@ -16,6 +16,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/timing_profiler.hpp"
+#include "protocol/connection_policy.hpp"  // kCoherence{Good,Moderate}Threshold (single source of truth)
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -63,6 +64,39 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         result.pilot_temporal_cv = waveform_->getLastPilotTemporalCV();
         result.pilot_symbol_mean_cv = waveform_->getLastPilotSymbolMeanCV();
         result.lts_residual_cfo_hz = waveform_->getLastLTSResidualCFOHz();
+        // Good/Moderate discriminator: feed one per-frame |H|^2 snapshot (the LTS channel
+        // magnitude) into the decoder-hosted Doppler-coherence estimator. populateDecodeMetrics
+        // runs ~once per decoded OFDM frame, so the snapshot cadence IS the inter-frame spacing
+        // (~1-2 s) — the lag at which Good (slow fading) and Moderate (fast) diverge. Hosting it
+        // here (not in the demodulator) survives the per-group demodulator recreation.
+        const float lts_mag = waveform_->getLastLTSChannelMagnitude();
+        if (std::isfinite(lts_mag) && lts_mag > 0.0f) {
+            doppler_coherence_.addSnapshot(lts_mag * lts_mag);
+        }
+        result.doppler_coherence_score = doppler_coherence_.coherenceScore();
+        result.doppler_hz = doppler_coherence_.dopplerHz();
+        result.doppler_coherence_valid = doppler_coherence_.valid();
+        last_doppler_coherence_score_.store(result.doppler_coherence_score);
+        last_doppler_hz_.store(result.doppler_hz);
+        last_doppler_coherence_valid_.store(result.doppler_coherence_valid);
+        if (result.doppler_coherence_valid) {
+            const float sc = result.doppler_coherence_score;
+            const bool confident_good = sc >= protocol::connection_policy::kCoherenceGoodThreshold;
+            const bool confident_mod = sc <= protocol::connection_policy::kCoherenceModerateThreshold;
+            const char* cls = confident_good ? "GOOD"
+                                             : (confident_mod ? "MODERATE/POOR" : "uncertain");
+            // ADAPTIVITY_AUDIT Case #2: de-pessimize the Wiener correlation model ONLY on a
+            // confident Good (slower 0.1 Hz / 0.5 ms keeps more pilot history -> better
+            // estimate). Uncertain / Moderate keep the env-aware Moderate-HF default — and the
+            // per-group demod rebuild resets the override, so we never strand a stale Good.
+            if (confident_good) waveform_->setWienerChannelParams(0.1f, 0.5e-3f);
+            LOG_MODEM(INFO,
+                      "[%s] Doppler coherence: score=%.3f doppler=%.3f Hz [%s] (snaps=%zu) "
+                      "vs fading_index=%.3f%s",
+                      log_prefix_.c_str(), sc, result.doppler_hz, cls,
+                      doppler_coherence_.snapshotCount(), result.lts_fading_index,
+                      confident_good ? " (Wiener->Good 0.1Hz/0.5ms)" : "");
+        }
         result.snr_source = SNRSource::SYNC_QUALITY;
         if (result.has_ofdm_broadband_snr_db) {
             result.snr_db = result.ofdm_broadband_snr_db;

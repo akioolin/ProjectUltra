@@ -926,13 +926,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         char buf[260];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             snprintf(buf, sizeof(buf),
-                     "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB (wire_peer), peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] MC-DPSK 8 carriers %s (link RX SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
                      codeRateToString(rate), static_cast<int>(snr_db),
                      peer_fading_text,
                      local_fading, local_quality);
         } else {
             snprintf(buf, sizeof(buf),
-                     "[MODE] %s %s %s (peer SNR=%d dB (wire_peer), peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] %s %s %s (link RX SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
                      static_cast<int>(snr_db), peer_fading_text,
                      local_fading, local_quality);
@@ -2956,18 +2956,53 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
         }
 
         std::vector<float> sim_samples(samples.begin(), samples.end());
-        const auto measurement =
-            ultra::sim::normalizeTxBurstToReference(sim_samples);
-        if (measurement.peak_warning || measurement.peak_clip_error) {
+        // SIMULATOR FIDELITY (ULTRA_SIM_PAPR_PENALTY, default off): by default the sim TX
+        // RMS-normalizes every burst to the fixed in-band reference, so high-PAPR coherent
+        // OFDM data frames ride at the same average power as the low-PAPR chirp/control
+        // frames and the OTASim reference-sized noise floor never sees the peak-limited-PA
+        // penalty a real radio cannot avoid. With the knob on we drive the sim TX through
+        // the SAME peak normalization the hardware path uses (peak -> settings_.tx_drive):
+        // one DAC/ALC gain across the whole continuous burst, so a ~14-15 dB-PAPR data frame
+        // delivers only (tx_drive/PAPR) average power. The noise stays pinned to the fixed
+        // reference, so the data frames' effective SNR drops by exactly their PAPR back-off
+        // (~10.26 dB measured for coherent QPSK R2/3) — reproducing the IONOS burst stall
+        // rig-free. Knob off => byte-identical to today.
+        static const bool kSimPaprPenalty = [] {
+            const char* e = std::getenv("ULTRA_SIM_PAPR_PENALTY");
+            return e && e[0] == '1';
+        }();
+        if (kSimPaprPenalty) {
+            // ULTRA_SIM_TX_PEAK optionally overrides the peak target (default = the operator
+            // tx_drive). Dialing it low (e.g. 0.12) reproduces the LOW RX operating level of a
+            // weak/cheap TX (real IONOS Pi5 card) so the absolute-vs-relative erasure gate can
+            // be A/B'd rig-free; clamped into the hardware peak range by normalizeTxBurstForHardware.
+            static const float kSimTxPeak = [] {
+                const char* e = std::getenv("ULTRA_SIM_TX_PEAK");
+                return (e && *e) ? static_cast<float>(std::atof(e)) : -1.0f;
+            }();
+            const float peak_target = (kSimTxPeak > 0.0f) ? kSimTxPeak : settings_.tx_drive;
+            const auto hw = ultra::sim::normalizeTxBurstForHardware(sim_samples, peak_target);
+            const auto post = ultra::sim::measureTxBurstInBandRms(sim_samples);
             LOG_WARN("AUDIO",
-                     "OTASim TX burst normalization peak_after_gain=%.3f "
-                     "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
-                     measurement.peak_after_gain,
-                     measurement.peak_clip_samples,
-                     measurement.gain_to_reference,
-                     measurement.active_samples,
-                     measurement.in_band_rms,
-                     measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
+                     "OTASim TX PAPR-penalty ON: peak_before=%.3f peak_after=%.3f "
+                     "gain=%.4f in_band_rms=%.6f (%.2f dB vs reference 0.30483)",
+                     hw.peak_before_gain, hw.peak_after_gain, hw.gain_to_target,
+                     post.in_band_rms,
+                     20.0f * std::log10(std::max(post.in_band_rms, 1e-6f) / 0.30482664f));
+        } else {
+            const auto measurement =
+                ultra::sim::normalizeTxBurstToReference(sim_samples);
+            if (measurement.peak_warning || measurement.peak_clip_error) {
+                LOG_WARN("AUDIO",
+                         "OTASim TX burst normalization peak_after_gain=%.3f "
+                         "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
+                         measurement.peak_after_gain,
+                         measurement.peak_clip_samples,
+                         measurement.gain_to_reference,
+                         measurement.active_samples,
+                         measurement.in_band_rms,
+                         measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
+            }
         }
 
         const size_t tx_duration_ms = (sim_samples.size() * 1000) / 48000;

@@ -255,8 +255,11 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
                 static_cast<float>(symbol_index),
                 kWienerMaxTimeObs,
                 [&](float delta_symbols) {
+                    const float doppler = wiener_params_override_active_
+                                              ? wiener_doppler_hz_override_
+                                              : robustDopplerHz();
                     return ofdm_wiener::timeCorrelation(
-                        delta_symbols, symbol_period_s, robustDopplerHz());
+                        delta_symbols, symbol_period_s, doppler);
                 });
             if (estimate.valid) {
                 wiener_time_estimate_[logical] = estimate.value;
@@ -299,8 +302,11 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
         static_cast<float>(logical_carrier),
         kWienerMaxFreqObs,
         [&](float delta_logical) {
+            const float delay = wiener_params_override_active_
+                                    ? wiener_delay_spread_s_override_
+                                    : robustDelaySpreadS();
             return ofdm_wiener::frequencyCorrelation(
-                delta_logical, carrier_spacing_hz, robustDelaySpreadS());
+                delta_logical, carrier_spacing_hz, delay);
         });
     if (!freq_estimate.valid) {
         if (out_error_var) {
@@ -543,6 +549,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // Use soft_bits.empty() to detect first DATA symbol (snr_symbol_count may be > 0 from LTS)
     bool is_first_data_symbol = soft_bits.empty();
 
+
     float alpha;
     if (is_first_data_symbol) {
         alpha = 1.0f;  // First data symbol: use pilot estimate directly (channel changed since LTS)
@@ -561,6 +568,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         h_ls_all[i] = rx / tx;
         h_sum += h_ls_all[i];
     }
+
 
     // Carrier phase recovery: compute average phase offset on first symbol
     // Skip for coherent modes (QPSK, BPSK) — the LTS provides accurate H that includes

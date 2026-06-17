@@ -176,6 +176,41 @@ inline ChannelClassification classifyChannel(float fading) {
     return ChannelClassification::POOR;
 }
 
+// Good/Moderate discriminator constants (docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md).
+// fading_index (fade DEPTH) cannot tell Good from Moderate; the Doppler coherence score
+// (per-frame pilot |H|^2 autocorrelation @~1.5 s inter-frame cadence) can. It refines ONLY
+// the Good<->Moderate boundary when valid; AWGN and Poor stay driven by fade depth.
+//
+// TWO-THRESHOLD DEAD ZONE (multi-seed GUI calibration, 2026-06-16). coherenceScore is the
+// CUMULATIVE MEAN of the per-frame lag-1 autocorrelation (a single 40-snapshot read has ~0.16
+// SE — Moderate single-reads scatter to ~0.45 — too noisy; the transfer mean separates cleanly).
+// 12-seed×2-channel GUI sweep (cumulative-mean): confident-Good (>= kCoherenceGoodThreshold)
+// = 11/12 Good (min 0.50), 0/12 Moderate; confident-Moderate (<= kCoherenceModerateThreshold)
+// = 11/12 Moderate (max 0.30), 0/12 Good. The in-between dead zone DEFERS to the raw
+// fading_index (conservative status quo) and absorbed the 2 marginal seeds (Good 0.421,
+// Moderate 0.359). ZERO dangerous misreads: no Moderate reached the Good threshold (max 0.359
+// < 0.45, margin 0.09), so "Moderate read as Good -> over-high rate" cannot happen on this data.
+inline constexpr float kCoherenceGoodThreshold = 0.45f;      // confident Good
+inline constexpr float kCoherenceModerateThreshold = 0.30f;  // confident Moderate
+inline constexpr float kRepresentativeGoodFadingIndex = 0.40f;      // mid-Good (< 0.65)
+inline constexpr float kRepresentativeModerateFadingIndex = 0.85f;  // mid-Moderate (0.65-1.10)
+
+// Returns a fading_index reflecting the coherence verdict on the Good<->Moderate axis when
+// the coherence is valid AND confident; otherwise the raw fading_index (so CONNECT-time —
+// before any OFDM data has pooled — and the uncertain dead zone are unchanged = status quo).
+// AWGN/Poor are never overridden.
+inline float coherenceAdjustedFadingIndex(float fading_index, float coherence_score,
+                                          bool coherence_valid) {
+    if (!coherence_valid) return fading_index;
+    const ChannelClassification base = classifyChannel(fading_index);
+    if (base != ChannelClassification::GOOD && base != ChannelClassification::MODERATE) {
+        return fading_index;
+    }
+    if (coherence_score >= kCoherenceGoodThreshold) return kRepresentativeGoodFadingIndex;
+    if (coherence_score <= kCoherenceModerateThreshold) return kRepresentativeModerateFadingIndex;
+    return fading_index;  // uncertain dead zone -> defer to the blind metric (conservative)
+}
+
 struct LadderRung {
     LadderRungId id = LadderRungId::UNKNOWN;
     const char* name = "Unknown";

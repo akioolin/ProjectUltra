@@ -1,6 +1,6 @@
 # Known Bugs
 
-Last updated: 2026-06-14
+Last updated: 2026-06-16
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
@@ -8,11 +8,42 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE: rate-change wipes the Good/Moderate coherence pool — precondition before enabling ULTRA_RATE_ADAPT
+- Status: **OPEN but GATED-INERT (no default-path impact).** Tracked by the 2026-06-16 four-tier
+  review of the Doppler-coherence discriminator (CHANGELOG 2026-06-16, design doc §11).
+- **What:** the discriminator is hosted in `StreamingDecoder` so it survives the per-group OFDM
+  demodulator recreation during a normal (fixed-rate) burst transfer — and it does (GUI-proven:
+  good 0.70 [GOOD] 27/27, moderate −0.11 [MODERATE/POOR] 78/78). BUT a MODE_CHANGE recreates more
+  than the demodulator; the coherence verdict reverts to the blind `fading_index` during the
+  ~30 s re-convergence window after a rate move.
+- **Why it doesn't bite today:** mid-stream rate moves originate only from the `ULTRA_RATE_ADAPT`
+  (default-OFF) machinery. At CONNECT the coherence is always invalid (no OFDM data pooled), so the
+  rate pick is byte-identical to today → zero default-path regression.
+- **Fix before enabling ULTRA_RATE_ADAPT:** persist `coherence_score_`/`coherence_valid_` across the
+  MODE_CHANGE (carry at the Connection layer, or keep the estimator pool across the rebuild), AND
+  route the CW-count/negotiate sites through `connection_policy::coherenceAdjustedFadingIndex`. See
+  `docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md` §11 follow-up #2.
+
 ### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
 - Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First
   Mac↔IONOS↔Pi5 bringup. After the CONNECT-decode code fix (CHANGELOG 2026-06-14), Mac→Pi5 completes
   (CONNECT decodes 4/4, Pi5 CONNECTED) but Pi5→Mac CONNECT_ACK never decodes → initiator never
   CONNECTED → no file transfer.
+- **UPDATE 2026-06-16 — when the handshake DOES complete (Mac→Pi5, MPG), the FILE TRANSFER stalls,
+  and the proximate mechanism is now isolated from the real receiver log (`/tmp/pi5_full.log`):**
+  the chirp anchor decodes but burst data frames 2–6 are ERASED every group at broadband RMS
+  0.0038–0.0145 (all under the absolute `BURST_ERASURE_RMS_THRESHOLD=0.015`) → all-zero-LLR group →
+  `header invalid` → ARQ retransmit → stall. The 0.015 gate was implicitly "~25 dB below the SIM
+  anchor (0.27)"; at the cheap card's ~6× lower RX operating level it became only ~5 dB below the
+  anchor and erased recoverable frames. **FIX A landed (UNCOMMITTED, see CHANGELOG 2026-06-16):** the
+  gate is now operating-level-RELATIVE (`max(0.055*anchor, 0.005)`), zero sim regression, keeps 16/20
+  of the erased frames on IONOS. **Hardware note (user, 2026-06-16): the MPG logs are the CLEAN Fe-Pi
+  HAT, not the old USB card** — so the deficit is codec-INDEPENDENT (high-PAPR data below the anchor +
+  lower RX operating level + Good fade nulls), and on a clean codec the KEPT frames should DECODE, so
+  FIX A is likely the actual fix (the cheap-card per-carrier-LLR / `CHEAP_CARD_ROBUSTNESS_PLAN.md` work
+  applies only to the old USB card). Re-test Mac→Pi5 MPG with `ULTRA_BURST_RMS_DIAG=1` to confirm the
+  anchor/level + that frames are KEPT and decode; if marginal, raise RX gain and/or use R2/3 (the
+  morning run negotiated the fragile R3/4). Decisive proof is rig-only.
 - **UPDATE 2026-06-15 — the "bad clock, swap the card" diagnosis was RE-EXAMINED and largely REFUTED;
   the real lever is carrier JITTER, and a software mitigation now recovers the slow-jitter regime.**
   In-sim impairment discrimination through the real encode→AWGN→decode path (`test_mcdpsk_clock_offset`,

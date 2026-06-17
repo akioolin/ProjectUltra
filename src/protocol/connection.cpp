@@ -175,10 +175,13 @@ Connection::Connection(const ConnectionConfig& config)
     // deletion follow-up). NOTE: burst is itself selective-repeat (GROUP_ACK carries
     // the 6-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
     // narrow/control; this is NOT "remove SR-ARQ".
-    // §14.36 Phase 5c: BER-driven per-block rate adaptation. Default OFF; opt in via
-    // ULTRA_ADAPTIVE_RATE=1. Only meaningful on the burst transport file path.
-    if (const char* ar = std::getenv("ULTRA_ADAPTIVE_RATE"); ar && ar[0] == '1') {
-        adaptive_rate_enabled_ = true;
+    // §14.36 Phase 5c: per-block decode-headroom quality feedback. Default ON for OBSERVABILITY
+    // (drives the GUI "Adapt:" bar + diagnostics on sim AND hardware); opt OUT with
+    // ULTRA_ADAPTIVE_RATE=0. The actual rate CHANGE is separately gated by rateAdaptationActive()
+    // (ULTRA_RATE_ADAPT, default off), so default-on here is pure visibility — no behavior change
+    // to the shipping rate path.
+    if (const char* ar = std::getenv("ULTRA_ADAPTIVE_RATE"); ar && ar[0] == '0') {
+        adaptive_rate_enabled_ = false;
     }
 
     // Wire up ARQ callbacks

@@ -574,6 +574,27 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(measure_ack_fer PRIVATE ultra_core ota_channel_core)
 
+    add_executable(papr_tx_measure
+        tools/papr_tx_measure.cpp
+        ${ULTRA_STREAMING_MODEM_SOURCES}
+    )
+    target_include_directories(papr_tx_measure PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(papr_tx_measure PRIVATE ultra_core ota_channel_core)
+
+    add_executable(channel_discriminator_probe
+        tools/channel_discriminator_probe.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/channel_discriminator_probe.cpp)
+    target_include_directories(channel_discriminator_probe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(channel_discriminator_probe PRIVATE ultra_core ota_channel_core)
+
     add_library(ultra_replay_lib STATIC
         src/replay/bundle_loader.cpp
         src/replay/event_timeline.cpp

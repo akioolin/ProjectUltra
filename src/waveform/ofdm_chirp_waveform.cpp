@@ -1049,6 +1049,12 @@ float OFDMChirpWaveform::getFadingIndex() const {
     return 0.0f;
 }
 
+void OFDMChirpWaveform::setWienerChannelParams(float doppler_hz, float delay_spread_s) {
+    if (demodulator_) {
+        demodulator_->setWienerChannelParams(doppler_hz, delay_spread_s);
+    }
+}
+
 float OFDMChirpWaveform::getLastPilotFrequencyCV() const {
     if (demodulator_) {
         return demodulator_->getLastPilotFrequencyCV();

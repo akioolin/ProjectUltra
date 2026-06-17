@@ -734,6 +734,11 @@ void ProtocolEngine::setChannelQuality(float snr_db, float fading_index,
     connection_.setChannelQuality(snr_db, fading_index, source);
 }
 
+void ProtocolEngine::setChannelCoherence(float coherence_score, bool valid) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setChannelCoherence(coherence_score, valid);
+}
+
 bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     const auto header = v2::parseHeader(data);

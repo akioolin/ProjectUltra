@@ -10,6 +10,215 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-16 — fix(snr): OFDM in-band SNR meter was absolute-referenced → over-read ~12 dB on hardware (UNCOMMITTED, IONOS-confirmed)
+
+**What was broken:** the OFDM in-band SNR meter (the `RX: in-band SNR` bar + `last_snr_db_estimate`)
+read **~31.8 dB on a real IONOS link set to 20 dB** — a ~12 dB over-read. The handshake SNR
+(`measured_snr_db_`, used for rate selection) read the correct ~20, so the two disagreed. Caught live
+by the operator (IONOS at 20 dB, meter at 31.8).
+
+**Root cause:** the `noise_reference_only` path in `updateLastSNREstimate`
+(`src/ofdm/channel_equalizer_lts.cpp`) computed
+`broadband_snr = fft_size · kModemReferencePower / corrected_noise` — using a **fixed reference signal
+power** (`kModemReferencePower`, the sim's calibrated normalized level) and only *measuring the noise*.
+The derivation is valid only because `SimulatedChannel` normalizes the signal to that reference; real
+hardware does not. On IONOS the RX operating level sits ~12 dB below the sim reference, so the meter
+**credited signal power the signal lacked** and over-read SNR by exactly the operating-level deficit.
+Canonical absolute-reference adaptivity violation (ADAPTIVITY_AUDIT class), same operating-level theme
+as the burst erasure gate and the RX AGC.
+
+**What changed:** the `noise_reference_only` branch now uses the **MEASURED** per-carrier signal/noise
+ratio (`signal_power` = the LTS `|H|²` already passed in by the caller; both terms scale with the
+operating level so the ratio is invariant) and applies the **same constant `measurement_gain` offset**
+the sibling fitted-gain path (line ~122) already uses to reach the in-band operator convention. This is
+LEVEL-INDEPENDENT: it reads the true SNR on sim and hardware alike. In the sim (signal at reference,
+`|H|² ≈ output_scale²·0.25·cp`) it is unchanged.
+
+**Test verification:**
+- SIM no-regress: `gui_qso_scenario.sh --channel good --snr-db 20`: OFDM in-band SNR meter reads
+  **median 20.0 dB** (n=63, 14.1–25.2 fade spread), RESULT=PASS GOODPUT=1710 — i.e. still reads the
+  correct value where the signal IS at the reference (units preserved).
+- HARDWARE-CONFIRMED: real Mac↔IONOS(MPG 20 dB)↔Pi5, both ends rebuilt — the in-band SNR bar now reads
+  **21.0 dB** (was 31.8), matching the IONOS setting + the handshake SNR; QPSK R3/4 file transfer
+  ARQ retx:0, 3278 bps.
+
+**Companion (same session):** the `[MODE]` GUI line relabeled `peer SNR (wire_peer)` → `link RX SNR`
+(`app.cpp:929,935`) — the value is the data-receiver's measured SNR (the auto-accept responder is the
+chooser, picking the rate from its OWN `measured_snr_db_` and shipping it in the CONNECT_ACK), so
+"peer" was misleading on the chooser; "link RX SNR" is correct on both stations. Still OPEN: the rate
+uses the EARLY handshake SNR (~20) not a settled-data estimate, and the OFDM-meter over-read previously
+masked this — R2/3-vs-R3/4 hinges on whether that handshake SNR lands ≥20.
+
+## 2026-06-16 — feat(rx): RX operating-level AGC (ULTRA_RX_AGC, default off) (UNCOMMITTED)
+
+**What / why:** companion to the relative erasure gate below. The RX path normalizes the *constellation*
+per-frame (equalizer LS/pilot `H`) but nothing normalizes the raw *operating level* before the
+absolute-amplitude gates (burst erasure 0.015, sync RMS floor, CCA quiet gate). So those gates are
+fragile to gain staging / channel attenuation — on a low-level link (real HF, IONOS) they fire wrong.
+This adds a real RX AGC: bring a low operating level up to the modem reference so every absolute gate
+works at once, instead of (or in addition to) making each threshold individually relative.
+
+**Design (`StreamingDecoder::feedAudio`, `streaming_decoder.cpp`):** a SLOW, AMPLIFY-ONLY, deadband
+normalizer applied to the ring-buffer path only — *after* the §15 tone-burst ACK monitor (the
+hardware-proven ACK path stays on raw audio) and before sync/gate/CCA.
+- Level estimate = EMA of the chunk broadband RMS, updated only when signal is present (activity gate)
+  so it never tracks idle noise or chases fade nulls. Time constant ≫ the ~4 s Good-fade coherence time.
+- Init HIGH (0.5) → the amplify-only gain stays 1.0 until the EMA converges DOWN and *confirms* a low
+  level (a normal run never engages; a noise blip can't trigger spurious gain).
+- Engages only at a SEVERE deficit (level < target/3 ≈ >9.5 dB below reference) — excludes the modem's
+  lower MC-DPSK handshake operating level (~0.09) so the normal case is an exact no-op; catches a low
+  channel (IONOS ~0.05). Gain slewed slowly (never jumps within a burst → never flattens fading), capped
+  at +15.6 dB.
+- **SNR-safe:** it scales received signal AND noise together → cannot change SNR, only the absolute level.
+- Complements the relative erasure gate (FIX A): FIX A gives the erasure path immediate per-group
+  robustness; the AGC restores the global level (over a few seconds) for the OTHER absolute thresholds.
+
+**Test verification (`gui_qso_scenario.sh` good@20 R2/3 seed42, GOODPUT in bps):**
+- NO-OP (the safety property): AGC OFF = **1710**, AGC ON = **1710**, 0 engagements, 0 erasures, RESULT=PASS
+  — byte-for-byte same goodput at the same seed ⇒ exact no-op at normal operating level.
+- MECHANISM: at a forced low operating level (`ULTRA_SIM_PAPR_PENALTY=1 ULTRA_SIM_TX_PEAK=0.18`) the AGC
+  tracks `level_est=0.037` and amplifies **+13.6 dB** back toward the 0.176 reference, 0 erasures (it
+  fails the transfer only on the sim's fixed-noise SNR confound, not the level — on real HW low-level +
+  good-SNR this is the win).
+- Default off ⇒ ctest / measure_ack_fer / all floors unchanged.
+
+**Honest scope (labeled prototype):** the modem has TWO operating levels (MC-DPSK handshake ~0.09 vs OFDM
+file ~0.30); a single AGC target (0.176) is a compromise, and the engage threshold is set to only correct
+SEVERE deficits to keep the normal case a clean no-op. A fully production-clean AGC would gate the level
+estimate on sync/decode state (definitive signal presence) rather than an amplitude activity gate, and
+could converge faster on a low channel. Default-off until proven on the IONOS rig (the decisive test).
+
+---
+
+## 2026-06-16 — fix(burst): operating-level-RELATIVE erasure gate + sim PAPR-penalty fidelity knob (IONOS MPG stall) (UNCOMMITTED)
+
+**What was broken:** An OFDM_CHIRP coherent QPSK file transfer COMPLETES in OTASim (Good@20)
+but STALLS on the real IONOS MPG (CCIR Good) hardware channel. Ground truth from the real
+receiver log `/tmp/pi5_full.log`: the chirp anchor (frame 1) decodes, but burst data frames
+2–6 are ERASED every group at broadband RMS **0.0038–0.0145** (median 0.0109) — all just under
+the gate — producing all-zero-LLR groups → `reassemble: header invalid` (CW0 all zeros) → ARQ
+retransmit → `max_retries` → stall.
+
+**Root cause (confirmed, not assumed):** the burst erasure gate
+`BURST_ERASURE_RMS_THRESHOLD = 0.015f` (`streaming_burst_interleave.cpp`) is an **absolute**
+broadband-RMS floor. It implicitly meant "~25 dB below the typical SIM anchor (~0.27 RMS)"
+(0.015/0.27). On a channel whose whole RX operating level rides ~6× lower (real HF / a cheap or
+peak-limited TX — IONOS anchor ≈0.05), a fixed 0.015 becomes only ~5 dB below the anchor, so it
+erases **normally-faded, RECOVERABLE** data frames. The canonical adaptivity violation: a magic
+absolute amplitude on a shared path with no operating-level reference.
+
+Why the sim hid it (and a fidelity gap): a new env-gated PAPR-penalty knob (FIX C) confirmed the
+sim's RMS-to-reference normalization delivers ~6–10 dB more data-frame average power than a
+peak-limited transmitter. BUT even with the penalty ON the sim does **not** reproduce the stall
+(data frames stay ~0.10–0.17 ≫ 0.015): the decisive extra deficit is the cheap-card
+**anchor-to-data gap** (constant-envelope chirp survives; high-PAPR multi-carrier data is
+saturated/distorted to ~0.011) — an effect OTASim does not model. So the failure is part
+absolute-gate bug, part unmodeled cheap-card sim-fidelity gap.
+
+**What changed (files):**
+- **FIX A — operating-level-relative erasure gate** (`src/gui/modem/streaming_burst_interleave.cpp`):
+  erase iff `next_rms < max(0.055 * burst_anchor_rms_, 0.005f)`; the legacy fixed `0.015f` is used
+  only if no anchor was captured. `k = 0.055` reproduces the historical 0.015 at the sim anchor 0.27
+  (⇒ **zero sim regression by construction**) and scales DOWN with the per-group RX level. New member
+  `burst_anchor_rms_` (`streaming_decoder.hpp`) captured once per group from `sampleRMS(frame_buffer)`
+  at the BURST_HEADER anchor (`streaming_ofdm_decode.cpp`). The anchor is chirp-dominated
+  (constant-envelope, lowest-fade-variance frame) → the stable per-group RX-level reference.
+- **FIX C — sim PAPR-penalty fidelity knob** `ULTRA_SIM_PAPR_PENALTY` (default 0)
+  (`src/gui/app.cpp`): the sim TX drives the burst through the SAME peak normalization the hardware
+  path uses (`normalizeTxBurstForHardware`, peak→`settings_.tx_drive`) so high-PAPR coherent OFDM
+  data frames deliver only (tx_drive/PAPR) average power against the fixed reference-sized OTASim
+  noise → models the peak-limited-PA penalty (~10.26 dB measured for coherent QPSK by
+  `tools/papr_tx_measure.cpp`). `ULTRA_SIM_TX_PEAK` overrides the peak target (dial the RX level).
+- **Diagnostics/test knobs** (default off, no-op): `ULTRA_BURST_RMS_DIAG` logs per-frame gate inputs
+  (next_rms / anchor_rms / noise_floor + ratios) for the NEXT instrumented IONOS run;
+  `ULTRA_BURST_ERASURE_ABSOLUTE` forces the legacy 0.015 gate for A/B.
+
+**How it's properly fixed (why it works):** the gate now tracks the per-group, per-channel RX
+operating level instead of a fixed sim-reference amplitude — RX AGC/soundcard gain cancels in the
+`next_rms / anchor_rms` ratio. On IONOS (anchor ≈0.05) the threshold drops to 0.005, KEEPING 16 of
+the 20 currently-erased frames (those ≥0.005) so they reach the demodulator/LDPC with calibrated
+soft LLRs instead of being hard-zeroed. Per CLAUDE.md: a magic absolute constant on a shared path
+replaced by an operating-level-derived threshold.
+
+**RESIDUAL / scope (corrected 2026-06-16):** the morning MPG logs are from the **clean Fe-Pi HAT
+codec** (NOT the old USB card) — so the data-frame deficit is NOT codec distortion; it is purely
+high-PAPR OFDM data riding below the chirp anchor + a lower RX operating level + Good fading nulls,
+all codec-independent. On a clean codec the frames FIX A KEEPS should DECODE, so FIX A is likely the
+actual fix (not merely a first layer). The decisive proof is still a fresh IONOS run with
+`ULTRA_BURST_RMS_DIAG=1` (confirms the real anchor/noise level and that frames are kept + decode);
+if marginal, raise RX gain and/or use R2/3 (the morning run negotiated the fragile R3/4). The
+cheap-card per-carrier-LLR work (`BUG-IONOS-PI5-CHEAP-DAC` / `CHEAP_CARD_ROBUSTNESS_PLAN.md`, task #28)
+applies only to the old USB card, not this HAT. NOT done: the same-family absolute-floor smell at the
+sync gate
+(`sync_controller.cpp:513`) — the IONOS log shows anchor acquisition is NOT failing (frame 1 never
+erased), so that gate is out of scope for this bug.
+
+**Test verification:**
+- `cmake --build build -j4` clean.
+- `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --expect-rate R2/3 --expect-mod QPSK --file-kb 10`
+  with the relative gate (default): **RESULT=PASS, GOODPUT_BPS=1710, 0 erasures — byte-identical to the
+  baseline absolute-gate run** ⇒ zero regression at normal operating level.
+- `ctest --test-dir build -j4`: 79/80. The one fail (`UltraTncSimAudio`) is **pre-existing / unrelated**:
+  it fails identically with FIX A neutralized (`ULTRA_BURST_ERASURE_ABSOLUTE=1`), at the **MC-DPSK
+  CONNECT handshake** (BOB `CW[0..3] FAIL` → `PING timeout`) — it never reaches burst transfer, logs
+  0 erasures, and `ultra_tnc` does not even compile `app.cpp` (FIX C absent from that binary). All
+  edits are behaviorally inert at default knobs. (The CONNECT-decode failure is a separate issue in
+  the current uncommitted tree, not introduced here.)
+- Sim limitation: the IONOS data-erasure regime cannot be cleanly reproduced in OTASim — lowering the
+  TX level enough to bite the gate also craters SNR and drives the anchor to the sync floor, and the
+  cheap-card anchor-to-data gap is unmodeled. Rig-free A/B of the gate benefit is therefore blocked;
+  the relative-gate math + the real IONOS RMS distribution are the evidence.
+
+## 2026-06-16 — feat(phy): Good/Moderate channel discriminator (Doppler coherence) — wired, gated, GUI-proven (UNCOMMITTED)
+
+**What was broken:** the OFDM rate ladder, short-anchor gate, and Wiener model all branch on
+`classifyChannel(fading_index)`. `fading_index` measures fade DEPTH (|H| CV), identical for the
+equal-gain 2-path CCIR Good (RMS Doppler 0.05 Hz) and Moderate (0.25 Hz) presets — it classifies
+Good vs Moderate at chance (~56%; measured Good 0.55 ≈ Moderate 0.58). The whole ladder rides a blind
+input. (IONOS MPG/MPM presets are the same CCIR profiles.)
+
+**What changed (files):** new `src/ofdm/doppler_coherence_estimator.hpp` — measures channel coherence
+TIME via the temporal autocorrelation of per-frame `|H|²` snapshots. Hosted in `StreamingDecoder`
+(`doppler_coherence_`, reset per connection), fed one snapshot per decoded OFDM frame in
+`streaming_sync_acquisition.cpp::populateDecodeMetrics` from `getLastLTSChannelMagnitude()²`. Surfaced
+via decoder atomics/getters → `ModemEngine` → `modem_protocol_binding` →
+`ProtocolEngine::setChannelCoherence` → `Connection`. Consumed (gated on `valid()`) at the rate-decision
+sites in `connection_handlers.cpp` via `connection_policy::coherenceAdjustedFadingIndex` (selectLadderRung,
+recommendWaveformAndRate). CI: `tests/test_doppler_coherence_estimator.cpp`. Sounder:
+`tools/channel_discriminator_probe.cpp`. Design: `docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md`.
+
+**How it works:** sim fading is Gaussian-Doppler, `R(τ)=exp(−2π²σ²τ²)`; the `|H|²` envelope autocovariance
+is `exp(−4π²σ²τ²)`. One snapshot per frame, correlated at snapshot-lag-1 (the ~1.5 s burst inter-frame
+cadence). `coherenceScore()` is the **cumulative mean** of the per-frame lag-1 readings (a single read has
+~0.16 SE — too noisy; the mean separates). Decision is a **two-threshold dead zone**: confident-Good ≥0.45,
+confident-Moderate ≤0.30, in-between defers to the raw `fading_index` (conservative). Hosted in the decoder
+(not the demodulator) because **burst transport reconstructs the OFDMDemodulator every group**, which wiped
+a demod-resident pool (found via the GUI gate; three refinements: within-frame→per-frame snapshot,
+demod→decoder hosting, single-read→cumulative-mean+dead-zone).
+
+**Gating / safety:** read-only; `coherenceAdjustedFadingIndex` returns the raw `fading_index` until
+`valid()` (≥24 frame snapshots) — never true at CONNECT (no OFDM data pooled), so the CONNECT rate pick
+is byte-identical → **zero default-path regression**. Mid-stream consumers are gated behind
+`ULTRA_RATE_ADAPT` (default-off).
+
+**Test verification:** `ctest` 25/25 (DopplerCoherenceEstimator + OFDM/Streaming/Waveform/Connection/
+Protocol/Watterson, no regression). **12-seed × 2-channel GUI sweep (Good@20/Moderate@20, cumulative
+mean + dead zone), all 24 CRC-clean:** Good **11/12 confident-Good** (1 marginal in the dead zone),
+Moderate **11/12 confident-Moderate** (1 in dead zone), **every confident verdict correct (22/22),
+ZERO dangerous misreads** (Moderate max 0.359 < 0.45). `fading_index` overlaps across the same seeds
+(the documented blindness). The Wiener push (confident-Good runs) is no-regression at Good@20.
+
+**Adversarial four-tier review (workflow):** safe as-is on the default ship path; one major-but-gated
+precondition before enabling `ULTRA_RATE_ADAPT` — persist the coherence across the MODE_CHANGE demod
+recreation (the same demod-recreation mechanism, on rate changes). See KNOWN_BUGS + design doc §11.
+
+**Status:** UNCOMMITTED (wired + verified). Follow-ups (where the throughput win lives): feed
+`dopplerHz()` into the Moderate-hardcoded Wiener model (ADAPTIVITY_AUDIT Case #2); enable the adaptive
+rate ladder to consume the verdict (after the MODE_CHANGE-persistence fix); gate short-dual-chirp on
+coherence; IONOS labeled-HW confirmation via `tools/ionos_ctl.py`.
+
+---
+
 ## 2026-06-15 — feat(ack): SNR-adaptive tone-burst ACK duration (§15.5 staircase) — deadlock-free, hardware-proven
 
 **What changed:** the tone-burst ACK symbol duration is now scaled to the measured in-band SNR

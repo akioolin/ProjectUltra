@@ -366,6 +366,13 @@ add_executable(test_waveform_loopback test_waveform_loopback.cpp)
 target_link_libraries(test_waveform_loopback PRIVATE ultra_core)
 add_test(NAME WaveformLoopback COMMAND test_waveform_loopback)
 
+# Good/Moderate channel discriminator (Doppler coherence) — locks the estimator class:
+# separation, sigma ordering, and abstain-until-pooled. Header-only; needs the src/ include.
+add_executable(test_doppler_coherence_estimator test_doppler_coherence_estimator.cpp)
+target_link_libraries(test_doppler_coherence_estimator PRIVATE ultra_core)
+target_include_directories(test_doppler_coherence_estimator PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME DopplerCoherenceEstimator COMMAND test_doppler_coherence_estimator)
+
 add_executable(test_streaming_config
     test_streaming_config.cpp
     ${ULTRA_STREAMING_DECODER_SOURCES}

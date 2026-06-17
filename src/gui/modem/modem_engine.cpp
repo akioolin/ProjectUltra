@@ -937,6 +937,14 @@ float ModemEngine::getFadingIndex() const {
     return 0.0f;
 }
 
+float ModemEngine::getDopplerCoherenceScore() const {
+    return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceScore() : 0.0f;
+}
+
+bool ModemEngine::getDopplerCoherenceValid() const {
+    return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceValid() : false;
+}
+
 bool ModemEngine::isFading() const {
     return getFadingIndex() > 0.65f;
 }

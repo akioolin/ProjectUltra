@@ -425,6 +425,18 @@ public:
     float getFadingIndex() const { return fading_index_; }
     bool isFading() const { return fading_index_ > 0.65f; }
 
+    // Doppler coherence (channel coherence-TIME) measured by the OFDM demodulator. Unlike
+    // fading_index (fade DEPTH), this discriminates Good (slow fading) from Moderate (fast);
+    // valid only after enough OFDM data has pooled (~8 frames). Consumed via
+    // connection_policy::coherenceAdjustedFadingIndex in the rate-decision handlers.
+    // See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
+    void setChannelCoherence(float coherence_score, bool valid) {
+        coherence_score_ = coherence_score;
+        coherence_valid_ = valid;
+    }
+    float getCoherenceScore() const { return coherence_score_; }
+    bool coherenceValid() const { return coherence_valid_; }
+
     // Callback when remote station requests mode change
     // Data-mode-changed callback. cw_count is the negotiated fixed-frame CW
     // count for the new rate (1..8) — host updates encoder/decoder from this
@@ -485,6 +497,8 @@ private:
     SNRSource measured_snr_source_ = SNRSource::NONE;
     bool measured_snr_valid_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
+    float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading
+    bool coherence_valid_ = false;   // true once enough OFDM data pooled for a trusted verdict
 
     // MODE_CHANGE timeout/retry tracking
     bool mode_change_pending_ = false;
@@ -615,7 +629,11 @@ private:
     // Polled from tick(): a frame stuck at a too-aggressive rate (the fade troughs keep killing it,
     // so it produces no group ACK and the clean-boundary gate can't help) escape-drops one rung.
     void maybeEscapeStuckFrame();
-    bool adaptive_rate_enabled_ = false;
+    bool adaptive_rate_enabled_ = true;  // default ON: drives the GUI "Adapt:" observability bar +
+                                         // decode-headroom quality feedback. The actual rate CHANGE
+                                         // stays gated by rateAdaptationActive() (ULTRA_RATE_ADAPT,
+                                         // default off), so this is pure visibility. Opt out with
+                                         // ULTRA_ADAPTIVE_RATE=0.
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
