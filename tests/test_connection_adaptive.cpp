@@ -284,7 +284,7 @@ void test_local_mode_change_ack_reconfigures_arq() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.30f);
     // R1/2 selects the high-throughput window (16), but the unified tone-burst ack carries
-    // a 6-bit SACK frame_mask, so the in-flight window is capped to 6.
+    // an 8-bit SACK frame_mask (widened 6->8 2026-06-17), so the in-flight window is capped to 8.
     CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
           "R1/2 high-throughput window is capped to the tone-burst SACK mask");
 

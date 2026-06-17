@@ -10,6 +10,53 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-17 — fix(coherence)+feat(gui,arq): disc was DEAD on every half-duplex transfer + RX-label wiring + SACK-mask widen
+
+Three related changes. RX-side except the SACK wire widen. ctest 80/81 (only the pre-existing
+`UltraTncSimAudio` fails — MC-DPSK CONNECT decode, unrelated). IONOS MPM + MPG rig-verified.
+
+### 1. fix(coherence): the Doppler-coherence discriminator was DEAD on every half-duplex transfer
+**Broken:** the Good/Moderate discriminator never validated on any real file transfer — on IONOS MPM
+its verdict-diag fired 0× over ~160 frames. So the disc, its gated rate/cw/short-anchor consumers
+(`coherenceAdjustedFadingIndex`), and the RX label all silently fell back to the blind `fading_index`
+forever. (It was "GUI-PROVEN" on a harness but dead in production — corrects that claim.)
+**Root cause:** `ModemEngine::clearRxBuffer()` — called before EVERY TX to prevent decoding own
+transmission (echo) — calls `StreamingDecoder::reset()`, which wiped `doppler_coherence_`. On
+half-duplex the receiver TXes a tone-burst ACK after every ~5-frame group, so `clearRxBuffer` fired
+every group and wiped the snapshot deque before it reached `kMinSnapsForReading=8`; `score_n_` stayed
+0 and `valid()` (needs ≥24) was never true. Diagnostic proof: a per-frame COH-FEED log showed `lts_mag`
+fed fine (fed=1) but `snaps=0` always.
+**Fixed:** `StreamingDecoder::reset(bool reset_doppler_coherence=true)` gates the disc reset;
+`clearRxBuffer` passes `false` to PRESERVE the slow channel-state estimator across the pre-TX echo
+clear (the disc is channel state, not pending audio). A true connection/mode reset still clears it.
+Files: streaming_decoder.cpp/.hpp, modem_engine.cpp.
+**Verified:** IONOS MPM — snaps climbs 0→24, valid=1 at ~60-90s, verdict score≈-0.15..0.06
+[MODERATE/POOR] (correct; matches the -0.11 calibration) while the blind fading_index simultaneously
+flickered AWGN(0.13)/Good(0.4-0.5). First live proof of the discrimination.
+
+### 2. feat(gui): RX channel-class label driven by the disc, "acquiring" until confident
+**Changed:** the `RX: ... [class]` label (app.cpp) no longer paints the blind/idle-biased
+`fading_index`. It shows a class ONLY when the disc is valid+confident (Good ≥ kCoherenceGoodThreshold,
+Moderate ≤ kCoherenceModerateThreshold), holds that verdict through between-burst gaps (overrides the
+idle-AWGN reading; the disc resets on disconnect so it can't go stale), and shows a dim "acquiring"
+during warmup / the uncertain dead zone. Idle/disconnected unchanged.
+**Verified:** IONOS MPM — dim "acquiring" ~60-90s then steady "[Moderate]" (no AWGN/Good flicker).
+
+### 3. feat(arq): widen the tone-burst SACK frame_mask 6→8 (thin-frame bursts fill the PA-duty budget)
+**Broken:** the 6-bit SACK frame_mask capped the ARQ window at 6, so a thin-frame (cw5) burst was
+window-bound at 6 frames / ~6.2s — wasting ~2.4s of the 8.6s PA-duty airtime budget/burst (measured:
+the 0.88-kbps cw5 outlier vs ~1.13 cw8 on IONOS Good).
+**Fixed:** frame_mask widened 6→8 bits in the 32-bit payload (layout cascaded: rate_hint→[14..16],
+type→[17], crc12→[18..29], reserved→[30..31]; same container, identical ACK airtime/FEC);
+`kToneBurstAckWindowCapFrames` 6→8; SACK builder masks to the wire width. Files:
+tone_burst_constants.hpp, tone_burst_payload.hpp, connection_policy.hpp, connection.cpp/.hpp,
+protocol_engine.hpp. **WIRE-BREAKING (no version field on the tone-burst payload) — both stations must
+run the same build.** `kBurstInterleaveGroupFrames` deliberately kept at 6 (interleave-ON group not
+re-swept at 8).
+**Verified:** ctest tone-burst round-trip (exercises bits 6,7); rig — forced cw5 R3/4 bursts now 8
+blocks / 7.76s (was 6/6.17s), cw8/R2/3 unchanged at 5 blocks (no regression); adversarial review found
+no blockers (wire-consistent, CRC span 18 both sides, window-vs-group safe).
+
 ## 2026-06-16 — fix(snr): OFDM in-band SNR meter was absolute-referenced → over-read ~12 dB on hardware (UNCOMMITTED, IONOS-confirmed)
 
 **What was broken:** the OFDM in-band SNR meter (the `RX: in-band SNR` bar + `last_snr_db_estimate`)

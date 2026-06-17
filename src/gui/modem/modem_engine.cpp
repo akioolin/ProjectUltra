@@ -1009,9 +1009,13 @@ void ModemEngine::reset() {
 
 void ModemEngine::clearRxBuffer() {
     // Clear streaming decoder buffer to discard any pending audio
-    // Use this before TX to prevent decoding our own transmission (acoustic echo)
+    // Use this before TX to prevent decoding our own transmission (acoustic echo).
+    // PRESERVE the slow Doppler-coherence estimator (reset_doppler_coherence=false): this fires
+    // every half-duplex turnaround (before each ACK), and the disc needs ~31 per-frame snapshots
+    // across many groups to validate — wiping it here kept it permanently invalid on real
+    // transfers (task #55). The disc still resets on a true connection/mode reset (ModemEngine::reset).
     if (streaming_decoder_) {
-        streaming_decoder_->reset();
+        streaming_decoder_->reset(/*reset_doppler_coherence=*/false);
     }
 }
 

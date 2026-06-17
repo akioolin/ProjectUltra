@@ -438,8 +438,12 @@ public:
     // LIFECYCLE
     // ========================================================================
 
-    // Reset decoder state (clear buffer, reset waveform)
-    void reset();
+    // Reset decoder state (clear buffer, reset waveform).
+    // reset_doppler_coherence=false preserves the slow Doppler-coherence estimator's snapshot
+    // pool across the reset — used by the pre-TX clearRxBuffer echo-clear, which fires every
+    // half-duplex turnaround; wiping the disc there starves it below its 8-snapshot minimum
+    // so it never validates on a real transfer (task #55).
+    void reset(bool reset_doppler_coherence = true);
 
     // Signal shutdown - wakes processBuffer() to return
     void stop();

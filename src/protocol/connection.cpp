@@ -173,7 +173,7 @@ Connection::Connection(const ConnectionConfig& config)
     // only valid file method now). `use_burst_transport_` stays initialized true; the
     // legacy windowed-file `!use_burst_transport_` branches are now dead code (R1
     // deletion follow-up). NOTE: burst is itself selective-repeat (GROUP_ACK carries
-    // the 6-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
+    // the 8-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
     // narrow/control; this is NOT "remove SR-ARQ".
     // §14.36 Phase 5c: per-block decode-headroom quality feedback. Default ON for OBSERVABILITY
     // (drives the GUI "Adapt:" bar + diagnostics on sim AND hardware); opt OUT with
@@ -245,8 +245,12 @@ Connection::Connection(const ConnectionConfig& config)
                     return;
                 }
                 ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
+                // frame_mask width tracks the wire layout (8 bits as of 2026-06-17) so the
+                // SACK can address an 8-frame in-flight window — see kToneBurstAckWindowCapFrames.
+                constexpr uint32_t kFrameMaskWire =
+                    (1u << ultra::waveform::tone_burst_ack::kPayloadFrameMaskBits) - 1u;
                 tba.group_seq = static_cast<uint8_t>(base_seq & 0x3F);
-                tba.frame_mask = static_cast<uint8_t>(bitmap & 0x3F);
+                tba.frame_mask = static_cast<uint8_t>(bitmap & kFrameMaskWire);
                 tba.type = ultra::waveform::tone_burst_ack::AckType::Ack;
                 // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
                 // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
@@ -2941,15 +2945,15 @@ void Connection::configureArqForCurrentDataMode() {
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSizeForChannel(
             data_modulation_, data_code_rate_, fading_index_, measured_snr_db_));
-        // TRANSPORT MERGE (step 1): the tone-burst ack carries a 6-bit frame_mask, so cap
-        // the in-flight window to 6. An N-frame message then streams as ≤6-frame windows
-        // (e.g. 8 frames → 6 then 2), each fully covered by one tone-burst snapshot — no
-        // mask truncation, no spurious resend of frames past the 6th. (MC-DPSK 1-5 and
-        // OFDM_NARROW 3 are already within 6.) The timing math below then sizes timeouts
-        // for the capped window.
+        // TRANSPORT MERGE (step 1): the tone-burst ack carries an 8-bit frame_mask (widened
+        // 6->8 2026-06-17), so cap the in-flight window to 8. An N-frame message then streams
+        // as ≤8-frame windows, each fully covered by one tone-burst snapshot — no mask
+        // truncation, no spurious resend of frames past the 8th. (MC-DPSK 1-5 and OFDM_NARROW
+        // 3 are already within 8.) The timing math below then sizes timeouts for the capped
+        // window. Lifting the cap 6->8 lets a thin-frame cw5 burst fill the 8.6s PA-duty budget.
         if (kInteractiveToneAckEnabled() &&
             arq_.getWindowSize() > connection_policy::kToneBurstAckWindowCapFrames) {
-            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> %zu (tone-burst 6-bit mask)",
+            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> %zu (tone-burst 8-bit mask)",
                       arq_.getWindowSize(),
                       connection_policy::kToneBurstAckWindowCapFrames);
             arq_.setWindowSize(connection_policy::kToneBurstAckWindowCapFrames);
@@ -3129,8 +3133,9 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // 6 TIE on goodput (~1400 bps, within run-to-run noise) and both deliver reliably with the
     // full-chirp-on-resend fix (maxretry=0; the two genuine failures recovered) — so the smaller
     // group wins on NON-speed grounds: shorter 8.6 s key-down (easier on a real PA than group 6's
-    // ~10 s), fewer frames lost per fade, and one frame below the 6-bit SACK frame_mask ceiling
-    // instead of right at it. Replaces the 3-frame 7000 ms default that re-paid the 1.2 s anchor +
+    // ~10 s), fewer frames lost per fade, and well below the 8-bit SACK frame_mask ceiling (raised
+    // from 6 on 2026-06-17, so thin-frame cw5 bursts can fill the budget — a cw8 burst stays
+    // airtime-bound at 5 frames regardless). Replaces the 3-frame 7000 ms default that re-paid the 1.2 s anchor +
     // turnaround every 3 frames. Still env-overridable for sweeps (clamped [5000, 12000]).
     static const uint32_t kMaxBurstAirtimeMs = [] {
         uint32_t v = 8600;  // group 5 (see above); ULTRA_MAX_BURST_AIRTIME_MS overrides

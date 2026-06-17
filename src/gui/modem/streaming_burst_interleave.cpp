@@ -580,7 +580,7 @@ void StreamingDecoder::finalizeBurstGroup() {
     // §SR-ARQ (2026-05-29): per-frame SACK. bit i set = logical frame i decoded OK.
     // Meaningful as a true per-frame mask only when the group was NOT byte-interleaved
     // (interleave-off path): then each physical frame is one independent logical frame.
-    // For an interleaved group only all_ok matters (mask collapses to 0x3F / 0x00).
+    // For an interleaved group only all_ok matters (mask collapses to all-set / 0x00).
     uint8_t frame_mask = 0;
     // §14.36 Phase 5c: track the worst codeword's LDPC iteration count across the
     // whole group — the group needs ALL frames, so its decode headroom = the weakest

@@ -133,13 +133,19 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // Payload + FEC layout
 // ============================================================================
 //
-// Payload (27 useful bits, packed into 32 bits with reserved/padding):
+// Payload (packed into 32 bits with reserved/padding):
 //   bits  0..5   group_seq (6 bits, mod-64 sequence number)
-//   bits  6..11  frame_mask (6 bits, 1 = frame OK, 0 = frame FAIL)
-//   bits 12..14  rate_hint (3 bits, RateController feedback per §14.43)
-//   bit  15      type (0 = ACK, 1 = NACK; receiver always emits a burst)
-//   bits 16..27  crc12 (CRC-12 over the preceding 16 bits + group_seq)
-//   bits 28..31  reserved (must be 0)
+//   bits  6..13  frame_mask (8 bits, 1 = frame OK, 0 = frame FAIL)  [widened 6->8 2026-06-17
+//                so a thin-frame cw5 burst can carry 8 frames and fill the PA-duty budget
+//                instead of stalling window-bound at 6 — see connection_policy kToneBurstAckWindowCapFrames]
+//   bits 14..16  rate_hint (3 bits, RateController feedback per §14.43)
+//   bit  17      type (0 = ACK, 1 = NACK; receiver always emits a burst)
+//   bits 18..29  crc12 (CRC-12 over the preceding 18 useful bits)
+//   bits 30..31  reserved (must be 0)
+//
+// WIRE-BREAKING (2026-06-17): no version field on the tone-burst payload — both
+// stations MUST run the same build (the offset shift moves the CRC field, so a
+// mixed-version pair mis-parses every ACK -> CRC fail -> retx storm).
 //
 // FEC: (15,11) Hamming code applied per nibble-block. 32 payload bits ->
 // three 11-bit groups (padded), each encoded to 15 coded bits = 45 coded
@@ -147,13 +153,13 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // per block, detects 2.
 
 inline constexpr uint32_t kPayloadBits = 32;       // raw payload incl. CRC
-inline constexpr uint32_t kPayloadUsefulBits = 16; // bits before CRC
+inline constexpr uint32_t kPayloadUsefulBits = 18; // bits before CRC (6+8+3+1)
 inline constexpr uint32_t kPayloadGroupSeqBits = 6;
-inline constexpr uint32_t kPayloadFrameMaskBits = 6;
+inline constexpr uint32_t kPayloadFrameMaskBits = 8;  // widened 6->8 (2026-06-17): 8-frame SACK window
 inline constexpr uint32_t kPayloadRateHintBits = 3;
 inline constexpr uint32_t kPayloadTypeBits = 1;
 inline constexpr uint32_t kPayloadCRCBits = 12;
-inline constexpr uint32_t kPayloadReservedBits = 4;
+inline constexpr uint32_t kPayloadReservedBits = 2;
 static_assert(kPayloadUsefulBits == kPayloadGroupSeqBits + kPayloadFrameMaskBits +
               kPayloadRateHintBits + kPayloadTypeBits, "payload bit layout mismatch");
 static_assert(kPayloadBits == kPayloadUsefulBits + kPayloadCRCBits +
@@ -162,10 +168,10 @@ static_assert(kPayloadBits == kPayloadUsefulBits + kPayloadCRCBits +
 // Bit-field offsets in the packed 32-bit payload.
 inline constexpr uint32_t kBitOffsetGroupSeq = 0;
 inline constexpr uint32_t kBitOffsetFrameMask = 6;
-inline constexpr uint32_t kBitOffsetRateHint = 12;
-inline constexpr uint32_t kBitOffsetType = 15;
-inline constexpr uint32_t kBitOffsetCRC = 16;
-inline constexpr uint32_t kBitOffsetReserved = 28;
+inline constexpr uint32_t kBitOffsetRateHint = 14;
+inline constexpr uint32_t kBitOffsetType = 17;
+inline constexpr uint32_t kBitOffsetCRC = 18;
+inline constexpr uint32_t kBitOffsetReserved = 30;
 
 // (15,11) Hamming: 11 info bits -> 15 coded bits per block.
 // 32 payload bits / 11 = 3 blocks (last block partially populated with 0s).

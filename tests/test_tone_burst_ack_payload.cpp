@@ -104,16 +104,17 @@ void test_pack_unpack_round_trip() {
 void test_pack_clamps_out_of_range_fields() {
     std::printf("[test] pack_clamps_out_of_range_fields\n");
     ToneBurstAckPayload p;
-    p.group_seq = 200;          // > 63
-    p.frame_mask = 200;         // > 63
-    p.rate_hint = 15;           // > 7
+    p.group_seq = 200;          // > 63 (6-bit) -> clamps
+    p.frame_mask = 200;         // 0b11001000: fits the WIDENED 8-bit frame_mask, incl. bits 6 & 7
+    p.rate_hint = 15;           // > 7 (3-bit) -> clamps
     p.type = AckType::Ack;
     const uint32_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
     const auto rt = unpackPayload(raw);
-    // Clamped via mask.
+    // group_seq (6-bit) and rate_hint (3-bit) still clamp; frame_mask is now 8-bit so 200
+    // round-trips intact — direct proof the high bits (6,7) carry data after the 6->8 widen.
     EXPECT_EQ(rt.group_seq, static_cast<uint8_t>(200 & 0x3F));
-    EXPECT_EQ(rt.frame_mask, static_cast<uint8_t>(200 & 0x3F));
+    EXPECT_EQ(rt.frame_mask, static_cast<uint8_t>(200 & 0xFF));
     EXPECT_EQ(rt.rate_hint, static_cast<uint8_t>(15 & 0x07));
 }
 

@@ -27,7 +27,7 @@ struct ToneBurstAckPayload {
     // group_seq: 6-bit (mod-64) burst-group sequence number being ACK'd.
     uint8_t group_seq = 0;
 
-    // frame_mask: 6 bits, one per frame in the group.
+    // frame_mask: 8 bits (widened 6->8 2026-06-17), one per frame in the group.
     //   bit i = 1 -> frame i delivered OK
     //   bit i = 0 -> frame i FAILED (sender should resend just this frame)
     // For a NACK, mask is the "still missing" mask (sender resends each 0 bit).
@@ -50,19 +50,21 @@ struct ToneBurstAckPayload {
 //
 // Layout (LSB first within each field, fields in ascending bit-order):
 //   bits  0..5   group_seq
-//   bits  6..11  frame_mask
-//   bits 12..14  rate_hint
-//   bit  15      type (0=ACK, 1=NACK)
-//   bits 16..27  crc12
-//   bits 28..31  reserved (zero)
+//   bits  6..13  frame_mask  (8 bits, widened from 6 on 2026-06-17)
+//   bits 14..16  rate_hint
+//   bit  17      type (0=ACK, 1=NACK)
+//   bits 18..29  crc12
+//   bits 30..31  reserved (zero)
 //
-// The CRC is computed over the 16 "useful" bits (bits 0..15) as a single
-// little-endian 16-bit word, using CRC-12-CCITT (poly 0x80F, init 0xFFF).
+// The CRC is computed over the 18 "useful" bits (bits 0..17), using
+// CRC-12-CCITT (poly 0x80F, init 0xFFF). All offsets/widths come from
+// tone_burst_constants.hpp (kBitOffset*/kPayload*Bits) — this comment is
+// descriptive; the code reads the constants.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on
 // air. CRC-12 still catches all 1-3 bit bursts and >99.97% of random errors
-// for our 16-bit message — overkill for ACK semantics.
+// for our 18-bit message — overkill for ACK semantics.
 
 // Pack 32 raw payload bits (excluding Hamming) into a uint32_t (LSB-first).
 uint32_t packPayload(const ToneBurstAckPayload& p);

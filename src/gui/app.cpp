@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "gui/modem/modem_protocol_binding.hpp"
+#include "protocol/connection_policy.hpp"  // coherenceAdjustedFadingIndex (RX-label channel class)
 #include "otasim_client/ota_rx_pump.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "imgui.h"
@@ -3442,9 +3443,32 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImVec4 mode_quality_color;
         const char* mode_quality = "Good";
 
-        // Get actual channel quality from fading measurement
-        float fading = modem_.getFadingIndex();
-        mode_quality = fadingToQualityWithColor(fading, mode_quality_color);
+        // Channel-class label (task #43). The raw fading_index CANNOT separate Good from Moderate
+        // (both ~0.55) and is idle-biased (reads ~AWGN in the gaps between bursts) — so it is NOT a
+        // trustworthy class and we deliberately do NOT paint it. We show a class ONLY when the
+        // Doppler-coherence discriminator is valid AND confident (Good >= kCoherenceGoodThreshold,
+        // Moderate <= kCoherenceModerateThreshold); that verdict is the slow channel-state estimate
+        // and we hold it through between-burst gaps (it overrides the idle AWGN reading; the disc
+        // resets on disconnect/mode-change so it can't go stale). Until then — warmup (~60-90s of
+        // OFDM data needed to validate) or the uncertain dead zone — show a dim "acquiring" rather
+        // than blink the blind raw class. (Idle/disconnected shows IDLE in the branch above.)
+        bool coh_confident = false;
+        if (modem_.getDopplerCoherenceValid()) {
+            const float coh = modem_.getDopplerCoherenceScore();
+            if (coh >= protocol::connection_policy::kCoherenceGoodThreshold) {
+                mode_quality = fadingToQualityWithColor(
+                    protocol::connection_policy::kRepresentativeGoodFadingIndex, mode_quality_color);
+                coh_confident = true;
+            } else if (coh <= protocol::connection_policy::kCoherenceModerateThreshold) {
+                mode_quality = fadingToQualityWithColor(
+                    protocol::connection_policy::kRepresentativeModerateFadingIndex, mode_quality_color);
+                coh_confident = true;
+            }
+        }
+        if (!coh_confident) {
+            mode_quality = "acquiring";
+            mode_quality_color = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);  // dim: no trustworthy class yet
+        }
 
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             // For MC-DPSK, just show carrier count (DQPSK R1/4 is implicit)

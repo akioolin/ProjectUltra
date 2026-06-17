@@ -363,7 +363,8 @@ void test_ofdm_profile_selection() {
           "non-speculative DQPSK R1/2 should keep existing burst-interleave behavior");
     CHECK(!isBurstInterleavedOFDMMode(Modulation::QPSK, CodeRate::R2_3),
           "non-QAM16 coherent modes should not inherit the QAM16 burst-interleave gate");
-    // Burst group size is 6 (mask-width-matched to the 6-bit SACK frame_mask).
+    // Burst interleave-ON group size stays 6 (<= the 8-bit SACK frame_mask ceiling; the
+    // interleave-ON group is a fade-diversity tradeoff, not re-swept at 8 — see connection_policy).
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 1),
           "single high-rate fading frame should not be padded");
     CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 2),

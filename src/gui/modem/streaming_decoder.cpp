@@ -1095,7 +1095,7 @@ Modulation StreamingDecoder::getConstellationModulation() const {
 // LIFECYCLE
 // ============================================================================
 
-void StreamingDecoder::reset() {
+void StreamingDecoder::reset(bool reset_doppler_coherence) {
     // Increment generation BEFORE acquiring lock - any ongoing search will see new value
     reset_generation_.fetch_add(1);
 
@@ -1151,10 +1151,18 @@ void StreamingDecoder::reset() {
     last_ofdm_broadband_snr_db_.store(0.0f);
     cfo_tracker_.store(0.0f);
     last_fading_index_.store(0.0f);
-    doppler_coherence_.reset();  // Good/Moderate discriminator: fresh per connection/reset
-    last_doppler_coherence_score_.store(0.0f);
-    last_doppler_hz_.store(0.0f);
-    last_doppler_coherence_valid_.store(false);
+    // Doppler-coherence disc: SLOW per-connection channel-state estimator (needs ~31 per-frame
+    // |H|^2 snapshots to validate). It MUST survive the pre-TX clearRxBuffer() reset (called
+    // before every half-duplex ACK turnaround for echo prevention) — otherwise its snapshot pool
+    // is wiped every ~5-frame group and it NEVER reaches the 8-snapshot/24-reading minimum (the
+    // bug that left the discriminator dead on every half-duplex transfer, task #55). Only a true
+    // connection/mode reset clears it; clearRxBuffer passes reset_doppler_coherence=false.
+    if (reset_doppler_coherence) {
+        doppler_coherence_.reset();
+        last_doppler_coherence_score_.store(0.0f);
+        last_doppler_hz_.store(0.0f);
+        last_doppler_coherence_valid_.store(false);
+    }
 }
 
 void StreamingDecoder::stop() {

@@ -70,23 +70,27 @@ inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 // Hard cap on the in-flight OFDM ARQ window when the interactive tone-burst ack is the
-// ack mechanism: the tone-burst carries a 6-bit per-frame SACK `frame_mask` (0x3F,
-// connection.cpp:438), so it can selectively acknowledge at most 6 in-flight frames.
-// A window > 6 leaves frames 7+ outside the mask — un-ackable, hence falsely "lost" and
+// ack mechanism: the tone-burst carries an 8-bit per-frame SACK `frame_mask` (0xFF,
+// connection.cpp), so it can selectively acknowledge at most 8 in-flight frames.
+// A window > 8 leaves frames 9+ outside the mask — un-ackable, hence falsely "lost" and
 // resent forever. The wide/high-throughput windows above are therefore capped to this on
-// the unified tone-burst path (an N-frame message streams as ≤6-frame windows). SINGLE
-// source of truth for the 6 — code (configureArqForCurrentDataMode) and tests reference it.
-inline constexpr size_t kToneBurstAckWindowCapFrames = 6;
-// Burst group size. 6 is the canonical default — it is MASK-WIDTH-MATCHED to the
-// 6-bit per-frame SACK `frame_mask` (0x3F, connection.cpp:459), which is what the
-// DEFAULT interleave-OFF SR path uses to selectively ACK frames. A group larger
-// than 6 leaves frames 7+ un-addressable by the SR mask, so they can never be
-// ACKed (the 16 default that lived here 2026-05-28..05-30 only "worked" with
-// interleave-ON whole-group ACK — the g16=1862bps Phase-D sweep was that path —
-// and the GUI harness papered over the default by pinning 6). The wideband
-// interleave-OFF SR path is the production default, so the default group is 6.
-// For the interleave-ON whole-group-ACK path you can still set a larger group via
-// ULTRA_BURST_GROUP_FRAMES (clamped [2,32]) — but note the 6-bit SACK ceiling.
+// the unified tone-burst path (an N-frame message streams as ≤8-frame windows). SINGLE
+// source of truth for the 8 — code (configureArqForCurrentDataMode) and tests reference it.
+// 2026-06-17: widened 6->8 (with the tone-burst frame_mask 6->8) so a THIN-frame burst
+// (cw5: ~0.79s/frame) is no longer window-bound at 6 frames/~6.2s — it can carry 8 frames
+// and fill the ~8.6s PA-duty airtime budget, reclaiming the wasted ~2.4s/burst of duty.
+// (cw8 bursts stay airtime-bound at 5 frames, so R2/3 is unaffected.) WIRE-BREAKING:
+// both stations must run the same build (no version field on the tone-burst payload).
+inline constexpr size_t kToneBurstAckWindowCapFrames = 8;
+// Burst group size for the INTERLEAVE-ON (Moderate/Poor) path's whole-group ACK and the
+// partial-burst padding. The SACK frame_mask is now 8 bits (2026-06-17), so the ceiling
+// is 8; this default stays 6 deliberately — the interleave-ON group size is a fade-
+// diversity-vs-loss tradeoff that has NOT been re-swept at 8, and the measured Good-path
+// win comes entirely from the WINDOW cap above (kToneBurstAckWindowCapFrames), not from
+// this. (The Good interleave-OFF SR burst sizes itself by airtime/window — it does not use
+// this constant.) 6 <= the 8-bit mask, so every group frame is still addressable. A group
+// larger than the mask width leaves trailing frames un-ACKable; keep it <= 8.
+// Overridable for the interleave-ON path via ULTRA_BURST_GROUP_FRAMES (clamped [2,32]).
 inline constexpr size_t kBurstInterleaveGroupFrames = 6;
 
 // Runtime burst group size. Read at the chunk/pad/config sites so TX file-chunking,
