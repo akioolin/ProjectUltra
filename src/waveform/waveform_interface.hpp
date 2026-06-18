@@ -206,6 +206,7 @@ public:
     // Last OFDM LTS channel metrics. Non-OFDM waveforms return safe defaults.
     virtual float getLastLTSSignalPower() const { return 1.0f; }
     virtual float getLastLTSChannelMagnitude() const { return 1.0f; }
+    virtual float getLastLTSNoiseVariance() const { return 0.0f; }
     virtual float getLastLTSResidualCFOHz() const { return 0.0f; }
 
     // Push measured Wiener correlation-model params (Doppler Hz / delay spread s) from the

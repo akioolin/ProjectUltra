@@ -451,8 +451,9 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     // fading channel the true post-eq residual is dominated by per-carrier H-ESTIMATE
     // error, which the demapper otherwise asserts at full confidence -> confident-wrong
     // LLRs that poison the LDPC (fatal for tight 16QAM, absorbed by QPSK's margins).
-    // ULTRA_HERR_LLR_K (default 0 = OFF, byte-identical) scales the pilot-anchored Wiener
-    // error_var into the noise NUMERATOR: nv = (sigma^2 + k*err_var*|H|^2)/(|H|^2+sigma^2).
+    // ULTRA_HERR_LLR_K (default 1.0 = ON since 2026-06-17; set =0 to DISABLE) scales the
+    // pilot-anchored Wiener error_var into the noise NUMERATOR: nv =
+    // (sigma^2 + k*err_var*|H|^2)/(|H|^2+sigma^2). QPSK/QAM8 ONLY (gated !soft_gray_zone_csi).
     // Production form of the (net-negative) single-symbol ULTRA_LLR_NOISE_EMP_FLOOR —
     // pilot-anchored, not single-symbol. k=1.0 is the VALIDATED value: a k-tune (0.5/1.0/2.0)
     // on 16QAM R2/3 sp8 Good@20 peaks at 1.0; k=2.0 over-inflates (suppresses good carriers ->
@@ -461,9 +462,15 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     static const float kHerrLlrK = []() {
         if (const char* env = std::getenv("ULTRA_HERR_LLR_K")) {
             const float v = static_cast<float>(std::atof(env));
-            if (v > 0.0f) return v;
+            if (v >= 0.0f) return v;  // env wins, including 0 to DISABLE
         }
-        return 0.0f;
+        // DEFAULT ON (2026-06-17): feed the calibrated per-carrier Wiener estimate-error
+        // variance into the LLR noise. Controlled OTASim A/B (same seed, moderate@20, only
+        // this knob): Mode-B confident-wrong CW-fails 147->21 (-86%), failed groups -75%,
+        // 50KB delivered in 2.4x fewer group-attempts. Principled (uses a variance the RX
+        // already computes; ~0 on flat/AWGN so no AWGN regression by construction). k=1.0 is
+        // the in-code-validated value (data_phase2b_epsH_ktune). See project_retx_modeB memory.
+        return 1.0f;
     }();
 
     // Relative-depth anti-poison: reference the frame's mean |H|² so deep
@@ -543,7 +550,12 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                 // MMSE post-equalization noise variance: σ²/(|H|²+σ²), plus the optional
                 // per-carrier eps_H estimate-error term (ULTRA_HERR_LLR_K; k=0 -> unchanged).
                 float h_err_var = 0.0f;
-                if (kHerrLlrK > 0.0f &&
+                // QPSK/QAM8 ONLY: skip when soft_gray_zone_csi (QAM16+) is active — QAM16
+                // already inflates per-carrier noise via softGrayZoneNoiseInflation, and
+                // STACKING eps_H on top double-counts → over-inflates → LDPC starves.
+                // Controlled OTASim gate (QAM16 good@24, same seed): eps_H ON regressed
+                // goodput 2720->2020 bps and CW-fails 135->512. So eps_H is QPSK/QAM8-only.
+                if (kHerrLlrK > 0.0f && !soft_gray_zone_csi &&
                     static_cast<size_t>(idx) < per_carrier_h_error_var_.size()) {
                     h_err_var = kHerrLlrK * per_carrier_h_error_var_[idx] * h_power;
                 }

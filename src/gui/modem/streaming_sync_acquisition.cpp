@@ -72,6 +72,23 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         const float lts_mag = waveform_->getLastLTSChannelMagnitude();
         if (std::isfinite(lts_mag) && lts_mag > 0.0f) {
             doppler_coherence_.addSnapshot(lts_mag * lts_mag);
+            // COH-DIAG (read-only diagnostic, env ULTRA_COH_DIAG=1, default OFF): per-frame
+            // raw disc inputs for the noise-floor / Doppler-discriminator investigation —
+            // snap=|H|^2, h_mag=mean_c|H_c|, lts_noise_var=E|H1-H0|^2/4, lts_sig_pow=mean_c|H_c|^2.
+            // Used to classify whether the snapshot decorrelation is LTS estimation noise
+            // (de-biasable) vs common-mode cheap-card wander. Gated so it does not spam logs.
+            static const bool kCohDiag = [] {
+                const char* e = std::getenv("ULTRA_COH_DIAG");
+                return e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0');
+            }();
+            if (kCohDiag) {
+                const float lts_noise_var = waveform_->getLastLTSNoiseVariance();
+                const float lts_sig_pow = waveform_->getLastLTSSignalPower();
+                LOG_MODEM(INFO,
+                          "[%s] COH-DIAG snap=%.6g h_mag=%.6g lts_noise_var=%.6g lts_sig_pow=%.6g",
+                          log_prefix_.c_str(), lts_mag * lts_mag, lts_mag, lts_noise_var,
+                          lts_sig_pow);
+            }
         }
         result.doppler_coherence_score = doppler_coherence_.coherenceScore();
         result.doppler_hz = doppler_coherence_.dopplerHz();

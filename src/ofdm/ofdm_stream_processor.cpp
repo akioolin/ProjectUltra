@@ -688,6 +688,10 @@ float OFDMDemodulator::getLastLTSChannelMagnitude() const {
     return impl_->last_lts_channel_magnitude;
 }
 
+float OFDMDemodulator::getLastLTSNoiseVariance() const {
+    return impl_->noise_variance;
+}
+
 float OFDMDemodulator::getLastLTSResidualCFOHz() const {
     return impl_->last_lts_residual_cfo_hz;
 }

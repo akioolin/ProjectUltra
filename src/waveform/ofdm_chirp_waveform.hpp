@@ -107,6 +107,7 @@ public:
     float getLastPilotSymbolMeanCV() const override;
     float getLastLTSSignalPower() const override;
     float getLastLTSChannelMagnitude() const override;
+    float getLastLTSNoiseVariance() const override;
     float getLastLTSResidualCFOHz() const override;
     void setWienerChannelParams(float doppler_hz, float delay_spread_s) override;
     std::string getFailureAttributionDiagnosticsText() const override;

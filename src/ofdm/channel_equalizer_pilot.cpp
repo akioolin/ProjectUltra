@@ -487,6 +487,21 @@ void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h
     }
     const float symbol_mag_mean =
         symbol_mag_sum / static_cast<float>(h_ls_all.size());
+    // PSYM-DIAG (read-only, env ULTRA_PSYM_DIAG): per-symbol carrier-averaged |H| for the
+    // within-frame coherence redesign (task #57 / WITHIN_FRAME_COHERENCE_DESIGN_2026_06_17).
+    // Symbol-cadence |H|(t) to find the discriminating sub-frame lag (~0.5-0.85s) that
+    // separates Good from Moderate where per-frame snapshots can't. Frame boundaries are
+    // recovered offline from the interleaved per-frame COH-DIAG lines in the same log.
+    {
+        static const bool kPsymDiag = [] {
+            const char* e = std::getenv("ULTRA_PSYM_DIAG");
+            return e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0');
+        }();
+        if (kPsymDiag && std::isfinite(symbol_mag_mean)) {
+            static thread_local unsigned long long psym_counter = 0;
+            LOG_DEMOD(INFO, "PSYM-DIAG sym=%llu hmag=%.6g", psym_counter++, symbol_mag_mean);
+        }
+    }
     if (symbol_mag_mean <= 0.01f || !std::isfinite(symbol_mag_mean)) {
         public_fading_index = last_fading_index;
         return;

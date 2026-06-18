@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-17 — feat(phy): per-carrier estimate-error LLR (eps_H) default-ON — kills "confident-wrong" retx + R2/3 entry basis
+
+Two throughput levers from a deep root-cause of the IONOS retx (the real ceiling — code rate is
+NOT: R5/6≈R3/4≈R2/3≈~1 kbps on fading, climbing just adds resends). ctest 80/80 meaningful
+(only pre-existing `UltraTncSimAudio`).
+
+### 1. feat(phy): eps_H per-carrier LLR estimate-error term default-ON (`ULTRA_HERR_LLR_K`, was 0 → 1.0)
+**Root cause (code-traced, 5-agent + adversarial):** 57% of rig CW failures were "Mode B" —
+frames with HEALTHY mean |LLR| (~9-13, same as the OK frames) that fail anyway (LDPC iters=60
+cap, unsat 19-67), with a per-carrier BIMODAL LLR (p10~0.1, p90=20 CLIPPED). These are
+**confident-WRONG bits**: on a frequency-selective channel the sparse-pilot (spacing 8) Wiener
+interpolation biases the H PHASE on between-pilot data carriers while smoothing the magnitude
+through — the equalized QPSK point rotates into the wrong quadrant, and because the LLR noise was
+THERMAL+MAGNITUDE-only (the per-carrier estimate-error term `eps_H` was gated OFF), it emitted a
+clipped-±20 confident-wrong soft bit that poisons the LDPC. The magnitude-variance per-carrier
+scaling (ofdm_symbol_demap.cpp) is structurally blind to a phase error.
+**Fix:** the receiver ALREADY computes the calibrated per-carrier Wiener residual error variance
+(`per_carrier_h_error_var_`, channel_equalizer_pilot.cpp); the wiring to fold it into the LLR
+noise `nv=(σ²+k·err_var·|H|²)/(|H|²+σ²)` exists (channel_equalizer_equalize.cpp:546-550) but `k`
+defaulted to 0. Default it to **k=1.0** (the in-code-validated value). Now uncertain
+between-pilot carriers soft-erase instead of out-voting the good carriers.
+**Scoped to QPSK/QAM8** (gated on `!soft_gray_zone_csi`): QAM16+ already inflates per-carrier
+noise via `softGrayZoneNoiseInflation`, and stacking eps_H double-counts → over-inflates → LDPC
+starves. A controlled OTASim gate (QAM16 good@24, same seed) **confirmed the QAM16 regression**:
+eps_H ON dropped goodput 2720→2020 bps and quadrupled CW-fails (135→512). So QAM16 keeps
+softGrayZone only; eps_H is QPSK/QAM8. The Wiener error_var is ~0 on flat/AWGN by construction →
+no AWGN regression. `ULTRA_HERR_LLR_K=0` disables; any value overrides.
+**Validation (controlled OTASim A/B, same seed, only the knob differs):** moderate@20 Mode-B
+**147→21 (−86%)**, failed groups −75%, 50 KB delivered in **2.4× fewer group-attempts**. Good@20
+neutral (7→8 Mode-B = noise; failed groups 5→3) — Good has little selectivity → little
+interpolation Mode-B. So: big win on selective/multipath HF (the real use case), neutral on Good,
+~0 on AWGN. (Rig cheap-card per-carrier distortion is a separate Mode-B component eps_H may not
+catch — that's the per-carrier-EVM follow-up, task #28.)
+
+### 2. feat(rate): `ULTRA_R23_BASIS` default-ON — R2/3 entry basis on FADING, decoupled from the blind Good-vs-Moderate classifier
+The Good/Moderate `fading_index` classifier is unreliable on hardware (it coin-flips a genuinely-
+Good IONOS channel between Good 0.5 and Moderate 0.71, dropping the entry from R3/4 to **R1/2**).
+`capInitialOFDMRate` now pins the ENTRY to **R2/3** for coherent QPSK at SNR≥18 on any FADING
+channel (entry-only; the rate_controller climb to R3/4 on measured headroom is not gated). Rate is
+NOT the throughput lever on fading (R3/4≈R2/3), so the robust R2/3 basis trades a tiny rung for
+immunity to the classifier coin-flip. `ULTRA_R23_BASIS=0` disables.
+**Gated on fading-present (`fading_index >= kFadingAwgnMax = 0.15`):** a controlled OTASim AWGN@20
+A/B (same seed, only the knob) measured that a *blanket* SNR-only pin costs **~11% on clean AWGN**
+(R3/4 2150 → R2/3 1920 bps) — on AWGN there is no fade margin to recover and R3/4 is the measured-
+correct rung. The `fading_index` cannot split Good from Moderate but it cleanly separates AWGN
+(~0) from any fading channel (~0.5), which is exactly the distinction this gate needs, so the pin
+fires only where R2/3 actually earns its robustness.
+
+### 3. Diagnostic scaffolding (read-only, env-gated, default off)
+`getLastLTSNoiseVariance()` accessor (IWaveform→OFDMChirpWaveform→OFDMDemodulator); `COH-DIAG`
+(env `ULTRA_COH_DIAG`) per-frame disc inputs; `PSYM-DIAG` (env `ULTRA_PSYM_DIAG`) per-symbol |H|.
+Plus `docs/WITHIN_FRAME_COHERENCE_DESIGN_2026_06_17.md`: the within-frame coherence-disc redesign
+(REJECTED — per-symbol |H| is too noisy/loop-contaminated on hardware; the disc is signal-limited,
+not statistic-limited; the real lever is a cleaner/faster channel-estimate feed).
+
+---
+
 ## 2026-06-17 — fix(arq)+fix(gui): ACK-listen deadline ignored the escalated full-chirp resend (resend storm) + S-meter ballistics on the SNR meter
 
 Two fixes from a 5-analyst + adversarial-synth diagnosis of an IONOS MPM (Moderate) 50 KB transfer.

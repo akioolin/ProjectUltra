@@ -172,6 +172,10 @@ public:
     // Last LTS channel-estimation metrics from processPresynced().
     float getLastLTSSignalPower() const;
     float getLastLTSChannelMagnitude() const;
+    // Per-frame LTS channel-estimation NOISE variance (E|H1-H0|^2/4 from the two-LTS
+    // difference, per data carrier). Hardware-measured per frame; feeds the Doppler-
+    // coherence disc's noise-floor de-bias (read-only diagnostic for now).
+    float getLastLTSNoiseVariance() const;
     float getLastLTSResidualCFOHz() const;
 
     // Override the Wiener correlation-model parameters (Doppler Hz / delay spread s) from a

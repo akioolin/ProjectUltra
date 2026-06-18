@@ -332,10 +332,32 @@ inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate ca
 inline CodeRate capInitialOFDMRate(float snr_db,
                                    float fading_index,
                                    CodeRate candidate,
-                                   Modulation /*modulation*/) {
+                                   Modulation modulation) {
     // ULTRA_FORCE_DATA_RATE: the operator is probing a specific rung — no demotion.
     if (std::getenv("ULTRA_FORCE_DATA_RATE") != nullptr) {
         return candidate;
+    }
+    // ULTRA_R23_BASIS (2026-06-17, default ON; set =0 to disable): decouple the ENTRY rate
+    // from the Good/Moderate classifier, which is unreliable on real hardware (it coin-flips
+    // a genuinely-Good IONOS channel between Good and Moderate, dropping the entry from R3/4
+    // to R1/2). On any FADING channel at usable SNR (>=18 dB) start every coherent-QPSK
+    // connection at the robust R2/3 basis regardless of the (unreliable) Good-vs-Moderate
+    // class, and let the closed-loop adaptive ladder climb to R3/4 on MEASURED headroom.
+    //   GATED ON FADING PRESENT (fading_index >= kFadingAwgnMax): on a genuine AWGN channel
+    //   there is no fade margin to recover and R3/4 is the measured-correct rung — a blanket
+    //   R2/3 pin there is a pure ~11% throughput loss (OTASim AWGN@20: R3/4 2150 vs R2/3 1920
+    //   bps). The fading_index cannot split Good from Moderate but it cleanly separates AWGN
+    //   (~0) from any fading channel (~0.5), which is exactly the distinction this gate needs.
+    // Entry-only: called only from the two initial-mode sites (connection.cpp:405,
+    // connection_handlers.cpp:269); the rate_controller climb path is not gated, so
+    // R2/3->R3/4 still works when adaptation is on.
+    {
+        const char* b = std::getenv("ULTRA_R23_BASIS");
+        const bool r23_basis_on = !(b && b[0] == '0');  // default ON
+        if (r23_basis_on && modulation == Modulation::QPSK && snr_db >= 18.0f &&
+            fading_index >= kFadingAwgnMax) {
+            return CodeRate::R2_3;
+        }
     }
     // Coherent-only band: modulation no longer changes the cap.
     return capInitialOFDMRate(snr_db, fading_index, candidate);
