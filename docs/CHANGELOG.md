@@ -10,7 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-06-17 — feat(phy): per-carrier estimate-error LLR (eps_H) default-ON — kills "confident-wrong" retx + R2/3 entry basis
+## 2026-06-17 — feat(rate): retire R5/6 from the auto ladder + QAM16 R2/3 cross-modulation climb (default-OFF)
+
+Reshapes the top of the adaptive rate ladder: above QPSK R3/4 the next throughput step is now a
+MODULATION step (QAM16 R2/3), not a thinner QPSK code (R5/6). ctest 79/80 (only pre-existing
+`UltraTncSimAudio`); 5-tier adversarial review = ship-with-changes, no blockers on the default path.
+
+### 1. feat(rate): R5/6 RETIRED from the adaptive ladder (default-ON)
+**Why:** multi-anchor measurement (`docs/RATE_LADDER_ANCHORS.md`): QPSK R5/6 Good@20 = 1480 bps /
+33% frame damage / it_max 17 — it LOSES to R3/4 (1630 bps / 8%). 17% FEC redundancy sits BELOW
+Good's ~23% fade-erasure → the rung is under the reliability cliff and the raw-rate gain is eaten
+by resends. R5/6 also forced the ssthresh machinery to exist purely to suppress the R3/4<->R5/6
+oscillation that burned the whole airtime budget (Good@20 seed 7/42, ~15 rate flips).
+**Change:** `RateController` default ladder → `{R1_4,R1_2,R2_3,R3_4}` (rate_controller.hpp);
+`maxValidatedCoherentRate(QPSK)` R5_6→R3_4; the 4 `ULTRA_MAX_OFDM_RATE` no-cap sentinels migrated
+R5_6→`CodeRate::AUTO` in lockstep (connection.cpp ×2, connection_handlers.cpp ×2 — AUTO=0xFF is the
+semantically-correct "unspecified" sentinel and no longer collides with a real ladder rate). R5_6
+stays a valid enum + LDPC rate, reachable only as an explicit `ULTRA_FORCE_DATA_RATE=R5_6` probe.
+The ssthresh guard is kept (now mostly inert; protects the R2/3<->R3/4 boundary). Tests updated to
+the new R3/4 top rung (tests/test_rate_controller.cpp). Mostly inert by default (adaptive rate is
+default-OFF). OTASim Good@20 adaptive sanity (R5/6 removed): QPSK R2/3 1870 bps CRC-clean PASS.
+
+### 2. fix(arq): applyDataMode HARQ flush + re-encode on a MODULATION change
+A modulation change (the QAM16 climb) changes the constellation geometry AND the per-CW byte
+capacity, exactly like a rate/CW change. `applyDataMode` now folds `mod_changed` into the
+requeue/refill predicate and — critically — the `soft_combine_harq_.clear()` guard: stale
+old-constellation soft-combine LLRs would corrupt HARQ across the modulation boundary. (The QAM16
+climb always co-changes the rate so the deeper ARQ-window rewind in setCodeRate fires; a pure
+modulation-only transition would need an explicit ARQ rewind — documented, not present today.)
+
+### 3. feat(rate): QAM16 R2/3 cross-modulation CLIMB (`ULTRA_QAM16_CLIMB`, default-OFF)
+The adaptive path was modulation-fixed (it only walked code rate at the CONNECT modulation). New:
+when adaptive rate is active and pinned at QPSK R3/4 for **`kQam16ClimbStreak` consecutive clean
+groups** (quality ≥ climb_above; default 4, env-tunable `ULTRA_QAM16_CLIMB_STREAK` [1..64] — lowered
+from 8 because the hop took ~30% of a transfer to fire at 8), the SENDER issues
+`requestModeChange(QAM16, R2_3)` at a CLEAN send
+boundary (reuses the existing `file_send_window_busy` gate + synchronized MODE_CHANGE → no ARQ-seq
+renumber, no pilot/geometry desync). The 8-consecutive-clean-groups gate doubles as a low-variance
+**Good-vs-Moderate proxy** (a Moderate channel's fades keep resetting the streak) — a sender-side
+substitute for the LTS coherence disc, which lives on the deaf-while-sending RECEIVER and whose HW
+threshold is not yet validated, so disc-gating needs a wire change and is a deliberate later add
+(no wire-version bump now). On QAM16 the policy is HOLD or an **asymmetric prompt demote** straight
+back to robust QPSK R3/4 (after kQam16DemoteBadStreak=2 sub-drop_below groups, or a NACK), made
+**sticky** so a fading channel can't thrash QPSK↔QAM16. `maybeEscapeStuckFrame` also demotes
+QAM16→QPSK R3/4 when a frame craters with no ack (the real backstop on a hard cliff). State
+(`qam16_clean_streak_`/`bad_streak_`/`sticky_demoted_`) is per-connection (reset in enterConnected).
+**Rationale (the rung is real post-keystone):** QAM16 R2/3 Good@20 ≈ 1790 bps clean (6/6) since the
+cross-frame TIME interleave keystone — competitive with QPSK R3/4 (1630–1910) — but a ZERO-MARGIN
+anchor (works at exactly Good@20; falls off the cliff on Moderate-misclassified-as-Good). Hence
+default-OFF + the conservative streak gate + sticky prompt drop-back. eps_H does NOT cover QAM16, so
+QAM16 stays on its softGrayZone per-carrier path.
+**MEASURED (OTASim, forced OFDM QPSK R3/4 entry, climb ON, 50KB):** Good@20 climb fires
+QPSK R3/4 → 16QAM R2/3 CRC-clean (streak=8: 1950 bps @~30% in; streak=4: 2060 bps @~22% in). Gates:
+climb-OFF Good@20 no-regression (R3/4 1840 PASS); Moderate@20 correctly does NOT climb (no cliff,
+CRC-clean). **Paired A/B Good@22 seed-42: climb-ON 16QAM 2140 bps vs climb-OFF QPSK R3/4 2090 bps =
++2.4% (WITHIN the ±25% gate noise = a TIE).** So even firing perfectly with 2 dB margin, QAM16 R2/3
+delivers NO measurable goodput gain over QPSK R3/4 — both hit the ~2100 bps PROTOCOL CEILING
+(turnaround + per-burst anchor ~47%), confirming the constellation is NOT the throughput lever (the
+ceiling is). The climb is therefore SHIPPED DEFAULT-OFF as validated scaffolding (correct + safe +
+gated), not as a throughput win; default-on would require lifting the ceiling first AND a
+HW-validated coherence disc to gate the cliff. (One seed; multi-seed pending but consistent with all
+prior ceiling data.)
 
 Two throughput levers from a deep root-cause of the IONOS retx (the real ceiling — code rate is
 NOT: R5/6≈R3/4≈R2/3≈~1 kbps on fading, climbing just adds resends). ctest 80/80 meaningful

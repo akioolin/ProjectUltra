@@ -44,12 +44,12 @@ void test_single_transient_fade_does_not_drop() {
     // fades: ONE (and even TWO) consecutive fades must HOLD; only a sustained run
     // (3rd consecutive) finally drops a rung.
     RateController c;
-    for (int i = 0; i < 4; ++i) c.update(CodeRate::R5_6, 1.0f);  // ema -> ~1.0
-    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R5_6,
+    for (int i = 0; i < 4; ++i) c.update(CodeRate::R3_4, 1.0f);  // ema -> ~1.0
+    CHECK(c.update(CodeRate::R3_4, 0.0f) == CodeRate::R3_4,
           "1 fade after a healthy run: HOLD (no churn)");
-    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R5_6,
+    CHECK(c.update(CodeRate::R3_4, 0.0f) == CodeRate::R3_4,
           "2 consecutive fades: still HOLD");
-    CHECK(c.update(CodeRate::R5_6, 0.0f) == CodeRate::R3_4,
+    CHECK(c.update(CodeRate::R3_4, 0.0f) == CodeRate::R2_3,
           "3 consecutive fades (sustained): NOW drop one rung");
 }
 
@@ -67,7 +67,7 @@ void test_periodic_fade_does_not_ratchet_to_floor() {
     }
     CHECK(!ratcheted_below_start,
           "75%-good periodic fade never ratchets below the R2/3 start (no churn)");
-    CHECK(r == CodeRate::R3_4 || r == CodeRate::R5_6 || r == CodeRate::R2_3,
+    CHECK(r == CodeRate::R3_4 || r == CodeRate::R2_3,
           "ends at or above the start rung");
 }
 
@@ -75,7 +75,7 @@ void test_sustained_failure_descends_to_floor() {
     // Unrelenting failure (the rung really IS over capacity) must still descend all
     // the way to the R1/4 floor — smoothing slows it, it does not stop it.
     RateController c;
-    CodeRate r = CodeRate::R5_6;
+    CodeRate r = CodeRate::R3_4;
     for (int i = 0; i < 40; ++i) r = c.update(r, 0.0f);
     CHECK(r == CodeRate::R1_4, "unrelenting failure descends to the R1/4 floor");
 }
@@ -91,7 +91,7 @@ void test_climb_is_slow_and_deliberate() {
     // sustained perfect quality eventually reaches the top rung.
     CodeRate r = CodeRate::R1_4;
     for (int i = 0; i < 40; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R5_6, "sustained perfect quality climbs to the top rung");
+    CHECK(r == CodeRate::R3_4, "sustained perfect quality climbs to the top rung");
 }
 
 void test_no_thrash_in_hysteresis_gap() {
@@ -120,28 +120,30 @@ void test_off_ladder_rate_passes_through() {
 void test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung() {
     // THE OSCILLATION FIX (2026-06-11). Without ssthresh, dropping off the top rung on a fade and
     // then climbing straight back into it (every climb_streak=3 good groups) thrashed the rate
-    // R3/4<->R5/6 ~15x in one transfer and burned the whole airtime budget (Good@20 seed 7/42).
+    // ~15x in one transfer and burned the whole airtime budget (Good@20 seed 7/42). That was the
+    // R3/4<->R5/6 boundary; R5/6 is now retired (2026-06-17) so the guard protects the new top
+    // boundary R2/3<->R3/4 with identical mechanics.
     RateController c;
     CodeRate r = CodeRate::R1_4;
     for (int i = 0; i < 40; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R5_6, "warm up to the top rung on sustained good");
+    CHECK(r == CodeRate::R3_4, "warm up to the top rung on sustained good");
 
     // exactly one sustained-fade window drops ONE rung off the top (ema 1.0 -> <drop_below in 3).
     r = c.update(r, 0.0f);
     r = c.update(r, 0.0f);
     r = c.update(r, 0.0f);
-    CHECK(r == CodeRate::R3_4, "a sustained fade drops R5/6 -> R3/4");
-    CHECK(c.ceilingRate() == CodeRate::R3_4, "the drop caps the ssthresh ceiling at R3/4");
+    CHECK(r == CodeRate::R2_3, "a sustained fade drops R3/4 -> R2/3");
+    CHECK(c.ceilingRate() == CodeRate::R2_3, "the drop caps the ssthresh ceiling at R2/3");
 
-    // good channel again: the OLD controller would re-climb to R5/6 by the ~4th good group.
+    // good channel again: the OLD controller would re-climb to R3/4 by the ~4th good group.
     // ssthresh must HOLD below the failed rung across several good groups.
     for (int i = 0; i < 6; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R3_4,
-          "ssthresh holds below the failed rung — 6 good groups do NOT bounce back to R5/6");
+    CHECK(r == CodeRate::R2_3,
+          "ssthresh holds below the failed rung — 6 good groups do NOT bounce back to R3/4");
 
     // but a sustained good run DOES eventually re-probe the ceiling upward (channel may recover).
     for (int i = 0; i < 30; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R5_6, "after a long good run the ceiling re-probes back to the top rung");
+    CHECK(r == CodeRate::R3_4, "after a long good run the ceiling re-probes back to the top rung");
 }
 
 }  // namespace

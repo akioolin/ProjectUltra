@@ -281,8 +281,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
                                : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
                                : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
-                               : CodeRate::R5_6;
-            if (cap != CodeRate::R5_6 && rec_rate > cap) {
+                               : CodeRate::AUTO;  // anything else = no cap (AUTO sentinel)
+            if (cap != CodeRate::AUTO && rec_rate > cap) {
                 LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE responder cap %s -> %s",
                           codeRateToString(rec_rate), codeRateToString(cap));
                 rec_rate = cap;
@@ -435,8 +435,8 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
             const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
                                : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
                                : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
-                               : CodeRate::R5_6;
-            if (cap != CodeRate::R5_6 && init_rate > cap) {
+                               : CodeRate::AUTO;  // anything else = no cap (AUTO sentinel)
+            if (cap != CodeRate::AUTO && init_rate > cap) {
                 LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE initiator cap %s -> %s",
                           codeRateToString(init_rate), codeRateToString(cap));
                 init_rate = cap;

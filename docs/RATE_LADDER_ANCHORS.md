@@ -89,6 +89,10 @@ Forced rungs at Good@20, 20 KB, CRC + sample-space. Single-seed scan then 5-seed
 - QPSK R5/6 (single seed): 1480 bps, **33% damage**, it_max 17 — LOSES to R3/4. Thin FEC (17%
   redundancy) < Good's ~23% fade-erasure → below the cliff; raw-rate gain eaten by resends.
   (Contradicts the old "R5/6 ~+10% over R3/4 on Good@20" note, which ignored fade-recovery cost.)
+  **→ R5/6 RETIRED from the auto ladder 2026-06-17** on this evidence (rate_controller.hpp ladder
+  is now {R1_4,R1_2,R2_3,R3_4}; R5_6 stays a forcible `ULTRA_FORCE_DATA_RATE` probe only). Above
+  QPSK R3/4 the next throughput rung is a MODULATION step (QAM16 R2/3, `ULTRA_QAM16_CLIMB`), not a
+  thinner code. See docs/CHANGELOG.md 2026-06-17.
 - 16QAM R1/2 (single seed): 1190 bps, 17% damage, it_max 29 — LOSES to R3/4. The dense
   constellation eats freq-selective nulls (decodability gate); slower despite 2.0 vs 1.5 eff
   bits/sym. 16QAM is a clean/AWGN rung, not a Good-fading one.

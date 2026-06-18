@@ -246,6 +246,11 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   no auto rung reaches them. Confirm no forced-mod test path first.
 - **R6. `carrier_ldpc_interleaver`** — default-off diversity layer, auto-on only on masked
   carriers; likely removable. Confirm the masked-carrier path is truly unused first.
+- **R9. `src/gui/adaptive_mode.cpp` legacy SNR-threshold controller** — the old
+  `>48 dB → QAM64 R5/6` ladder (`:28-40`). NOT the production auto path (`recommendDataMode` /
+  `selectCoherentOFDM` is), and it is the last live picker of `CodeRate::R5_6` after R5/6 was
+  retired from the real ladder (2026-06-17). KEEP-check: confirm no GUI control still calls it
+  before deleting; the `R5_6` enum value itself stays (valid LDPC rate + forcible probe).
 
 ## Deprecate (divergent, not yet removed)
 

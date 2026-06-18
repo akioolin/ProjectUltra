@@ -638,6 +638,14 @@ private:
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
     std::string last_adaptive_action_;      // GUI: short human-readable action
+    // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-OFF). See
+    // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK
+    // R3/4 (the climb gate AND a low-variance Good/Moderate proxy — a Moderate channel's fades
+    // keep resetting it); bad_streak = consecutive bad groups on QAM16 (the prompt-demote
+    // trigger); sticky = demoted once -> do not re-climb QAM16 for the rest of this connection.
+    int qam16_clean_streak_ = 0;
+    int qam16_bad_streak_ = 0;
+    bool qam16_sticky_demoted_ = false;
     // Raw file payload (TYPE+OFFSET headers stripped) + a byte cursor used by the
     // chunk-at-rate form fn. Populated by startBurstFileTransfer when adaptive
     // rate is on; the cursor advances by burst_pending_advance_ only on ACK.

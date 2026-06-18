@@ -62,31 +62,36 @@ public:
         // failed, the controller may climb back UP to (and past) that rung only after this many
         // climb-eligible events while pinned at the ceiling. With climb_streak=3 that is ~6 good
         // groups per re-probe — so a rung that keeps failing on a fading channel is retried
-        // occasionally, not every 3 groups. This kills the R3/4<->R5/6 oscillation that, ungated,
+        // occasionally, not every 3 groups. This killed the R3/4<->R5/6 oscillation that, ungated,
         // thrashed the rate ~15x in one transfer (Good@20 seed 7/42) and burned the whole budget.
+        // R5/6 is now retired from the ladder (the top rung is R3/4, the Good@20 sweet spot), so
+        // this guard is mostly inert on the default ladder — it still protects the R2/3<->R3/4
+        // boundary on a fading channel that can't hold R3/4.
         int ceiling_reprobe_climbs = 2;
         // Ordered ladder of SUPPORTED rates, lowest throughput first. If left empty
         // the controller fills it with the production OFDM ladder (skips the
-        // unsupported R1_3/R5_6/R7_8 enum holes).
+        // unsupported R1_3/R7_8 enum holes, and R5_6 — retired 2026-06-17, see ctor).
         std::vector<CodeRate> ladder;
     };
 
     RateController() : RateController(Config{}) {}
     explicit RateController(Config cfg) : cfg_(std::move(cfg)) {
         if (cfg_.ladder.empty()) {
-            // §14.36 toward-3000 ladder: R5/6 added as a climb target above R3/4
-            // (2026-05-28). LDPC encoder/decoder fully support R5/6 (802.11n
-            // base matrix, 540 info bits / 648 coded). +11% bytes/frame vs R3/4
-            // when the channel permits; controller drops back automatically when
-            // headroom shrinks. Adds NO risk on faded channels (it just never
-            // climbs that high if quality stays low), real win on clean stretches.
-            // §14.36 toward-3000 ladder: R5/6 added as a climb target above R3/4
-            // (2026-05-28). LDPC encoder/decoder fully support R5/6 (802.11n base
-            // matrix, 540 info bits / 648 coded). +11% bytes/frame vs R3/4 when
-            // the channel permits; controller drops back automatically when
-            // headroom shrinks.
+            // R5/6 RETIRED from the auto ladder (2026-06-17). It was added (2026-05-28)
+            // as a "toward-3000" climb target above R3/4, but multi-anchor measurement
+            // (docs/RATE_LADDER_ANCHORS.md): QPSK R5/6 Good@20 = 1480 bps / 33% frame
+            // damage / it_max 17 — it LOSES to R3/4 (1630 bps / 8%). 17% FEC redundancy
+            // sits BELOW Good's ~23% fade-erasure → the rung is under the reliability
+            // cliff and the raw-rate gain is eaten by resends. It also forced the
+            // ssthresh machinery below to exist purely to suppress the R3/4<->R5/6
+            // oscillation that burned the whole airtime budget (Good@20 seed 7/42).
+            // The top auto rung is now R3/4 (the measured Good@20 sweet spot); R5_6 is
+            // still a valid enum + LDPC rate, reachable only as an explicit
+            // ULTRA_FORCE_DATA_RATE probe. The next throughput rung above R3/4 is a
+            // *modulation* step (QAM16 R2/3), handled in the connection's adaptive
+            // layer, not a thinner QPSK code.
             cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3,
-                           CodeRate::R3_4, CodeRate::R5_6};
+                           CodeRate::R3_4};
         }
         ceiling_idx_ = static_cast<int>(cfg_.ladder.size()) - 1;  // start unrestricted
     }

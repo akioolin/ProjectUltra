@@ -197,13 +197,14 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
 
 // Highest GUI-validated code rate for a given coherent modulation — a per-modulation
 // ceiling for the adaptive RateController, which is otherwise modulation-BLIND (it walks
-// {R1/4..R5/6} at whatever modulation was fixed at CONNECT). Without this, a clean stretch
+// {R1/4..R3/4} at whatever modulation was fixed at CONNECT). Without this, a clean stretch
 // promotes the connect-time 16QAM R1/2 up into the measured DAMAGE-BOUND 16QAM R2/3/R3/4
 // (Phase 0a: 55-70% frame loss, 1-of-3 link-death — fable_analysis/07) BEFORE the reactive
 // ssthresh can cap it, taking a frame into a fade at the over-climbed rung. QAM16 is capped
 // at R1/2 (the only Good-clean QAM16 rung measured to date); RAISE this per rung as the
 // dense-rung margins work (fable_analysis Phase 2b) validates QAM16 R2/3+ on the GUI gate.
-// Non-QAM16 modulations keep the full ladder (R5_6 = no cap = current behavior).
+// Non-QAM16 (QPSK) is capped at R3/4 — the top of the auto ladder since R5/6 was retired
+// (2026-06-17, a measured-losing rung; see rate_controller.hpp). R5_6 is no longer a cap value.
 inline CodeRate maxValidatedCoherentRate(Modulation mod) {
     switch (mod) {
         // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (auto-on for QAM16 via
@@ -211,7 +212,7 @@ inline CodeRate maxValidatedCoherentRate(Modulation mod) {
         // (6/6 seeds), now ABOVE the R1/2 clean rung (~1550). Capped at R2/3, NOT R3/4 — 16QAM
         // R3/4 stays damage-bound even with interleave; AWGN@30 ceiling is ~2850.
         case Modulation::QAM16: return CodeRate::R2_3;
-        default:                return CodeRate::R5_6;
+        default:                return CodeRate::R3_4;  // QPSK ceiling = top of the auto ladder
     }
 }
 
