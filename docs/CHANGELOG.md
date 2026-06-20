@@ -10,6 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — perf(rx): preserve warm-sync state across the half-duplex echo-clear (turnaround −43%, env-gated)
+
+**Broken:** the rig's steady-state clean-cycle turnaround was ~2.7s (vs OTASim ~0.6s) — a ~27% goodput
+tax on every Good/Moderate file transfer. Root cause (lockstep instrumented rig run, md5-identical both
+ends): the pre-TX echo-clear `clearRxBuffer()` (app.cpp:3047-3051, "Mute RX and clear buffers to avoid
+local feedback decode") calls `streaming_decoder_->reset()` on EVERY ACK the station transmits.
+`reset()` zeroes the ring timeline (`total_fed_`) AND wipes the warm-sync frame-arrival prediction
+(`resetFrameArrivalTrackingLocked`), so every next burst is COLD-re-acquired (`min_search` =
+CHIRP_MAX_SEARCH ≈ 2.5s) instead of warm (~0.2s). Proof: RXLAG `audio_fed` resets 0→9.3s→0 every cycle
+on the rig but climbs continuously on OTASim — because OTASim's sim-TX path returns BEFORE the
+echo-clear (app.cpp:3040) and never runs it (so `warm-sync: wait` fires on OTASim, NEVER on the rig:
+0/5156 warm-window traces). SAME bug class as task #55 (that fix preserved the Doppler-coherence disc
+across this reset via `reset_doppler_coherence=false`; this leaves the warm-sync prediction to be wiped).
+Also a SIMULATOR-FIDELITY gap: the faithful gate is structurally blind to it (sim TX skips the path).
+
+**Change:** `ModemEngine::clearRxBuffer(bool for_tx_echo=false)` (modem_engine.{hpp,cpp}); the pre-TX
+echo-clear call site (app.cpp:3051) passes `for_tx_echo=true`. Under `ULTRA_WARM_TURNAROUND=1`
+(default-OFF), the connected-OFDM TX echo-clear becomes a decoder NO-OP — the audio side
+(`setRxMuted`+`stopCapture`+`AudioEngine::clearRxBuffer`) already prevents echo, so the decoder
+full-reset is harmful overkill. Skipping it makes the rig behave like OTASim (warm state + timeline
+survive the turnaround). Default-OFF: this is a real-half-duplex-only correctness change the faithful
+gate cannot see, so it is proven on a lockstep rig A/B before any default-on.
+
+**Verification:** lockstep rig A/B (md5-identical both ends, interleaved OFF/ON/OFF/ON 30KB MPG@20):
+MEDIAN turnaround OFF **2.71s → ON 1.54s (−43%)**, consistent across BOTH pairs (on1 1.42<off1 2.60,
+on2 1.65<off2 2.82), all 4 CRC-clean (echo safety holds). Mechanism markers: per-cycle decoder wipes
+19/22→2/2; cold RUNNING-correlations 115/87→73/48. `ctest` 80/81 (only pre-existing `UltraTncSimAudio`);
+flag-off path is byte-identical (env default-off).
+
+**Notes / dead ends (documented so they're not re-tried):** (1) full warm predict-and-wait (OTASim's
+~0.6s) is PARTLY A SIMULATOR ARTIFACT — the warm window is ±20ms but real-radio inter-group arrival
+varies ±260ms (T/R relay + PTT + CAT latency), so tight predict-and-wait can't catch the next group on a
+real radio (chasing it = chasing a sim artifact). (2) A `seedArrivalAfterDelay`-based silence-injection
+fix and (3) a medium-window predicted dual-chirp anchor search (v3, learned inter-group cadence) were
+both built and **adversarially rejected/measured-redundant**: the predicted search is REDUNDANT with
+this no-op (rig A/B: predict-ON 1.63s ≈ predict-OFF 1.60s median; it fires 0-3×/13 groups because the
+now-near-live cold/warm path re-acquires first) — reverted. (4) `postProcessTx` (modem_engine.cpp:719)
+prepends a FIXED 150ms lead-in + 50ms tail = 200ms/TX (verified: ACK 15552→25152 queued samples) — a
+separate, radio-dependent turnaround lever to be investigated next (NOT the ±260ms variance source).
+
+---
+
 ## 2026-06-19 — fix(arq): budget receiver SACK-coalesce hold in ACK timeouts + drain in-group burst frames per wake
 
 Two RX-turnaround fixes found via a deep per-retx forensic on a live IONOS MPG@20 transfer (the rig's

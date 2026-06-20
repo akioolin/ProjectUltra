@@ -1007,16 +1007,35 @@ void ModemEngine::reset() {
     }
 }
 
-void ModemEngine::clearRxBuffer() {
+void ModemEngine::clearRxBuffer(bool for_tx_echo) {
     // Clear streaming decoder buffer to discard any pending audio
     // Use this before TX to prevent decoding our own transmission (acoustic echo).
     // PRESERVE the slow Doppler-coherence estimator (reset_doppler_coherence=false): this fires
     // every half-duplex turnaround (before each ACK), and the disc needs ~31 per-frame snapshots
     // across many groups to validate — wiping it here kept it permanently invalid on real
     // transfers (task #55). The disc still resets on a true connection/mode reset (ModemEngine::reset).
-    if (streaming_decoder_) {
-        streaming_decoder_->reset(/*reset_doppler_coherence=*/false);
+    if (!streaming_decoder_) return;
+
+    // #67 WARM TURNAROUND (ULTRA_WARM_TURNAROUND): the pre-TX half-duplex echo-clear (for_tx_echo)
+    // fires before EVERY ACK during a connected OFDM transfer. The decoder reset() it triggers
+    // zeroes the ring timeline (total_fed_) and wipes the warm-sync frame-arrival prediction, so
+    // every subsequent burst is COLD-re-acquired (min_search ~2.5 s) instead of warm (~0.2 s) —
+    // measured ~2 s/cycle (~27% goodput) on the IONOS rig. The audio side (setRxMuted + stopCapture +
+    // AudioEngine::clearRxBuffer) already prevents echo, so on this path the decoder reset is harmful
+    // overkill. Skipping it makes the rig behave like OTASim, which never runs this path at all
+    // (its sim-TX returns before the echo-clear) and therefore keeps warm-sync alive across turnarounds.
+    // Gated + default-off: this is a real-half-duplex-only correctness change the faithful gate
+    // cannot see, so it is proven on a lockstep rig A/B before becoming default.
+    static const bool kWarmTurnaround = [] {
+        const char* e = std::getenv("ULTRA_WARM_TURNAROUND");
+        return e && e[0] == '1';
+    }();
+    if (for_tx_echo && kWarmTurnaround && connected_ &&
+        protocol::isOFDMMode(waveform_mode_)) {
+        return;  // preserve warm-sync state + ring timeline across the turnaround
     }
+
+    streaming_decoder_->reset(/*reset_doppler_coherence=*/false);
 }
 
 } // namespace gui

@@ -3048,7 +3048,7 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
     audio_.setRxMuted(true);
     audio_.stopCapture();
     audio_.clearRxBuffer();
-    modem_.clearRxBuffer();
+    modem_.clearRxBuffer(/*for_tx_echo=*/true);  // #67: connected-OFDM path may preserve warm-sync
 
     if (!audio_.hasOutputDevice()) {
         std::string output_dev = getOutputDeviceName();

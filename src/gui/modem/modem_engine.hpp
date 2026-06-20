@@ -215,7 +215,11 @@ public:
     void setNarrowbandControl(bool narrowband);
 
     void reset();
-    void clearRxBuffer();  // Clear RX audio buffer (use before TX to prevent echo)
+    // Clear RX audio buffer (use before TX to prevent echo). for_tx_echo=true marks the
+    // pre-TX half-duplex echo-clear (fires before every ACK/burst); during a connected OFDM
+    // transfer that path can preserve warm-sync state (ULTRA_WARM_TURNAROUND) instead of a
+    // full decoder reset that wipes warm re-acquisition (the ~27% turnaround penalty, #67).
+    void clearRxBuffer(bool for_tx_echo = false);
 
     // Carrier sense (listen-before-talk) lives in the shared ChannelBusyDetector
     // (src/audio/channel_busy_detector.cpp), reached by simulator/TNC stations via
