@@ -249,8 +249,8 @@ void test_narrow_ofdm_timing_and_timeout() {
     auto narrow_8cw = narrowOFDMFrameTiming(Modulation::DQPSK, 8);
     CHECK(narrow_8cw.data_ms > narrow.data_ms,
           "narrow OFDM data duration should scale with fixed-frame CW count");
-    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK) == 7165,
-          "narrow OFDM DQPSK ACK timeout (window=1, default)");
+    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK) == 8665,
+          "narrow OFDM DQPSK ACK timeout (window=1, default) — +1500ms receiver SACK hold (2026-06-19)");
     CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 8) >
               computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK),
           "narrow OFDM ACK timeout should scale with fixed-frame CW count");
@@ -262,16 +262,16 @@ void test_narrow_ofdm_timing_and_timeout() {
     const uint32_t w1 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 1);
     const uint32_t w2 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 2);
     const uint32_t w3 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 3);
-    CHECK(w1 == 7165, "window=1 timeout matches default behavior");
+    CHECK(w1 == 8665, "window=1 timeout matches default behavior (+1500ms SACK hold)");
     CHECK(w2 > w1, "window=2 timeout scales above window=1");
     CHECK(w3 > w2, "window=3 timeout scales above window=2");
-    // For 4-CW DQPSK narrow, data_ms=3453, ack_ms=933, so:
+    // For 4-CW DQPSK narrow, data_ms=3453, ack_ms=933, plus the +1500 ms receiver SACK hold:
     //   window=2: tx_burst_ms = 2*3453 = 6906; timeout = 6906 + 2*933
-    //             + 120 + max(700, 1726) = 10618 ms
+    //             + 120 + max(700, 1726) + 1500 = 12118 ms
     //   window=3: tx_burst_ms = 3*3453 = 10359; timeout = 10359 + 2*933
-    //             + 120 + max(700, 1726) = 14071 ms (current narrow default)
-    CHECK(w2 >= 10000 && w2 <= 11000, "window=2 timeout ~10.6 s");
-    CHECK(w3 >= 13500 && w3 <= 14500, "window=3 timeout ~14.0 s (current narrow default)");
+    //             + 120 + max(700, 1726) + 1500 = 15571 ms (current narrow default)
+    CHECK(w2 >= 11500 && w2 <= 12500, "window=2 timeout ~12.1 s");
+    CHECK(w3 >= 15000 && w3 <= 16000, "window=3 timeout ~15.6 s (current narrow default)");
 }
 
 void test_mc_dpsk_window_timing() {
@@ -651,6 +651,97 @@ void test_warm_short_anchor_descriptor_gate() {
           "short anchor must NOT fire on MC_DPSK");
 }
 
+// 2026-06-19: the burst-transport ACK deadline (unifiedBurstAckTimeoutMs) must NEVER fire before
+// the receiver can realistically return its tone-burst group-ACK, for EVERY mod/rate/cw/frame. The
+// half-duplex peer can only ACK after: burst fully on air (real-time airtime) + its deliberate
+// SACK-coalesce holdoff + LDPC decode + ack-return airtime. The bug this guards: the burst formula
+// omitted the receiver's SACK holdoff, so a full cw8 burst (IONOS MPG E5, seq63-67) timed out ~1-2 s
+// early and resent the whole group though 4/5 frames had decoded and the ACK was in flight.
+void test_unified_burst_ack_timeout() {
+    const Modulation mods[] = {Modulation::DQPSK, Modulation::QPSK,
+                               Modulation::QAM8, Modulation::QAM16};
+    const CodeRate rates[] = {CodeRate::R1_4, CodeRate::R1_2,
+                              CodeRate::R2_3, CodeRate::R3_4};
+    const int cws[] = {1, 4, 5, 6, 8};
+    const size_t frame_counts[] = {1, 3, 5, 8, 16};
+    const int z_values[] = {27, 81};
+    const Modulation control_mod = Modulation::DQPSK;  // robust control (matches production)
+    const uint32_t cfg_sack = kCarrierSenseSackCoalesceMs;
+    int cells = 0;
+    bool all_cover = true;
+    for (Modulation m : mods)
+        for (CodeRate r : rates)
+            for (int cw : cws)
+                for (size_t f : frame_counts)
+                    for (int z : z_values) {
+                        const uint32_t to = unifiedBurstAckTimeoutMs(
+                            m, r, cw, f, z, control_mod, cfg_sack);
+                        const size_t frames = std::max<size_t>(1, f);
+                        // Hard lower bound the deadline MUST cover: the receiver cannot ACK before
+                        // (burst on air) + (its SACK holdoff) + (1-CW ack return). decode margin /
+                        // turnaround slack are additional headroom on top.
+                        const uint32_t burst =
+                            wideOFDMBurstAirtimeMs(m, r, frames, cw, 0, z);
+                        const uint32_t sack_hold = std::max<uint32_t>(
+                            cfg_sack, wideOFDMSackDelayMs(m, r, frames, cw, 0));
+                        const uint32_t ack_ret =
+                            wideOFDMFrameTiming(control_mod, CodeRate::R1_4).ack_ms;
+                        const uint32_t required = burst + sack_hold + ack_ret;
+                        if (to < required) all_cover = false;
+                        ++cells;
+                    }
+    CHECK(cells == 4 * 4 * 5 * 5 * 2, "burst ACK timeout matrix fully swept");
+    CHECK(all_cover,
+          "unified burst ACK timeout must cover burst airtime + receiver SACK holdoff + ack "
+          "return for EVERY mod/rate/cw/frame/z");
+
+    // The SACK-coalesce term is actually wired into the deadline (the fix): the deadline includes
+    // at least the configured receiver holdoff (set a value well above any modeled hold).
+    CHECK(unifiedBurstAckTimeoutMs(Modulation::QPSK, CodeRate::R2_3, 8, 5, 27,
+                                   control_mod, 20000) >= 20000,
+          "configured receiver SACK-coalesce delay must flow into the burst ACK deadline");
+
+    // E5 regression: the exact live case (QPSK R2/3, cw8, 5-frame burst, z=27). Pre-fix the
+    // deadline was < burst + SACK holdoff and resent seq63-67 prematurely.
+    const uint32_t e5_to = unifiedBurstAckTimeoutMs(
+        Modulation::QPSK, CodeRate::R2_3, 8, 5, 27, control_mod, cfg_sack);
+    const uint32_t e5_burst =
+        wideOFDMBurstAirtimeMs(Modulation::QPSK, CodeRate::R2_3, 5, 8, 0, 27);
+    const uint32_t e5_sack = std::max<uint32_t>(
+        cfg_sack, wideOFDMSackDelayMs(Modulation::QPSK, CodeRate::R2_3, 5, 8, 0));
+    CHECK(e5_to > e5_burst + e5_sack,
+          "E5: QPSK R2/3 cw8 5-frame burst deadline must exceed burst airtime + SACK holdoff");
+
+    // NARROW path shares the bug: computeNarrowOFDMAckTimeoutMs previously omitted the 1500 ms
+    // receiver tone-burst SACK hold and went 0.3-1.5 s short for QPSK/8PSK/QAM16 at window=3. The
+    // deadline must cover window burst airtime + the receiver hold + the ack turnaround, every
+    // narrow mod/cw/window. (Narrow's tone-burst listen window already floors to getAckTimeout
+    // because isOFDMMode(OFDM_NARROW) is true, so the timeout fix is sufficient here.)
+    const Modulation narrow_mods[] = {Modulation::QPSK, Modulation::QAM8, Modulation::QAM16,
+                                      Modulation::DBPSK, Modulation::DQPSK};
+    const int narrow_cws[] = {1, 4, 8};
+    const size_t narrow_windows[] = {1, 2, 3};
+    bool narrow_cover = true;
+    for (Modulation m : narrow_mods)
+        for (int cw : narrow_cws)
+            for (size_t w : narrow_windows) {
+                const uint32_t to = computeNarrowOFDMAckTimeoutMs(m, cw, w);
+                const OFDMFrameTiming t = narrowOFDMFrameTiming(m, cw);
+                const uint32_t required =
+                    static_cast<uint32_t>(w) * t.data_ms +
+                    kToneBurstReceiverSackHoldMs + 2 * t.ack_ms;
+                if (to < required) narrow_cover = false;
+            }
+    CHECK(narrow_cover,
+          "narrow OFDM ACK timeout must cover window burst + 1500ms receiver SACK hold + ack "
+          "turnaround for every narrow mod/cw/window");
+    // The receiver hold is actually budgeted (the fix): the deadline includes >= the 1500 ms hold.
+    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::QAM16, 4, 3) >
+              3u * narrowOFDMFrameTiming(Modulation::QAM16, 4).data_ms +
+                  kToneBurstReceiverSackHoldMs,
+          "narrow QAM16 win=3 deadline must exceed burst + receiver SACK hold (the live short case)");
+}
+
 }  // namespace
 
 int main() {
@@ -665,6 +756,7 @@ int main() {
     test_recommend_cw_count();
     test_variable_frame_payload_capacity();
     test_warm_short_anchor_descriptor_gate();
+    test_unified_burst_ack_timeout();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

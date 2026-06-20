@@ -713,6 +713,61 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
     return std::max<uint32_t>(timeout_ms, kWideOFDMAckTimeoutFloorMs);
 }
 
+// Burst-transport (unified SR-ARQ) ACK timeout: the deadline the sender waits for the prompt
+// tone-burst group-ACK before resending the WHOLE burst. A half-duplex peer cannot ACK until it
+// has (1) physically received the multi-frame burst (real-time airtime), (2) held off for its
+// deliberate SACK-coalesce delay, (3) decoded, then (4) keyed up to return the 1-CW tone-burst.
+// EVERY term is mod/rate/cw/z-derived, so the deadline is correct for the whole modulation family
+// by construction (QPSK..16QAM, R1/4..R3/4, any cw/frame-count, z=27/81).
+//
+// 2026-06-19 FIX: added physical_sack_hold_ms. The sibling computeWideOFDMAckTimeoutMs() budgets the
+// receiver's SACK holdoff (line ~697) but THIS burst path did not — only a fixed 1500 ms round-trip
+// slack, which is SMALLER than the receiver's mod/rate-scaled SACK-coalesce delay (~2000 ms+). So for
+// a full cw8 burst the deadline fired ~1-2 s before the receiver's intentionally-delayed SACK could
+// arrive, and the sender resent the entire group even though most frames had already decoded and the
+// ACK was in flight (measured live: IONOS MPG@20, group seq63-67 — 4/5 frames OK at RX, SACK sent,
+// yet a 5-frame timeout-resend cost ~8.8 s, the single largest retx in the run). Budgeting the same
+// hold the receiver applies (wideOFDMSackDelayMs / setSackDelay) makes sender and receiver agree
+// across every mod/rate. Conservative by design: an over-long deadline only delays a genuinely-lost
+// ACK's resend slightly; an under-long one triggers spurious whole-burst resends (far worse).
+inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
+                                         CodeRate data_rate,
+                                         int cw_count,
+                                         size_t burst_frames,
+                                         int data_lifting_z,
+                                         Modulation control_mod,
+                                         uint32_t configured_sack_delay_ms,
+                                         uint32_t reanchor_ms = 0) {
+    const int sanitized_cw = v2::sanitizeFixedFrameCodewords(cw_count);
+    const size_t frames = std::max<size_t>(1, burst_frames);
+    const OFDMFrameTiming timing =
+        wideOFDMFrameTiming(data_mod, data_rate, sanitized_cw, data_lifting_z);
+    const OFDMFrameTiming control_timing =
+        wideOFDMFrameTiming(control_mod, CodeRate::R1_4);
+
+    // (1) actual on-air burst airtime (frames + first-frame anchor), mod/rate/cw/z-derived.
+    const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
+        data_mod, data_rate, frames, sanitized_cw, reanchor_ms, data_lifting_z);
+    // (2) receiver SACK-coalesce holdoff — the term the legacy burst formula OMITTED. Match the
+    // larger of the configured delay and the mod/rate-modeled physical hold (mirrors the sibling).
+    const uint32_t physical_sack_hold_ms = std::max<uint32_t>(
+        configured_sack_delay_ms,
+        wideOFDMSackDelayMs(data_mod, data_rate, frames, sanitized_cw, reanchor_ms));
+    // (3) peer LDPC decode-jitter envelope — a floor plus half a data-frame, so it scales with size.
+    const uint32_t decode_margin_ms =
+        std::max<uint32_t>(700, timing.data_ms / 2) + 700;
+    // (4) one prompt 1-CW group-ack returns (+ any re-anchor); diversity repeats don't gate.
+    const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
+    constexpr uint32_t kRoundTripSlackMs = 1500;  // T/R turnaround + jitter cushion
+    // §16.4 reserve: a warm-sync-cold escalation re-keys a RELIABILITY-mode burst with a SECOND full
+    // anchor beyond what wideOFDMBurstAirtimeMs models; budget it unconditionally (free on clean
+    // cycles, the ack-monitor auto-disarms the instant an ACK decodes).
+    const uint32_t reliability_full_anchor_ms = kWideOFDMFullAnchorExtraMs;
+
+    return burst_ms + physical_sack_hold_ms + decode_margin_ms + ack_return_ms +
+           kRoundTripSlackMs + reliability_full_anchor_ms;
+}
+
 inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
     switch (mod) {
         case Modulation::DBPSK: return 1;
@@ -830,9 +885,17 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
     return timing;
 }
 
-inline uint32_t computeNarrowOFDMAckTimeoutMs(Modulation mod,
-                                              int cw_count = v2::kDefaultFixedFrameCodewords,
-                                              size_t window_size = 1) {
+// Receiver tone-burst partial-SACK coalesce hold, applied UNCONDITIONALLY for every mode that
+// returns a tone-burst ack (selective_repeat_arq.cpp:622, kToneBurstPartialSackDelayMs). The narrow
+// peer withholds its SACK this long before keying up, so the sender's deadline must budget it — the
+// same omission the wide-OFDM burst path had (IONOS MPG E5).
+inline constexpr uint32_t kToneBurstReceiverSackHoldMs = 1500;
+
+inline uint32_t computeNarrowOFDMAckTimeoutMs(
+        Modulation mod,
+        int cw_count = v2::kDefaultFixedFrameCodewords,
+        size_t window_size = 1,
+        uint32_t configured_sack_delay_ms = kToneBurstReceiverSackHoldMs) {
     const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod, cw_count);
     // For window>1 selective-repeat, we hold the ARQ window full during
     // the burst, so the ACK timeout has to cover the full TX burst plus
@@ -840,13 +903,24 @@ inline uint32_t computeNarrowOFDMAckTimeoutMs(Modulation mod,
     // the timer fires while later frames are still on the wire.
     const uint32_t tx_burst_ms = timing.data_ms *
                                  static_cast<uint32_t>(std::max<size_t>(1, window_size));
+    // 2026-06-19: budget the receiver's tone-burst SACK-coalesce hold (the term the formula
+    // OMITTED — narrow QPSK/8PSK/QAM16 at window=3 went 0.3-1.5 s short of the 1.5 s hold, the
+    // same premature-resend class as wide-OFDM E5). Match the larger of the configured delay and
+    // the physical tone-burst hold so sender and receiver agree across every narrow mod/rate.
+    const uint32_t physical_sack_hold_ms =
+        std::max<uint32_t>(configured_sack_delay_ms, kToneBurstReceiverSackHoldMs);
     const uint32_t timeout_ms = tx_burst_ms + 2 * timing.ack_ms + 120 +
-                                std::max<uint32_t>(700, timing.data_ms / 2);
-    // Cap scales with window: 4.5s..14s for window=1, 4.5s..22s for window=2,
-    // 4.5s..30s for window=3 etc. Avoids pathologically long single-window
-    // values while letting large windows actually wait for their bursts.
-    const uint32_t upper = 14000u + 8000u * static_cast<uint32_t>(
-                               std::max<size_t>(1, window_size) - 1);
+                                std::max<uint32_t>(700, timing.data_ms / 2) +
+                                physical_sack_hold_ms;
+    // The cap only bounds the NON-physical extras (decode-jitter slop). It must NEVER fall below
+    // the physical minimum the peer needs to ACK — burst airtime + ack turnaround + receiver SACK
+    // hold — else the clamp re-introduces the premature-timeout bug for large narrow frames.
+    const uint32_t physical_floor_ms =
+        tx_burst_ms + 2 * timing.ack_ms + physical_sack_hold_ms;
+    const uint32_t upper = std::max<uint32_t>(
+        physical_floor_ms,
+        14000u + physical_sack_hold_ms +
+            8000u * static_cast<uint32_t>(std::max<size_t>(1, window_size) - 1));
     return std::clamp(timeout_ms, 4500u, upper);
 }
 

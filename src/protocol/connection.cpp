@@ -3046,7 +3046,7 @@ void Connection::configureArqForCurrentDataMode() {
         const auto timing = connection_policy::narrowOFDMFrameTiming(
             data_modulation_, data_frame_cw_count_);
         uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(
-            data_modulation_, data_frame_cw_count_, kNarrowWindow);
+            data_modulation_, data_frame_cw_count_, kNarrowWindow, arq_.getSackDelay());
         arq_.setAckTimeout(timeout_ms);
 
         LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums), carrier_sense_sack_coalesce=%ums, ack_repeat=%d, cw=%d (OFDM_NARROW %s %s)",
@@ -3291,41 +3291,17 @@ uint32_t Connection::unifiedBurstAckTimeoutMs(size_t burst_frames) const {
     // DATA frames carry the negotiated lifting z (z=81 long-LDPC ≈ 3× the coded bits/
     // codeword → ~3× the per-frame airtime); the control/ack frame is always short (z=27).
     const int data_z = selectBurstLiftingZ();
-    const auto timing = connection_policy::wideOFDMFrameTiming(
-        data_modulation_, data_code_rate_, data_frame_cw_count_, data_z);
-    const auto control_timing = connection_policy::wideOFDMFrameTiming(
-        wideOFDMControlModulationForData(data_modulation_), CodeRate::R1_4);
-    // The ack cannot arrive until the peer has fully RECEIVED the burst (real-time
-    // airtime) AND decoded it, then keyed up to return the tone-burst:
-    //   burst airtime (actual frames) + peer LDPC decode jitter + ack-return airtime.
-    const uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
-        data_modulation_, data_code_rate_, std::max<size_t>(1, burst_frames),
-        data_frame_cw_count_, reanchor_ms, data_z);
-    // Decode-jitter envelope — same model the legacy timeout uses (line ~4419): a
-    // floor plus half a data-frame, so it scales with frame size.
-    const uint32_t decode_margin_ms =
-        std::max<uint32_t>(700, timing.data_ms / 2) + 700;
-    // ONE prompt group-ack returns (diversity repeats are extra and don't gate the
-    // timeout); 1-CW control airtime + any re-anchor.
-    const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
-    constexpr uint32_t kRoundTripSlackMs = 1500;  // T/R turnaround + jitter cushion
-    // §16.4 escalation reserve: when warm-sync goes cold the encoder re-keys a
-    // RELIABILITY-mode burst that prepends a SECOND full chirp+LTS at the group start
-    // (on top of the descriptor's own anchor), inflating the on-air burst by one full
-    // anchor (~1.2 s) beyond what wideOFDMBurstAirtimeMs() models above (a single
-    // first-frame anchor + light/short continuations). If the deadline does not cover
-    // that extra anchor, the tone-burst-ACK listen window (which floors to this timeout)
-    // collapses and the sender re-keys THROUGH the receiver's inbound ACK — half-duplex,
-    // it cannot hear an ACK while keyed — clobbering it and triggering a resend storm
-    // (observed on IONOS MPM: a single slipped ACK escalates to full-chirp -> window
-    // shrinks -> more slips, 30-110 s stalls). Budget the worst-case reliability burst
-    // unconditionally: it is free on clean cycles (the monitor auto-disarms the instant
-    // an ACK decodes) and only delays a resend on a genuinely lost ACK, which is the
-    // correct conservative behavior.
-    const uint32_t reliability_full_anchor_ms =
-        connection_policy::kWideOFDMFullAnchorExtraMs;
-    return burst_ms + decode_margin_ms + ack_return_ms + kRoundTripSlackMs +
-           reliability_full_anchor_ms;
+    // Single source of truth (testable across the whole mod/rate/cw/z matrix):
+    // connection_policy::unifiedBurstAckTimeoutMs. It budgets burst airtime + the receiver's
+    // SACK-coalesce holdoff (the term the old inline formula OMITTED — see the IONOS MPG E5
+    // premature-timeout fix 2026-06-19) + decode jitter + ack-return + turnaround + the §16.4
+    // reliability full-anchor reserve. arq_.getSackDelay() is only a FLOOR here — the free function
+    // takes max(it, the mod/rate-modeled wideOFDMSackDelayMs), and that model floor is what
+    // guarantees coverage of the receiver's full physical hold (the sender's own configured value is
+    // its shorter sliding delay, not necessarily the peer's full-burst coalesce hold).
+    return connection_policy::unifiedBurstAckTimeoutMs(
+        data_modulation_, data_code_rate_, data_frame_cw_count_, burst_frames, data_z,
+        wideOFDMControlModulationForData(data_modulation_), arq_.getSackDelay(), reanchor_ms);
 }
 
 size_t Connection::prepareUnifiedBurstWindow() {

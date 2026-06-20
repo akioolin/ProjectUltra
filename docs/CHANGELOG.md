@@ -10,6 +10,56 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-19 — fix(arq): budget receiver SACK-coalesce hold in ACK timeouts + drain in-group burst frames per wake
+
+Two RX-turnaround fixes found via a deep per-retx forensic on a live IONOS MPG@20 transfer (the rig's
+real throughput is turnaround-bound, not retx- or rate-bound: turnaround ~3.1s/cycle = ~31% of airtime
+vs OTASim ~0.8s; retx ~6-7%). ctest 79/80 (only pre-existing `UltraTncSimAudio`).
+
+### 1. fix(arq): ACK timeout omitted the receiver's SACK-coalesce hold (premature whole-group resend)
+**Broken:** on the rig a full 5-frame burst (seq63-67, QPSK R2/3 cw8) was resent on `cause=timeout`
+even though 4/5 frames had decoded and the receiver's tone-burst SACK was already in flight — the
+sender's ACK deadline (`unifiedBurstAckTimeoutMs`) fired ~1-2s BEFORE the receiver could ACK. Root
+cause: the burst-transport deadline budgeted `burst_airtime + decode + ack_return + slack + reliability`
+but OMITTED the receiver's deliberate ~1.5s SACK-coalesce holdoff, while its sibling
+`computeWideOFDMAckTimeoutMs` (connection_policy.hpp:682) already includes it.
+**Change:** extracted the formula to a testable free function `connection_policy::unifiedBurstAckTimeoutMs`
+(connection_policy.hpp) + added a `physical_sack_hold_ms` term; `Connection::unifiedBurstAckTimeoutMs`
+(connection.cpp ~3285) is now a thin wrapper. Same fix to the narrow path
+`computeNarrowOFDMAckTimeoutMs` (was short 0.3-1.5s for QPSK/8PSK/QAM16 at window=3) via
+`kToneBurstReceiverSackHoldMs=1500` (mirrors the unconditional tone-burst hold at
+selective_repeat_arq.cpp:622); physical-floor-aware clamp so a large narrow frame is never capped below
+burst+hold. MC-DPSK is safe-by-accident (30ms hold masked by an 18s floor) — left unchanged.
+**Test:** `tests/test_connection_policy.cpp::test_unified_burst_ack_timeout` — 800-cell
+mod×rate×cw×frame×z matrix asserts `timeout >= burst + sack_hold + ack_return` for the WHOLE family,
+plus the E5 regression; narrow exact-value asserts updated +1500ms. `ctest -R ConnectionPolicy` PASS.
+**KNOWN FOLLOW-UP (BUG-ACK-TIMEOUT-DOUBLECOUNT):** the SACK-hold term currently uses
+`wideOFDMSackDelayMs` = `burst_airtime + coalesce`, so it counts the burst airtime TWICE (deadline
+~24s for an ~8s burst). This is CONSERVATIVE-SAFE (an over-long deadline only delays a genuinely-lost
+ACK's resend; it never causes spurious resends — the bug it fixes), but wasteful. The principled value
+is `burst_once + coalesce(~1.5s) + decode + turnaround` ≈ 14-17s. Tighten in a follow-up with rig-worst-
+case-turnaround calibration (a fade-affected partial-NACK pushed E5's post-burst latency to ~5.8s).
+
+### 2. perf(rx): drain already-arrived in-group burst frames per wake (BURST_ACC catch-up)
+**Broken:** the receiver trails live audio (rig RXQ peaks ~40s; the cold-chirp search head
+`correlation_pos_` falls behind and never catches up — streaming_decoder.cpp:502-516). One contributor:
+`accumulateBurstFrames` consumed ONE frame per ~50ms `processBuffer` wake, so after the frozen-anchor
+SYNC (where the whole contiguous group streams in) the already-arrived frames sat un-drained.
+**Change:** `accumulateBurstFrames` (streaming_burst_interleave.cpp) now drains in a bounded loop —
+group-size cap + ~30ms wall budget so the audio feed thread is never starved; reuses the existing
+`WAITING` (`write_pos_`-gated) return as the "next frame not on the wire yet" sentinel, so the loop is
+inert/correct when the lag is genuinely inherent. No new locking. Measured A/B ratio: 25% of frames
+already-present (drainable), 69% inherent. Rig goodput across 3 runs 1.24 → 1.31 → 1.41 kbps (modest,
+channel-noisy). The dominant turnaround lever (per-group anchor-search freeze / `correlation_pos_`
+fast-forward) is a separate follow-up (task #56).
+**Test:** ctest 79/80 (drain must not corrupt group assembly — group still consumed in `burst_next_pos_`
+order); rig file transfers stay CRC-clean.
+
+### 3. diag: removable RX-processing-lag instrumentation (ULTRA_RX_LAG_DIAG, default-off)
+`[RXLAG]` (streaming_decoder.cpp) logs per-state backlog + the modem's own `RXQ`/`RXQ_peak`;
+`[BURST_DRAIN]` (streaming_burst_interleave.cpp) logs the per-frame already-arrived A/B ratio. Env-gated,
+behavior-neutral when unset. Tools for the open task #56 (RXQ spiral); grep the tags to remove.
+
 ## 2026-06-17 — feat(rate): retire R5/6 from the auto ladder + QAM16 R2/3 cross-modulation climb (default-OFF)
 
 Reshapes the top of the adaptive rate ladder: above QPSK R3/4 the next throughput step is now a
