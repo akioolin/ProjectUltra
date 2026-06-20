@@ -84,8 +84,11 @@ public:
 
     // Encode frame data -> audio samples (preamble + modulated data)
     // Uses full preamble (chirp sync); prefer_short_anchor uses the Phase 2a short single-chirp
-    // warm re-anchor (for the BURST_HEADER descriptor when sync is warm).
-    std::vector<float> encodeFrame(const Bytes& frame_data, bool prefer_short_anchor = false);
+    // warm re-anchor (for the BURST_HEADER descriptor when sync is warm). #69 light_preamble emits
+    // an LTS-only (NO chirp) descriptor for the ULTRA_ANCHOR_SKIP_K periodic-anchor experiment —
+    // overrides prefer_short_anchor; the receiver acquires it via warm prediction + light-LTS.
+    std::vector<float> encodeFrame(const Bytes& frame_data, bool prefer_short_anchor = false,
+                                   bool light_preamble = false);
 
     // Encode frame with light preamble (for connected mode, faster turnaround)
     // Only works if waveform supports data preamble
@@ -272,6 +275,9 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
+    // #69 monotonic GROUP ordinal for ULTRA_ANCHOR_SKIP_K (NOT the ARQ base seq, which jumps by
+    // group size + retx). Increments per descriptor build; drives the periodic full-chirp pattern.
+    uint32_t burst_anchor_ordinal_ = 0;
     bool emit_burst_descriptor_ = false;   // §14.17 self-describing BURST_HEADER head
     uint16_t burst_group_seq_ = 0;         // §14.27 group seq stamped into descriptor
     std::string burst_descriptor_src_;

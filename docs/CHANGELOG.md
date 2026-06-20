@@ -10,6 +10,60 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — perf(tx): periodic full-chirp anchor + warm-skip (ULTRA_ANCHOR_SKIP_K, env-gated #69)
+
+**Lever (not a bug):** the per-burst full dual chirp (1.2 s, TB=1200) is re-emitted on EVERY group's
+BURST_HEADER descriptor — 15.6% of a 7.69 s burst / 13.1% of the 9.19 s cycle. Research
+(`project_chirp_anchor_skip_not_shrink`, workflow + adversarial review): the chirp is **near-optimal**
+— its fade robustness IS its time-bandwidth product (TB = 0.5 s × 2400 Hz = 1200 ≈ 30 dB processing
+gain = the margin that lets it sweep through a frozen frequency-selective null). The band B is fixed,
+so **shrinking** the chirp cuts TB 1:1 and craters on fading (the bad seed relocates with duration but
+never vanishes — confirmed by the `ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS` "no gain, marginally worse"
+result). The lever is to emit the full chirp **LESS OFTEN** (SKIP not SHRINK), not make it shorter.
+
+**Change:** `ULTRA_ANCHOR_SKIP_K` (default **1 = full chirp every group = byte-identical**). When K>1
+the sender emits the full chirp only on `burst_anchor_ordinal_ % K == 0` (a **monotonic per-descriptor
+counter**, NOT the ARQ base seq `burst_group_seq_` which jumps by group size + retx — that was the
+first-attempt bug that fired 0 skips on OTASim); skipped groups get a **LIGHT (LTS-only, no-chirp)**
+descriptor (`encodeFrame(..., light_preamble=true)` → `connectedDataPreambleForFrame()`) and ride the
+production warm predicted-position + light-LTS + LDPC path. The full chirp every K groups is the
+robustness BACKSTOP + drift reset; `warm_descriptor` excludes the session-first burst and resends
+(cold-start / lost-tail keep the full chirp). Enabled by the no-op turnaround fix (58eed53) keeping the
+RX warm-sync state alive across the turnaround.
+
+**Wire flag (refinement after the K=3 crater):** the descriptor ANNOUNCES the next group's anchor type
+via `BURST_FLAG_NEXT_LIGHT_ANCHOR` (0x04, `frame_v2.hpp` payload[4]); RX reads it at descriptor parse
+(`setNextGroupLightAnchor`) and `noteGroupDelivered` arms the right search — full-search chirp groups,
+light-search announced-skip groups — **immediately**, no grinding through ~12 light rejects (the
+~30 s/resend stall that crawled K=3 in the first light-first RX). Reactive resends are unannounced
+(always full chirp); they're caught by a **K-gated fast §16.4 escalation** (`kEscalateStreak` = 4
+rejects ~8 s when K>1, vs the default 12). A dropped descriptor leaves `next_group_light_anchor_=false`
+→ expect full chirp (safe).
+
+**Rig-validated (uncommitted experiment, env-gated):** IONOS MPG@20 50KB, both stations md5-lockstep.
+10-run interleaved K=1/K=2 robustness: **K=2 +10.5% mean / +12.8% median goodput over K=1, 0 stalls
+across all 10, escalations 4–8 all fast**; each side lost exactly 1 run to a bad channel patch (no
+K-specific reliability penalty). OTASim K=2: escalations 9→1 with the wire flag, CRC-clean 2040 bps.
+K=3 was fixed by the wire flag (260 s steady, 0 stalls) but banks NO gain (escalation+resend overhead
+from skipping 2/3 chirps offsets the airtime saved) — **K=2 is the sweet spot.** All runs ran QPSK R2/3
+data + R1/4 control profile (`ULTRA_R23_BASIS` pins R2/3 on fading; R3/4 ≈ R2/3 goodput — code rate is
+a non-lever, orthogonal to anchor-skip).
+
+**STILL DEFAULT-OFF.** Production default-on requires the **coherence-disc gate** (force K=1 on
+Poor/backlog/cold-start): warm-skip is safe only when (a) the channel is genuinely Good/Moderate via the
+coherence disc — NOT the blind `fading_index` which mislabels — , (b) the RX is not behind live audio
+(backlog DEFEATS warm-predict → cold 2.5 s re-acquire), and (c) past the cold-start hole (disc
+`valid()=false` for the first ~6–8 groups of every connection). The skip is trivial; the gate is the
+real work — that's #57/#58 (the disc), the next target.
+
+**Files:** `frame_v2.hpp` (flag + `next_light_anchor` parse), `streaming_encoder.{cpp,hpp}` (ordinal +
+skip schedule + light preamble), `streaming_ofdm_decode.cpp` (stash announcement), `sync_controller.{cpp,hpp}`
+(arm search from announcement + K-gated escalation). **Verification:** `ctest` 80/81 (only pre-existing
+`UltraTncSimAudio`); default K=1 is behaviorally byte-identical (all skip/light predicates gate on `K>1`,
+the ordinal increment is an unused side effect, escalation streak reverts to the original constant).
+
+---
+
 ## 2026-06-20 — perf(rx): flip warm-turnaround fix to DEFAULT-ON (opt-out) after Moderate validation
 
 The `ULTRA_WARM_TURNAROUND` no-op (58eed53) is now **default-ON**, opt-out via `ULTRA_WARM_TURNAROUND_OFF=1`

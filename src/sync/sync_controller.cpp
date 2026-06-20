@@ -72,14 +72,28 @@ void SyncController::noteGroupDelivered(uint32_t group_seq) {
     // false after the first group, so bravo searched LIGHT-only, its data LTS correlated at ~0.54 (vs
     // ~0.91 right after a chirp anchor), forcing low-threshold marginal decodes + retries. The
     // BURST_HEADER-consume keeper then flips this back to false so the CONTIGUOUS group data stays light.
-    expect_full_ofdm_anchor_ = true;
+    //
+    // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, default 1 = always re-arm =
+    // byte-identical). When K>1 the sender skips the chirp on ~(K-1)/K of groups (LIGHT descriptor)
+    // and ANNOUNCES the next group's anchor via BURST_FLAG_NEXT_LIGHT_ANCHOR (read into
+    // next_group_light_anchor_ at descriptor parse). Arm the RIGHT search for the next group from
+    // that announcement: full-search a chirp group, light-search a skip group — IMMEDIATELY, no
+    // grinding through light rejects (the ~30 s/resend stall that crawled K=3). A dropped descriptor
+    // leaves next_group_light_anchor_ false → expect full (safe). Reactive resends are unannounced
+    // (always full chirp); the K-gated fast §16.4 escalation catches those mismatches.
+    static const int kAnchorSkipK = [] {
+        const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
+        return (e && *e) ? std::max(1, std::atoi(e)) : 1;
+    }();
+    expect_full_ofdm_anchor_ = (kAnchorSkipK <= 1) || !next_group_light_anchor_;
     LOG_MODEM(INFO,
         "[%s] s16-warm-handoff: refreshed warm-sync state on "
         "delivered group_seq=%u (conf=%.2f phase=WARM misses=0, "
-        "re-armed descriptor chirp anchor for next group)",
+        "next-anchor=%s K=%d)",
         log_prefix_.c_str(),
         static_cast<unsigned>(group_seq),
-        frame_arrival_confidence_);
+        frame_arrival_confidence_,
+        expect_full_ofdm_anchor_ ? "FULL-chirp" : "LIGHT-skip(announced)", kAnchorSkipK);
 }
 
 // --- arrival-tracking transition logic (§7.4 A2) ---------------------------------------------
@@ -657,10 +671,20 @@ bool SyncController::detectConnectedLightSync(
     // expect_full_ofdm_anchor_ is cleared again after the next clean data decode — a one-group
     // escalation, not a permanent revert to per-group chirps. Unconditional (promoted past
     // ULTRA_S16_WARM_HANDOFF).
+    // #69: under ULTRA_ANCHOR_SKIP_K>1 a RESEND (always full chirp, reactive → unannounced by the
+    // next-light flag) arrives while the RX is light-searching an announced-skip group. The default
+    // 12-reject escalation took ~30 s/resend (the K=3 crawl). Escalate FAST (4 rejects, ~8 s) when
+    // anchor-skip is active so resends re-acquire promptly; the periodic skips themselves no longer
+    // grind (the wire flag arms full-search on chirp groups directly).
+    static const uint64_t kEscalateStreak = [] {
+        const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
+        const int k = (e && *e) ? std::max(1, std::atoi(e)) : 1;
+        return (k > 1) ? uint64_t{4} : signal_policy::kConnectedOFDMReanchorEscalateStreak;
+    }();
     if (!found && connected &&
         mode == protocol::WaveformMode::OFDM_CHIRP &&
         !expect_full_ofdm_anchor_ &&
-        sync_reject_streak_ >= signal_policy::kConnectedOFDMReanchorEscalateStreak) {
+        sync_reject_streak_ >= kEscalateStreak) {
         std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
         expect_full_ofdm_anchor_ = true;
         sync_reject_streak_ = 0;
@@ -668,8 +692,7 @@ bool SyncController::detectConnectedLightSync(
             "[%s] §16.4 escalation: %llu light rejects at group boundary; "
             "arming full chirp+LTS re-anchor for sender RESEND",
             log_prefix_.c_str(),
-            static_cast<unsigned long long>(
-                signal_policy::kConnectedOFDMReanchorEscalateStreak));
+            static_cast<unsigned long long>(kEscalateStreak));
     }
 
     return found;

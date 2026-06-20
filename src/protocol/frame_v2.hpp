@@ -554,6 +554,10 @@ struct ControlFrame {
     // Burst-descriptor interleave flag bits (BURST_HEADER payload[4]).
     static constexpr uint8_t BURST_FLAG_INTERLEAVE = 0x01;    // cross-frame burst interleave
     static constexpr uint8_t BURST_FLAG_CARRIER_LDPC = 0x02;  // carrier-LDPC interleave
+    // #69 anchor-skip: THIS group announces that the NEXT group's descriptor will be LIGHT
+    // (chirp-less). Lets the RX full-search chirp groups and light-search skip groups IMMEDIATELY
+    // (no grinding through light rejects). Only set when ULTRA_ANCHOR_SKIP_K>1; default-off byte 0.
+    static constexpr uint8_t BURST_FLAG_NEXT_LIGHT_ANCHOR = 0x04;
 
     struct BurstHeaderInfo {
         uint8_t group_size = 0;     // frames in the interleaved group
@@ -562,6 +566,7 @@ struct ControlFrame {
         CodeRate code_rate = CodeRate::R1_4;
         bool burst_interleave = false;  // cross-frame interleave applied
         bool carrier_ldpc = false;      // carrier-LDPC interleave applied
+        bool next_light_anchor = false; // #69: the NEXT group's descriptor is light (chirp-less)
         // LDPC lifting size Z for the data group's codewords (2026-05-28).
         //   27 -> n=648 (legacy short LDPC, fast handshake / ACK class)
         //   81 -> n=1944 (long LDPC for OFDM data, ~3 dB more FEC margin)
@@ -598,6 +603,7 @@ struct ControlFrame {
         info.code_rate = static_cast<CodeRate>(payload[3]);
         info.burst_interleave = (payload[4] & BURST_FLAG_INTERLEAVE) != 0;
         info.carrier_ldpc = (payload[4] & BURST_FLAG_CARRIER_LDPC) != 0;
+        info.next_light_anchor = (payload[4] & BURST_FLAG_NEXT_LIGHT_ANCHOR) != 0;  // #69
         // payload[5] == 0 -> legacy/unspecified -> Z=27 (n=648).
         // payload[5] == 81 -> long LDPC (n=1944). Any other unexpected value
         // also falls back to 27 (defensive: we'd rather decode a control-size

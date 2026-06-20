@@ -759,6 +759,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 sync_controller_.last_burst_descriptor_ = bi;
                                 sync_controller_.have_burst_descriptor_ = true;
+                                // #69 anchor-skip: stash the sender's announcement of the NEXT
+                                // group's anchor type so noteGroupDelivered arms the right search
+                                // (full-search chirp groups, light-search announced-skip groups).
+                                sync_controller_.setNextGroupLightAnchor(bi.next_light_anchor);
                                 // 2026-05-28 Phase 3: propagate the announced
                                 // lifting_z to the waveform so
                                 // getMinSamplesForCWCount returns the right

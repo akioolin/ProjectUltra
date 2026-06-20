@@ -286,7 +286,8 @@ void StreamingEncoder::setNarrowbandControl(bool narrowband) {
 // ENCODING
 // ============================================================================
 
-std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool prefer_short_anchor) {
+std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool prefer_short_anchor,
+                                                 bool light_preamble) {
     if (!waveform_) {
         LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
         return {};
@@ -316,9 +317,11 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
     // Encode frame bytes (LDPC + interleaving)
     Bytes encoded = encodeFrameBytes(frame_data);
 
-    // Generate preamble (full dual chirp, or the Phase 2a short single-chirp warm re-anchor)
-    Samples preamble = prefer_short_anchor ? waveform_->generateShortAnchorPreamble()
-                                           : waveform_->generatePreamble();
+    // Generate preamble (full dual chirp, or the Phase 2a short single-chirp warm re-anchor, or the
+    // #69 light LTS-only descriptor for ULTRA_ANCHOR_SKIP_K — no chirp; warm-acquired by the RX).
+    Samples preamble = light_preamble       ? connectedDataPreambleForFrame()
+                       : prefer_short_anchor ? waveform_->generateShortAnchorPreamble()
+                                             : waveform_->generatePreamble();
 
     // Modulate
     Samples modulated = waveform_->modulate(encoded);
@@ -531,6 +534,36 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // full chirp+LTS anchor and seeds the warm timing the group-start marker rides.
     if (emit_burst_descriptor_ && interleaved_groups > 0 &&
         protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
+        // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, default 1 = full chirp every
+        // group = byte-identical). Research (project_chirp_anchor_skip_not_shrink): the chirp is
+        // near-optimal (TB=1200 = fade margin; shrinking it craters), so SKIP it on benign groups
+        // instead of shrinking it. Emit the full chirp only when ordinal % K == 0; skipped groups
+        // get a LIGHT (LTS-only, no chirp) descriptor. warm_descriptor excludes the session-first
+        // burst + resends (cold-start / lost-tail keep the full chirp). The full chirp every K
+        // groups is the robustness BACKSTOP + drift reset. Enabled by the no-op turnaround fix
+        // (58eed53) which keeps the RX warm-sync state alive across the turnaround.
+        //
+        // WIRE FLAG (refinement after K=3 crater): the descriptor ANNOUNCES the next group's anchor
+        // type (BURST_FLAG_NEXT_LIGHT_ANCHOR) so the RX full-searches chirp groups + light-searches
+        // skip groups IMMEDIATELY — no grinding through ~12 light rejects (the ~30 s/resend stall
+        // that crawled K=3). Resends are reactive (can't be announced); the RX's K-gated fast §16.4
+        // escalation catches those. Computed BEFORE makeBurstHeader so the flag lands in the payload.
+        const bool warm_descriptor =
+            !(force_full_preamble_once_ || force_burst_group_start_full_preamble_);
+        static const int kAnchorSkipK = [] {
+            const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
+            return (e && *e) ? std::max(1, std::atoi(e)) : 1;
+        }();
+        const uint32_t anchor_ordinal = burst_anchor_ordinal_++;
+        const bool skip_chirp_descriptor =
+            kAnchorSkipK > 1 && warm_descriptor &&
+            (static_cast<int>(anchor_ordinal % static_cast<uint32_t>(kAnchorSkipK)) != 0);
+        // Announce the NEXT group's anchor by the periodic pattern (a resend will override to full
+        // chirp; the RX fast-escalates on that mismatch).
+        const bool next_group_light =
+            kAnchorSkipK > 1 &&
+            (static_cast<int>((anchor_ordinal + 1) % static_cast<uint32_t>(kAnchorSkipK)) != 0);
+
         uint8_t flags = 0;
         if (use_burst_interleave_) {
             // per-burst flag: groups in THIS burst are cross-frame interleaved (the RX
@@ -540,6 +573,9 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         if (use_carrier_ldpc_interleaver_) {
             flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
         }
+        if (next_group_light) {
+            flags |= protocol::v2::ControlFrame::BURST_FLAG_NEXT_LIGHT_ANCHOR;
+        }
         auto descriptor = protocol::v2::ControlFrame::makeBurstHeader(
             burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/burst_group_seq_,
             static_cast<uint8_t>(BURST_GROUP_SIZE),
@@ -547,26 +583,21 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             modulation_, code_rate_, flags,
             /*lifting_z=*/ldpc_lifting_z_);
         Bytes descriptor_bytes = descriptor.serialize();
-        // Phase 2a: the descriptor carries the per-burst anchor. When sync is WARM (NOT the
-        // session-first burst and NOT a resend — same predicate the group-start uses at :568),
-        // emit the SHORT DUAL chirp anchor instead of the full 500ms dual chirp. Session-first and
-        // resends keep the full dual chirp (cold re-acquire / lost-tail rescue); a short-anchor
-        // miss therefore self-heals — the timeout resend re-anchors at full strength. The §14.25
-        // fixed-stride risk does NOT apply: the descriptor is a self-locating control frame and
-        // the burst member stride is chirp-free (getMinSamplesForCWCount).
-        const bool warm_descriptor =
-            !(force_full_preamble_once_ || force_burst_group_start_full_preamble_);
-        // Channel-gate the short anchor to the rate ladder's top rung (R3/4 == benign Good/AWGN).
-        // GUI-measured: shortening the warm chirp craters on fading at every duration (the bad
-        // seed just relocates); R3/4 is the robust sender-side "benign" proxy. See
-        // connection_policy::shouldUseWarmShortAnchorDescriptor. Auto-reverts to full dual when
-        // the ladder drops off R3/4.
+        // Phase 2a short DUAL chirp anchor (gated to R3/4, default-off shortAnchorEnabled): the warm
+        // descriptor can shorten the chirp. Mutually exclusive with the #69 light skip.
         const bool descriptor_short_anchor =
             warm_descriptor && waveform_ && waveform_->shortAnchorEnabled() &&
             protocol::connection_policy::shouldUseWarmShortAnchorDescriptor(
                 waveform_->getMode(), modulation_, code_rate_);
         std::vector<float> descriptor_samples =
-            encodeFrame(descriptor_bytes, descriptor_short_anchor);
+            encodeFrame(descriptor_bytes, descriptor_short_anchor && !skip_chirp_descriptor,
+                        /*light_preamble=*/skip_chirp_descriptor);
+        if (kAnchorSkipK > 1) {
+            LOG_MODEM(INFO, "[%s] #69 anchor-skip: ordinal=%u K=%d -> %s descriptor (announce next=%s)",
+                      log_prefix_.c_str(), anchor_ordinal, kAnchorSkipK,
+                      skip_chirp_descriptor ? "LIGHT(no-chirp)" : "FULL-chirp",
+                      next_group_light ? "LIGHT" : "FULL");
+        }
         if (!descriptor_samples.empty()) {
             result.insert(result.end(), descriptor_samples.begin(), descriptor_samples.end());
             LOG_MODEM(INFO,

@@ -304,6 +304,13 @@ public:
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
     bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
                                                      // (the 11-flip flag; toggled by the burst decode path)
+    // #69 anchor-skip: the LAST decoded BURST_HEADER's BURST_FLAG_NEXT_LIGHT_ANCHOR — the sender's
+    // announcement that the NEXT group's descriptor is light (chirp-less). Set by the decoder at
+    // BURST_HEADER parse (setNextGroupLightAnchor); read in noteGroupDelivered to arm the right
+    // search type for the next group (full-search chirp groups, light-search skip groups — no
+    // grinding). Default false → expect full chirp (safe; also the K=1 / dropped-descriptor case).
+    bool     next_group_light_anchor_ = false;
+    void     setNextGroupLightAnchor(bool light) { next_group_light_anchor_ = light; }
 
     // §7 Phase-D collapse (2026-05-31): the stored 4-state warm_sync_phase_ field is GONE.
     // The phase is now DERIVED on demand from (warm_sync_active_, consecutive_sync_misses_) via
