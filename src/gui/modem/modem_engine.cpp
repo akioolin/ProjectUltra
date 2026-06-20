@@ -1045,21 +1045,23 @@ void ModemEngine::clearRxBuffer(bool for_tx_echo) {
     // transfers (task #55). The disc still resets on a true connection/mode reset (ModemEngine::reset).
     if (!streaming_decoder_) return;
 
-    // #67 WARM TURNAROUND (ULTRA_WARM_TURNAROUND): the pre-TX half-duplex echo-clear (for_tx_echo)
-    // fires before EVERY ACK during a connected OFDM transfer. The decoder reset() it triggers
-    // zeroes the ring timeline (total_fed_) and wipes the warm-sync frame-arrival prediction, so
-    // every subsequent burst is COLD-re-acquired (min_search ~2.5 s) instead of warm (~0.2 s) —
-    // measured ~2 s/cycle (~27% goodput) on the IONOS rig. The audio side (setRxMuted + stopCapture +
-    // AudioEngine::clearRxBuffer) already prevents echo, so on this path the decoder reset is harmful
-    // overkill. Skipping it makes the rig behave like OTASim, which never runs this path at all
-    // (its sim-TX returns before the echo-clear) and therefore keeps warm-sync alive across turnarounds.
-    // Gated + default-off: this is a real-half-duplex-only correctness change the faithful gate
-    // cannot see, so it is proven on a lockstep rig A/B before becoming default.
-    static const bool kWarmTurnaround = [] {
-        const char* e = std::getenv("ULTRA_WARM_TURNAROUND");
+    // #67 WARM TURNAROUND (now DEFAULT-ON; opt-out ULTRA_WARM_TURNAROUND_OFF=1): the pre-TX
+    // half-duplex echo-clear (for_tx_echo) fires before EVERY ACK during a connected OFDM transfer.
+    // The decoder reset() it triggers zeroes the ring timeline (total_fed_) and wipes the warm-sync
+    // frame-arrival prediction, so every subsequent burst was COLD-re-acquired (min_search ~2.5 s)
+    // instead of warm (~0.2 s) — measured ~2 s/cycle (~27% goodput) on the IONOS rig. The audio side
+    // (setRxMuted + stopCapture + AudioEngine::clearRxBuffer) already prevents echo, so on this path
+    // the decoder reset is harmful overkill. Skipping it makes the rig behave like OTASim, which never
+    // runs this path at all (its sim-TX returns before the echo-clear) and keeps warm-sync alive across
+    // turnarounds. Correct by construction; worst case is a stale prediction → cold fallback (== the old
+    // behavior), never a stranded frame. Default-ON after rig-proven on BOTH Good (MPG@20: turnaround
+    // 2.71→1.54s median, −43%) AND Moderate (MPM@20: turnaround 1.59s, 0 stalls), all CRC-clean. The
+    // faithful OTASim gate cannot exercise this path (sim TX skips it), so the rig is the proving ground.
+    static const bool kWarmTurnaroundOff = [] {
+        const char* e = std::getenv("ULTRA_WARM_TURNAROUND_OFF");
         return e && e[0] == '1';
     }();
-    if (for_tx_echo && kWarmTurnaround && connected_ &&
+    if (for_tx_echo && !kWarmTurnaroundOff && connected_ &&
         protocol::isOFDMMode(waveform_mode_)) {
         return;  // preserve warm-sync state + ring timeline across the turnaround
     }

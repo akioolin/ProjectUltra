@@ -10,6 +10,22 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — perf(rx): flip warm-turnaround fix to DEFAULT-ON (opt-out) after Moderate validation
+
+The `ULTRA_WARM_TURNAROUND` no-op (58eed53) is now **default-ON**, opt-out via `ULTRA_WARM_TURNAROUND_OFF=1`
+(mirrors the `ULTRA_TNC_ACCUM_DISABLE` pattern). Rationale: it is correct by construction (the audio side
+already prevents echo; the decoder full-reset was overkill; worst case = a stale prediction → cold fallback
+== the old behavior, never a stranded frame), and it is now rig-proven on BOTH channel classes, all CRC-clean:
+- **Good (MPG@20, 50KB):** turnaround 2.71→1.54s median (−43%), 1.66 kbps, cycle 10.7→9.24s.
+- **Moderate (MPM@20, 50KB):** turnaround 1.59s, **0 burst-timeout stalls**, 1.54 kbps, warm-sync engaging
+  (28 detections); 18 retx is normal Moderate fading (the fix cannot *cause* retx).
+The faithful OTASim gate cannot exercise this path (sim TX returns before the echo-clear), so the flag is a
+no-op on OTASim/ctest either way — the real rig (now 2 channel classes) is the proving ground.
+**Change:** `modem_engine.cpp::clearRxBuffer` gate inverted to `!kWarmTurnaroundOff`. `ctest` 80/81 (only
+pre-existing `UltraTncSimAudio`); OTASim path byte-identical (it skips the echo-clear).
+
+---
+
 ## 2026-06-20 — perf(tx): make the fixed 150ms/50ms TX lead-in/tail configurable (default-unchanged)
 
 **Issue (not a bug, an over-provisioned constant):** `postProcessTx` (modem_engine.cpp:719) prepended a
