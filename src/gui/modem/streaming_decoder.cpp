@@ -498,6 +498,54 @@ void StreamingDecoder::processBuffer() {
         applyPendingDescriptorDataMode();
     }
 
+    // ===== [RXLAG-DIAG] TEMPORARY RX-processing-lag instrumentation (ULTRA_RX_LAG_DIAG=1) =====
+    // Measures how far the decode/search position trails LIVE audio — the ~2.4s post-burst backlog
+    // the SEARCHING comment below describes, suspected to be the bulk of the rig's ~3.1s turnaround
+    // (vs OTASim's ~0.8s). backlog = total_fed_ - search position, in seconds. Rate-limited ~1/s.
+    // REMOVE by deleting this whole block (grep RXLAG-DIAG). No behavior change when the env is unset.
+    {
+        static const bool kRxLagDiag = [] {
+            const char* e = std::getenv("ULTRA_RX_LAG_DIAG");
+            return e && e[0] == '1';
+        }();
+        if (kRxLagDiag) {
+            size_t fed = 0, corr_abs = 0;
+            {
+                std::lock_guard<std::mutex> lk(sync_controller_.ring_.buffer_mutex_);
+                fed = sync_controller_.ring_.total_fed_;
+                corr_abs = sync_controller_.ring_.ringPosToAbsoluteLocked(
+                    sync_controller_.ring_.correlation_pos_);
+            }
+            const double backlog_s = (fed > corr_abs ? fed - corr_abs : 0) / 48000.0;
+            static const auto t0 = std::chrono::steady_clock::now();
+            const double wall_s = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            static double last_log_s = -1e9;
+            if (wall_s - last_log_s >= 1.0) {
+                last_log_s = wall_s;
+                const char* st =
+                    state_ == DecoderState::SEARCHING ? "SEARCH" :
+                    state_ == DecoderState::SYNC_FOUND ? "SYNC" :
+                    state_ == DecoderState::DECODING ? "DECODE" :
+                    state_ == DecoderState::BURST_ACCUMULATING ? "BURST_ACC" : "MCDPSK_CONT";
+                // Also surface the modem's OWN backlog metric (the GUI "RXQ" value): it is sampled
+                // at feedAudio cadence (every chunk), so its running PEAK captures transient spikes my
+                // 1/s [RXLAG] sampling misses (the user-observed ~40s RXQ peak even on a good run).
+                float official_ms = 0.0f, peak_ms = 0.0f;
+                {
+                    std::lock_guard<std::mutex> slock(stats_mutex_);
+                    official_ms = stats_.backlog_ms;
+                    peak_ms = stats_.peak_backlog_ms;
+                }
+                LOG_MODEM(INFO,
+                          "[RXLAG] wall=%.1fs audio_fed=%.1fs backlog=%.2fs state=%s "
+                          "RXQ=%.0fms RXQ_peak=%.0fms",
+                          wall_s, fed / 48000.0, backlog_s, st, official_ms, peak_ms);
+            }
+        }
+    }
+    // ===== [RXLAG-DIAG] end =====
+
     switch (state_) {
         case DecoderState::SEARCHING: {
             // SEARCH CATCH-UP DRAIN. processBuffer runs once per audio-chunk wake-up

@@ -214,46 +214,70 @@ void StreamingDecoder::accumulateBurstFrames() {
         return;
     }
 
-    // Try to demodulate next frame
-    auto result = tryDemodulateNextBurstFrame();
+    // #56 BURST-ACC DRAIN: demodulate ALL already-arrived in-group frames this wake instead of one
+    // per ~50ms processBuffer() tick. Within a burst the sender keys down ONCE and streams the group
+    // contiguously, so after the frozen-anchor SYNC the group can already be in the ring; consuming
+    // one frame per wake then leaves it un-drained, trailing live audio (the measured [RXLAG] BURST_ACC
+    // backlog → late ACK → rig turnaround ~3.1s vs OTASim ~0.8s). tryDemodulateNextBurstFrame()'s
+    // WAITING return is the exact write_pos_-gated "next frame not on the wire yet" sentinel, so
+    // draining until WAITING NEVER reads unarrived audio (it is inert/correct when the lag is inherent).
+    // Guardrails: bounded by group size; every state-changing terminal returns immediately; a ~30ms
+    // wall-budget yields so the audio feed thread is never starved (one LDPC frame is ~88ms, so the
+    // budget caps the loop after the in-flight frame); no new locking (handler keeps copy-under-lock /
+    // demod-lock-free). reset_generation_ is re-checked inside tryDemodulateNextBurstFrame each call.
+    const auto drain_start = std::chrono::steady_clock::now();
+    constexpr long kBurstDrainWallBudgetMs = 30;
+    for (int drained = 0; drained < burst_group_size; ++drained) {
+        auto result = tryDemodulateNextBurstFrame();
 
-    if (result == BurstFrameResult::FAILED) {
-        // Hard failure (energy lost or process error) — abort immediately
-        LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
-                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
-        logBurstDiagnosticsAbort("hard_failure", burst_soft_buffer_.size() + 1);
-        {
-            std::lock_guard<std::mutex> slock(stats_mutex_);
-            stats_.frames_failed += burst_group_size;
+        if (result == BurstFrameResult::FAILED) {
+            // Hard failure (energy lost or process error) — abort immediately
+            LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
+                      log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
+            logBurstDiagnosticsAbort("hard_failure", burst_soft_buffer_.size() + 1);
+            {
+                std::lock_guard<std::mutex> slock(stats_mutex_);
+                stats_.frames_failed += burst_group_size;
+            }
+            burst_soft_buffer_.clear();
+            burst_metric_templates_.clear();
+            clearBurstDiagnostics();
+            {
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
+            }
+            state_ = DecoderState::SEARCHING;
+            return;
         }
-        burst_soft_buffer_.clear();
-        burst_metric_templates_.clear();
-        clearBurstDiagnostics();
-        {
-            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-            sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
-        }
-        state_ = DecoderState::SEARCHING;
-        return;
-    }
 
-    if (result == BurstFrameResult::WAITING) {
-        return;  // Not enough samples yet — come back on next processBuffer() tick
-    }
-
-    // SUCCESS — check if group complete
-    if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
-        finalizeBurstGroup();
-        burst_soft_buffer_.clear();
-        burst_metric_templates_.clear();
-        clearBurstDiagnostics();
-        {
-            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-            sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
+        if (result == BurstFrameResult::WAITING) {
+            return;  // Next frame not on the wire yet — (B) boundary; resume next tick.
         }
-        state_ = DecoderState::SEARCHING;
+
+        // SUCCESS — check if group complete
+        if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
+            finalizeBurstGroup();
+            burst_soft_buffer_.clear();
+            burst_metric_templates_.clear();
+            clearBurstDiagnostics();
+            {
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
+            }
+            state_ = DecoderState::SEARCHING;
+            return;
+        }
+
+        // Non-final SUCCESS: an already-arrived frame was reclaimed (the drainable (A) backlog).
+        // Yield if we have spent the wall budget so the audio feed thread keeps running.
+        const long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - drain_start).count();
+        if (elapsed_ms >= kBurstDrainWallBudgetMs) {
+            return;  // Stay BURST_ACCUMULATING; resume the drain next tick.
+        }
     }
-    // else: still accumulating, return and wait for next processBuffer() call
+    // Drained group_size frames without group-complete (shouldn't happen — completion returns above);
+    // fall through and resume next tick.
 }
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
@@ -272,6 +296,25 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             next_available = sync_controller_.ring_.write_pos_ - burst_next_pos_;
         } else {
             next_available = sync_controller_.ring_.buffer_capacity_samples_ - burst_next_pos_ + sync_controller_.ring_.write_pos_;
+        }
+    }
+
+    // [RXLAG-DIAG / #56] A/B split discriminator (ULTRA_RX_LAG_DIAG=1, removable). ratio = how many
+    // whole frames are ALREADY present at burst_next_pos_: ratio>=2 => the next frame(s) already
+    // arrived = DRAINABLE backlog (the per-wake serialization is the lag); ratio~1 then WAITING =>
+    // INHERENT airtime (the frame genuinely isn't on the wire yet, no drain can help). Decides whether
+    // the burst drain below is the lever. Per-frame (~8/burst) — no rate limit needed.
+    {
+        static const bool kRxLagDiag = [] {
+            const char* e = std::getenv("ULTRA_RX_LAG_DIAG");
+            return e && e[0] == '1';
+        }();
+        if (kRxLagDiag && burst_min_block_ > 0) {
+            LOG_MODEM(INFO, "[BURST_DRAIN] next_available=%.0fms ratio=%.2f frame=%zu/%d",
+                      static_cast<double>(next_available) / 48.0,
+                      static_cast<double>(next_available) /
+                          static_cast<double>(burst_min_block_),
+                      burst_soft_buffer_.size() + 1, burst_group_size);
         }
     }
 
