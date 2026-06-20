@@ -700,7 +700,15 @@ std::vector<float> ModemEngine::transmitToneBurstAck(
                   : "ACK",
               static_cast<unsigned>(payload.frame_mask),
               samples.size());
-    return postProcessTx(samples);
+    // #68: the ACK's lead-in lands squarely in the half-duplex turnaround, and an ACK is a tiny
+    // (~324ms) low-PA-thermal tone-burst — the safest TX to shorten. ULTRA_TX_ACK_LEADIN_MS (default
+    // -1 = use the global lead-in, i.e. unchanged) lets the ACK lead-in be reduced independently of
+    // the higher-PA-duty data bursts. Conservative-by-default until real-radio-proven.
+    static const int kAckLeadInMs = [] {
+        const char* e = std::getenv("ULTRA_TX_ACK_LEADIN_MS");
+        return (e && *e) ? std::max(0, std::atoi(e)) : -1;
+    }();
+    return postProcessTx(samples, /*lead_in_ms=*/kAckLeadInMs);
 }
 
 std::vector<float> ModemEngine::transmitPong() {
@@ -714,10 +722,31 @@ std::vector<float> ModemEngine::transmitPong() {
 // TX POST-PROCESSING (lead-in, filter, scale, stats)
 // ============================================================================
 
-std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples) {
+std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples,
+                                              int lead_in_ms, int tail_ms) {
+    // TX guard timing (#68). The lead-in is purely TX/PA-side margin (PTT relay + PA ramp + ALC
+    // settling) so the chirp/signal isn't clipped during key-up — the RECEIVER does not need it
+    // (the chirp detector searches). The legacy fixed 150ms is early-project (Jan/Feb 2026)
+    // over-provisioning vs real radios (IC-7300 T/R ~15ms, FT-891 ~20ms; ALC settling tens of ms);
+    // it sits FIXED on EVERY TX (data, ACK, ping), and the ACK's copy lands squarely in the
+    // half-duplex turnaround. Now CONFIGURABLE (default-unchanged): callers may pass a shorter
+    // lead-in (the ACK path does — ACKs are tiny + low PA-thermal), or override globally via
+    // ULTRA_TX_LEADIN_MS / ULTRA_TX_TAIL_MS. FIDELITY CAVEAT: the cheap-card rig has no real 100W
+    // PA, so a reduction stays CONFIGURABLE + conservative-by-default until real-radio-proven.
+    static const int kDefaultLeadInMs = [] {
+        const char* e = std::getenv("ULTRA_TX_LEADIN_MS");
+        return (e && *e) ? std::max(0, std::atoi(e)) : 150;
+    }();
+    static const int kDefaultTailMs = [] {
+        const char* e = std::getenv("ULTRA_TX_TAIL_MS");
+        return (e && *e) ? std::max(0, std::atoi(e)) : 50;
+    }();
+    const int eff_lead_in_ms = (lead_in_ms >= 0) ? lead_in_ms : kDefaultLeadInMs;
+    const int eff_tail_ms = (tail_ms >= 0) ? tail_ms : kDefaultTailMs;
+
     // Combine lead-in + signal + tail guard
-    const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms for AGC settling
-    const size_t TAIL_SAMPLES = 2400;  // 50ms guard
+    const size_t LEAD_IN_SAMPLES = static_cast<size_t>(48000) * eff_lead_in_ms / 1000;
+    const size_t TAIL_SAMPLES = static_cast<size_t>(48000) * eff_tail_ms / 1000;
 
     std::vector<float> output;
     output.reserve(LEAD_IN_SAMPLES + samples.size() + TAIL_SAMPLES);

@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — perf(tx): make the fixed 150ms/50ms TX lead-in/tail configurable (default-unchanged)
+
+**Issue (not a bug, an over-provisioned constant):** `postProcessTx` (modem_engine.cpp:719) prepended a
+FIXED 150ms lead-in + 50ms tail = 200ms of silence to EVERY TX (data bursts, ACKs, ping) — early-project
+(Jan/Feb 2026) "AGC settling" code, never tuned. Verified on the rig: ACK encoded 15552 samp → TX queued
+25152 (+9600=200ms); data burst 364480→374080 (+9600). The ACK's 200ms lands squarely in the half-duplex
+turnaround (~13% of a 1.6s turnaround); ~400ms/cycle total. The lead-in is purely TX/PA-side margin (PTT
+relay + PA ramp + ALC settling so the chirp isn't clipped at key-up) — the RECEIVER does not need it (the
+chirp detector searches). 150ms is 2-5× over real radios (IC-7300 T/R ~15ms, FT-891 ~20ms; ALC tens of ms).
+
+**Change:** `ModemEngine::postProcessTx(samples, lead_in_ms=-1, tail_ms=-1)` — the lead-in/tail are now
+configurable (`ULTRA_TX_LEADIN_MS` / `ULTRA_TX_TAIL_MS`, default 150/50 = **byte-identical when unset**),
+and `transmitToneBurstAck` passes a separate `ULTRA_TX_ACK_LEADIN_MS` (default -1 = use the global) so the
+ACK lead-in — the turnaround-relevant, lowest-PA-thermal piece (an ACK is a ~324ms tone-burst) — can be
+shortened independently of the high-duty data bursts. The configurability IS the radio-agnostic fix: the
+150ms is a one-size guess; making it per-setup tunable (default conservative) is the principled form.
+
+**Why default-unchanged (NOT a blind cut):** (1) FIDELITY — the cheap-card rig has no real 100W PA, so a
+shorter lead-in can't be validated against a real PA's ramp-up clipping the first symbols. (2) The ACK
+lead-in also gives the data-SENDER time to finish its own T/R turnaround to RX before the ACK arrives;
+too short → missed ACK → retx (real T/R 15-30ms, so ~50ms is safe, but radio-dependent). Operators with
+fast radios / sims opt into a shorter lead-in; the default stays conservative until real-radio-proven.
+
+**Verification:** `ctest` 80/81 (only pre-existing `UltraTncSimAudio`); default path (no env) is
+byte-identical (`LEAD_IN_SAMPLES`/`TAIL_SAMPLES` resolve to the same 7200/2400). No rig A/B (the rig
+cannot validate real-PA safety; the change is byte-identical by default).
+
+---
+
 ## 2026-06-20 — perf(rx): preserve warm-sync state across the half-duplex echo-clear (turnaround −43%, env-gated)
 
 **Broken:** the rig's steady-state clean-cycle turnaround was ~2.7s (vs OTASim ~0.6s) — a ~27% goodput
