@@ -148,6 +148,42 @@ bool test_score_ordering_and_doppler() {
     return true;
 }
 
+bool test_coherence_area_ordering() {
+    // coherenceArea (the radio-agnostic discriminator) = cumulative mean of the sliding-window
+    // Sum_{lag=1..5} normalized autocov. Lock its ORDERING: Good (slow, sustained positive
+    // autocorrelation out to lag ~5) must give a clearly higher area than Moderate/Poor (decorrelated
+    // -> the multi-lag sum collapses). NOTE: this synthetic channel is FLAT fading (no delay spread,
+    // so no frequency-selectivity), so its absolute scale is NOT the real-channel scale — the
+    // production enter/exit thresholds (0.05/0.00) are calibrated on the real sim+IONOS captures
+    // (docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md), where Moderate's selectivity pushes the
+    // area negative. Here we assert only the platform-independent ORDERING + monotonic-in-Doppler.
+    // Assert the PAIRED ordering (per-seed Good>Mod) + a mean margin — the properties a flat-fading
+    // channel CAN faithfully show. We do NOT assert across-seed range non-overlap or the absolute
+    // production thresholds: on a very slow (0.05 Hz) FLAT process the |H|^2 barely varies over a
+    // 40-frame window so its local-demeaned autocorrelation is ill-conditioned/noisy (a Good seed can
+    // dip negative) — which on a REAL channel cannot happen (selectivity + larger fade variation) and
+    // would in any case fail SAFE (under-read Good -> conservative). Real-scale validation is the
+    // cross-platform sim+IONOS capture, not this synthetic flat channel.
+    int good_above_mod = 0;
+    double good_sum = 0.0, mod_sum = 0.0;
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        DopplerCoherenceEstimator g, m;
+        runChannel(g, 0.05f, 7000u + seed, 50, 51, 0.05f);
+        runChannel(m, 0.25f, 8000u + seed, 50, 51, 0.05f);
+        const float ga = g.coherenceArea();
+        const float ma = m.coherenceArea();
+        good_sum += ga; mod_sum += ma;
+        if (ga > ma) ++good_above_mod;
+    }
+    const float good_mean = static_cast<float>(good_sum / 8.0);
+    const float mod_mean = static_cast<float>(mod_sum / 8.0);
+    std::printf("  coherenceArea: good_mean=%.3f mod_mean=%.3f  (Good>Mod paired on %d/8 seeds)\n",
+                good_mean, mod_mean, good_above_mod);
+    CHECK(good_above_mod == 8, "coherenceArea: Good must exceed Moderate on every PAIRED seed (ordering)");
+    CHECK(good_mean > mod_mean + 0.2f, "coherenceArea: Good mean must clearly exceed Moderate mean");
+    return tests_failed == 0;
+}
+
 bool test_abstains_until_enough_pooled() {
     // A single short frame must NOT be trusted (the prior "window too short" failure).
     DopplerCoherenceEstimator est;
@@ -161,6 +197,7 @@ bool test_abstains_until_enough_pooled() {
 int main() {
     test_good_moderate_separation();
     test_score_ordering_and_doppler();
+    test_coherence_area_ordering();
     test_abstains_until_enough_pooled();
 
     if (tests_failed != 0) {

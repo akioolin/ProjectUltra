@@ -52,6 +52,8 @@ public:
         snaps_.clear();
         score_sum_ = 0.0;
         score_n_ = 0;
+        area_sum_ = 0.0;
+        area_n_ = 0;
     }
 
     // Add ONE per-frame |H|^2 snapshot (the frame's LTS channel power). Caller supplies one per
@@ -67,6 +69,22 @@ public:
         if (snaps_.size() >= kMinSnapsForReading) {
             score_sum_ += static_cast<double>(normAutocov(1));
             ++score_n_;
+            // COHERENCE-AREA (2026-06-20, the RADIO-AGNOSTIC discriminator): the multi-lag sum of
+            // the normalized |H|^2 autocovariance over lags 1..kAreaLags. Like the lag-1 score it is
+            // dimensionless (normalized by lag-0 -> level/gain invariant), but the multi-lag sum (a)
+            // dilutes the single-lag mean-reverting selectivity artifact and (b) captures SUSTAINED
+            // coherence (Good stays positive out to lag ~5; Moderate does not). Cross-platform proof
+            // (sim + IONOS rig, 7 transfers, docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md):
+            // averaged like the lag-1 score below (cumulative mean of the sliding-window reading),
+            // this separates Good {rig +0.09,+0.11; sim +0.66} from Moderate {rig −0.10,−0.10,−0.18;
+            // sim −0.12} on ONE threshold ~0 (gap 0.19), vs the lag-1 cumulative-mean's 0.018 gap
+            // (platform-broken: needs ~0.045 on rig, ~0.30 on sim). Cadence-robust because Moderate
+            // sits <0 on ANY radio (the channel really IS decorrelated at these lags) while the
+            // absolute Good scale floats with the inter-frame cadence.
+            double area = 0.0;
+            for (int lag = 1; lag <= kAreaLags; ++lag) area += static_cast<double>(normAutocov(lag));
+            area_sum_ += area;
+            ++area_n_;
         }
     }
 
@@ -85,6 +103,14 @@ public:
     float coherenceScore() const {
         return (score_n_ > 0) ? static_cast<float>(score_sum_ / static_cast<double>(score_n_))
                               : 0.0f;
+    }
+
+    // CUMULATIVE-MEAN coherence-AREA: Sum_{tau=1..kAreaLags} normalized |H|^2 autocovariance, averaged
+    // over the transfer. The radio-agnostic Good/Moderate discriminator (see addSnapshot). Good >0 (rig
+    // ~+0.09, sim ~+0.66), Moderate <0 (~−0.10) on ANY audio path; threshold ~0 (hysteresis enter 0.05 /
+    // exit 0.00, connection_policy::kCoherenceArea*). 0 until valid().
+    float coherenceArea() const {
+        return (area_n_ > 0) ? static_cast<float>(area_sum_ / static_cast<double>(area_n_)) : 0.0f;
     }
 
     // Diagnostic: the assumed inter-frame cadence used for the Doppler-Hz readout (seconds).
@@ -130,11 +156,14 @@ private:
     static constexpr size_t kMinSnapsForReading = 8; // need a few snapshots before a reading is meaningful
     static constexpr size_t kMinReadings = 24;       // average >=24 readings before the verdict is trusted
     static constexpr float kNominalCadenceS = 1.6f;  // approx OFDM burst inter-frame spacing (Hz readout only)
+    static constexpr int kAreaLags = 5;              // coherence-area sums normalized autocov over lags 1..5
 
     float symbol_period_s_ = 0.024f;  // retained for API symmetry / future timestamp-based cadence
     std::deque<float> snaps_;         // per-frame |H|^2, sliding window
     double score_sum_ = 0.0;          // sum of per-frame lag-1 autocorrelation readings
     size_t score_n_ = 0;              // number of readings (cumulative-mean denominator)
+    double area_sum_ = 0.0;           // sum of per-frame coherence-area readings (lags 1..kAreaLags)
+    size_t area_n_ = 0;               // number of area readings (cumulative-mean denominator)
 };
 
 }  // namespace ultra

@@ -278,6 +278,10 @@ private:
     // #69 monotonic GROUP ordinal for ULTRA_ANCHOR_SKIP_K (NOT the ARQ base seq, which jumps by
     // group size + retx). Increments per descriptor build; drives the periodic full-chirp pattern.
     uint32_t burst_anchor_ordinal_ = 0;
+    // #69 REACTIVE gate: consecutive clean (warm-delivered) groups. A resend/cold-start/escalation
+    // (warm_descriptor==false) resets it to 0; the skip engages only once it reaches the configured
+    // streak. Radio-agnostic delivery-driven gate — replaces the rig-disproven predicted disc label.
+    uint32_t anchor_skip_clean_streak_ = 0;
     bool emit_burst_descriptor_ = false;   // §14.17 self-describing BURST_HEADER head
     uint16_t burst_group_seq_ = 0;         // §14.27 group seq stamped into descriptor
     std::string burst_descriptor_src_;

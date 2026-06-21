@@ -554,15 +554,36 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
             return (e && *e) ? std::max(1, std::atoi(e)) : 1;
         }();
+        // REACTIVE GATE (2026-06-20, radio-agnostic) — the gate that lets the skip default-on safely.
+        // The IONOS rig DISPROVED a PREDICTED coherence label: a Moderate channel read clean-Good for
+        // a whole ~60 s transfer (coherence-area +0.20, raw acf lags 1-5 all +0.2-0.3), because a
+        // 60 s observation is too few fade cycles to pin Doppler and the channel is non-stationary.
+        // (docs/SCALE_INVARIANT_COHERENCE_DISC + project_disc_radio_agnostic_fuzzy_boundary.) So gate
+        // the skip on OBSERVED delivery, not a prediction: a resend / cold-start / §16.4 escalation
+        // forces a full chirp (warm_descriptor==false) and RESETS the clean streak; only after
+        // kReactiveCleanStreak consecutive clean (warm-delivered) groups do we begin skipping. The
+        // half-duplex ACK turnaround means warm_descriptor==false reliably reflects the PRIOR group's
+        // outcome (the connection sets force_full on its resend) — so this is delivery-driven, not
+        // send-optimistic. Radio-agnostic by construction (no channel model, no calibration): a
+        // fading channel that keeps triggering resends stays full-chirp; a genuinely clean run earns
+        // the skip and reverts the instant it craters. The streak-reset IS the cooldown.
+        static const uint32_t kReactiveCleanStreak = [] {
+            const char* e = std::getenv("ULTRA_ANCHOR_SKIP_CLEAN_STREAK");
+            return (e && *e) ? static_cast<uint32_t>(std::max(0, std::atoi(e))) : 4u;
+        }();
+        if (!warm_descriptor) anchor_skip_clean_streak_ = 0;  // resend/cold/escalation -> recool
+        const bool reactive_skip_enabled =
+            kAnchorSkipK > 1 && anchor_skip_clean_streak_ >= kReactiveCleanStreak;
         const uint32_t anchor_ordinal = burst_anchor_ordinal_++;
         const bool skip_chirp_descriptor =
-            kAnchorSkipK > 1 && warm_descriptor &&
+            reactive_skip_enabled && warm_descriptor &&
             (static_cast<int>(anchor_ordinal % static_cast<uint32_t>(kAnchorSkipK)) != 0);
-        // Announce the NEXT group's anchor by the periodic pattern (a resend will override to full
-        // chirp; the RX fast-escalates on that mismatch).
+        // Announce the NEXT group's anchor by the periodic pattern, BUT only while reactively enabled
+        // (a resend overrides to full chirp; the RX fast-escalates on that mismatch).
         const bool next_group_light =
-            kAnchorSkipK > 1 &&
+            reactive_skip_enabled &&
             (static_cast<int>((anchor_ordinal + 1) % static_cast<uint32_t>(kAnchorSkipK)) != 0);
+        if (warm_descriptor) ++anchor_skip_clean_streak_;  // count this clean group toward the streak
 
         uint8_t flags = 0;
         if (use_burst_interleave_) {
@@ -593,8 +614,10 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             encodeFrame(descriptor_bytes, descriptor_short_anchor && !skip_chirp_descriptor,
                         /*light_preamble=*/skip_chirp_descriptor);
         if (kAnchorSkipK > 1) {
-            LOG_MODEM(INFO, "[%s] #69 anchor-skip: ordinal=%u K=%d -> %s descriptor (announce next=%s)",
+            LOG_MODEM(INFO, "[%s] #69 anchor-skip: ordinal=%u K=%d streak=%u/%u reactive=%s -> %s descriptor (announce next=%s)",
                       log_prefix_.c_str(), anchor_ordinal, kAnchorSkipK,
+                      anchor_skip_clean_streak_, kReactiveCleanStreak,
+                      reactive_skip_enabled ? "ON" : "OFF(full-chirp)",
                       skip_chirp_descriptor ? "LIGHT(no-chirp)" : "FULL-chirp",
                       next_group_light ? "LIGHT" : "FULL");
         }

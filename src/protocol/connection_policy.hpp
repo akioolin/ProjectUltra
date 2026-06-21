@@ -194,10 +194,26 @@ inline ChannelClassification classifyChannel(float fading) {
 // fading_index (conservative status quo) and absorbed the 2 marginal seeds (Good 0.421,
 // Moderate 0.359). ZERO dangerous misreads: no Moderate reached the Good threshold (max 0.359
 // < 0.45, margin 0.09), so "Moderate read as Good -> over-high rate" cannot happen on this data.
-inline constexpr float kCoherenceGoodThreshold = 0.45f;      // confident Good
-inline constexpr float kCoherenceModerateThreshold = 0.30f;  // confident Moderate
+inline constexpr float kCoherenceGoodThreshold = 0.45f;      // confident Good (legacy lag-1; SIM-scale)
+inline constexpr float kCoherenceModerateThreshold = 0.30f;  // confident Moderate (legacy lag-1; SIM-scale)
 inline constexpr float kRepresentativeGoodFadingIndex = 0.40f;      // mid-Good (< 0.65)
 inline constexpr float kRepresentativeModerateFadingIndex = 0.85f;  // mid-Moderate (0.65-1.10)
+
+// RADIO-AGNOSTIC coherence-AREA thresholds (2026-06-20, docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md).
+// The legacy lag-1 score above is SIM-calibrated and platform-broken (needs ~0.045 on the IONOS rig,
+// ~0.30 on sim — a flat re-base would break sim). The coherence-AREA (cumulative-mean of the sliding-
+// window Sum_{lag=1..5} normalized |H|^2 autocov, DopplerCoherenceEstimator::coherenceArea) separates
+// Good from Moderate on a SINGLE dimensionless threshold across BOTH audio paths. Cross-platform
+// validation (sim + IONOS rig, 7 transfers, faithful C++-algorithm replication): Good {rig +0.09,
+// +0.11; sim +0.66} vs Moderate {rig −0.10, −0.10, −0.18; sim −0.12} -> worst-Good +0.091 vs best-Mod
+// −0.100, gap 0.19, midpoint ~0. (The sliding-window LOCAL demean compresses Good toward 0 but rejects
+// a Moderate transfer's transient Good-like patch — "Mod-b" reads −0.10 here vs +0.08 single-window.)
+// Hysteresis (enter > exit): enter is above max-Mod by 0.15 (a Moderate misread needs a +0.15 jump =
+// safe), and Good clearing enter by only ~0.04 fails SAFE (a benign Good->uncertain just keeps the
+// conservative no-skip). The consumer ALSO has a REACTIVE override (escalations/resends/backlog/cold-
+// start) so a momentarily-wrong label cannot strand a frame.
+inline constexpr float kCoherenceAreaEnterGood = 0.05f;  // climb into confident-Good (clear of max Mod −0.10 by 0.15)
+inline constexpr float kCoherenceAreaExitGood  = 0.00f;  // drop out of confident-Good (hysteresis floor; Mod sits <0)
 
 // Returns a fading_index reflecting the coherence verdict on the Good<->Moderate axis when
 // the coherence is valid AND confident; otherwise the raw fading_index (so CONNECT-time —

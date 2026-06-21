@@ -10,6 +10,77 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — feat(disc): radio-agnostic coherence-AREA metric (Stage A, read-only) — #57
+
+**Why (measured, not assumed):** the shipped `DopplerCoherenceEstimator` (per-frame |H|² lag-1
+autocorrelation, cumulative mean) tells Good (slow fading → aggressive OK) from Moderate (fast →
+conservative). It separates on hardware (rig single-window lag-1: Good +0.15 / Mod −0.25) BUT the
+shipped threshold `kCoherenceGoodThreshold=0.45` is SIM-calibrated → a Good rig channel reads
+`score=0.05 [MODERATE/POOR]` (live mislabel). **A flat re-base breaks sim** (sim Moderate +0.1..0.25
+would read "Good") — the platforms read on different scales, and de-bias can't close it (LTS noise is
+only ~7% of the snapshot variance). **Deeper:** the per-transfer verdict is intrinsically fuzzy on
+non-stationary HF (worst-Good +0.057 vs best-Moderate +0.039 = 0.018 gap, n=5; a "Moderate" transfer
+genuinely read Good because it had a slow-fading patch). So no fixed threshold on the lag-1 metric is
+radio-agnostic. Full analysis: `docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md`.
+
+**What changed (read-only — no behavior change):** added `DopplerCoherenceEstimator::coherenceArea()`
+— the cumulative-mean of the sliding-window `Σ_{lag=1..5}` normalized |H|² autocovariance. It is
+dimensionless (normalized by lag-0 → level/gain invariant) and the multi-lag sum both dilutes the
+single-lag mean-reverting selectivity artifact AND captures *sustained* coherence (Good positive out
+to lag ~5; Moderate collapses). **Cross-platform proof (faithful C++-algorithm replication on sim +
+IONOS rig, 7 transfers):** Good {rig +0.09, +0.11; sim +0.66} vs Moderate {rig −0.10, −0.10, −0.18;
+sim −0.12} → **worst-Good +0.091 vs best-Moderate −0.100, gap 0.19, separated on ONE threshold ~0**
+(vs the lag-1 cumulative-mean's 0.018 gap, which needs ~0.045 on rig / ~0.30 on sim). Cadence-robust
+because Moderate sits <0 on ANY radio (the channel really is decorrelated at these lags) while the
+absolute Good scale floats with the inter-frame cadence. New `connection_policy::kCoherenceAreaEnterGood
+=0.05 / kCoherenceAreaExitGood=0.00` (hysteresis; enter clears max-Mod by 0.15 = a Moderate misread
+needs a +0.15 jump = safe; a benign Good→uncertain fails safe to conservative). Logged in the disc
+verdict line (`area=%.3f [%s]`) alongside the legacy score for live validation; **not yet consumed.**
+
+**Files:** `doppler_coherence_estimator.hpp` (metric), `connection_policy.hpp` (thresholds),
+`streaming_sync_acquisition.cpp` (log), `test_doppler_coherence_estimator.cpp` (ordering lock).
+**Verification:** `ctest` 80/81 (only pre-existing `UltraTncSimAudio`); default behavior byte-identical
+(read-only); new `coherenceArea` ordering test passes (Good mean ≫ Moderate mean, paired 8/8).
+
+**Outcome (rig, 2026-06-20): the PREDICTIVE disc is kept as read-only telemetry ONLY** — live IONOS
+runs disproved using a coherence label as the anchor-skip gate (see the reactive-gate entry above).
+
+---
+
+## 2026-06-20 — feat(tx): REACTIVE anchor-skip gate (delivery-driven, radio-agnostic) — #57
+
+**Why the predictive disc was abandoned as the gate (rig-measured):** validating the Stage-A
+coherence-area metric live on the IONOS rig disproved it as a *gate*. A confirmed **Moderate** channel
+(MPM@20) produced a whole ~60 s transfer that read clean-**Good** (coherence-area +0.20, raw |H|²
+autocorrelation lags 1–5 all +0.2–0.3) — a false-Good that, if it had gated anchor-skip, would have
+skipped chirps on a Moderate channel → stalls. Three confirmed-Moderate transfers spanned area +0.20
+to −0.41. Root cause is physical, not a metric bug: a ~60 s transfer is only ~10–20 fade cycles (too
+few to pin Doppler), and the channel is non-stationary, so even a *correct* past measurement doesn't
+predict the next group. **No predictive per-transfer coherence label can safely gate on real HF.**
+
+**What changed — gate on OBSERVED delivery, not prediction:** the encoder's anchor-skip decision
+(`streaming_encoder.cpp::encodeBurstLight`) now requires a streak of clean groups. `warm_descriptor`
+is already *false* on every resend / cold-start / §16.4 escalation (the connection forces a full chirp
+on those, app.cpp:605); a new `anchor_skip_clean_streak_` counts consecutive clean (warm) groups and
+**resets to 0 on any non-warm group**. The skip engages only once the streak ≥ `ULTRA_ANCHOR_SKIP_CLEAN_STREAK`
+(default 4), and reverts to full-chirp-every-group the instant a resend fires. The half-duplex ACK
+turnaround means `warm_descriptor==false` reflects the *prior* group's outcome, so this is
+delivery-driven, not send-optimistic. Radio-agnostic by construction — no channel model, no
+calibration, no per-card threshold: a channel that keeps triggering resends stays full-chirp; a
+genuinely clean run earns the skip and reverts the moment it craters. The streak-reset IS the cooldown,
+and it auto-covers cold-start (the session-first burst is a forced full chirp → streak starts at 0).
+
+**Validation:** `ctest` 80/81 (only pre-existing `UltraTncSimAudio`); **byte-identical at the default
+`ULTRA_ANCHOR_SKIP_K=1`** (the streak logic only affects `K>1`). Sim Good `K=2`: streak climbs 0→4
+(full chirp, 5-group cold-start), then `reactive=ON` and the K=2 LIGHT/FULL skip pattern engages,
+RESULT=PASS CRC-clean, 1940 bps (vs 1700 at K=1, +14% non-paired). [Sim Moderate reset-on-resend +
+rig A/B pending; rig needs the Pi5/sender rebuilt — the gate is sender-side.]
+
+**STILL DEFAULT-OFF** (`ULTRA_ANCHOR_SKIP_K=1`): the reactive gate is what *makes* `K=2` safe to
+default-on, but the flip waits on the sim-Moderate reset proof + a rig A/B. Files: `streaming_encoder.{cpp,hpp}`.
+
+---
+
 ## 2026-06-20 — perf(tx): periodic full-chirp anchor + warm-skip (ULTRA_ANCHOR_SKIP_K, env-gated #69)
 
 **Lever (not a bug):** the per-burst full dual chirp (1.2 s, TB=1200) is re-emitted on EVERY group's

@@ -107,10 +107,18 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
             // estimate). Uncertain / Moderate keep the env-aware Moderate-HF default — and the
             // per-group demod rebuild resets the override, so we never strand a stale Good.
             if (confident_good) waveform_->setWienerChannelParams(0.1f, 0.5e-3f);
+            // Stage A (read-only): the scale-invariant coherence-AREA verdict, logged alongside the
+            // legacy lag-1 score for live cross-platform validation (the area is the radio-agnostic
+            // discriminator; threshold ~0.19, hysteresis enter 0.20/exit 0.12 — see
+            // docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md). NOT yet consumed — Stage B/C wire it.
+            const float area = doppler_coherence_.coherenceArea();
+            const char* acls = (area >= protocol::connection_policy::kCoherenceAreaEnterGood) ? "GOOD"
+                             : (area <  protocol::connection_policy::kCoherenceAreaExitGood) ? "MOD/POOR"
+                                                                                            : "uncertain";
             LOG_MODEM(INFO,
-                      "[%s] Doppler coherence: score=%.3f doppler=%.3f Hz [%s] (snaps=%zu) "
+                      "[%s] Doppler coherence: score=%.3f doppler=%.3f Hz [%s] area=%.3f [%s] (snaps=%zu) "
                       "vs fading_index=%.3f%s",
-                      log_prefix_.c_str(), sc, result.doppler_hz, cls,
+                      log_prefix_.c_str(), sc, result.doppler_hz, cls, area, acls,
                       doppler_coherence_.snapshotCount(), result.lts_fading_index,
                       confident_good ? " (Wiener->Good 0.1Hz/0.5ms)" : "");
         }

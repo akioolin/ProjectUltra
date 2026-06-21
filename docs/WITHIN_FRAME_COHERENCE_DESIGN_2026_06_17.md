@@ -4,6 +4,34 @@
 DEFEATED by real-path per-symbol noise on the IONOS rig — keep the per-frame disc + a
 re-based threshold instead. See "RIG RESULT" below.**
 
+## ADDENDUM 2026-06-20 — the per-symbol rejection was NOISE-limited, not signal-absent (PARTIAL OVERTURN)
+Re-analysis of the SAME rig PSYM-DIAG captures (`/tmp/psym_mac_{good,mod}.log`, ~7700 sym each,
+`/tmp/psym_window_test.py`) with **block-averaging** of the per-symbol |H| BEFORE the autocorrelation
+(segmented at turnaround gaps; each segment demeaned; pooled autocov at integer block-lags; channel
+time = 24 ms/symbol since the PSYM-DIAG timestamps are decode-CPU time, ~0, not channel time):
+
+| channel-time lag | W=1 (raw, the rejected feed) | W=2 | W=4 | W=8 | **W=16 (~384 ms blocks)** |
+|---|---|---|---|---|---|
+| 384 ms | 0.05 | 0.07 | 0.09 | 0.09 | **0.14** |
+| 600 ms | 0.08 | 0.09 | 0.09 | 0.12 | **0.17** |
+| 1200 ms | 0.08 | 0.11 | 0.13 | 0.18 | **0.22** |
+
+**Monotonic in W at every lag.** Raw per-symbol ≈ 0 (reproduces the rejection); de-noising to ~384 ms
+blocks recovers **0.14–0.22** G−M separation — comparable to the per-frame disc (~0.20). So the
+per-symbol feed DOES contain the channel Doppler; raw per-sample estimation noise (sparse ~pilot-only
+LS + cheap-card/loop dynamics) swamped it. The doc's "the feed doesn't contain the Doppler / R(2)/R(1)
+≈ 1" conclusion was wrong — R(2)/R(1) is an unstable ratio of two noisy small numbers; block-averaging
+is the right de-bias.
+
+**BUT it does NOT clearly BEAT the per-frame disc on separation (~0.20 either way), and it's n=1
+capture-pair.** The value of a block-averaged per-symbol feed (#58) is therefore **convergence SPEED**
+(many ~384 ms blocks per 7 s burst → a verdict in ~1–2 bursts vs the per-frame disc's ~24 readings ×
+~1.4 s ≈ 34 s), not better separation. **The live defect is the per-frame disc's THRESHOLD, not its
+feed** (see below: shipping 0.30/0.45 calls rig Good +0.05 "Moderate"). PRIORITY: re-base the threshold
+first (cheap, fixes a real mislabel, unblocks anchor-skip); #58 block-averaged feed is a follow-up
+refinement for convergence, now de-risked offline. Replicate on a fresh rig Good/Mod pair before
+trusting the 0.14–0.22.
+
 ## RIG RESULT (decisive, 2026-06-17)
 Per-symbol PSYM-DIAG captures, IONOS Good (MPG) vs Moderate (MPM), ~7700 symbols each:
 - **Per-SYMBOL autocorrelation: Good ≈ Moderate, separation ~0** at every lag (raw AND
