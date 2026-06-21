@@ -58,11 +58,13 @@ noteGroupDelivered/escalation) so TX and RX agree.
   The reactive revert holds under load on real hardware.
 - **Safe by construction.** Any resend / cold-start / §16.4 escalation forces a full chirp and resets
   the clean streak, so in steady state it cannot be worse than full-chirp-every-group (K=1).
-- **Throughput is channel-dependent, net tie-to-positive.** Good A/B: +8.0% on the clean pair, +1.2%,
-  −3.4% on the fady pair → **+1.9% mean (within the ±25% channel noise = a tie)**. The −3.4% is the
-  one real cost (a light skip occasionally fails to re-acquire under fade → resend gives back the saved
-  airtime); the reactive revert bounds it. So it **helps on clean stretches and never meaningfully
-  hurts** — the basis for default-on (free upside + duty-cycle savings, not a measured win).
+- **Throughput is channel-dependent, net POSITIVE (firmer measurement 2026-06-21).** The first small
+  A/B read +1.9% mean (within noise), but a larger overnight paired confirmation — **n=10 k1-vs-skip
+  pairs across 2 sessions (Phases 6+7), MPG@20** — gives **+10.9% mean / +7.2% median goodput vs
+  full-chirp-every-group** (range −6%..+41%, all CRC-clean, 0 stalls). The skip's advantage GROWS on
+  fady channels (full chirp = most airtime = most fade exposure), which is exactly when it's wanted.
+  So default-on is a real measured win, not just a safe tie — the bigger sample resolved it above the
+  per-pair noise.
 
 **NOT yet proven:** a clean-channel multi-pair goodput win (this session was fady) and a Moderate
 throughput A/B (only safety was measured there). Opt out with `ULTRA_ANCHOR_SKIP_K=1` if any channel
