@@ -476,7 +476,18 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
     // No per-burst signaling needed: full-anchor descriptors match the full detector, short ones
     // match here. (The 2 LTS after either chirp re-validate timing identically.)
     if (!chirp_result.success && short_anchor_chirp_sync_) {
-        auto short_result = short_anchor_chirp_sync_->detectDualChirp(samples, threshold);
+        // #62: a SHORT dual chirp has less time-bandwidth product than the full one, so its
+        // matched-filter peak is intrinsically lower — using the FULL detector's threshold here
+        // under-detects it (the measured ~24% miss at 250 ms on the rig, whose resends eat the
+        // airtime the short chirp saved). ULTRA_SHORT_CHIRP_DETECT_SCALE (default 1.0 = byte-identical)
+        // lowers JUST this fallback threshold. Safe-ish: this branch only runs after the full detector
+        // already MISSED (so there's no full chirp here), and a false short-detect merely mis-anchors
+        // one group -> resend -> the reactive revert (bounded), never a stall.
+        static const float kShortDetectScale = [] {
+            const char* e = std::getenv("ULTRA_SHORT_CHIRP_DETECT_SCALE");
+            return (e && *e) ? std::clamp(static_cast<float>(std::atof(e)), 0.3f, 1.0f) : 1.0f;
+        }();
+        auto short_result = short_anchor_chirp_sync_->detectDualChirp(samples, threshold * kShortDetectScale);
         if (short_result.success) {
             chirp_result = short_result;
             cs = short_anchor_chirp_sync_.get();
