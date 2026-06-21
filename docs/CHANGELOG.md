@@ -10,6 +10,34 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-20 — perf(tx): anchor-skip DEFAULT-ON (ULTRA_ANCHOR_SKIP_K 1→2, reactive-gated) — #57/#69
+
+The reactive anchor-skip gate (prior entry) is now **default-ON**: `ULTRA_ANCHOR_SKIP_K` defaults to
+**2** (skip every other group's chirp, reactive clean-streak gated); `ULTRA_ANCHOR_SKIP_K=1` is the
+explicit opt-out. Flipped all three default sites (`streaming_encoder.cpp` encoder + `sync_controller.cpp`
+noteGroupDelivered/escalation) so TX and RX agree.
+
+**Rationale (honest — this is a SAFE tie-to-positive, not a proven throughput win):**
+- **Safe, rig-proven on both channel classes.** IONOS MPG@20 (Good) reactive A/B, 3 paired runs:
+  `STALL=0` all runs, CRC-clean, gate engaged (reactive=ON 16–21 groups, 8–11 skips/run). IONOS MPM@20
+  (Moderate) 2 runs: `STALL=0`, CRC-clean, gate engaged + reverted under resends (esc 2–3, rtx 20–24).
+  The reactive revert holds under load on real hardware.
+- **Safe by construction.** Any resend / cold-start / §16.4 escalation forces a full chirp and resets
+  the clean streak, so in steady state it cannot be worse than full-chirp-every-group (K=1).
+- **Throughput is channel-dependent, net tie-to-positive.** Good A/B: +8.0% on the clean pair, +1.2%,
+  −3.4% on the fady pair → **+1.9% mean (within the ±25% channel noise = a tie)**. The −3.4% is the
+  one real cost (a light skip occasionally fails to re-acquire under fade → resend gives back the saved
+  airtime); the reactive revert bounds it. So it **helps on clean stretches and never meaningfully
+  hurts** — the basis for default-on (free upside + duty-cycle savings, not a measured win).
+
+**NOT yet proven:** a clean-channel multi-pair goodput win (this session was fady) and a Moderate
+throughput A/B (only safety was measured there). Opt out with `ULTRA_ANCHOR_SKIP_K=1` if any channel
+regresses. **Verification:** `ctest` 80/81 (only pre-existing `UltraTncSimAudio`) — the flip breaks no
+unit test; sim Good (no env → new default) CRC-clean with reactive=ON. Files: `streaming_encoder.cpp`,
+`sync_controller.cpp`.
+
+---
+
 ## 2026-06-20 — feat(disc): radio-agnostic coherence-AREA metric (Stage A, read-only) — #57
 
 **Why (measured, not assumed):** the shipped `DopplerCoherenceEstimator` (per-frame |H|² lag-1

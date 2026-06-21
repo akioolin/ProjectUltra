@@ -534,8 +534,9 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // full chirp+LTS anchor and seeds the warm timing the group-start marker rides.
     if (emit_burst_descriptor_ && interleaved_groups > 0 &&
         protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
-        // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, default 1 = full chirp every
-        // group = byte-identical). Research (project_chirp_anchor_skip_not_shrink): the chirp is
+        // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, DEFAULT-ON 2026-06-20: default 2
+        // = skip every other group's chirp, REACTIVE-gated; ULTRA_ANCHOR_SKIP_K=1 opts out to full
+        // chirp every group). Research (project_chirp_anchor_skip_not_shrink): the chirp is
         // near-optimal (TB=1200 = fade margin; shrinking it craters), so SKIP it on benign groups
         // instead of shrinking it. Emit the full chirp only when ordinal % K == 0; skipped groups
         // get a LIGHT (LTS-only, no chirp) descriptor. warm_descriptor excludes the session-first
@@ -552,7 +553,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             !(force_full_preamble_once_ || force_burst_group_start_full_preamble_);
         static const int kAnchorSkipK = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-            return (e && *e) ? std::max(1, std::atoi(e)) : 1;
+            return (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (K=2 reactive); =1 to disable
         }();
         // REACTIVE GATE (2026-06-20, radio-agnostic) — the gate that lets the skip default-on safely.
         // The IONOS rig DISPROVED a PREDICTED coherence label: a Moderate channel read clean-Good for

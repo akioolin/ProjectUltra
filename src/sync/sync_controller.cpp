@@ -83,7 +83,7 @@ void SyncController::noteGroupDelivered(uint32_t group_seq) {
     // (always full chirp); the K-gated fast §16.4 escalation catches those mismatches.
     static const int kAnchorSkipK = [] {
         const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-        return (e && *e) ? std::max(1, std::atoi(e)) : 1;
+        return (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (matches the encoder default)
     }();
     expect_full_ofdm_anchor_ = (kAnchorSkipK <= 1) || !next_group_light_anchor_;
     LOG_MODEM(INFO,
@@ -678,7 +678,7 @@ bool SyncController::detectConnectedLightSync(
     // grind (the wire flag arms full-search on chirp groups directly).
     static const uint64_t kEscalateStreak = [] {
         const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-        const int k = (e && *e) ? std::max(1, std::atoi(e)) : 1;
+        const int k = (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (matches the encoder)
         return (k > 1) ? uint64_t{4} : signal_policy::kConnectedOFDMReanchorEscalateStreak;
     }();
     if (!found && connected &&
