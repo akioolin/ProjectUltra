@@ -605,21 +605,37 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             modulation_, code_rate_, flags,
             /*lifting_z=*/ldpc_lifting_z_);
         Bytes descriptor_bytes = descriptor.serialize();
-        // Phase 2a short DUAL chirp anchor (gated to R3/4, default-off shortAnchorEnabled): the warm
-        // descriptor can shorten the chirp. Mutually exclusive with the #69 light skip.
+        // Short DUAL chirp anchor (default-off shortAnchorEnabled = ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS).
+        // On a chirp-bearing group the warm descriptor can SHORTEN the chirp (250 ms dual vs 500 ms);
+        // the RX auto-falls-back to the short detector on a full-detector miss (ofdm_chirp_waveform.cpp:478),
+        // so no wire flag is needed. Mutually exclusive with the #69 light skip.
+        //   GATING: the original Phase-2a gate was R3/4-as-a-clean-proxy. #62 REACTIVE SHORT CHIRP
+        //   (ULTRA_REACTIVE_SHORT_CHIRP=1) replaces that with the SAME delivery-driven clean-streak the
+        //   skip uses (reactive_skip_enabled): short chirp on a proven-clean run, full chirp the instant
+        //   a resend/crater resets the streak. So a clean Good run emits skip-light + short-chirp
+        //   alternating (max airtime); a fady run reverts to full chirp every group. Radio-agnostic.
+        static const bool kReactiveShortChirp = [] {
+            const char* e = std::getenv("ULTRA_REACTIVE_SHORT_CHIRP");
+            return e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0');
+        }();
+        const bool short_anchor_gate =
+            kReactiveShortChirp
+                ? reactive_skip_enabled
+                : protocol::connection_policy::shouldUseWarmShortAnchorDescriptor(
+                      waveform_->getMode(), modulation_, code_rate_);
         const bool descriptor_short_anchor =
-            warm_descriptor && waveform_ && waveform_->shortAnchorEnabled() &&
-            protocol::connection_policy::shouldUseWarmShortAnchorDescriptor(
-                waveform_->getMode(), modulation_, code_rate_);
+            warm_descriptor && waveform_ && waveform_->shortAnchorEnabled() && short_anchor_gate;
         std::vector<float> descriptor_samples =
             encodeFrame(descriptor_bytes, descriptor_short_anchor && !skip_chirp_descriptor,
                         /*light_preamble=*/skip_chirp_descriptor);
-        if (kAnchorSkipK > 1) {
-            LOG_MODEM(INFO, "[%s] #69 anchor-skip: ordinal=%u K=%d streak=%u/%u reactive=%s -> %s descriptor (announce next=%s)",
+        if (kAnchorSkipK > 1 || kReactiveShortChirp) {
+            const char* anchor_kind = skip_chirp_descriptor ? "LIGHT(no-chirp)"
+                                    : (descriptor_short_anchor ? "SHORT-chirp" : "FULL-chirp");
+            LOG_MODEM(INFO, "[%s] #69 anchor: ordinal=%u K=%d streak=%u/%u reactive=%s shortchirp=%d -> %s (announce next=%s)",
                       log_prefix_.c_str(), anchor_ordinal, kAnchorSkipK,
                       anchor_skip_clean_streak_, kReactiveCleanStreak,
                       reactive_skip_enabled ? "ON" : "OFF(full-chirp)",
-                      skip_chirp_descriptor ? "LIGHT(no-chirp)" : "FULL-chirp",
+                      kReactiveShortChirp ? 1 : 0, anchor_kind,
                       next_group_light ? "LIGHT" : "FULL");
         }
         if (!descriptor_samples.empty()) {
