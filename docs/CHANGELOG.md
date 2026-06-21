@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-21 — perf(tx): reactive short dual chirp — built, rig-investigated, SAFE WASH (env-gated) — #62
+
+Overnight IONOS MPG@20 investigation of the reactive SHORT dual chirp (commits 942382b short-chirp,
+280de4b detect-threshold knob; both env-gated, default byte-identical). Goal: on chirp-bearing groups,
+emit a 250/200 ms dual chirp instead of 500 ms on clean streaks (revert to full on crater), to reclaim
+the last chunk of anchor airtime. ~50 paired rig runs across 6 phases, ALL CRC-clean, STALL=0.
+
+**What's proven (positive):** (1) the short chirp WORKS on the real cheap-card rig — the RX auto-falls
+back to the short detector (no wire flag) and detects it ~81–92% of the time through the actual hardware
+audio path (previously only ever sim-verified). (2) It is SAFE by construction — the reactive revert
+held across all ~50 runs, 0 stalls. (3) The whole reactive anchor SYSTEM is a real win: Phase 6 paired
+ladder (n=4, fady session) — full-chirp-every-group 1.44 kbps → **skip (shipped default-on) 1.62 (+13.1%)**
+→ skip+short 1.66 (+15.8%). The skip's advantage *grows* on fady channels (full chirp = most airtime =
+most fade exposure).
+
+**What's NOT proven (the honest part): the short chirp itself is a goodput WASH, not a win.** Physics
+ceiling: a short chirp saves ~0.65 s but a detection MISS costs a ~group resend (~7–9 s ≈ 14× one
+chirp's saving), so it is net-positive only at ~99%+ detection. Rig detection caps at **~92%** (8% miss
+irreducible). Cross-phase short-vs-skip paired: +4.7% (P3), −7.7% (P4), +2.7% (P6) → ~−1% mean = a wash
+within the ±25% channel noise; the ~3% airtime it saves is below the rig's goodput-measurement floor.
+The **detect-threshold lever FAILED** (Phase 5): `ULTRA_SHORT_CHIRP_DETECT_SCALE` 0.6/0.4 → the RX
+detect count EXCEEDED the sent count (180%/167% = FALSE POSITIVES) → mis-anchors → rtx 24→55 → goodput
+−11/−13%. Detection cannot be pushed past ~92% without false alarms; keep scale=1.0 (the knob is a
+footgun — REMOVAL candidate).
+
+**Decision:** the reactive short chirp stays **env-gated, default-OFF** (`ULTRA_REACTIVE_SHORT_CHIRP`) —
+a safe duty/thermal option (real airtime saved) but no measurable goodput benefit. The SKIP (default-on,
+e975abb) remains the real win. The big anchor-airtime levers (turnaround −43%, skip) were already done;
+chirp shortening is the diminishing-returns tail below measurability. Verification: ctest 80/81 (only
+pre-existing `UltraTncSimAudio`); both knobs default byte-identical. Analysis: `/tmp/rs_analyze.py`,
+`/tmp/rs_phase{1..6}.out`.
+
+---
+
 ## 2026-06-20 — perf(tx): anchor-skip DEFAULT-ON (ULTRA_ANCHOR_SKIP_K 1→2, reactive-gated) — #57/#69
 
 The reactive anchor-skip gate (prior entry) is now **default-ON**: `ULTRA_ANCHOR_SKIP_K` defaults to
