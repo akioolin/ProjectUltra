@@ -269,6 +269,14 @@ public:
     void setHandshakeComplete(bool complete);
     bool isHandshakeComplete() const { return handshake_complete_; }
 
+    // #70: forward the handshake-stage gate (bare-chirp-expected) to the decoder so
+    // ULTRA_ROBUST_IDLE_PING only fires a robust chirp-lock PONG when the local
+    // station expects a BARE CHIRP next (idle/probing), never a data control frame
+    // (connecting -> CONNECT_ACK). No-op unless the knob is set.
+    void setBareChirpExpected(bool v) {
+        if (streaming_decoder_) streaming_decoder_->setBareChirpExpected(v);
+    }
+
     void setDataMode(Modulation mod, CodeRate rate);
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }

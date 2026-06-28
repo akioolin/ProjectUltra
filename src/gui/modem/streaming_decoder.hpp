@@ -335,6 +335,19 @@ public:
     void setBurstTransportRxEnabled(bool enabled) { burst_transport_rx_ = enabled; }
     void setPingCallback(StreamingPingCallback callback) { ping_callback_ = callback; }
     void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) { data_sync_accepted_callback_ = callback; }
+    // #70 stage 2: handshake-stage gate for ULTRA_ROBUST_IDLE_PING. TRUE when the
+    // local station next expects a BARE-CHIRP control frame (idle->PING, probing
+    // ->PONG); set FALSE while it expects a DATA control frame (connecting->
+    // CONNECT_ACK) so a badly-FADED CONNECT_ACK (low LLR -> trips false-lock reject)
+    // is NOT mis-PONGed (the IONOS #27 case). Default TRUE = robust-ping eligible.
+    // TWO writer threads: the decode thread (onPongReceived -> sendFullConnect ->
+    // CONNECTING, serialized in-line inside this PING's own emit, which is what
+    // actually closes #27 on the initiator) and the GUI thread (protocol tick
+    // CONNECT timeout). atomic/relaxed: a one-frame stale read is benign and the
+    // gate only matters when the env knob is on.
+    void setBareChirpExpected(bool v) {
+        bare_chirp_expected_.store(v, std::memory_order_relaxed);
+    }
     void setLogPrefix(const std::string& prefix) {
         log_prefix_ = prefix;
         sync_controller_.setLogPrefix(prefix);  // warm-sync logs now emit from the controller
@@ -692,6 +705,9 @@ private:
     std::unique_ptr<IWaveform> waveform_;
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
+    // #70: see setBareChirpExpected. Default TRUE so an idle receiver (the common
+    // case) is always robust-ping eligible; the App flips it FALSE during CONNECTING.
+    std::atomic<bool> bare_chirp_expected_{true};
 
     // Dual-listen: narrowband waveform for detecting narrowband chirps when disconnected
     // Lazy-initialized on first search to avoid startup cost

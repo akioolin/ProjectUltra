@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-28 — fix(handshake): low-SNR PING-classification floor — robust chirp-lock PING (env-gated, default-OFF) — #70
+
+**What was broken (symptom + root cause).** Investigating an apparent "MC-DPSK tx=0" at low SNR, the
+real bug is a HANDSHAKE FLOOR, not file transport. A PING is a bare chirp with no data
+(`encodePing`→`generatePreamble`). The receiver distinguishes a PING from a CONNECT (chirp + 4-CW
+MC-DPSK data frame) with a LEVEL test: `data_rms/training_rms < kPingMaxDataToTrainingRMSRatio (0.5)`,
+plus an absolute floor `kPingChirpLockMaxDataRMS (0.16)`. At low SNR the BROADBAND noise floods the
+PING's silent data region (measured data_rms ~0.37 ≈ noise, NOT signal → ratio 0.68–0.88, well over
+0.5; abs level also > 0.16), so a real PING reads as a faded CONNECT → the decoder waits for a 4-CW
+frame that never comes → no PONG → never connects. The chirp itself locks solidly everywhere it fails
+(corr 0.6–0.75, floor 0.30). Faithful-gate floor map (seed42, 1KB, `--expect-mod any`): NEVER connects
+awgn@6/8, good@8/10/12; MARGINAL good@15 (connects on a lucky fade peak); reliable good@20. So the
+handshake floor ≈ 15 dB Good / >8 dB AWGN — far above the published 5 dB AWGN *data* floor
+(`measure_ack_fer` measures the data path WITHOUT the live handshake → never caught this) and above the
+OFDM Good *entry* floor (12). This caps ALL operation below ~15 dB Good. The original `tx_submitted=0`
+was simply because `sendFile()` was never reached (no link). It is the same PING/CONNECT ambiguity the
+IONOS #27 ratiometric fix sits on, failing the OTHER direction (#27 = CONNECT mis-PONGed; this = PING
+mis-CONNECTed).
+
+**What changed.** Env-gated `ULTRA_ROBUST_IDLE_PING` (default-OFF, decoder-only).
+- `streaming_ofdm_decode.cpp` (~488 knob read; ~1190 emit): at the pre-LDPC false-lock-reject site,
+  when the knob is ON and the frame already tripped `reject_as_false_lock` (low LLR), emit the PING on a
+  solid chirp signature alone (corr ≥ `kPingCorrFloor`, |gap| ≤ `kPingMaxGapError`) regardless of the
+  data-region level. Returns immediately (no fallthrough).
+- Stage-2 handshake-stage gate: `std::atomic<bool> bare_chirp_expected_` on the decoder (default TRUE) +
+  `setBareChirpExpected`; forwarded by `ModemEngine::setBareChirpExpected`; set by `app.cpp`'s connection
+  state-changed handler — TRUE for DISCONNECTED/PROBING (next frame is a bare chirp), FALSE for CONNECTING
+  (next frame is the CONNECT_ACK data frame). The robust emit ANDs `bare_chirp_expected_`.
+
+**Why it's properly fixed (under all three lenses).** PHY: a chirp carries matched-filter processing
+gain that a silent-gap RMS level test does not; at low SNR the noise power in the empty gap rises to meet
+weak-signal power, so a level discriminator is SNR-limited by construction while the chirp signature is
+not — trusting the chirp is first-principles correct. DSP/state-machine: PING==PONG on the wire (both
+bare chirp); the Connection already disambiguates by state. The robust emit fires ONLY for frames that
+already failed the LLR/false-lock test, so a cleanly-decodable CONNECT/CONNECT_ACK (good LLR → CW0 magic
+peek) is never short-circuited. The #27 initiator regression (a faded CONNECT_ACK mis-PONGed while
+CONNECTING) is closed because the PROBING→CONNECTING transition and the `bare_chirp_expected_=false`
+write are serialized in-line on the RX decode thread inside the PONG's own emit, before the next
+(CONNECT_ACK) frame is processed (adversarially reviewed). Operator: "I can hear his chirp but we never
+connect" is the worst marginal-band failure; this answers any solid chirp when idle, as operators do.
+
+**Test verification.** `cmake --build build -j4` clean; `ctest -j4` = 80/81 (only the pre-existing
+`UltraTncSimAudio`; no new regression). Faithful gate with `ULTRA_ROBUST_IDLE_PING=1` (seed42, 1KB):
+good@8 NEVER-connect → **connects** (DBPSK R1/4; file too slow for the 130 s window = separate throughput
+lever); good@10 NEVER-connect → **PASS** QPSK R1/2 510 bps; good@12 NEVER-connect → **PASS** QPSK R1/2
+620 bps; good@20 **PASS** QPSK R2/3 1150 bps with the robust path NOT triggered (no regression); 0
+mispings at every point. Default-OFF build byte-identical (single function-local `static const bool`
+short-circuit; the one decoder reader is ANDed after it).
+
+**Remaining (before default-ON).** Responder-side starvation: chirp-lock alone cannot distinguish a bare
+PING from a faded multi-CW CONNECT, and the emit pre-empts the 4-CW decode; the responder stays
+DISCONNECTED post-PONG (where `bare_chirp_expected_` is TRUE) so a run of faded CONNECTs could be PONGed
+instead of decoded. Non-fatal in sim (good@10/12 PASS, responder accepts CONNECTs) but needs a stronger
+discriminator + a lockstep IONOS@10 rig A/B before flipping default. Tracked: BUG-HANDSHAKE-PING-FLOOR.
+
+---
+
 ## 2026-06-21 — perf(tx): reactive short dual chirp — built, rig-investigated, SAFE WASH (env-gated) — #62
 
 Overnight IONOS MPG@20 investigation of the reactive SHORT dual chirp (commits 942382b short-chirp,

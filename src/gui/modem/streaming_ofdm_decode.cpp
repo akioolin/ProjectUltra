@@ -486,6 +486,25 @@ void StreamingDecoder::decodeCurrentFrame() {
     // RMS heuristic for connected OFDM light-preamble frames: valid data/control
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
     const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
+
+    // ROBUST LOW-SNR IDLE PING (#70, env-gated prototype, default-OFF):
+    // The ping/connect classifier is level/ratio-based (kPingMaxDataToTrainingRMSRatio
+    // = 0.5, absolute floor 0.16). A bare PING is just a chirp with a SILENT data
+    // region; at low SNR the broadband noise floods that region (data/train RMS ratio
+    // rises to 0.68-0.88 well above 0.5) so a real PING reads as a faded CONNECT and
+    // is sent to wait for a 4-CW frame that never comes -> no PONG -> never connects
+    // (sim floor: never below ~15 dB Good, vs the chirp itself locking solidly at
+    // corr 0.6-0.75 to ~6 dB AWGN). When ON, a solid chirp-lock (corr >= floor, gap
+    // OK) emits the PING on the chirp signature alone, independent of the data-region
+    // level. SAFE-by-construction in this prototype: only frames that ALREADY tripped
+    // the pre-LDPC false-lock reject (low LLR) reach the robust emit, so a cleanly
+    // decodable CONNECT/CONNECT_ACK (good LLR -> CW0 magic peek) is never short-
+    // circuited. The hardware #27 case (a BADLY FADED CONNECT_ACK whose CW0 also
+    // fails) is handled in stage 2 by gating on handshake state (bare-chirp-expected).
+    static const bool robust_idle_ping = [] {
+        const char* v = std::getenv("ULTRA_ROBUST_IDLE_PING");
+        return v && v[0] == '1';
+    }();
     const size_t mc_dpsk_symbol_samples =
         (allow_ping_detection && waveform_)
             ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
@@ -1185,6 +1204,22 @@ void StreamingDecoder::decodeCurrentFrame() {
             if (!is_ofdm && allow_ping_detection) {
                 const auto reject_ping = evaluatePingDecision(false, false, false);
                 data_bearing_mcdpsk = !reject_ping.ping_by_silence;
+                // #70: when the data region only LOOKS data-bearing because low-SNR
+                // noise floods a bare PING's silent gap, a solid chirp signature is the
+                // trustworthy discriminator (it carries the chirp's processing gain).
+                // Emit the PING on chirp-lock alone instead of waiting for a CONNECT.
+                if (data_bearing_mcdpsk && robust_idle_ping &&
+                    bare_chirp_expected_.load(std::memory_order_relaxed) &&
+                    reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
+                    std::abs(reject_ping.gap_error_samples) <=
+                        frame_policy::kPingMaxGapError) {
+                    LOG_MODEM(INFO, "[%s] robust idle PING by chirp-lock "
+                              "(ratio=%.2f corr=%.2f gap=%.1f) — low-SNR (not silent)",
+                              log_prefix_.c_str(), reject_ping.ratio,
+                              reject_ping.chirp_corr, reject_ping.gap_error_samples);
+                    emitPingFrame(reject_ping, false);
+                    return;
+                }
                 if (data_bearing_mcdpsk) {
                     LOG_MODEM(INFO, "[%s] MC-DPSK weak 1-CW LLRs but data-bearing "
                               "(ratio=%.2f >= silence) — not a PING; falling through to "

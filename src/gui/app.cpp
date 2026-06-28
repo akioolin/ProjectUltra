@@ -713,6 +713,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             audio_.pauseInput();
         }
         modem_.setConnected(modem_connected);
+        // #70 stage 2: robust-idle-ping (ULTRA_ROBUST_IDLE_PING) is eligible only
+        // when this station next expects a BARE-CHIRP control frame — idle (incoming
+        // PING) or PROBING (the PONG). While CONNECTING it expects a CONNECT_ACK
+        // (data frame); a badly-faded CONNECT_ACK must be retried-as-data, NOT mis-
+        // PONGed (the IONOS #27 regression). No-op unless the knob is set.
+        modem_.setBareChirpExpected(
+            state == protocol::ConnectionState::PROBING ||
+            state == protocol::ConnectionState::DISCONNECTED);
         if (wrap_audio_quiesce) {
             audio_.drainInput();
             audio_.resumeInput();

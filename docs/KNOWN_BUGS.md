@@ -8,6 +8,12 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-HANDSHAKE-PING-FLOOR: low-SNR PING/CONNECT classifier starves → handshake never connects below ~15 dB Good (caps ALL operation)
+- Status: **ROOT-CAUSED + FIX PROVEN IN SIM, env-gated `ULTRA_ROBUST_IDLE_PING` default-OFF (#70, CHANGELOG 2026-06-28).** Default-ON blocked on a responder-side starvation case + a lockstep IONOS rig A/B.
+- **What:** a PING is a bare chirp with no data (`encodePing`→`generatePreamble`). The receiver tells a PING from a CONNECT with a LEVEL test (`data/training RMS ratio < 0.5`, abs floor 0.16). At low SNR broadband noise floods the PING's silent gap (ratio 0.68–0.88 > 0.5) → real PING reads as a faded CONNECT → waits for a 4-CW frame that never comes → no PONG → never connects. The chirp itself locks solid (corr 0.6–0.75). Floor map (faithful gate): never connects awgn@6/8 good@8/10/12; marginal good@15; reliable good@20. The published 5 dB AWGN *data* floor never caught this (`measure_ack_fer` skips the live handshake).
+- **Fix (env-gated):** when the knob is ON, a solid chirp-lock with a low-LLR (false-lock-rejected) frame emits the PING on chirp signature alone; gated on `bare_chirp_expected_` (FALSE during CONNECTING) so a faded CONNECT_ACK isn't mis-PONGed (#27-safe on the initiator). PROVEN: good@10/12 never-connect→PASS, good@20 no-regress.
+- **Remaining before default-ON:** the RESPONDER stays DISCONNECTED post-PONG with `bare_chirp_expected_`=TRUE, so a run of faded multi-CW CONNECTs could be PONGed instead of decoded (chirp-lock can't tell a bare PING from a faded CONNECT, and the emit pre-empts the 4-CW decode). Non-fatal in sim; needs a stronger discriminator + rig validation. Also: throughput below ~8 dB (MC-DPSK DBPSK R1/4 ≈12 bps) is a separate lever, not this bug.
+
 ### BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE: rate-change wipes the Good/Moderate coherence pool — precondition before enabling ULTRA_RATE_ADAPT
 - Status: **OPEN but GATED-INERT (no default-path impact).** Tracked by the 2026-06-16 four-tier
   review of the Doppler-coherence discriminator (CHANGELOG 2026-06-16, design doc §11).
