@@ -8,6 +8,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-MCDPSK-FILE-COMPLETION: MC-DPSK file transfer never completes — receiver gets ALL frames but never finalizes (THE real MC-DPSK file-transfer blocker)
+- Status: **OPEN, ROOT-CAUSED + REPRODUCED (#73, 2026-06-29).** Pre-existing; surfaced once the handshake fixes (#70 ping floor + #72 control baud) let MC-DPSK connect on every rung.
+- **What:** with MC-DPSK connected, a file transfer never completes at ANY rung/SNR. Forensic (natural good@7, DBPSK/1024 ROBUST_MID, faithful gate): the RECEIVER decodes and receives the WHOLE file — all 18 seqs (0–17) of a 1 KB file, each ~4× (retx duplicates) — but `file-recv=0`: it never assembles/finalizes. So the sender never sees completion and stays stuck resending (21 retx, 0 "Transfer complete"), running out the window. CRC=0.
+- **Not the handshake, not #72:** data frames don't use the control profile; ROBUST_MID config is byte-identical pre/post #72. Not the forcing gotcha (this is natural selection).
+- **Where:** burst transport is OFDM-only ("THE OFDM file method"); MC-DPSK file rides the `arq_` path. The bug is the receiver-side file assembly + the final-ACK / "Transfer complete" trigger on that path. Prerequisite to ANY MC-DPSK file transfer (and to the #71 DQPSK speedup — speed is moot if it never completes). Repro: `/tmp/v72_nat7`.
+
+### BUG-MCDPSK-CONTROL-BAUD: CONNECT_ACK shipped at the data rung's mod/baud → handshake strand on sps≠1024 rungs — **FIXED (#72, 2026-06-29, CHANGELOG)**
+- Standardized MC-DPSK on sps=1024 + routed handshake-negotiation frames through the DBPSK control profile. Forced rungs now CONNECT; no regression. See CHANGELOG.
+
 ### BUG-HANDSHAKE-PING-FLOOR: low-SNR PING/CONNECT classifier starves → handshake never connects below ~15 dB Good (caps ALL operation)
 - Status: **ROOT-CAUSED + FIX PROVEN IN SIM, env-gated `ULTRA_ROBUST_IDLE_PING` default-OFF (#70, CHANGELOG 2026-06-28).** Default-ON blocked on a responder-side starvation case + a lockstep IONOS rig A/B.
 - **What:** a PING is a bare chirp with no data (`encodePing`→`generatePreamble`). The receiver tells a PING from a CONNECT with a LEVEL test (`data/training RMS ratio < 0.5`, abs floor 0.16). At low SNR broadband noise floods the PING's silent gap (ratio 0.68–0.88 > 0.5) → real PING reads as a faded CONNECT → waits for a 4-CW frame that never comes → no PONG → never connects. The chirp itself locks solid (corr 0.6–0.75). Floor map (faithful gate): never connects awgn@6/8 good@8/10/12; marginal good@15; reliable good@20. The published 5 dB AWGN *data* floor never caught this (`measure_ack_fer` skips the live handshake).

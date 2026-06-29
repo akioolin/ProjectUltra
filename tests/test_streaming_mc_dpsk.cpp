@@ -56,7 +56,15 @@ bool runLoopback(const char* name,
     decoder.setLogPrefix("TEST");
     decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
     decoder.setMCDPSKConfig(mc_config);
-    decoder.setDataMode(modulation, CodeRate::R1_4);
+    // #72: handshake-negotiation frames (CONNECT/CONNECT_ACK) ride the fixed DBPSK
+    // control profile — like OFDM's QPSK control profile — so they are peer-decodable
+    // regardless of the negotiated DATA constellation. In production the receiver
+    // decodes them while still at the default DBPSK control state (the data mode is
+    // applied only AFTER the frame decodes). Mirror that: decode CONNECT at DBPSK.
+    const bool handshake_frame = (expected_type == v2::FrameType::CONNECT ||
+                                  expected_type == v2::FrameType::CONNECT_ACK);
+    decoder.setDataMode(handshake_frame ? Modulation::DBPSK : modulation,
+                        CodeRate::R1_4);
 
     bool callback_seen = false;
     DecodeResult decoded;

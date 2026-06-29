@@ -32,6 +32,21 @@ bool isControlFrameBytes(const Bytes& frame_data) {
     return v2::isControlFrame(ft);
 }
 
+// #72: the handshake-NEGOTIATION frames (CONNECT / CONNECT_ACK / CONNECT_NAK) are
+// the ONLY MC-DPSK frames sent while the two peers may be on DIFFERENT constellations
+// (the responder has decided the DATA rung but the initiator hasn't adopted it yet).
+// They must ride the fixed control profile (DBPSK/1024). NOT DISCONNECT/ACK/MODE_CHANGE
+// — those go out AFTER both sides agree on the data mode, so they ride it. (CONNECT is
+// effectively already DBPSK at the default, so pinning it is a harmless no-op.)
+bool isHandshakeNegotiationFrameBytes(const Bytes& frame_data) {
+    if (frame_data.size() < 3) {
+        return false;
+    }
+    auto ft = static_cast<v2::FrameType>(frame_data[2]);
+    return ft == v2::FrameType::CONNECT || ft == v2::FrameType::CONNECT_ACK ||
+           ft == v2::FrameType::CONNECT_NAK;
+}
+
 void markFirstLTSSymbolForBurstGroup(Samples& preamble, size_t symbol_samples) {
     if (preamble.empty() || symbol_samples == 0) {
         return;
@@ -294,9 +309,17 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
     }
 
     bool is_ofdm = protocol::isOFDMMode(mode_);
-    bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
+    // #72: MC-DPSK control/handshake frames also ride a fixed control profile
+    // (DBPSK R1/4) so CONNECT/CONNECT_ACK are peer-decodable regardless of the
+    // negotiated DATA constellation. Baud is standardized at 1024, so configure()
+    // only swaps the constellation; the CONNECT FEC is already R1/4 (encodeFrameBytes).
+    const bool is_mc_dpsk = (mode_ == protocol::WaveformMode::MC_DPSK);
+    bool use_control_profile =
+        (is_ofdm && isControlFrameBytes(frame_data)) ||
+        (is_mc_dpsk && isHandshakeNegotiationFrameBytes(frame_data));
     const auto control_profile =
-        streaming_control_profile::profileForDataMode(modulation_);
+        is_mc_dpsk ? streaming_control_profile::profileForMCDPSK()
+                   : streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
@@ -307,7 +330,7 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
     }
 
     if (use_control_profile) {
-        LOG_MODEM(INFO, "[%s] OFDM control profile TX: %s %s (data=%s %s)",
+        LOG_MODEM(INFO, "[%s] control profile TX: %s %s (data=%s %s)",
                   log_prefix_.c_str(), modulationToString(tx_mod),
                   codeRateToString(tx_rate), modulationToString(modulation_),
                   codeRateToString(code_rate_));
@@ -358,14 +381,18 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     }
 
     bool is_ofdm = protocol::isOFDMMode(mode_);
-    bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
+    const bool is_mc_dpsk = (mode_ == protocol::WaveformMode::MC_DPSK);  // #72
+    bool use_control_profile =
+        (is_ofdm && isControlFrameBytes(frame_data)) ||
+        (is_mc_dpsk && isHandshakeNegotiationFrameBytes(frame_data));
     const auto control_profile =
-        streaming_control_profile::profileForDataMode(modulation_);
+        is_mc_dpsk ? streaming_control_profile::profileForMCDPSK()
+                   : streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
     if (use_control_profile) {
-        LOG_MODEM(INFO, "[%s] OFDM control profile TX(light): %s %s (data=%s %s)",
+        LOG_MODEM(INFO, "[%s] control profile TX(light): %s %s (data=%s %s)",
                   log_prefix_.c_str(), modulationToString(tx_mod),
                   codeRateToString(tx_rate), modulationToString(modulation_),
                   codeRateToString(code_rate_));

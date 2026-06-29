@@ -245,8 +245,17 @@ struct LadderRung {
 inline LadderRung ladderRungForId(LadderRungId id) {
     switch (id) {
         case LadderRungId::ROBUST_LOW:
+            // #72/#71 (2026-06-28): MC-DPSK standardized on ONE baud (sps=1024).
+            // The CONTROL waveform is fixed at sps=1024 (the handshake profile); a
+            // DATA rung at a DIFFERENT baud (the old 2048/512) re-cut the shared
+            // waveform and shipped CONNECT_ACK at a baud the peer couldn't sync to
+            // -> handshake strand. With every rung at 1024, control==data baud by
+            // construction and the only thing that varies is the constellation
+            // (DBPSK/DQPSK) + rate — handled by the control-profile path, exactly
+            // like OFDM. The 512 "fast" gear's throughput is recovered at 1024 via
+            // DQPSK (ROBUST) and code rate; its only real edge was fast-Doppler.
             return {id, "Robust-Low", WaveformMode::MC_DPSK,
-                    Modulation::DBPSK, CodeRate::R1_4, 8, 2048, 3};
+                    Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
         case LadderRungId::ROBUST_MID:
             return {id, "Robust-Mid", WaveformMode::MC_DPSK,
                     Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
@@ -255,8 +264,12 @@ inline LadderRung ladderRungForId(LadderRungId id) {
                     Modulation::DQPSK, CodeRate::R1_4, 8, 1024,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::STANDARD:
+            // #72/#71: standardized to sps=1024 (see ROBUST_LOW). Same
+            // constellation/rate as ROBUST now (DQPSK 1024 R1/4); the throughput
+            // the old 512 baud gave is reachable here via DQPSK + a higher code
+            // rate, without the variable-baud handshake hazard.
             return {id, "Standard", WaveformMode::MC_DPSK,
-                    Modulation::DQPSK, CodeRate::R1_4, 8, 512,
+                    Modulation::DQPSK, CodeRate::R1_4, 8, 1024,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::OFDM_CHIRP:
             // Coherent-only wideband OFDM (thread A, 2026-05-31). Nominal mod is
@@ -300,6 +313,18 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 }
 
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
+    // DIAGNOSTIC force (ULTRA_FORCE_MCDPSK_RUNG=LOW|MID|ROBUST|STANDARD): pin the
+    // MC-DPSK rung, bypassing the SNR thresholds, to MEASURE each rung's real floor
+    // on the faithful gate (#71). The DQPSK rungs ROBUST (1024) / STANDARD (512) are
+    // otherwise UNREACHABLE (robust_floor > ofdm_floor; STANDARD never returned), so
+    // their floors are unknown. No-op unless set; not a production path.
+    if (const char* e = std::getenv("ULTRA_FORCE_MCDPSK_RUNG")) {
+        const std::string s(e);
+        if (s == "LOW")      return ladderRungForId(LadderRungId::ROBUST_LOW);
+        if (s == "MID")      return ladderRungForId(LadderRungId::ROBUST_MID);
+        if (s == "ROBUST")   return ladderRungForId(LadderRungId::ROBUST);
+        if (s == "STANDARD") return ladderRungForId(LadderRungId::STANDARD);
+    }
     float ofdm_floor = 10.0f;
     float robust_floor = 13.0f;
     float robust_mid_floor = 5.0f;

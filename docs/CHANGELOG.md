@@ -10,6 +10,60 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-29 — fix(handshake): MC-DPSK control-baud coupling strands CONNECT_ACK on sps≠1024 rungs — #72
+
+**What was broken (symptom + root cause).** The MC-DPSK handshake stranded whenever the selected DATA
+rung used a baud (samples_per_symbol) other than the default 1024. The MC-DPSK control waveform baud was
+COUPLED to the data rung's sps (one shared `config_.mc_dpsk_samples_per_symbol`; control frames rode the
+DATA `waveform_`/mod, since `use_control_profile` in `streaming_encoder.cpp` was OFDM-only). When the
+responder applied the rung around CONNECT_ACK time — via a CROSS-THREAD retune (the decoder thread, on
+finishing the incoming CONNECT, applies the deferred descriptor change and re-cuts the shared encoder
+*during* the synchronous CONNECT_ACK encode) — the CONNECT_ACK shipped at the data rung's mod/baud (e.g.
+DQPSK/512 or DBPSK/2048). The initiator, still at the default DBPSK/1024 (it applies the rung only AFTER
+decoding CONNECT_ACK), detected the chirp but could not demap the frame (`cw_fail=0`) → stuck CONNECTING,
+0 sendFile, no recovery (MC-DPSK CONNECT_ACK rescue retx = 0). Production-real, not just the diagnostic
+force-knob: the live ladder returns ROBUST_LOW (sps=2048) at SNR < robust_mid_floor (Good<6 etc.) — same
+strand (reproduced at natural good@5). Exposed by #70 (which lets it connect that low). The OFDM
+handshake never hits this (OFDM control frames already ride a fixed control profile; OFDM symbol timing
+is baud-independent — only the constellation/rate vary).
+
+**What changed (user-chosen design: standardize MC-DPSK on ONE baud=1024, reuse the OFDM control-profile path).**
+- `connection_policy.hpp` `ladderRungForId`: ROBUST_LOW sps 2048→1024, STANDARD sps 512→1024. ALL MC-DPSK
+  rungs are now 1024 baud — control==data baud by construction, so the handshake is always mutually
+  decodable. The gears now vary only constellation (DBPSK/DQPSK) + rate; the old 512 "fast" gear's
+  throughput is recoverable at 1024 via DQPSK ± higher rate (its only real edge was fast-Doppler).
+  Also adds the `ULTRA_FORCE_MCDPSK_RUNG=LOW|MID|ROBUST|STANDARD` diagnostic force-knob (the DQPSK rungs
+  are otherwise unreachable; needed to floor-measure them).
+- `streaming_encoder.cpp`: `use_control_profile` now also fires for MC-DPSK HANDSHAKE-NEGOTIATION frames
+  (new `isHandshakeNegotiationFrameBytes` = CONNECT/CONNECT_ACK/CONNECT_NAK ONLY — NOT DISCONNECT/ACK,
+  which go out post-connect when both peers are on the data mode). `configure(DBPSK,R1/4)` before the
+  modulate (baud preserved), restore after. The FEC is already R1/4 for CONNECT (`encodeFrameBytes`), so
+  only the modulate needed the profile. `streaming_control_profile.hpp`: `profileForMCDPSK()` = {DBPSK,R1/4}.
+
+**Why it's properly fixed.** With every rung at 1024, configure() only swaps the constellation, so the
+control-profile mechanism (proven on OFDM) makes CONNECT/CONNECT_ACK ride DBPSK/1024 regardless of the
+encoder's data state — RACE-IMMUNE (the cross-thread retune can't change the baud, and the profile pins
+the constellation right before the modulate). The receiver decodes handshake frames at the default
+DBPSK/1024 (it applies the rung only after decoding them), so encode and decode match by construction.
+GOTCHA worth recording: `v2::isControlFrame` does NOT include CONNECT/CONNECT_ACK (they're a separate
+`isConnectFrame` category) — the first un-gate used `isControlFrameBytes` and silently no-op'd.
+
+**Test verification.** `cmake --build build -j4` clean; `ctest -j4` = 80/81 (only pre-existing
+`UltraTncSimAudio`) after updating `test_connection_policy` (sps 2048/512→1024) + `test_streaming_mc_dpsk`
+(decode CONNECT loopback at DBPSK — mirrors production decoding handshake frames at default-DBPSK).
+Faithful gate: forced STANDARD/ROBUST (DQPSK/1024) + MID (DBPSK/1024) at good@15/20 now CONNECT
+("control profile TX: DBPSK R1/4" + ALPHA reaches CONNECTED; was 0/stranded). No regression: natural
+good@20 PASSES (OFDM QPSK R2/3, 1150 bps, rtx=1).
+
+**Known follow-ups (NOT in this commit).** (1) BUG-MCDPSK-FILE-COMPLETION (#73): with the handshake now
+working on every rung, MC-DPSK FILE TRANSFER still never completes — the receiver gets ALL the data
+frames (all 18 seqs of a 1 KB file) but never assembles/finalizes, so the sender stays stuck resending.
+Pre-existing, independent of this fix (data frames don't use the control profile), and the real blocker
+to usable MC-DPSK file transfer. (2) The DQPSK rungs remain unreachable in `selectLadderRung`
+(robust_floor > ofdm_floor) — the #71 speedup needs that threshold re-derivation too.
+
+---
+
 ## 2026-06-28 — fix(handshake): low-SNR PING-classification floor — robust chirp-lock PING (env-gated, default-OFF) — #70
 
 **What was broken (symptom + root cause).** Investigating an apparent "MC-DPSK tx=0" at low SNR, the

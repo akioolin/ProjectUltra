@@ -50,7 +50,9 @@ void test_ladder_rung_selection() {
     const auto robust_low = ladderRungForId(LadderRungId::ROBUST_LOW);
     CHECK(robust_low.waveform == WaveformMode::MC_DPSK, "Robust-Low waveform");
     CHECK(robust_low.modulation == Modulation::DBPSK, "Robust-Low modulation");
-    CHECK(robust_low.samples_per_symbol == 2048, "Robust-Low SPS");
+    // #72: MC-DPSK standardized on sps=1024 (control==data baud → handshake always
+    // mutually decodable; the gears now vary only constellation/rate, not baud).
+    CHECK(robust_low.samples_per_symbol == 1024, "Robust-Low SPS");
     CHECK(robust_low.cw_count == 3, "Robust-Low CW count");
 
     const auto robust_mid = ladderRungForId(LadderRungId::ROBUST_MID);
@@ -68,7 +70,7 @@ void test_ladder_rung_selection() {
     const auto standard = ladderRungForId(LadderRungId::STANDARD);
     CHECK(standard.waveform == WaveformMode::MC_DPSK, "Standard waveform");
     CHECK(standard.modulation == Modulation::DQPSK, "Standard modulation");
-    CHECK(standard.samples_per_symbol == 512, "Standard SPS");
+    CHECK(standard.samples_per_symbol == 1024, "Standard SPS");  // #72: was 512
 
     CHECK(ladderRungForId(LadderRungId::OFDM_CHIRP).waveform == WaveformMode::OFDM_CHIRP,
           "OFDM_CHIRP rung waveform");
