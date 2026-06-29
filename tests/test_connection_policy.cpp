@@ -82,25 +82,39 @@ void test_ladder_rung_selection() {
           "Moderate below in-band 7 dB selects Robust-Low");
     CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate in-band 7 dB boundary selects Robust-Mid");
+          "Moderate in-band 7 dB boundary selects Robust-Mid (DBPSK)");
+    // #71: DQPSK reachable on BENIGN channels only (measured). FADING Moderate/Poor
+    // keep their old DQPSK floors (Moderate 15 > ofdm 14 -> DBPSK only; fading DQPSK
+    // floor unmeasured — differential Doppler penalty > +2.5 dB).
     CHECK(selectLadderRung(13.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate below in-band 14 dB stays Robust-Mid");
+          "Moderate below in-band 14 dB stays Robust-Mid (DBPSK, fading)");
     CHECK(selectLadderRung(14.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::OFDM_CHIRP,
           "Moderate in-band 14 dB boundary selects OFDM_CHIRP");
 
     // AWGN entry floor lowered 10->8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
-    CHECK(selectLadderRung(7.9f, ChannelClassification::AWGN).id ==
+    // #71: AWGN robust_mid_floor=5 -> dqpsk_floor=min(7.5, 8-0.5)=7.5, ofdm_floor=8.
+    CHECK(selectLadderRung(7.4f, ChannelClassification::AWGN).id ==
               LadderRungId::ROBUST_MID,
-          "AWGN below in-band 8 dB stays MC-DPSK");
+          "AWGN below DQPSK floor stays Robust-Mid (DBPSK)");
+    CHECK(selectLadderRung(7.5f, ChannelClassification::AWGN).id ==
+              LadderRungId::ROBUST,
+          "AWGN at DQPSK floor selects Robust (DQPSK)");
     CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
               LadderRungId::OFDM_CHIRP,
           "AWGN in-band 8 dB boundary selects OFDM_CHIRP");
     // Good entry floor lowered 12->10 (R1/2 reliable @ Good 10, measured).
-    CHECK(selectLadderRung(9.9f, ChannelClassification::GOOD).id ==
+    // #71: Good robust_mid_floor=6 -> dqpsk_floor=min(8.5, 9.5)=8.5, ofdm_floor=10.
+    CHECK(selectLadderRung(8.4f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST_MID,
-          "Good fading below in-band 10 dB stays MC-DPSK");
+          "Good below DQPSK floor stays Robust-Mid (DBPSK)");
+    CHECK(selectLadderRung(8.5f, ChannelClassification::GOOD).id ==
+              LadderRungId::ROBUST,
+          "Good at DQPSK floor selects Robust (DQPSK) — measured clean @good8");
+    CHECK(selectLadderRung(9.9f, ChannelClassification::GOOD).id ==
+              LadderRungId::ROBUST,
+          "Good fading below OFDM floor selects Robust (DQPSK)");
     CHECK(selectLadderRung(10.0f, ChannelClassification::GOOD).id ==
               LadderRungId::OFDM_CHIRP,
           "Good fading in-band 10 dB boundary selects OFDM_CHIRP");

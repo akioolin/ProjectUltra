@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-29 — perf(mc-dpsk): DQPSK rung reachable below the OFDM floor → ~2x low-SNR file throughput — #71 (step 2)
+
+**What was slow.** MC-DPSK file transfer was glacial (~20 bps effective). The DQPSK rung (ROBUST =
+DQPSK/1024/R1/4, ~2x the DBPSK throughput because DQPSK halves the per-frame airtime: 2 bits/symbol →
+324 vs 648 symbols/codeword) was DEAD CODE in `selectLadderRung`: the old `robust_floor` (13-17 dB) sat
+ABOVE `ofdm_floor` (10-14 dB), so the DQPSK interval `[robust_floor, ofdm_floor)` was EMPTY and MC-DPSK
+was permanently pinned to DBPSK R1/4. (94 bps raw is ~50x below the ~6.8 kbps Shannon capacity at 7 dB /
+2.8 kHz — the conservatism was a selector config bug, not physics.)
+
+**What changed.** `connection_policy.hpp` `selectLadderRung` now partitions the MC-DPSK sub-band by
+per-rung geometry: `robust_dqpsk_floor = robust_mid_floor + 2.5 dB` (the differential BPSK→QPSK gap),
+clamped just below `ofdm_floor`, **on the BENIGN channels only (AWGN/Good)**. Good DQPSK band = [8.5,10),
+AWGN = [7.5,8). Moderate/Poor KEEP their old DQPSK floors (15/17) UNCHANGED — fast-fading compounds the
+differential Doppler penalty (DQPSK costs > +2.5 dB there) and that floor is unmeasured, so DBPSK stays
+the safe pick (no fading regression). DQPSK is already wired end-to-end (demod 2-soft-bit branch, ROBUST
+rung pre-defined); control stays fixed DBPSK/1024 (#72) — a pure selector change, no wire/encoder change.
+
+**Verification.** Floor probe (guardrail): forced DQPSK decodes CRC-clean at good@8/10/12 (0 cw_fail / 0
+decode_fail), confirming the +2.3 dB geometry prediction; the +2.5 dB floor sits with hysteresis above it.
+`ctest` ConnectionPolicy PASS (DQPSK-reachable on benign, DBPSK on fading). Faithful gate, NATURAL
+selection, paired adjacent-band (seed42, 1 KB): **DBPSK@8 = 20 bps / 428.7s vs DQPSK@9 = 40 bps / 167.5s**
+— ~2x goodput, ~2.6x faster delivery, both CRC-clean, and DQPSK@9 now completes inside the standard 300s
+window (DBPSK needed 600s). The selector picks DQPSK naturally ("Adaptive ladder selected Robust →
+DQPSK R1/4").
+
+**Follow-ups (the rest of the #71 plan, not here).** Step 1: SNR-free amortization (ARQ window 3→5 +
+frames 3→6 CW) to spread the per-group anchor + ~8s ACK turnaround over more payload (~+50%). Step 3: add
+a DQPSK R1/2 rung at the top of the band (~1.3x → ~375 bps gross). Step 4 (gated): live-SNR climb via the
+existing clean-boundary requestModeChange. Cumulative target ~3x effective.
+
+---
+
 ## 2026-06-29 — fix(handshake): MC-DPSK control-baud coupling strands CONNECT_ACK on sps≠1024 rungs — #72
 
 **What was broken (symptom + root cause).** The MC-DPSK handshake stranded whenever the selected DATA

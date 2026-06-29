@@ -326,46 +326,74 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
         if (s == "STANDARD") return ladderRungForId(LadderRungId::STANDARD);
     }
     float ofdm_floor = 10.0f;
-    float robust_floor = 13.0f;
-    float robust_mid_floor = 5.0f;
+    float robust_mid_floor = 5.0f;  // DBPSK R1/4 floor (the robust MC-DPSK fallback)
 
     // OFDM entry floors are the SINGLE source in waveform_selection.hpp
     // (kOFDMEntryFloor*Db) so this enum-keyed path and the fading-index-keyed
-    // recommendWaveformAndRate() can't drift. robust_*/robust_mid_* are the
-    // MC-DPSK fallback floors, local to this ladder.
+    // recommendWaveformAndRate() can't drift. robust_mid_floor is the MC-DPSK
+    // DBPSK floor, local to this ladder.
     switch (channel) {
         case ChannelClassification::AWGN:
             ofdm_floor = kOFDMEntryFloorAwgnDb;
-            robust_floor = 13.0f;
             robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:
             ofdm_floor = kOFDMEntryFloorGoodDb;
-            robust_floor = 14.0f;
             robust_mid_floor = 6.0f;
             break;
         case ChannelClassification::MODERATE:
             ofdm_floor = kOFDMEntryFloorModerateDb;
-            robust_floor = 15.0f;
             robust_mid_floor = 7.0f;
             break;
         case ChannelClassification::POOR:
             ofdm_floor = kOFDMEntryFloorPoorDb;
-            robust_floor = 17.0f;
             robust_mid_floor = 9.0f;
+            break;
+    }
+
+    // #71: the DQPSK rung (ROBUST = DQPSK/1024/R1/4, ~2x DBPSK throughput) is now
+    // REACHABLE in the MC-DPSK sub-band. The old robust_floor (13-17) sat ABOVE
+    // ofdm_floor (10-14), so the DQPSK interval [robust_floor, ofdm_floor) was EMPTY
+    // and MC-DPSK was pinned to DBPSK R1/4. Partition the sub-band by per-rung
+    // GEOMETRY: DQPSK R1/4 needs ~+2.5 dB over DBPSK (the differential BPSK->QPSK gap).
+    // MEASURED on BENIGN channels: forced DQPSK decodes CRC-clean at good@8/10/12 (0
+    // cw_fail), matching the +2.3 dB prediction; the +2.5 dB floor sits with hysteresis
+    // above that, clamped just below ofdm_floor.
+    //
+    // FAST-FADING (Moderate/Poor): the DIFFERENTIAL demod compounds the Doppler phase
+    // error symbol-to-symbol, so DQPSK costs MORE than +2.5 dB there and its floor is
+    // UNMEASURED. Keep DQPSK unreachable on fading channels (DBPSK only) until a fading
+    // floor-probe sets a principled threshold — DBPSK is the robust differential pick
+    // for fast fading anyway. DQPSK is already wired end-to-end; control stays fixed
+    // DBPSK/1024 (#72), so this is a pure selector change.
+    float robust_dqpsk_floor;
+    switch (channel) {
+        case ChannelClassification::AWGN:
+        case ChannelClassification::GOOD:
+            // BENIGN + MEASURED: lower the floor to the geometry +2.5 dB so DQPSK is
+            // reachable below the OFDM floor (the speedup band).
+            robust_dqpsk_floor = std::min(robust_mid_floor + 2.5f, ofdm_floor - 0.5f);
+            break;
+        case ChannelClassification::MODERATE:
+            robust_dqpsk_floor = 15.0f;  // UNCHANGED (old robust_floor): > ofdm 14 ->
+                                         // DBPSK only; fading DQPSK floor unmeasured.
+            break;
+        case ChannelClassification::POOR:
+        default:
+            robust_dqpsk_floor = 17.0f;  // UNCHANGED (old robust_floor).
             break;
     }
 
     if (snr_db >= ofdm_floor) {
         return ladderRungForId(LadderRungId::OFDM_CHIRP);
     }
-    if (snr_db >= robust_floor) {
-        return ladderRungForId(LadderRungId::ROBUST);
+    if (snr_db >= robust_dqpsk_floor) {
+        return ladderRungForId(LadderRungId::ROBUST);  // DQPSK R1/4 — ~2x DBPSK
     }
     if (snr_db >= robust_mid_floor) {
-        return ladderRungForId(LadderRungId::ROBUST_MID);
+        return ladderRungForId(LadderRungId::ROBUST_MID);  // DBPSK R1/4
     }
-    return ladderRungForId(LadderRungId::ROBUST_LOW);
+    return ladderRungForId(LadderRungId::ROBUST_LOW);  // DBPSK R1/4 (deepest fallback)
 }
 
 inline LadderRung selectLadderRung(float snr_db, float fading_index) {
