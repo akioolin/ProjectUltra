@@ -10,6 +10,55 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-30 — fix(snr): ratiometric connect-time SNR (handshake MC-DPSK training) replaces level-dependent idle meter — #74 (default-OFF)
+
+**What was broken (symptom + root cause).** On the live IONOS rig, the connect-time rate decision over-picked
+the data rate at low SNR (e.g. MPG@10 → QPSK R1/2 → 102-retx near-death transfer at 0.13 kbps). Root cause:
+the responder's rate decision consumes `IDLE_IN_BAND` SNR, computed as `10·log10(kModemReferencePower /
+idle_noise)` (`idle_noise_snr_estimator.cpp:89`). That meter measures ONLY the noise floor and ASSUMES the
+received signal sits at the simulator's fixed reference level (`kModemReferenceInBandRms = 0.30482664`). In the
+faithful sim, AWGN is sized from `encodePing()` at exactly that RMS, so idle is correct. On a real radio the RX
+operating level differs from that reference, so idle credits signal power the link does not have and **over-reads
+the SNR by the level deficit** → too-aggressive rate. Rig A/B (Mac responder): idle read **13.1 dB** at connect
+on a channel whose true effective SNR was ~8 (the ratiometric meter, once data flowed, read 8.0).
+
+**What changed.** `streaming_sync_acquisition.cpp::populateDecodeMetrics` — the non-OFDM branch already routes
+the **MC-DPSK training SNR** (`MultiCarrierDPSKDemodulator::updateTrainingSNREstimate` →
+`10·log10(signal_power/residual_power)`, both 50–2950 Hz in-band, a pure ratio of measured powers →
+**level-invariant by construction** = `10·log10(|H|²/noise_var)`, `MCDPSK_IN_BAND`) but only when
+`connected_`. The handshake runs un-connected, so the ratiometric value was discarded and the rate fell back to
+the level-dependent idle meter. The `connected_` gate is now relaxed behind a default-OFF opt-in env knob
+`ULTRA_CONNECT_RATIOMETRIC_SNR` (`(connected_ || connectRatiometricSnrEnabled())`). Knob OFF →
+`(connected_ || false) == connected_` → **byte-identical**. The rate ladder, thresholds, and SNRSource plumbing
+are untouched — only WHICH dB value enters at connect changes. Rig A/B with the knob ON: connect read flipped
+from **13.1 (idle)** to **8.0 (mcdpsk_in_band)** → picked the robust DBPSK R1/4 instead of stalling.
+
+**The estimator is sound — verified, and a misdiagnosis corrected.** During rig calibration the mcdpsk meter
+read 16 @ dialed-20 and 18.7 @ dialed-40 (a saturation), which first looked like an estimator residual-floor
+defect. A new offline characterization harness (`test_mcdpsk_snr_calibration`) disproves that: through **clean
+AWGN** the estimator tracks true SNR within **~0.1–0.7 dB to 30 dB** (no saturation). Through a **GOOD fading**
+channel it caps ~12 dB (sim) / ~18.7 (rig) regardless of true SNR — that cap is the **physical fading coherence
+limit** (the channel decorrelates over the 8-symbol/~170 ms training window), which the estimator *correctly*
+reports as the EFFECTIVE SNR. So mcdpsk is the right meter for rate selection on a fading link (the AWGN-
+equivalent dial is the wrong reference for a fading channel). Two wrong "fixes" were avoided by measuring: (a) a
+"+4 dB to match the dial" offset — would have re-broken level-invariance and lied; (b) "fix the estimator
+saturation" — the estimator has no defect.
+
+**Why default-OFF.** The faithful `gui_qso` gate runs AT the 0.3048 reference where idle is already correct, and
+the two meters carry a small (~−0.45 dB) scale offset there that can shift a rate pick at a ladder boundary — so
+a default-on flip is unprovable on the only level-correct gate. Default-OFF keeps the build byte-identical; the
+rig is the proving ground. Promote to default-on only after a multi-channel rig A/B.
+
+**Test verification.**
+- `ctest` (knob unset): byte-identical, no regression (only pre-existing `UltraTncSimAudio` fails, unrelated).
+- `test_mcdpsk_snr_calibration` (`MCDPSKSnrCalibration`): PASS — AWGN estimate tracks true SNR, no estimator
+  saturation; GOOD column documents the fading-coherence cap (report-only, intentionally not gated).
+- Rig A/B (IONOS, Mac responder, `ULTRA_CONNECT_RATIOMETRIC_SNR=1`): connect SNR source flips
+  `IDLE_IN_BAND 13.1` → `MCDPSK_IN_BAND 8.0` on MPG@10; the over-aggressive R1/2 pick is replaced by a robust
+  rung. New env knob registered in `MODEM_INFRASTRUCTURE_MAP.md`.
+
+---
+
 ## 2026-06-29 — perf(mc-dpsk): DQPSK rung reachable below the OFDM floor → ~2x low-SNR file throughput — #71 (step 2)
 
 **What was slow.** MC-DPSK file transfer was glacial (~20 bps effective). The DQPSK rung (ROBUST =

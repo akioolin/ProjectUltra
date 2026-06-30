@@ -43,6 +43,40 @@ bool qam16GenieTimingCfoEnabled() {
     return enabled;
 }
 
+// ULTRA_CONNECT_RATIOMETRIC_SNR (default-OFF, opt-in): route the ratiometric
+// MC-DPSK training-symbol SNR for the UN-connected handshake (PING/CONNECT/
+// CONNECT_ACK) control frames, not only for connected MC-DPSK data flow.
+//
+// WHY: the default connect-time rate decision consumes idle_in_band SNR, which
+// is 10*log10(kModemReferencePower / measured_noise) -- a NOISE-ONLY meter that
+// ASSUMES the received signal sits at the simulator's reference level
+// (kModemReferenceInBandRms = 0.30482664). In the faithful sim that holds (AWGN
+// is sized from encodePing() at exactly that RMS) so idle is correct. On a real
+// radio the RX operating level is several dB below that reference, so idle
+// credits signal power the link does not have and OVER-READS the SNR by the
+// level deficit -> too-aggressive connect-time rate picks (e.g. MPG@10 -> QPSK
+// R1/2 that stalls in the fades). The MC-DPSK training SNR
+// (updateTrainingSNREstimate: 10*log10(signal_power/residual_power), both terms
+// 50-2950 Hz in-band filtered) is a pure ratio of measured powers -> level-
+// invariant by construction (= 10log10(|H|^2/noise_var)), honest at any level,
+// and it is already populated for the inbound handshake preamble and already an
+// accepted rate-selection source (MCDPSK_IN_BAND). The ONLY thing suppressing
+// it during the handshake is the connected_ gate below; this knob relaxes it.
+//
+// Default-OFF because the faithful gui_qso gate runs AT the reference, where
+// idle is correct and the two estimators carry a small (~-0.45 dB) scale offset
+// that can shift a rate pick at a ladder boundary -- so a default-on flip is
+// unprovable on the only level-correct gate. Default-OFF keeps the build
+// byte-identical; the rig is the proving ground. Promote only after multi-
+// channel rig A/B. See docs/CHANGELOG.md (BUG-CONNECT-SNR-LEVEL).
+bool connectRatiometricSnrEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_CONNECT_RATIOMETRIC_SNR");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
 }  // namespace
 
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
@@ -142,7 +176,13 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     } else {
         result.snr_source = SNRSource::SYNC_QUALITY;
         const auto* mc_waveform = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
-        if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
+        // connected_ OR the opt-in knob: when ULTRA_CONNECT_RATIOMETRIC_SNR is
+        // set, the level-invariant MC-DPSK training SNR also routes for the
+        // un-connected handshake frames (so the connect-time rate decision uses
+        // an honest, level-agnostic SNR instead of the reference-assuming idle
+        // meter). Knob OFF => (connected_ || false) == connected_ => byte-identical.
+        if ((connected_ || connectRatiometricSnrEnabled()) &&
+            mode_ == protocol::WaveformMode::MC_DPSK &&
             mc_waveform && mc_waveform->hasEstimatedSNR() &&
             std::isfinite(mc_waveform->estimatedSNR())) {
             result.snr_db = mc_waveform->estimatedSNR();

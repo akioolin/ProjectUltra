@@ -472,6 +472,20 @@ target_include_directories(test_mcdpsk_clock_offset PRIVATE
 target_link_libraries(test_mcdpsk_clock_offset PRIVATE ultra_core ota_channel_core)
 add_test(NAME MCDPSKClockOffset COMMAND test_mcdpsk_clock_offset)
 
+# MC-DPSK training-SNR estimator calibration: sweeps true AWGN SNR and reports the
+# routed mcdpsk_in_band estimate, exposing the high-SNR residual-floor saturation
+# (gate for the per-carrier estimator fix). Report-only today.
+add_executable(test_mcdpsk_snr_calibration
+    test_mcdpsk_snr_calibration.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_mcdpsk_snr_calibration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_mcdpsk_snr_calibration PRIVATE ultra_core ota_channel_core)
+add_test(NAME MCDPSKSnrCalibration COMMAND test_mcdpsk_snr_calibration)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.
