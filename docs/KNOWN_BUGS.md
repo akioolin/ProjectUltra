@@ -1,12 +1,19 @@
 # Known Bugs
 
-Last updated: 2026-06-16
+Last updated: 2026-06-30
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-MCDPSK-ACK-COLLISION: hole-bearing SACK repeats are sent UN-guarded into the sender's long MC-DPSK burst → phase-locked half-duplex collision livelock
+- Status: **OPEN, ROOT-CAUSED + REPRODUCED on the live IONOS rig (2026-06-30). Fix deferred (next session).** Surfaced once #74 let MC-DPSK connect + transfer at low SNR (rig MPG@8, DQPSK R1/4, window=5).
+- **What:** on a hole (a frame in the window fails to decode), the transfer livelocks: the SENDER retransmits the whole window on its 31.6 s RTO (`cause=timeout`, NEVER on a NACK), the RECEIVER keeps re-sending the same SACK (`group_seq=35 frame_mask=0x02`), they collide forever → 10/10 retries → DISCONNECT. The clean path (no holes) works fine — groups advance every ~21 s. Only the REPAIR path collides.
+- **Trace (rig, MPG@8):** Pi5 (sender) TX bursts at 408.3 / 439.8 / 471.4 s (each 896256 samples ≈ **18.7 s**, period ~31.5 s); Mac (receiver) ACKs at 420.6 / 452.0 / 483.6 s (period ~31.5 s). Every ACK lands ~12 s INSIDE a sender burst → sender mid-TX (deaf) → never hears the NACK → times out → resends → next ACK lands in that burst too. Both ends on the same ~31.5 s period, phase-offset to collide.
+- **Root cause:** `selective_repeat_arq.cpp:1747` — `guard_half_duplex_repeat = (bitmap == 0) && !sack_has_final`. The half-duplex peer-burst guard is DELIBERATELY disabled for hole-bearing SACKs (`bitmap != 0`) so repair feedback is "prompt." Correct for OFDM (short bursts → sender stops & listens fast), WRONG for MC-DPSK: the window burst is ~18.7 s so the "prompt" NACK fires straight into the sender's transmission. The RTO was made rate-agnostic (`computeMCDPSKAckTimeoutMs` scales with the 3691 ms frame) but the ACK-repeat guard was NOT — `setAckRepeatPeerBurstGuardMs(arq_.getSackDelay())` = **30 ms**, vs an 18.7 s burst.
+- **Fix (next session):** peer-burst-guard the hole-SACK repeat ALSO on the long-burst path — delay it past the sender's window-burst airtime (`connection_policy::mcDpskBurstAirtimeMs ≈ 18.7 s`, already computed) so the NACK lands in the inter-burst gap. Rate-agnostic = guard derived from the actual burst airtime, not the 30 ms sack_delay. The fully radio-correct version is **carrier-sense** (don't key up while the peer is heard); the burst-airtime-scaled guard is the minimal targeted fix. Needs rig A/B on a lossy channel (collision only appears on a hole). Likely interacts with BUG-MCDPSK-FILE-COMPLETION (a persistent hole that never repairs).
 
 ### BUG-MCDPSK-FILE-COMPLETION: MC-DPSK file transfer never completes — receiver gets ALL frames but never finalizes (THE real MC-DPSK file-transfer blocker)
 - Status: **OPEN, ROOT-CAUSED + REPRODUCED (#73, 2026-06-29).** Pre-existing; surfaced once the handshake fixes (#70 ping floor + #72 control baud) let MC-DPSK connect on every rung.
