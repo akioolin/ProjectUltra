@@ -2998,6 +2998,17 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setImmediateOutOfOrderSackEnabled(true);
         arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
         arq_.setAckRepeatPeerBurstGuardMs(arq_.getSackDelay());
+        // BUG-MCDPSK-ACK-COLLISION: the tone-burst partial (hole-bearing) SACK fires this
+        // long after the last decoded out-of-order frame. It MUST exceed one MC-DPSK frame
+        // airtime (~timing.data_ms), else it lands while the sender is still transmitting a
+        // trailing failed frame of the same ~18.7 s window burst -> half-duplex collision ->
+        // the sender never hears the NACK -> RTO whole-window resend -> phase-locked
+        // livelock -> disconnect. One frame airtime + a T/R/decode margin lands the SACK in
+        // the inter-burst gap. Floored at the 1500 ms OFDM default; stays well under the
+        // ~31.6 s ACK RTO. (Carrier-sense — defer until the channel is heard idle — is the
+        // fully radio-correct generalization; this airtime-scaled guard is the targeted fix.)
+        arq_.setToneBurstPartialSackDelayMs(
+            std::max<uint32_t>(1500u, timing.data_ms + 1000u));
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
             timing, window_size, arq_.getSackDelay(),
             connection_policy::kCarrierSenseAckRepeatCount);

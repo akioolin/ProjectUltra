@@ -614,13 +614,16 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         } else if (arm_delayed_timer) {
             sack_pending_ = true;
             if (on_emit_tone_burst_sack_) {
-                // Tone-burst partial-burst SACK: short SLIDING delay (re-armed on each
+                // Tone-burst partial-burst SACK: SLIDING delay (re-armed on each
                 // out-of-order frame, so it fires ~this long after the LAST hole frame —
                 // coalescing the burst's holes into ONE tone-burst). Kept well under the
                 // sender's retransmit timeout so the selective SACK reaches it before it
-                // would blindly resend the whole burst.
-                constexpr uint32_t kToneBurstPartialSackDelayMs = 1500;
-                sack_timer_ms_ = kToneBurstPartialSackDelayMs;
+                // would blindly resend the whole burst. MUST exceed one sender frame
+                // airtime so it clears a trailing (failed) frame still on air — else
+                // half-duplex collision livelock on long-frame MC-DPSK
+                // (BUG-MCDPSK-ACK-COLLISION). Default 1500 ms (OFDM); the Connection
+                // scales it to the MC-DPSK frame airtime via setToneBurstPartialSackDelayMs.
+                sack_timer_ms_ = tone_burst_partial_sack_delay_ms_;
             } else if (sack_delay_slides_on_data_) {
                 // OFDM physical bursts decode frames in cadence. Re-arming on
                 // each decoded frame turns the SACK timer into a burst-tail

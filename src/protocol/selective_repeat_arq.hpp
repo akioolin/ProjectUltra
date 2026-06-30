@@ -216,6 +216,21 @@ public:
         return ack_repeat_peer_burst_guard_ms_.value_or(config_.sack_delay_ms);
     }
 
+    // Tone-burst partial (hole-bearing) SACK sliding delay: fires this long after the
+    // LAST out-of-order frame decoded in a burst, coalescing the burst's holes into one
+    // SACK that the sender hears in the inter-burst gap. MUST be >= one sender frame
+    // airtime, else on a long-frame waveform (MC-DPSK, ~3691 ms/frame) the SACK fires
+    // while the sender is still transmitting a trailing (failed) frame -> half-duplex
+    // collision -> the sender never hears the NACK -> RTO whole-window resend ->
+    // phase-locked livelock (BUG-MCDPSK-ACK-COLLISION). Default 1500 ms is correct for
+    // OFDM (short frames); the Connection scales it to the frame airtime for MC-DPSK.
+    void setToneBurstPartialSackDelayMs(uint32_t ms) {
+        tone_burst_partial_sack_delay_ms_ = std::max(1u, ms);
+    }
+    uint32_t getToneBurstPartialSackDelayMs() const {
+        return tone_burst_partial_sack_delay_ms_;
+    }
+
     using ReceiveWindowAdvancedCallback = std::function<void(uint16_t base_seq, size_t window_size)>;
     void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
         on_rx_window_advanced_ = std::move(cb);
@@ -330,6 +345,9 @@ private:
     int ack_repeat_count_ = 1;         // Total copies (1=single, 2=double, 3=triple)
     uint32_t ack_repeat_delay_ms_ = 80; // Delay between copies
     std::optional<uint32_t> ack_repeat_peer_burst_guard_ms_;
+    // Tone-burst partial-SACK sliding delay (>= one sender frame airtime). Default is
+    // the legacy 1500 ms (OFDM-correct); the Connection scales it up for MC-DPSK.
+    uint32_t tone_burst_partial_sack_delay_ms_ = 1500;
 
     // Pending repeat state (queue avoids overwriting repeats during ACK bursts)
     struct AckRepeatJob {

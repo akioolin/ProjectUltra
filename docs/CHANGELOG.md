@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-30 — fix(arq): scale tone-burst partial-SACK delay to the frame airtime — kill the MC-DPSK half-duplex collision livelock (BUG-MCDPSK-ACK-COLLISION)
+
+**What was broken.** On the live IONOS rig (MPG@8, MC-DPSK DQPSK R1/4, window=5), once a frame in a window
+failed to decode (a hole), the transfer livelocked → 10/10 retries → disconnect. Trace: the SENDER retransmitted
+the whole window on its 31.6 s RTO (`cause=timeout`, NEVER on a NACK); the RECEIVER kept re-sending the same SACK
+(`group_seq=35 frame_mask=0x02`); every receiver ACK landed ~12 s INSIDE an 18.7 s sender burst (both on the same
+~31.5 s period, phase-offset to collide), so the sender — mid-TX, deaf — never heard the NACK. The clean (no-hole)
+path advanced fine.
+
+**Root cause.** The tone-burst PARTIAL (hole-bearing) SACK sliding timer (`selective_repeat_arq.cpp` ~622) was
+hardcoded to `kToneBurstPartialSackDelayMs = 1500 ms`. It fires that long after the LAST decoded out-of-order
+frame. 1500 ms exceeds an OFDM frame airtime (correct → SACK lands in the gap), but an MC-DPSK frame is **3691 ms**,
+so the SACK fired while the sender was still transmitting a trailing (failed) frame of the same window burst →
+collision. The ACK RTO was made rate-agnostic (`computeMCDPSKAckTimeoutMs`) but this partial-SACK delay was not.
+
+**What changed.** Made the delay configurable: `SelectiveRepeatARQ::setToneBurstPartialSackDelayMs` +
+`tone_burst_partial_sack_delay_ms_` (default **1500 → OFDM byte-identical**); `selective_repeat_arq.cpp` uses the
+member instead of the constant. `Connection::configureArqForCurrentDataMode` (MC-DPSK block) scales it to
+`max(1500, timing.data_ms + 1000)` ≈ **4.7 s** — one frame airtime + a T/R/decode margin — so the partial-SACK
+clears the burst tail and lands in the inter-burst gap; the sender then does a FAST retransmit instead of an RTO
+whole-window resend. Stays well under the ~31.6 s ACK RTO.
+
+**Why it's correct / adaptive.** The guard is derived from the measured per-frame airtime (`timing.data_ms`), so
+it's rate-agnostic by construction — short for OFDM (default 1500), long for MC-DPSK. Carrier-sense (defer the SACK
+until the channel is heard idle) is the fully radio-correct generalization and also covers the rare
+multi-trailing-hole case; this airtime-scaled guard is the minimal targeted fix.
+
+**Verification.** `ctest` green, OFDM/SR-ARQ unchanged (only pre-existing `UltraTncSimAudio` fails). **Pending:**
+lossy-channel rig A/B (faithful gate runs clean → no holes → can't exercise it; also confounded by
+BUG-MCDPSK-FILE-COMPLETION which blocks *completion* regardless — what the rig CAN show is the SACK in the gap +
+`cause=fast` retransmits replacing the timeout livelock). See `docs/KNOWN_BUGS.md`.
+
+---
+
 ## 2026-06-30 — fix(snr): ratiometric connect-time SNR (handshake MC-DPSK training) replaces level-dependent idle meter — #74 (default-OFF)
 
 **What was broken (symptom + root cause).** On the live IONOS rig, the connect-time rate decision over-picked
