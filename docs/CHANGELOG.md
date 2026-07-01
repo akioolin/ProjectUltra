@@ -61,10 +61,20 @@ ratiometric knob on. #71 is NOT "2× on the rig by default."
 
 **NOT in this change (tracked follow-ups).** (1) The full rig ≤9 speedup on the DEFAULT path also needs
 `ULTRA_CONNECT_RATIOMETRIC_SNR` default-ON (per the reach asymmetry above) — deliberately kept gated
-(streaming_sync_acquisition.cpp), pending the multi-channel rig A/B its author specified; only Good is validated. (2) Lowering the DQPSK floor further (toward the DBPSK floor) is supported by
-the data but needs MPG@8/7 floor-finding + a fade-AVERAGED connect SNR (task #58; the single-snapshot reading is
-noisy, so dial-9 auto-selection is not yet deterministic). (3) A truly decode-latency-derived per-rung window
-(vs the flat cap of 3) is the principled successor once the shelved DQPSK-512 rung is exercised.
+(streaming_sync_acquisition.cpp), pending the multi-channel rig A/B its author specified; only Good is validated.
+(2) Floor further-lowering: **RESOLVED — do NOT lower it.** Post-commit rig floor-finding @ MPG@8 (forced DQPSK,
+committed default window=3) brackets DQPSK's reliable floor at **effective ~5–6 dB**: a run at effective 3.6 dB
+FAILED (cw_fail + deinterleave fail at RX, 0 ACKs, no delivery) while a run at 6.2 dB delivered CRC-clean (1
+nack retx). Both MPG@8 snapshots (3.6, 6.2) sit BELOW the shipped floor of Good 7.0, so the selector already
+correctly falls back to DBPSK there. The shipped `+1.0` (Good 7.0) is thus validated as correctly placed — it
+picks DQPSK only in the MPG@9+ reliable zone. (Reaching the band deterministically at a given dial still needs a
+fade-AVERAGED connect SNR, task #58 — the single snapshot is noisy.) (3) A truly decode-latency-derived per-rung
+window (vs the flat cap of 3) is the principled successor once the shelved DQPSK-512 rung is exercised.
+
+**Post-commit rig validation (2026-07-01, both ends at 5ec8607).** (a) Default-behavior confirm @ MPG@9: forced
+DQPSK with NO window knob → `ARQ window=3` from the committed `kMaxRoundTripSafeMCDPSKWindow` default, CRC-clean
+byte-identical 13.1 s / 0.62 kbps, 0 retx — the fix ships without the diagnostic knob. (b) Floor-finding @ MPG@8
+as above (item 2).
 
 ---
 
