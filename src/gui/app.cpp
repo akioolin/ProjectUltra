@@ -489,14 +489,17 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // reactions to a decoded frame (monitor-mode log) ride the after_rx_data hook;
     // ping/status stay GUI-owned below.
     ModemProtocolFrontendHooks modem_hooks;
-    modem_hooks.after_rx_data = [this](const Bytes& data, float snr_db, float /*fading*/,
+    modem_hooks.after_rx_data = [this](const Bytes& data, float snr_db, float fading,
                                        SNRSource snr_source, bool /*used_for_quality*/) {
         // Cache the latest in-band decode SNR (lock-free) so the tone-burst ACK
         // callback can pick its §15.5 staircase symbol duration without calling
         // protocol_ (which holds its mutex while invoking that callback; re-entry
         // self-deadlocks). The ACK callback gates on the source being trusted.
+        // Fading rides along: the staircase fast edge is basis-dependent
+        // (fade-effective SNR -> 16 dB edge; AWGN -> 18 dB).
         cached_inband_snr_db_.store(snr_db, std::memory_order_relaxed);
         cached_inband_snr_source_.store(snr_source, std::memory_order_relaxed);
+        cached_fading_index_.store(fading, std::memory_order_relaxed);
         // Monitor mode: surface every decoded frame's payload in the RX log regardless of
         // addressing (the protocol layer would otherwise drop frames whose dst hash doesn't
         // match local call, making the GUI silent on OTA captures from peers).
@@ -643,9 +646,31 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             uint32_t symbol_ms = ultra::waveform::tone_burst_ack::kBaselineSymbolMs;
             const SNRSource src = cached_inband_snr_source_.load(std::memory_order_relaxed);
             if (src == SNRSource::IDLE_IN_BAND || src == SNRSource::OFDM_BROADBAND) {
+                // Fade-aware fast edge (BUG-ACK-STAIRCASE-FADE-BIN): the cached
+                // in-band SNR is fade-effective on a fading channel, so the fast
+                // rung's edge is 16 dB there (18 dB on AWGN). Uses the same
+                // AWGN-vs-fading split as capInitialOFDMRate (kFadingAwgnMax);
+                // the Good-vs-Moderate distinction is deliberately NOT consulted
+                // (the classifier can't make it). ULTRA_ACK_FADE_EDGE=0 opts out.
+                static const bool kFadeEdgeEnabled = [] {
+                    const char* e = std::getenv("ULTRA_ACK_FADE_EDGE");
+                    return !(e && *e == '0');
+                }();
+                const bool fading_present =
+                    kFadeEdgeEnabled &&
+                    cached_fading_index_.load(std::memory_order_relaxed) >=
+                        ultra::protocol::kFadingAwgnMax;
                 symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
-                    cached_inband_snr_db_.load(std::memory_order_relaxed));
+                    cached_inband_snr_db_.load(std::memory_order_relaxed),
+                    fading_present);
             }
+            // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
+            // inputs behind every ACK duration — greppable on sim and rig.
+            LOG_MODEM(INFO,
+                      "ToneBurstAck staircase: symbol_ms=%u snr=%.1f src=%s fading=%.2f",
+                      symbol_ms, cached_inband_snr_db_.load(std::memory_order_relaxed),
+                      snrSourceToString(src),
+                      cached_fading_index_.load(std::memory_order_relaxed));
             auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
                 // Carry the same in_qso_data flag as the OFDM ACK (false —

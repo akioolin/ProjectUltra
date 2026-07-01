@@ -1041,6 +1041,20 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Only re-search when we are genuinely mid-burst (a descriptor is active).
         if ((use_burst_interleave_ || burst_transport_rx_) && connected_ &&
             sync_controller_.have_burst_descriptor_) {
+            // BUG-BURST-HEADNULL-DROP observability (2026-07-01): when the group
+            // HEAD (marker frame) is nulled, accumulation never arms and every
+            // clean mid-group frame lands here and is re-searched away with no
+            // decode attempt and no ACK credit — previously with NO log at all
+            // (a 27 dB frame vanished silently; one such saga cost 83 s). The
+            // re-search itself stays (the §14.24 estimate-poisoning guard is
+            // load-bearing); this counter makes the drop measurable. Recovery
+            // (enter accumulation from any group-member sync with the head
+            // erasure-marked) is the tracked follow-up.
+            ++headnull_resync_drop_count_;
+            LOG_MODEM(INFO,
+                      "[%s] [HEADNULL] sync-accepted frame consumed without decode "
+                      "attempt (group not armed; drop #%u)",
+                      log_prefix_.c_str(), headnull_resync_drop_count_);
             {
                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                 sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);

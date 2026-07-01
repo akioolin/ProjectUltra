@@ -795,6 +795,10 @@ private:
 
     // Burst interleave accumulation state (valid only in BURST_ACCUMULATING)
     bool use_burst_interleave_ = false;
+    // BUG-BURST-HEADNULL-DROP observability: sync-accepted frames consumed by the
+    // mid-burst re-search with no decode attempt (group head nulled -> accumulation
+    // never armed). Monotonic since construction; [HEADNULL] log per event.
+    uint32_t headnull_resync_drop_count_ = 0;
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     std::vector<BurstPhysicalDiag> burst_physical_diag_;

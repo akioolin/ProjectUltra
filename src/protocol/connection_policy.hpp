@@ -312,6 +312,43 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
     return {};
 }
 
+// #58 connect-time SNR basis correction (2026-07-01, fable_analysis/09 §4).
+// The OFDM entry floors and coherent-ladder anchors are DIAL-calibrated (forced-rung
+// sim sweeps at --snr-db = the AWGN-equivalent dial), but the connect-time reading
+// compared against them (#74 ratiometric MC-DPSK training SNR) is FADE-EFFECTIVE and
+// INSTANT: on a fading channel it averages ~2 dB below the dial (Jensen penalty over
+// the ~170 ms << Tc training window) and swings with the fade phase run-to-run.
+// Comparing effective-instant readings against dial thresholds double-penalizes — a
+// single fade dip at CONNECT dropped a dial-20 rig channel (sync SNR 21.8) to a 12.4
+// reading -> below the Moderate entry floor 14 -> MC-DPSK DBPSK (~94 bps nominal, 0
+// bytes delivered) on a channel that carries ~1.5 kbps at QPSK R2/3. Align the bases:
+// on any FADING channel the SELECTION comparison adds back the measured penalty. The
+// reported/wire SNR stays raw (honest measurement); MC-DPSK-internal rung floors were
+// themselves calibrated against this same ratiometric reading on the rig (#71
+// floor-finding, already effective-basis) — the +2 there equals lowering the DQPSK
+// floor by 2, which the #71 rig data supports (DQPSK 3/3 across effective 2.4-9 dB)
+// and whose comment anticipated pending #58. Cost asymmetry backs the sign: wrongly
+// entering OFDM at true-effective ~10 still delivers ~450 bps (Good@10 R1/2 5/5,
+// RATE_LADDER_ANCHORS), while wrongly falling to MC-DPSK costs 15-40x.
+// ULTRA_CONNECT_SNR_FADE_BASIS=0 disables; a value in (0,6] overrides the 2.0 default.
+inline float connectSnrFadeBasisDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_CONNECT_SNR_FADE_BASIS")) {
+            const float parsed = std::strtof(e, nullptr);
+            if (parsed <= 0.0f) return 0.0f;
+            if (parsed <= 6.0f) return parsed;
+        }
+        return 2.0f;
+    }();
+    return v;
+}
+inline float connectSelectionSnrDb(float measured_snr_db, float fading_index) {
+    if (fading_index >= kFadingAwgnMax) {
+        return measured_snr_db + connectSnrFadeBasisDb();
+    }
+    return measured_snr_db;  // AWGN: reading and thresholds share the basis already
+}
+
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
     // DIAGNOSTIC force (ULTRA_FORCE_MCDPSK_RUNG=LOW|MID|ROBUST|STANDARD): pin the
     // MC-DPSK rung, bypassing the SNR thresholds, to MEASURE each rung's real floor

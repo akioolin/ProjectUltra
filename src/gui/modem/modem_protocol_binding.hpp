@@ -44,8 +44,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
 
     // Core RX-data path: every decoded frame -> SNR/channel-quality measurement + onRxData.
     // The frontend hook observes afterwards (no duplication of the core forwarding).
+    // (hooks captured by copy here AND in the burst-group binding below — both delivery
+    // paths must feed the frontend's SNR observation.)
     modem.setRawDataCallback(
-        [&modem, &protocol, hooks = std::move(hooks)](const Bytes& data) {
+        [&modem, &protocol, hooks](const Bytes& data) {
             const auto stats = modem.getStats();
             const float snr_db = stats.snr_db;
             const SNRSource snr_source = stats.snr_source;
@@ -68,8 +70,37 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // §14.27: a decoded interleaved burst delivered as a unit -> protocol burst transport
     // (deliver-once + single GROUP_ACK). THIS is the forwarding ultra_tnc was missing.
     modem.setBurstGroupCallback(
-        [&protocol](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-                    float quality, uint8_t frame_mask, bool interleaved, uint8_t group_size) {
+        [&modem, &protocol, hooks](uint16_t group_seq, const std::vector<Bytes>& frames,
+                                   bool all_ok, float quality, uint8_t frame_mask,
+                                   bool interleaved, uint8_t group_size) {
+            // BUG-ACK-STAIRCASE-FADE-BIN layer 2 (2026-07-01): burst-as-unit delivery
+            // bypasses setRawDataCallback, so the frontend's SNR observation STARVED
+            // during file transfers — the GUI's §15.5 ACK-duration cache held the stale
+            // handshake reading (mcdpsk_in_band, an untrusted staircase source) and the
+            // fast ACK never engaged even at 19-22 dB broadband. Feed the hook from the
+            // modem's per-frame decode stats — the group's logical frames updated them
+            // (frame_callback_ fires per frame, streaming_burst_interleave.cpp ~704)
+            // BEFORE this group callback. Must run BEFORE onBurstGroupReceived: that
+            // call emits THIS group's tone-burst ACK, whose §15.5 duration reads the
+            // cache. Data payload is not re-forwarded (the protocol gets the frames
+            // below); used_for_quality=false — protocol channel-quality/coherence stay
+            // on their existing paths, this is frontend observation only.
+            if (hooks.after_rx_data) {
+                // stats.snr_db/snr_source are stats-queue-drained and stay stale on
+                // this path (measured: frozen at the handshake mcdpsk reading while
+                // fading updated live) — the decoder's lock-free last-broadband
+                // atomics are the honest per-logical-frame feed.
+                if (modem.hasLastOFDMBroadbandSNR()) {
+                    hooks.after_rx_data(Bytes{}, modem.getLastOFDMBroadbandSNR(),
+                                        modem.getFadingIndex(),
+                                        SNRSource::OFDM_BROADBAND,
+                                        /*used_for_quality=*/false);
+                } else {
+                    const auto stats = modem.getStats();
+                    hooks.after_rx_data(Bytes{}, stats.snr_db, modem.getFadingIndex(),
+                                        stats.snr_source, /*used_for_quality=*/false);
+                }
+            }
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                           interleaved, group_size);
         });

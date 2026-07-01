@@ -397,12 +397,16 @@ void Connection::acceptCall() {
     Modulation rec_mod;
     CodeRate rec_rate;
 
-    // Use centralized algorithm from waveform_selection.hpp
-    recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate, fading_index_);
+    // Use centralized algorithm from waveform_selection.hpp. #58: the selection value
+    // is basis-corrected (fade-effective reading vs dial-calibrated anchors); the raw
+    // measured_snr_db_ stays untouched for the wire/logs.
+    const float accept_selection_snr_db =
+        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_);
+    recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
     if (isOFDMMode(negotiated_mode_)) {
-        CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate, rec_mod);
+        CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, fading_index_, rec_rate, rec_mod);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                       codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_,

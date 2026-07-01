@@ -10,6 +10,69 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — fix(policy,ack): #58 connect-SNR basis correction + §15.5 ACK staircase revived (feed + fade edge) + [HEADNULL] counter
+
+Three changes from the re-audit's ranked plan (items 1-3), all gated: build clean, ctest green
+(only pre-existing UltraTncSimAudio), 6-cell faithful-gate validation matrix PASS, no
+regressions (stock Good@20 1960 QPSK R2/3; AWGN@20 2290 QPSK R3/4). Rig validation at IONOS
+MPG@20 follows this commit (both ends lockstepped).
+
+### 1. fix(policy): #58 connect-time SNR basis correction (`connectSelectionSnrDb`, default-ON)
+**Broken:** the OFDM entry floors/ladder anchors are DIAL-calibrated (forced-rung sim sweeps),
+but the connect-time reading compared against them (#74 ratiometric training SNR) is
+FADE-EFFECTIVE-INSTANT (~2 dB Jensen penalty + fade-phase swing over a 170 ms << Tc window).
+One fade dip at CONNECT flipped a dial-20 rig channel (sync SNR 21.8) to a 12.4 reading →
+below the Moderate floor 14 → MC-DPSK DBPSK (~94 bps nominal) → 0 bytes in 9 min, while a
+second run 10 min later read 18.2 → QPSK R2/3 → 1.53 kbps. A zero-delivery coin-flip, stock.
+**Fix:** `connection_policy::connectSelectionSnrDb()` adds +2 dB (env
+`ULTRA_CONNECT_SNR_FADE_BASIS`, 0 disables, (0,6] overrides) to the SELECTION comparison only,
+on fading channels only (`fading_index >= kFadingAwgnMax`); applied at the three consumption
+sites (handleConnect, negotiateMode, acceptCall — `connection_handlers.cpp`,
+`connection.cpp`). The wire byte and raw logs keep the honest measurement; corrected values
+log as `SNR_sel=`. MC-DPSK internal floors are untouched-by-construction arguments: they were
+calibrated against the same ratiometric reading (#71 rig), so the +2 there = lowering the
+DQPSK floor by 2, which the #71 data supports (3/3 across effective 2.4-9 dB). Boundary-test
+contracts in test_connection_policy/test_waveform_policy unchanged (correction lives above
+the policy functions). Zero handshake latency added — uses only measurements in hand at pick
+time.
+**Validation:** sim no-regress (stock Good@20 / AWGN@20 unchanged behavior); decisive proof is
+rig-only (the sim's snapshot variance rarely coin-flips). NOTE: the Good@12 boundary probe
+could not exercise it — blocked by the a81725d robust-PING absolute emit gate (re-opened as a
+mid-SNR SIM hole under BUG-HANDSHAKE-PING-FLOOR; unrelated to this change).
+
+### 2. fix(ack): §15.5 staircase revived — live broadband feed + fade-aware fast edge (BUG-ACK-STAIRCASE-FADE-BIN, default-ON)
+**Broken (two layers):** (a) FEED — burst-as-unit delivery bypasses `setRawDataCallback`, so
+the GUI's lock-free ACK-duration cache froze at the handshake reading (`mcdpsk_in_band`, not a
+trusted staircase source) for entire file transfers; measured 0% fast-ACK occupancy on ALL
+channels incl. AWGN@20 (0/23) — the engine `LoopbackStats` snr/source are stats-queue-drained
+and also stale on this path (only fading was live). (b) EDGE — the 18 dB fast edge was
+calibrated against the pre-06-16 absolute-referenced meter; the current fade-effective basis
+reads ~16-17 at Good@20, so even a live feed rarely crossed it on fading (rig 30/30 ACKs at
+675 ms).
+**Fix:** (a) the burst-group binding (`modem_protocol_binding.hpp`) now feeds the frontend
+hook BEFORE `onBurstGroupReceived` (which emits the group's ACK) from the decoder's lock-free
+`last_ofdm_broadband_snr_db_` atomics (new `ModemEngine::getLastOFDMBroadbandSNR()`
+passthrough — updated per logical frame on both delivery paths); (b)
+`symbolMsForSNR(snr, fading_present)` fast edge = 16 dB on fading / 18 dB AWGN
+(`tone_burst_constants.hpp`), fed by a new `cached_fading_index_` atomic (app.hpp/app.cpp);
+env `ULTRA_ACK_FADE_EDGE=0` opts the edge out. ONLY the top edge moves — lower rungs are
+detection-safety-side. The 12 ms rung's hardware proof (06-15 MPG@20, 0 retx/15 bursts) is
+the same physical point that now reads 16-17 effective. Every ACK decision logs
+`ToneBurstAck staircase: symbol_ms= snr= src= fading=` (the validation instrument).
+**Validation (faithful gate, 50 KB):** fast-ACK occupancy 0% → ~90% everywhere (16QAM Good@20
+27/2 + 29/3; stock Good@20 26/1; AWGN@20 23/0); the edge specifically halves residual slow
+ACKs vs edge-off (2-3 vs 6). Goodput pairs within ±25% gate noise (a ~4%/cycle lever by
+construction: ~350 ms × ~0.9 occupancy per ~8.4 s cycle). All 6 cells PASS, no regressions.
+
+### 3. diag(rx): [HEADNULL] counter on the silent mid-burst re-search drop (BUG-BURST-HEADNULL-DROP)
+The previously log-less path that consumes sync-accepted frames when the group head is nulled
+(`streaming_ofdm_decode.cpp` ~1042) now counts + logs per event
+(`headnull_resync_drop_count_`). NO behavior change — the re-search stays (the §14.24
+estimate-poisoning guard is load-bearing); this makes the saga measurable. Recovery
+(descriptor-geometry accumulation entry) is the tracked follow-up.
+
+---
+
 ## 2026-07-01 — analysis(throughput): why we are stuck at ~2000 bps — full re-audit; 3 defects filed; corrected path to 3000 (NO code changes)
 
 **Deliverable: `fable_analysis/09_WHY_STUCK_AT_2000_2026_07_01.md`** (supersedes the 06-12 roadmap's

@@ -96,8 +96,24 @@ inline constexpr uint32_t kSymbolMsWeakSNR = 200;  // SNR < -5 dB
 // robust detection. The receiver's ACK monitor scans ALL durations, so the
 // two ends need not pre-agree. Thresholds mirror the kSymbolMs* comments above;
 // monotonic non-increasing, so it only shortens as SNR rises.
-inline constexpr uint32_t symbolMsForSNR(float snr_db) {
-    if (snr_db >= 18.0f) return kSymbolMsHighSNR;   // 12 ms -> 324 ms airtime
+//
+// fading_present (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01): the caller's in-band
+// SNR basis is FADE-EFFECTIVE on a fading channel (carries the ~2 dB
+// fading/Jensen penalty vs the AWGN-equivalent dial), while the 18 dB edge was
+// calibrated in AWGN-equivalent terms against the pre-2026-06-16 (absolute-
+// referenced) meter — so the fast rung never engaged on fading (measured
+// occupancy: 3 of 4 runs at 0%, incl. 30/30 rig ACKs at 675 ms at MPG@20).
+// The 12 ms rung's hardware proof (2026-06-15, MPG@20, 0 retx/15 bursts) is
+// the SAME physical operating point that now reads ~16-17 effective, so on a
+// fading channel the fast edge is 16 dB — a basis correction back to the
+// validated point, not a new one. ONLY the top edge shifts: the lower rungs
+// are detection-safety-side and stay put (shifting them would shorten ACKs at
+// low SNR — the unsafe direction).
+inline constexpr float kFastAckEdgeAwgnDb = 18.0f;
+inline constexpr float kFastAckEdgeFadingDb = 16.0f;
+inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
+    const float fast_edge = fading_present ? kFastAckEdgeFadingDb : kFastAckEdgeAwgnDb;
+    if (snr_db >= fast_edge) return kSymbolMsHighSNR;  // 12 ms -> 324 ms airtime
     if (snr_db >= 12.0f) return kSymbolMsMidSNR;    // 25 ms -> 675 ms (baseline)
     if (snr_db >= 5.0f)  return kSymbolMsLowSNR;    // 50 ms -> 1350 ms
     if (snr_db >= -5.0f) return kSymbolMsMargSNR;   // 100 ms -> 2700 ms

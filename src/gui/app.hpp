@@ -251,6 +251,10 @@ private:
     // re-locks it, so a direct call self-deadlocks. Atomics → no lock either side.
     std::atomic<float> cached_inband_snr_db_{12.0f};
     std::atomic<SNRSource> cached_inband_snr_source_{SNRSource::NONE};
+    // Fading index cached alongside the SNR (same lock-free discipline): the
+    // §15.5 staircase fast edge is basis-dependent — fade-effective SNR uses the
+    // 16 dB edge, AWGN the 18 dB one (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01).
+    std::atomic<float> cached_fading_index_{0.0f};
 
     bool operator_log_file_suppressed_ = false;
     uint32_t operator_log_slow_ms_ = 0;

@@ -974,6 +974,14 @@ bool ModemEngine::getDopplerCoherenceValid() const {
     return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceValid() : false;
 }
 
+bool ModemEngine::hasLastOFDMBroadbandSNR() const {
+    return streaming_decoder_ ? streaming_decoder_->hasLastOFDMBroadbandSNREstimate() : false;
+}
+
+float ModemEngine::getLastOFDMBroadbandSNR() const {
+    return streaming_decoder_ ? streaming_decoder_->getLastOFDMBroadbandSNREstimate() : 0.0f;
+}
+
 bool ModemEngine::isFading() const {
     return getFadingIndex() > 0.65f;
 }

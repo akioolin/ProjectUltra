@@ -145,6 +145,12 @@ public:
     float getDopplerCoherenceScore() const;
     bool getDopplerCoherenceValid() const;
     ChannelQuality getChannelQuality() const;
+    // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
+    // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,
+    // which bypasses the stats-queue drain). The honest feed for the §15.5 ACK
+    // staircase (BUG-ACK-STAIRCASE-FADE-BIN layer 2).
+    bool hasLastOFDMBroadbandSNR() const;
+    float getLastOFDMBroadbandSNR() const;
 
     // Set known CFO for light preamble mode (for testing or external CFO source)
     void setKnownCFO(float cfo_hz);
