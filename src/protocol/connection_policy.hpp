@@ -915,20 +915,45 @@ inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
     return std::clamp<size_t>(by_burst, 1, kMaxAuditedMCDPSKWindow);
 }
 
+// Sender ACK RTO for an MC-DPSK selective-repeat window burst. It MUST exceed the real
+// half-duplex ACK round-trip, else the sender blind-resends the whole window before the
+// legitimate ACK lands -> doubled airtime -> the FINAL file chunk is never reached in a
+// bounded session -> the transfer never finalizes (BUG-MCDPSK-FILE-COMPLETION), and on a
+// hole the resend collides with the receiver's SACK (BUG-MCDPSK-ACK-COLLISION).
+//
+// The physical round-trip on MC-DPSK's long (~5.4 s) frames has FOUR terms the old formula
+// under-budgeted (it summed only tx_burst + ack + a flat 12 s, and was passed the 30 ms
+// carrier-sense coalesce instead of the real receiver hold):
+//   (1) tx_burst  = window * data_ms         sender transmits the whole window
+//   (2) rx_decode ~= window * data_ms         receiver SERIALLY decodes it before it can
+//                                             build the SACK (streaming decoder / RXQ
+//                                             backlog, task #56 — each frame ~= one data_ms;
+//                                             this is the dominant term the old flat 12 s
+//                                             margin missed, measured ~16 s on the rig)
+//   (3) receiver_sack_hold_ms                 the tone-burst partial-SACK coalesce hold the
+//                                             receiver actually applies (must be the SAME
+//                                             value passed to setToneBurstPartialSackDelayMs)
+//   (4) ack_copies * ack_ms                   ACK airtime (x repeat copies)
+// plus a small T/R turnaround margin. Measured rig RTT (DBPSK R1/4, w=3) ~= 37.9 s; this
+// budgets ~43.5 s. The lower clamp is lifted to the physical RTT so it can never truncate
+// the round-trip and re-introduce the self-collision (mirrors the narrow-OFDM physical
+// floor). See docs/CHANGELOG.md.
 inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
                                           size_t window_size,
-                                          uint32_t sack_delay_ms,
+                                          uint32_t receiver_sack_hold_ms,
                                           int ack_repeat_count) {
     const uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
-    const uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * timing.data_ms;
-    const uint32_t ack_path_ms = ack_copies * timing.ack_ms + sack_delay_ms;
+    const uint32_t tx_burst_ms  = static_cast<uint32_t>(window_size) * timing.data_ms;
+    const uint32_t rx_decode_ms = static_cast<uint32_t>(window_size) * timing.data_ms;
+    const uint32_t ack_path_ms  = ack_copies * timing.ack_ms + receiver_sack_hold_ms;
+    constexpr uint32_t kTurnaroundMarginMs = 3000;
 
-    // MC-DPSK uses full audio frames and a streaming decoder, so keep a larger
-    // wall-clock margin than OFDM. This prevents a legal window burst from
-    // self-timing-out before the receiver can batch and send its SACK.
-    constexpr uint32_t kStreamingDecoderMarginMs = 12000;
-    const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + kStreamingDecoderMarginMs;
-    return std::clamp(timeout_ms, 18000u, 72000u);
+    const uint32_t physical_rtt_ms = tx_burst_ms + rx_decode_ms + ack_path_ms;
+    const uint32_t timeout_ms = physical_rtt_ms + kTurnaroundMarginMs;
+    // Never clamp below the physical RTT (else the sender self-collides with blind resends).
+    return std::clamp(timeout_ms,
+                      std::max<uint32_t>(18000u, physical_rtt_ms),
+                      std::max<uint32_t>(72000u, physical_rtt_ms));
 }
 
 inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,

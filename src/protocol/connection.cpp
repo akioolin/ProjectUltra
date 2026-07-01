@@ -3007,10 +3007,19 @@ void Connection::configureArqForCurrentDataMode() {
         // the inter-burst gap. Floored at the 1500 ms OFDM default; stays well under the
         // ~31.6 s ACK RTO. (Carrier-sense — defer until the channel is heard idle — is the
         // fully radio-correct generalization; this airtime-scaled guard is the targeted fix.)
-        arq_.setToneBurstPartialSackDelayMs(
-            std::max<uint32_t>(1500u, timing.data_ms + 1000u));
+        // Compute the receiver tone-burst partial-SACK hold ONCE and feed it to BOTH the
+        // receiver (setToneBurstPartialSackDelayMs) AND the sender's ACK RTO budget
+        // (computeMCDPSKAckTimeoutMs) — otherwise the sender's deadline omits the hold the
+        // receiver actually applies, times out before the ACK round-trip completes, and
+        // blind-resends the whole window (BUG-MCDPSK-FILE-COMPLETION: the resulting doubled
+        // airtime means the FINAL file chunk is never reached in-session -> never finalizes).
+        // Previously the RTO was passed arq_.getSackDelay() = 30 ms carrier-sense coalesce,
+        // NOT this ~6.4 s hold.
+        const uint32_t sack_hold_ms =
+            std::max<uint32_t>(1500u, timing.data_ms + 1000u);
+        arq_.setToneBurstPartialSackDelayMs(sack_hold_ms);
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
-            timing, window_size, arq_.getSackDelay(),
+            timing, window_size, sack_hold_ms,
             connection_policy::kCarrierSenseAckRepeatCount);
         if (data_modulation_ == Modulation::DBPSK &&
             config_.mc_dpsk_samples_per_symbol >= 2048) {

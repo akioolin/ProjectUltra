@@ -306,10 +306,24 @@ void test_mc_dpsk_window_timing() {
           "Robust-Mid MC-DPSK window=3 physical burst timing");
     CHECK(mcDpskWindowSizeForTiming(robust_mid) == 3,
           "Robust-Mid MC-DPSK should use window=3");
-    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 3, kCarrierSenseSackCoalesceMs,
-                                    kCarrierSenseAckRepeatCount) >=
-              3 * robust_mid.data_ms + robust_mid.ack_ms + kCarrierSenseSackCoalesceMs,
-          "Robust-Mid ACK timeout should cover the three-frame burst and carrier-sensed ACK path");
+    // BUG-MCDPSK-FILE-COMPLETION / ACK-COLLISION: the ACK RTO must budget the SAME receiver
+    // tone-burst SACK hold the receiver applies (setToneBurstPartialSackDelayMs) AND the
+    // receiver serial-decode round-trip, else the sender blind-resends before the measured
+    // ~37.9 s rig RTT -> doubled airtime -> FINAL file chunk never reached -> never finalizes.
+    const uint32_t rm_hold = std::max<uint32_t>(1500u, robust_mid.data_ms + 1000u);  // 6376
+    const uint32_t rm_timeout =
+        computeMCDPSKAckTimeoutMs(robust_mid, 3, rm_hold, kCarrierSenseAckRepeatCount);
+    // Covers the physical half-duplex RTT: sender TX + receiver serial decode + hold + ACK.
+    CHECK(rm_timeout >= 2u * 3u * robust_mid.data_ms + robust_mid.ack_ms + rm_hold,
+          "Robust-Mid ACK RTO must budget tx_burst + rx_decode + receiver SACK hold + ACK");
+    // Must exceed the measured ~37.9 s rig RTT so the sender does not self-collide.
+    CHECK(rm_timeout >= 40000u,
+          "Robust-Mid ACK RTO must exceed the measured ~37.9 s half-duplex RTT");
+    // REGRESSION: budgeting the real ~6.4 s hold yields a STRICTLY larger RTO than the old
+    // 30 ms carrier-sense coalesce that under-budgeted the round-trip (the bug's origin).
+    CHECK(rm_timeout > computeMCDPSKAckTimeoutMs(robust_mid, 3, kCarrierSenseSackCoalesceMs,
+                                                 kCarrierSenseAckRepeatCount),
+          "Real receiver hold must widen the RTO vs the old 30 ms coalesce (regression guard)");
 
     auto robust = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
     CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
@@ -328,9 +342,13 @@ void test_mc_dpsk_window_timing() {
           "Standard MC-DPSK window=5 physical burst timing");
     CHECK(mcDpskWindowSizeForTiming(standard) == 5,
           "Standard MC-DPSK should use window=5");
-    CHECK(computeMCDPSKAckTimeoutMs(standard, 5, kCarrierSenseSackCoalesceMs,
-                                    kCarrierSenseAckRepeatCount) >= 18000,
+    const uint32_t std_hold = std::max<uint32_t>(1500u, standard.data_ms + 1000u);
+    const uint32_t std_timeout =
+        computeMCDPSKAckTimeoutMs(standard, 5, std_hold, kCarrierSenseAckRepeatCount);
+    CHECK(std_timeout >= 18000u,
           "Standard MC-DPSK window=5 timeout should retain the conservative floor");
+    CHECK(std_timeout >= 2u * 5u * standard.data_ms + standard.ack_ms + std_hold,
+          "Standard MC-DPSK ACK RTO must budget tx_burst + rx_decode + hold + ACK");
 }
 
 void test_ofdm_profile_selection() {

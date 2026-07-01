@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-30 — fix(arq): budget the full MC-DPSK ACK round-trip so the file completes — BUG-MCDPSK-FILE-COMPLETION
+
+**What was broken.** A MC-DPSK file transfer NEVER completes at any rung/SNR (the #73 blocker): the receiver
+decodes/assembles every frame it gets, but `file-recv=0` — it never finalizes, so the sender resends forever
+until the session ends. Forensic (gui_qso good@7, DBPSK R1/4, 1 KB): all 21 retransmits are `cause=timeout`
+(zero NACK-driven); the receiver only ever gets ~18 of the 33 seqs; the FINAL chunk is never transmitted, so
+`checkAndFinalizeReceive` (needing `rx_data_.size() >= expected`) never fires.
+
+**Root cause (workflow root-cause + adversarial verification).** NOT an assembly/flag/routing defect — the
+receiver path is byte-correct and identical to OFDM. It's a sender-side ACK-RTO defect: `computeMCDPSKAckTimeoutMs`
+budgeted only `tx_burst + ack + a flat 12 s` and was passed `arq_.getSackDelay() = 30 ms` (the carrier-sense
+coalesce), NOT the **6376 ms receiver tone-burst SACK hold** that the ACK-collision fix (33ccade) had just added
+via `setToneBurstPartialSackDelayMs`. So the RTO (30.1 s) fell short of the real half-duplex round-trip, the sender
+blind-resent the whole window before the legit ACK landed → **doubled airtime** → the transfer is so slow the
+FINAL chunk is unreachable in a bounded session → never finalizes. (So this bug and BUG-MCDPSK-ACK-COLLISION are
+the same bug: 33ccade widened the receiver hold without updating the sender deadline.) The adversarial verifier
+measured the **actual rig RTT = 37.9 s** and showed the naive "just add the 6376 hold" fix (→36.4 s) is STILL
+short — the RTT is dominated by a **~16 s receiver serial-decode latency** (streaming decoder / RXQ backlog #56)
+that neither formula budgeted.
+
+**What changed.** `computeMCDPSKAckTimeoutMs` (connection_policy.hpp) now budgets the full physical half-duplex
+RTT: `tx_burst (window·data_ms) + rx_decode (~window·data_ms, the serial-decode term) + receiver_sack_hold +
+ack_copies·ack_ms + turnaround`, with the lower clamp lifted to the physical RTT so it can never truncate the
+round-trip (mirrors the narrow-OFDM physical floor). `Connection::configureArqForCurrentDataMode` (connection.cpp)
+computes the hold ONCE and feeds it to BOTH `setToneBurstPartialSackDelayMs` (receiver) AND
+`computeMCDPSKAckTimeoutMs` (sender) — removing the 30-vs-6376 divergence by construction. For the repro rung the
+RTO goes 30.1 s → ~43.5 s (> the 37.9 s RTT), so retransmits become NACK/SACK-driven, per-window airtime halves,
+and the FINAL chunk is reached → finalize.
+
+**Scope / honest caveat.** This fixes COMPLETION (the transfer now reliably progresses to the FINAL chunk and
+finalizes in an unbounded session). It does NOT make MC-DPSK files FAST: RTT ~38 s × ~11 windows ≈ ~7 min for
+1 KB, because the RTT's ~16 s decode term (#56) and the 32-byte chunks / window=3 (~33 seqs) are the goodput
+limiter — that's the separate #71 (DQPSK rung / bigger chunk / window) lever. OFDM file completion is untouched
+(separate FILE_BLOCK fast path + computeWide/NarrowOFDMAckTimeoutMs; MC-DPSK branch only).
+
+**Verification.** `ctest` green (ConnectionPolicy asserts the RTO now budgets `2·tx_burst + hold + ack` and
+exceeds the 37.9 s RTT; only pre-existing `UltraTncSimAudio` fails). Faithful-gate completion proof:
+`ULTRA_ROBUST_IDLE_PING=1 gui_qso_scenario.sh --channel good --snr-db 7 --file-kb 1 --exit-after 650` (MC-DPSK
+DBPSK R1/4) → **FILE_CRC_OK_COUNT=2, ALPHA_FILE_DONE_COUNT=1, RESULT=PASS** (was 0 / resend-forever / FAIL),
+GOODPUT=10 bps (~11 min/1KB — the separate #71 speed lever). See KNOWN_BUGS.
+
+---
+
 ## 2026-06-30 — fix(arq): scale tone-burst partial-SACK delay to the frame airtime — kill the MC-DPSK half-duplex collision livelock (BUG-MCDPSK-ACK-COLLISION)
 
 **What was broken.** On the live IONOS rig (MPG@8, MC-DPSK DQPSK R1/4, window=5), once a frame in a window
