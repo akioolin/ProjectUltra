@@ -5,10 +5,19 @@ modulation and speed throughput and see what was missed [vs the ~3086 bps market
 leader at 3 kHz, Good fading, 20 dB], and save the findings so a smaller model can
 work from them."*
 
+> **⚠ 2026-07-01 UPDATE — READ `09_WHY_STUCK_AT_2000_2026_07_01.md` FIRST.** The
+> re-audit at HEAD supersedes the 06-12 roadmap's Phase-2a/2b framing: QPSK is measured
+> AT its (corrected) ceiling and closed; 16QAM R2/3 already flies 8-frame bursts and its
+> gap is a fade-retx tax, not caps; three new defects are filed (head-null silent drop,
+> ACK-staircase fade-bin, RTO double-count); the rig's out-of-box mode pick at MPG@20 is
+> a zero-delivery coin-flip (~16× nominal) (#58). Docs 00-08 remain the June historical record — several of their
+> numbers (ceilings, group sizes, "16QAM beats QPSK") are corrected in 09.
+
 ## Read in this order
 
 | Doc | What it settles |
 |---|---|
+| **`09_WHY_STUCK_AT_2000_2026_07_01.md`** | **CURRENT: the verified ceiling model, the sync/fading verdict, 3 new defects, the corrected path to 3000** |
 | `00_EXECUTIVE_SUMMARY.md` | The headline (stale 16QAM verdict — it passes now), the ranked "what was missed" list, the path |
 | `01_GAP_DECOMPOSITION_AND_RUNG_MATH.md` | Air-true numerology, raw rung table, why QPSK is excluded, route arithmetic, benchmark fairness (0.61 dB, small-file penalty) |
 | `02_LLR_CALIBRATION_THE_MISSED_FIX.md` | The missing ε²_H LLR term (structural fact) + live A/B that demoted it to a margins fix; the honest counter-evidence trail |

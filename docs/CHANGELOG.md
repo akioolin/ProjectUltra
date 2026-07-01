@@ -10,6 +10,74 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — analysis(throughput): why we are stuck at ~2000 bps — full re-audit; 3 defects filed; corrected path to 3000 (NO code changes)
+
+**Deliverable: `fable_analysis/09_WHY_STUCK_AT_2000_2026_07_01.md`** (supersedes the 06-12 roadmap's
+Phase-2a/2b framing). Method: verified cycle-arithmetic model (every constant file:line-checked) +
+4-agent code audit with adversarial cross-examination + fresh paired GUI-gate runs at HEAD +
+live IONOS MPG@20 rig runs. No source files were modified — documentation + bug register only.
+
+**The answer to "sync issue or fading issue?": neither.** Sync is empirically lossless on the
+clean path (24/24 light-anchored groups, 0 RX backlog, ACK leg 25/25). Fading's cost is
+irreducible and correctly ARQ-collected. The jailer is cycle arithmetic: verified zero-retx
+delivered ceilings (steady-state, T=1.0s) — QPSK R2/3 **1834**, QPSK R3/4 **2049**, 16QAM R2/3
+**3299** bps. Fresh paired runs (Good@20, 50 KB): QPSK R3/4 = 2090/2000/1690 (**at ~95-100% of
+ceiling — QPSK is closed, 3000 arithmetically excluded**); 16QAM R2/3 = 1760/1990/1890 (**53-57%
+of ceiling; the gap is a 47% frame-fail fade-retx tax at its zero-margin anchor**, 113 FAIL/127 OK
+seed 42). The stock config (R2/3 entry pin + rate-adapt OFF) cannot leave R2/3 by design.
+
+**Defects found (filed in KNOWN_BUGS):**
+- **BUG-BURST-HEADNULL-DROP** — marker-gated burst accumulation: a group-head null makes the RX
+  silently discard clean 27 dB mid-group frames (log-less re-search, `streaming_ofdm_decode.cpp:1042-1052`);
+  one occurrence cost 83 s (~23% of the stock seed-42 run).
+- **BUG-ACK-STAIRCASE-FADE-BIN** — the §15.5 fast tone-ACK (324 ms @≥18 dB) never engages on
+  fading: fade-effective SNR (~16-17 at Good@20) vs AWGN-calibrated 18 dB edge. Measured: sim
+  29/29 + 26/26 ACKs at 675 ms, **rig MPG@20 30/30 at 675 ms** ⇒ ~4-5% tax, worst on 16QAM.
+- **BUG-ACK-TIMEOUT-DOUBLECOUNT** promoted to the register + quantified (24.5 s vs true RTT
+  ~9.5 s; floor 14-17 s; must move jointly with the wall-clock RX group timeout).
+
+**Key code facts established (adversarially verified):** `ULTRA_BURST_GROUP_FRAMES` is a NO-OP on
+the unified file path (`transmitBurst` overrides group size per burst, `modem_engine.cpp:528-531`;
+16QAM already flies 8-frame bursts — window/SACK-mask 8 binds, not the stale "6"). The 1500 ms
+SACK hold is NOT on the clean path (comment at `connection_policy.hpp:1013-1015` is stale; the
+group bracket suppresses it). Per-frame SACK accounting survives interleave (the "whole-group
+ACK" invariant comment is stale); 16QAM's all-or-nothing group losses are PHY correlation. HARQ
+chase-combining is blind to the dominant fade-loss class (CW0-keyed, `streaming_ofdm_decode.cpp:2933-2941`).
+The airtime budget always charges the full 1200 ms anchor, so anchor-SKIPPED bursts forgo a legal
+6th QPSK frame (+6-8% available). Min clean turnaround in code ≈ 620-810 ms (sim measures 0.61 s).
+
+**Rig (IONOS MPG@20, both ends a81725d): the out-of-box mode pick is a coin-flip (~16× nominal, zero-delivery worst case).** Stock #1:
+connect snapshot 12.4 dB + fading 0.67 "Moderate" → DBPSK R1/4 (Robust-Mid, ~94 bps nominal) → 0 bytes in 9 min.
+Stock #2 (same channel, 10 min later): 18.2 dB + 0.39 "Good" → QPSK R2/3 → 1.53 kbps CRC-clean.
+Forced QPSK R3/4 → 1.62 kbps (rate-is-not-the-lever reconfirmed). This is open task #58
+(fade-averaged connect SNR) compounded by the classifier coin-flip — reliability item #1.
+**Forced 16QAM R2/3 on the rig: FAIL (no delivery in 480 s, 117 nack + 74 timeout) with ZERO PHY
+frame failures (77/77 deint SUCCESS) — sync-corr collapse 0.95→0.2 vs the QPSK run. Filed
+BUG-QAM16-RIG-ANCHOR-COLLAPSE (suspect PAPR/normalization vs RX-backlog; sim can't reproduce —
+fidelity gap). On hardware, THIS blocks the 3000-path before fade damage even matters.**
+
+**Crossover measured (margin cells):** 16QAM R2/3 Good@22 = 2710/2150/2050 (mean +22% vs @20;
+seed-42 damage 113→30 fails = 82% of ceiling) → the QPSK↔16QAM crossover sits at ~20-22 dB
+effective; 16QAM R1/2@20 bracket = 1830 @16 fails (clean but ceiling-capped ~2280).
+
+**Corrected path to 3000 (see 09 §5; arithmetic review-corrected):** (1) #58 connect coin-flip
+fix; (2) ACK staircase fade-basis re-bin; (3) head-null drop counter + recovery;
+(3b) QAM16-rig-anchor-collapse diagnosis — gates all HW 16QAM work; (4) HARQ CW0-independent
+combine key (must be ARQ/descriptor-derived — the code documents why receive-order keys are
+rejected); (5) cw16 frames for 16QAM (`kMaxFixedFrameCodewords` 8→16: 1272 ms frames like QPSK
+cw8; **5-frame groups — a full-anchor 6-frame group is 9.2 s = duty violation**; ceilings
+3.6-4.0k); (6) budget-aware anchor-skip (+6-8% QPSK; also unlocks cw16 6-frame light bursts);
+(7) joint RTO/group-timeout tightening (floor pending rig calibration); (8) margin-aware
+laddering (preconditions: 3b + BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE). Honest total:
+**~2.7-3.1 kbps delivered = marginal vs 3000**; residual lever if short = the in-frame overhead
+diet (pilots/LTS/probe rework — the leader's real framing edge; ours 62% of raw vs their ~78%).
+Dead ends re-confirmed: rate climbing, naive constellation climbing, eps_H-for-QAM16, LLR
+re-weighting, shorter chirps, predictive channel labels, `ULTRA_BURST_GROUP_FRAMES`, plus the
+reverted v3 predicted-anchor search and gate-less mid-stream rate change (09 §6).
+
+**Test verification:** no code changed; `cmake --build build -j4` clean at a81725d; runs archived
+under `/tmp/fa2` (sim) and `/tmp/fa2rig` (rig) with summary.env / logs.
+
 ## 2026-07-01 — fix(handshake): #70 high-SNR-safe robust-PING gate -> ULTRA_ROBUST_IDLE_PING promoted DEFAULT-ON
 
 **What was blocking the flip.** The previous commit landed STAGE2 but DEFERRED the default-on flip because
