@@ -10,6 +10,64 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — perf(mc-dpsk): round-trip-safe window kills the DQPSK ACK spiral -> ~2x reliable low-SNR file throughput (#71)
+
+**What was broken.** MC-DPSK with DQPSK modulation (2 bits/symbol, the ~2x-faster rung) delivered files
+UNRELIABLY at low SNR — rig-measured @ MPG@9 (live IONOS Good fading, forced rung, 1 KB): DQPSK delivered
+only **1 of 3** transfers; the other 2 spiraled into blind resends and never finished in-session. Crucially the
+failures were NOT fade damage: **0 cw_fail, every ACK bitmap=0x0** (the frames decoded fine and the receiver
+ACKed "I have everything"), and **all resends were cause=timeout**. The sender simply wasn't hearing the ACK
+before its RTO fired, so it blind-resent the whole window — which piled more onto the receiver's serial-decode
+queue (#56) and delayed the ACK further: a spiral. DBPSK on the same rig delivered 3/3, so the bug was
+DQPSK-specific.
+
+**Root cause.** `mcDpskWindowSizeForTiming` sized the selective-repeat window to fill a 19 s *transmit* burst,
+**blind to the receiver decode + ACK round-trip**. DQPSK's shorter frames (data_ms 3691 vs DBPSK 5376) let the
+window grow to **5**; that ~18.9 s burst's ACK round-trip (TX burst + serial decode of 5 frames + SACK hold +
+ACK) intermittently exceeded the ~45.7 s RTO. DBPSK's longer frames already capped it at 3 (~16.9 s burst),
+whose round-trip stayed well under the RTO — which is exactly why DBPSK was never affected.
+
+**What changed** (`src/protocol/connection_policy.hpp`):
+1. **Window cap 5 -> 3** (`kMaxRoundTripSafeMCDPSKWindow`), the round-trip-safe, rig-validated value. Only DQPSK
+   is affected (DBPSK already sat at 3). Kept the `ULTRA_MCDPSK_WINDOW_CAP=N` diagnostic knob (default no-op)
+   for future per-rung round-trip tuning.
+2. **Good/AWGN DQPSK selection floor lowered** from `robust_mid_floor+2.5` (Good 8.5 / AWGN 7.5) to
+   `robust_mid_floor+1.0` (Good 7.0 / AWGN 6.0) in `selectLadderRung`. With the spiral fixed, DQPSK-window=3
+   matched DBPSK reliability at ~2x speed across effective connect-SNR ~2.4–9 dB; the +2.5 dB differential
+   BPSK->QPSK geometry margin is an AWGN bound that over-penalizes DQPSK on FADING (ARQ means only the good-fade
+   frames must decode). Moderate/Poor floors UNCHANGED (DQPSK untested on fast fading).
+
+**Why it works / invariants.** Shorter window => shorter, less-variable ACK round-trip that fits under the RTO
+with margin (rig: ~6–13 s round-trip vs 30.9 s RTO at window=3). The window still flows to both
+`arq_.setWindowSize` and `computeMCDPSKAckTimeoutMs`, so the RTO stays consistent. DQPSK keeps a throughput edge
+over DBPSK even at window=3 because 2 bits/frame = fewer frames = fewer half-duplex ACK turnarounds.
+
+**Verification.**
+- RIG (live IONOS MPG@9, 1 KB, paired, ratiometric SNR on): DQPSK window=3 = **3/3 CRC-clean byte-identical, 0
+  retx, ~13.1 s / 0.62 kbps** vs DBPSK **3/3, ~27.8 s / 0.29 kbps** (=> ~2.1x) vs DQPSK window=5 = **1/3**.
+- `ctest ConnectionPolicy` PASS (window-timing test now asserts DQPSK rungs -> window=3; AWGN/Good DQPSK floor
+  boundary tests updated to 6.0/7.0). Full suite: only the pre-existing `UltraTncSimAudio` and the
+  fixture-only `ImageUtil` (unrelated — a deleted `sample.jpg`) fail.
+- OFDM path unaffected (Parts touch only the MC-DPSK window + DQPSK-rung floor; good@20 selects OFDM).
+
+**Reach asymmetry (important — do not over-claim).** Part 1 (window cap) is UNCONDITIONAL: it fixes the DQPSK
+spiral wherever DQPSK runs, so it reaches every user live. Part 2 (floor lowering) only bites when the
+connect-time SNR lands in the widened DQPSK band — and on the DEFAULT path the connect SNR is `IDLE_IN_BAND`,
+which OVER-READS on a real radio (credits signal power the link lacks) and biases the pick UP toward OFDM,
+systematically under-visiting the new DQPSK band. The #71 rig validation reached the band only because it ran
+with `ULTRA_CONNECT_RATIOMETRIC_SNR` ON (default-OFF). So **Part 2's 2× does NOT reliably reach default-rig users
+today** — it demonstrably works in the faithful sim (idle accurate at reference) and on the rig only with the
+ratiometric knob on. #71 is NOT "2× on the rig by default."
+
+**NOT in this change (tracked follow-ups).** (1) The full rig ≤9 speedup on the DEFAULT path also needs
+`ULTRA_CONNECT_RATIOMETRIC_SNR` default-ON (per the reach asymmetry above) — deliberately kept gated
+(streaming_sync_acquisition.cpp), pending the multi-channel rig A/B its author specified; only Good is validated. (2) Lowering the DQPSK floor further (toward the DBPSK floor) is supported by
+the data but needs MPG@8/7 floor-finding + a fade-AVERAGED connect SNR (task #58; the single-snapshot reading is
+noisy, so dial-9 auto-selection is not yet deterministic). (3) A truly decode-latency-derived per-rung window
+(vs the flat cap of 3) is the principled successor once the shelved DQPSK-512 rung is exercised.
+
+---
+
 ## 2026-06-30 — fix(arq): budget the full MC-DPSK ACK round-trip so the file completes — BUG-MCDPSK-FILE-COMPLETION
 
 **What was broken.** A MC-DPSK file transfer NEVER completes at any rung/SNR (the #73 blocker): the receiver
@@ -50,6 +108,14 @@ exceeds the 37.9 s RTT; only pre-existing `UltraTncSimAudio` fails). Faithful-ga
 `ULTRA_ROBUST_IDLE_PING=1 gui_qso_scenario.sh --channel good --snr-db 7 --file-kb 1 --exit-after 650` (MC-DPSK
 DBPSK R1/4) → **FILE_CRC_OK_COUNT=2, ALPHA_FILE_DONE_COUNT=1, RESULT=PASS** (was 0 / resend-forever / FAIL),
 GOODPUT=10 bps (~11 min/1KB — the separate #71 speed lever). See KNOWN_BUGS.
+
+**HW proof (live IONOS, 2026-06-30).** MPG@8 Good, Pi5→Mac, commit 9579a1a both ends, 568-byte file,
+`ULTRA_ROBUST_IDLE_PING=1 ULTRA_CONNECT_RATIOMETRIC_SNR=1`. Ladder correctly picked **MC-DPSK DBPSK R1/4**
+(mcdpsk_in_band effective SNR 0.9–5.1 dB read < 10 → not OFDM — the #74 ratiometric source doing its job);
+runtime log confirms **`ARQ window=3, timeout=43.6s`** (the fixed RTO — old ~30 s would have fired before the
+37.9 s RTT); both tone-burst ACKs `bitmap=0x0` (**0 retx, 0 holes**); sender `[FILE] Transfer complete (37.4s)`;
+receiver `Received OK (568 bytes, CRC ok)` → **md5 byte-identical**. Same build/channel blind-resent forever
+before this fix. Goodput 0.12–0.20 kbps confirms #71 is the remaining (speed-only) lever.
 
 ---
 

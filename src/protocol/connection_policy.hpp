@@ -370,9 +370,18 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
     switch (channel) {
         case ChannelClassification::AWGN:
         case ChannelClassification::GOOD:
-            // BENIGN + MEASURED: lower the floor to the geometry +2.5 dB so DQPSK is
-            // reachable below the OFDM floor (the speedup band).
-            robust_dqpsk_floor = std::min(robust_mid_floor + 2.5f, ofdm_floor - 0.5f);
+            // #71: with the DQPSK window spiral fixed (round-trip-safe window=3, above),
+            // rig A/B @ MPG@9 showed DQPSK-window=3 matches DBPSK reliability (3/3 vs 3/3)
+            // at ~2x goodput across effective connect-SNR ~2.4-9 dB. The old +2.5 dB
+            // differential BPSK->QPSK geometry margin (floor 8.5) is an AWGN bound and
+            // over-penalizes DQPSK on FADING, where ARQ means only the good-fade frames
+            // must decode. Lower to a validated-conservative +1.0 dB over the DBPSK floor
+            // (Good 7.0, AWGN 6.0), clamped below the OFDM floor, keeping a thin DBPSK-mid
+            // buffer above the deep-fade fallback. NOTE: going lower (toward the DBPSK
+            // floor) is supported by the data but needs MPG@8/7 floor-finding + a
+            // fade-AVERAGED connect SNR (task #58) — the single-snapshot reading is noisy,
+            // so dial-9 auto-selection is not yet deterministic.
+            robust_dqpsk_floor = std::min(robust_mid_floor + 1.0f, ofdm_floor - 0.5f);
             break;
         case ChannelClassification::MODERATE:
             robust_dqpsk_floor = 15.0f;  // UNCHANGED (old robust_floor): > ofdm 14 ->
@@ -894,14 +903,32 @@ inline uint32_t mcDpskBurstAirtimeMs(const MCDPSKFrameTiming& timing,
 inline size_t mcDpskWindowSizeForTiming(const MCDPSKFrameTiming& timing) {
     if (timing.data_ms == 0 || timing.data_only_ms == 0) return 1;
 
+    // #71: the window must be sized so the FULL half-duplex ACK round-trip fits under the
+    // ACK RTO with margin — TX burst + the receiver's SERIAL decode of that burst (task
+    // #56, and heavier/more variable for DQPSK's 2-bit soft demod) + SACK hold + ACK
+    // airtime. The old sizing targeted a 19 s TX burst ONLY and was blind to the
+    // decode+ACK half, so DQPSK's shorter frames let the window grow to 5; that burst's
+    // round-trip intermittently exceeded the RTO -> the sender blind-resends the whole
+    // window -> spiral. Rig-measured @ MPG@9 (paired, live fades): DQPSK window=5 delivered
+    // 1/3 (2/3 spiraled, all cause=timeout, 0 cw_fail — decode was clean, the ACK just
+    // didn't get back in time); DQPSK window=3 delivered 3/3 CRC-clean at ~2x DBPSK
+    // goodput; DBPSK window=3 delivered 3/3. DBPSK was never affected — its longer frames
+    // already cap it below 5 (test_connection_policy + the rig log confirm ROBUST_MID/sps=1024
+    // -> 3, ROBUST_LOW/sps=2048 -> 1). So cap at the round-trip-safe, rig-validated 3.
     constexpr uint32_t kTargetContinuousBurstMs = 19000;
-    constexpr size_t kMaxAuditedContinuousMCDPSKWindow = 5;
+    constexpr size_t kMaxRoundTripSafeMCDPSKWindow = 3;
     size_t selected = 1;
-    for (size_t candidate = 2; candidate <= kMaxAuditedContinuousMCDPSKWindow; ++candidate) {
+    for (size_t candidate = 2; candidate <= kMaxRoundTripSafeMCDPSKWindow; ++candidate) {
         if (mcDpskBurstAirtimeMs(timing, candidate) > kTargetContinuousBurstMs) {
             break;
         }
         selected = candidate;
+    }
+    // Diagnostic override (ULTRA_MCDPSK_WINDOW_CAP=N): further cap the window for A/B
+    // round-trip measurement per rung; unset = no-op.
+    if (const char* cap = std::getenv("ULTRA_MCDPSK_WINDOW_CAP")) {
+        const long v = std::strtol(cap, nullptr, 10);
+        if (v >= 1) selected = std::min<size_t>(selected, static_cast<size_t>(v));
     }
     return selected;
 }
@@ -909,10 +936,13 @@ inline size_t mcDpskWindowSizeForTiming(const MCDPSKFrameTiming& timing) {
 inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
     if (data_frame_ms == 0) return 1;
 
+    // Round-trip-safe cap of 3 (see the MCDPSKFrameTiming overload above for the #71
+    // rig-validated rationale). This coarse overload is not on the production window path
+    // (connection.cpp uses the timing overload); kept consistent to avoid a stale bound.
     constexpr uint32_t kTargetBurstMs = 19000;
-    constexpr size_t kMaxAuditedMCDPSKWindow = 5;
+    constexpr size_t kMaxRoundTripSafeMCDPSKWindow = 3;
     const size_t by_burst = std::max<size_t>(1, kTargetBurstMs / data_frame_ms);
-    return std::clamp<size_t>(by_burst, 1, kMaxAuditedMCDPSKWindow);
+    return std::clamp<size_t>(by_burst, 1, kMaxRoundTripSafeMCDPSKWindow);
 }
 
 // Sender ACK RTO for an MC-DPSK selective-repeat window burst. It MUST exceed the real

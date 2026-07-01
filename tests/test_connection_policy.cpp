@@ -94,24 +94,26 @@ void test_ladder_rung_selection() {
           "Moderate in-band 14 dB boundary selects OFDM_CHIRP");
 
     // AWGN entry floor lowered 10->8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
-    // #71: AWGN robust_mid_floor=5 -> dqpsk_floor=min(7.5, 8-0.5)=7.5, ofdm_floor=8.
-    CHECK(selectLadderRung(7.4f, ChannelClassification::AWGN).id ==
+    // #71: AWGN robust_mid_floor=5 -> dqpsk_floor=min(5+1.0, 8-0.5)=6.0, ofdm_floor=8
+    // (lowered from +2.5=7.5: DQPSK window spiral fixed + rig-validated DQPSK>=DBPSK).
+    CHECK(selectLadderRung(5.9f, ChannelClassification::AWGN).id ==
               LadderRungId::ROBUST_MID,
           "AWGN below DQPSK floor stays Robust-Mid (DBPSK)");
-    CHECK(selectLadderRung(7.5f, ChannelClassification::AWGN).id ==
+    CHECK(selectLadderRung(6.0f, ChannelClassification::AWGN).id ==
               LadderRungId::ROBUST,
           "AWGN at DQPSK floor selects Robust (DQPSK)");
     CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
               LadderRungId::OFDM_CHIRP,
           "AWGN in-band 8 dB boundary selects OFDM_CHIRP");
     // Good entry floor lowered 12->10 (R1/2 reliable @ Good 10, measured).
-    // #71: Good robust_mid_floor=6 -> dqpsk_floor=min(8.5, 9.5)=8.5, ofdm_floor=10.
-    CHECK(selectLadderRung(8.4f, ChannelClassification::GOOD).id ==
+    // #71: Good robust_mid_floor=6 -> dqpsk_floor=min(6+1.0, 9.5)=7.0, ofdm_floor=10
+    // (lowered from +2.5=8.5: DQPSK window spiral fixed + rig-validated DQPSK>=DBPSK @MPG9).
+    CHECK(selectLadderRung(6.9f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST_MID,
           "Good below DQPSK floor stays Robust-Mid (DBPSK)");
-    CHECK(selectLadderRung(8.5f, ChannelClassification::GOOD).id ==
+    CHECK(selectLadderRung(7.0f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST,
-          "Good at DQPSK floor selects Robust (DQPSK) — measured clean @good8");
+          "Good at DQPSK floor selects Robust (DQPSK) — rig-validated clean @MPG9");
     CHECK(selectLadderRung(9.9f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST,
           "Good fading below OFDM floor selects Robust (DQPSK)");
@@ -329,9 +331,12 @@ void test_mc_dpsk_window_timing() {
     CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
     CHECK(robust.data_only_ms == 3499, "Robust MC-DPSK data-only timing");
     CHECK(mcDpskBurstAirtimeMs(robust, 5) == 18887,
-          "Robust MC-DPSK window=5 physical burst timing");
-    CHECK(mcDpskWindowSizeForTiming(robust) == 5,
-          "Robust MC-DPSK should use window=5");
+          "Robust MC-DPSK window=5 physical burst timing (airtime formula)");
+    // #71: DQPSK is capped at the round-trip-safe window=3 (was 5). Window=5's ~18.9 s TX
+    // burst made the ACK round-trip intermittently exceed the RTO -> blind-resend spiral
+    // (rig @ MPG@9: 1/3 delivered); window=3 delivered 3/3 CRC-clean at ~2x DBPSK goodput.
+    CHECK(mcDpskWindowSizeForTiming(robust) == 3,
+          "Robust (DQPSK) MC-DPSK must cap at the round-trip-safe window=3, not 5");
     CHECK(kCarrierSenseAckRepeatCount == 1,
           "Robust MC-DPSK must not repeat full-preamble ACKs into the next DATA turn");
 
@@ -339,15 +344,15 @@ void test_mc_dpsk_window_timing() {
     CHECK(standard.data_ms == 1845, "Standard MC-DPSK 4-CW data timing");
     CHECK(standard.data_only_ms == 1749, "Standard MC-DPSK data-only timing");
     CHECK(mcDpskBurstAirtimeMs(standard, 5) == 10041,
-          "Standard MC-DPSK window=5 physical burst timing");
-    CHECK(mcDpskWindowSizeForTiming(standard) == 5,
-          "Standard MC-DPSK should use window=5");
+          "Standard MC-DPSK window=5 physical burst timing (airtime formula)");
+    CHECK(mcDpskWindowSizeForTiming(standard) == 3,
+          "Standard (DQPSK) MC-DPSK must cap at the round-trip-safe window=3, not 5 (#71)");
     const uint32_t std_hold = std::max<uint32_t>(1500u, standard.data_ms + 1000u);
     const uint32_t std_timeout =
-        computeMCDPSKAckTimeoutMs(standard, 5, std_hold, kCarrierSenseAckRepeatCount);
+        computeMCDPSKAckTimeoutMs(standard, 3, std_hold, kCarrierSenseAckRepeatCount);
     CHECK(std_timeout >= 18000u,
-          "Standard MC-DPSK window=5 timeout should retain the conservative floor");
-    CHECK(std_timeout >= 2u * 5u * standard.data_ms + standard.ack_ms + std_hold,
+          "Standard MC-DPSK timeout should retain the conservative floor");
+    CHECK(std_timeout >= 2u * 3u * standard.data_ms + standard.ack_ms + std_hold,
           "Standard MC-DPSK ACK RTO must budget tx_burst + rx_decode + hold + ACK");
 }
 
