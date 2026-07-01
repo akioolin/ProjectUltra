@@ -43,7 +43,7 @@ bool qam16GenieTimingCfoEnabled() {
     return enabled;
 }
 
-// ULTRA_CONNECT_RATIOMETRIC_SNR (default-OFF, opt-in): route the ratiometric
+// ULTRA_CONNECT_RATIOMETRIC_SNR (now DEFAULT-ON; opt-out via =0): route the ratiometric
 // MC-DPSK training-symbol SNR for the UN-connected handshake (PING/CONNECT/
 // CONNECT_ACK) control frames, not only for connected MC-DPSK data flow.
 //
@@ -63,16 +63,30 @@ bool qam16GenieTimingCfoEnabled() {
 // accepted rate-selection source (MCDPSK_IN_BAND). The ONLY thing suppressing
 // it during the handshake is the connected_ gate below; this knob relaxes it.
 //
-// Default-OFF because the faithful gui_qso gate runs AT the reference, where
-// idle is correct and the two estimators carry a small (~-0.45 dB) scale offset
-// that can shift a rate pick at a ladder boundary -- so a default-on flip is
-// unprovable on the only level-correct gate. Default-OFF keeps the build
-// byte-identical; the rig is the proving ground. Promote only after multi-
-// channel rig A/B. See docs/CHANGELOG.md (BUG-CONNECT-SNR-LEVEL).
+// PROMOTED to DEFAULT-ON 2026-07-01 after the multi-channel rig A/B this note demanded:
+// on the rig the idle meter over-reads (RX below the reference level) and mis-selects a
+// too-aggressive mode that STALLS on BOTH Good (#74, MPG@10) and Moderate (MPM@8, idle
+// -> OFDM QPSK R1/2 no-delivery), while ratiometric picks the correct robust mode and
+// delivers. The over-read is a LEVEL deficit, channel-independent -> generalizes to AWGN/
+// Poor. On the faithful gui_qso gate (level AT reference) the ~-0.45 dB scale offset can
+// nudge a pick at a ladder boundary but is more-conservative and never regresses delivery
+// (verified good@20 no-regress). See docs/CHANGELOG.md (BUG-CONNECT-SNR-LEVEL).
 bool connectRatiometricSnrEnabled() {
+    // #74/#71 (2026-07-01): now DEFAULT-ON; opt OUT via ULTRA_CONNECT_RATIOMETRIC_SNR=0.
+    // Promoted after multi-channel rig A/B showed the level-dependent idle meter OVER-READS
+    // on a real radio and mis-selects a too-aggressive mode that STALLS, while the
+    // level-invariant ratiometric SNR picks the correct robust mode and delivers:
+    //   MPG@10 (Good, #74): idle 13.1 -> QPSK R1/2 stall; ratiometric 8.0 -> robust rung.
+    //   MPM@8  (Moderate):  idle -> OFDM QPSK R1/2 STALL (0 ACKs, 8 timeout resends, no
+    //                       delivery); ratiometric ~1 dB -> MC-DPSK DBPSK R1/4 CRC-clean 0-retx.
+    // The over-read is a LEVEL deficit (RX below the 0.3048 sim reference), independent of
+    // channel type, so it generalizes to AWGN/Poor. On the faithful sim (level AT reference)
+    // the two estimators differ by only ~0.45 dB -- can nudge a pick at a ladder boundary but
+    // never regresses delivery (more conservative). See docs/CHANGELOG.md.
     static const bool enabled = [] {
         const char* value = std::getenv("ULTRA_CONNECT_RATIOMETRIC_SNR");
-        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+        if (!value || value[0] == '\0') return true;      // default-ON
+        return !(value[0] == '0' && value[1] == '\0');    // "0" opts out
     }();
     return enabled;
 }

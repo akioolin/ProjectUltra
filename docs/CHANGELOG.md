@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — fix(snr): promote ratiometric connect SNR to DEFAULT-ON (#74) — idle meter mis-selects a stalling mode on a real radio
+
+**What was broken.** The connect-time rate decision consumed `IDLE_IN_BAND` SNR, a noise-only meter that
+ASSUMES the RX signal sits at the sim reference level (`kModemReferenceInBandRms=0.3048`). On a real radio the RX
+operating level is several dB below that, so idle credits signal power the link lacks and OVER-READS the SNR ->
+too-aggressive mode/rate picks that STALL. The level-invariant ratiometric MC-DPSK training SNR that fixes it
+existed (`MCDPSK_IN_BAND`, `10log10(signal/residual)`) but was gated behind `ULTRA_CONNECT_RATIOMETRIC_SNR`,
+default-OFF, pending "multi-channel rig A/B."
+
+**What changed.** `connectRatiometricSnrEnabled()` (streaming_sync_acquisition.cpp) is now DEFAULT-ON; opt OUT
+via `ULTRA_CONNECT_RATIOMETRIC_SNR=0`.
+
+**Why it's justified (the multi-channel rig A/B the gate demanded).** Two channels, same clear result — the
+default idle meter mis-selects a mode that never delivers, ratiometric picks the correct robust mode that does:
+- **Good** (#74, MPG@10): idle 13.1 dB -> QPSK R1/2 stall; ratiometric 8.0 dB -> robust rung.
+- **Moderate** (MPM@8, this session, paired natural-selection A/B): idle OFF -> **OFDM QPSK R1/2, 0 ACKs,
+  8 timeout resends, NO delivery**; ratiometric ON -> read effective ~1 dB -> **MC-DPSK DBPSK R1/4, CRC-clean,
+  0 retx**. Byte-identical delivery, md5 match.
+The over-read is a LEVEL deficit (RX below reference), INDEPENDENT of channel type, so it generalizes to
+AWGN/Poor by the same mechanism (not yet separately rig-run, but the cause is not fading-specific).
+
+**Sim-gate caveat (why the author had kept it off).** The faithful gui_qso gate runs AT the reference where idle
+is accurate, and the two estimators differ by only ~0.45 dB there — which can nudge a rate pick at a ladder
+boundary but is MORE conservative and never regresses delivery. Verified: `gui_qso good@20` -> QPSK R2/3
+CRC-clean PASS with ratiometric now default (no regression). `ctest` clean (no test pinned the default; only the
+pre-existing UltraTncSimAudio + fixture-only ImageUtil fail).
+
+**Interaction with #71.** This is what makes the #71 MC-DPSK DQPSK speedup actually REACHABLE on a real radio at
+≤9 dB: without it the idle meter over-reads at dial-9 and picks OFDM instead of MC-DPSK, so Part-2's DQPSK band
+is never visited. With both landed, the ≤9 rig path selects MC-DPSK correctly and DQPSK where the (effective)
+SNR supports it.
+
+---
+
 ## 2026-07-01 — perf(mc-dpsk): round-trip-safe window kills the DQPSK ACK spiral -> ~2x reliable low-SNR file throughput (#71)
 
 **What was broken.** MC-DPSK with DQPSK modulation (2 bits/symbol, the ~2x-faster rung) delivered files
