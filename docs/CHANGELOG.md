@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — fix(handshake): #70 STAGE2 — responder expects-CONNECT window closes the robust-idle-PING starvation hole (default-on flip DEFERRED)
+
+**What was the gap.** The robust-idle-PING emit (streaming_ofdm_decode.cpp, ULTRA_ROBUST_IDLE_PING, still
+default-OFF) ANDs `bare_chirp_expected_`. The INITIATOR flips it FALSE on PROBING->CONNECTING (that's what makes
+#27 safe — a faded CONNECT_ACK is decoded, not mis-PONGed). The RESPONDER had no equivalent: after it PONGs a
+PING it stays in DISCONNECTED (the PONG is a stateless reflex — `onPongReceived` fires the callback and returns,
+connection_handlers.cpp:38-48), so `bare_chirp_expected_` stayed TRUE and a badly-faded CONNECT — byte-for-byte
+indistinguishable from a bare PING to the chirp-lock gate — got re-PONGed instead of decoded. That responder-side
+starvation was the documented blocker for default-on (KNOWN_BUGS BUG-HANDSHAKE-PING-FLOOR).
+
+**STAGE2 fix (app.cpp).** When this station PONGs (setPingReceivedCallback), it is now a RESPONDER expecting the
+initiator's CONNECT (a DATA frame), so it sets `bare_chirp_expected_=FALSE` and arms a re-arm deadline — mirroring
+the initiator's PROBING->CONNECTING disarm. A new `responder_connect_expected_until_ms_` atomic + the periodic
+tick re-arm it to TRUE if no CONNECT arrives within the window (~20 s, one CONNECT reception; a spurious PONG must
+not leave the responder deaf). SOUND FOR ANY WINDOW: while CONNECTING the initiator re-SENDS CONNECT and never
+re-PINGs (connection.cpp:2421-2442), and a stray PONG to a CONNECTING initiator is a verified no-op
+(connection_handlers.cpp:39-48) + half-duplex-inaudible, so if the window ever re-arms mid-attempt and re-PONGs a
+still-faded CONNECT, that PONG is harmless and this same callback re-arms the FALSE window — PERMANENT starvation
+becomes at worst occasional harmless waste.
+
+**Default-on flip DEFERRED (the honest result).** I flipped ULTRA_ROBUST_IDLE_PING default-ON and it worked on
+the RIG (MPM@8 + MPG@9 pure-default connects + delivery), but it REGRESSED the faithful sim gate at good@20:
+the handshake churned (11 PING / 9 PONG, ~30 s connect) and overran. Isolation proved it: same build with
+ULTRA_ROBUST_IDLE_PING=0 -> good@20 PASS (QPSK R2/3, 1860 bps); STAGE2 alone is clean. Mechanism: at high SNR the
+near-silent PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real
+chirp, so the robust emit fires spuriously -> PING/PONG churn. A high-SNR-safe emit gate (e.g. a higher
+data_bearing floor that separates a noise-FLOODED low-SNR PING from high-SNR PONG residual) is needed before the
+flip. So this commit lands STAGE2 (closes the responder hole; active whenever the knob is on — the rig low-SNR
+use case) and REVERTS the flip: robust-idle-ping stays default-OFF.
+
+**Verification.** ctest clean (STAGE2 is GUI-layer; no protocol-test regression). gui_qso good@20 PASS with
+STAGE2 present + robust-ping off (byte-behavior unchanged vs before — the emit that reads bare_chirp_expected_ is
+disabled). Rig MPM@8 pure-default+knob: connects (1 robust-PING) + delivers CRC-clean. KNOWN_BUGS updated: the
+responder-starvation blocker is closed; the remaining default-on gate is the good@20 high-SNR churn.
+
+---
+
 ## 2026-07-01 — fix(snr): promote ratiometric connect SNR to DEFAULT-ON (#74) — idle meter mis-selects a stalling mode on a real radio
 
 **What was broken.** The connect-time rate decision consumed `IDLE_IN_BAND` SNR, a noise-only meter that

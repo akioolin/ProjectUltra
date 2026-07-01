@@ -487,7 +487,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
     const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
 
-    // ROBUST LOW-SNR IDLE PING (#70, env-gated prototype, default-OFF):
+    // ROBUST LOW-SNR IDLE PING (#70, env-gated, default-OFF; opt IN via ULTRA_ROBUST_IDLE_PING=1):
     // The ping/connect classifier is level/ratio-based (kPingMaxDataToTrainingRMSRatio
     // = 0.5, absolute floor 0.16). A bare PING is just a chirp with a SILENT data
     // region; at low SNR the broadband noise floods that region (data/train RMS ratio
@@ -496,11 +496,17 @@ void StreamingDecoder::decodeCurrentFrame() {
     // (sim floor: never below ~15 dB Good, vs the chirp itself locking solidly at
     // corr 0.6-0.75 to ~6 dB AWGN). When ON, a solid chirp-lock (corr >= floor, gap
     // OK) emits the PING on the chirp signature alone, independent of the data-region
-    // level. SAFE-by-construction in this prototype: only frames that ALREADY tripped
-    // the pre-LDPC false-lock reject (low LLR) reach the robust emit, so a cleanly
-    // decodable CONNECT/CONNECT_ACK (good LLR -> CW0 magic peek) is never short-
-    // circuited. The hardware #27 case (a BADLY FADED CONNECT_ACK whose CW0 also
-    // fails) is handled in stage 2 by gating on handshake state (bare-chirp-expected).
+    // level. SAFE-by-construction: only frames that ALREADY tripped the pre-LDPC
+    // false-lock reject (low LLR) reach the robust emit, so a cleanly decodable
+    // CONNECT/CONNECT_ACK (good LLR -> CW0 magic peek) is never short-circuited. Both
+    // starvation directions are now GATED: initiator #27 by bare_chirp_expected_=FALSE
+    // during CONNECTING, responder by STAGE2 (app.cpp: PONG -> expects-CONNECT window).
+    // DEFAULT-ON DEFERRED (2026-07-01): flipping it regresses the faithful sim gate at
+    // good@20 — a robust emit fires on the near-silent high-SNR PONG (ratio just above
+    // 0.5 -> data_bearing + low-LLR + chirp-lock) -> spurious PING/PONG churn -> slow
+    // connect. Needs a high-SNR-safe emit gate (e.g. a higher data_bearing floor that
+    // separates a genuinely noise-FLOODED PING from high-SNR PONG residual) before the
+    // flip. Rig low-SNR connect proven with the knob ON (MPG@9, MPM@8 pure-default+knob).
     static const bool robust_idle_ping = [] {
         const char* v = std::getenv("ULTRA_ROBUST_IDLE_PING");
         return v && v[0] == '1';

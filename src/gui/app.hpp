@@ -184,6 +184,14 @@ private:
     // deadlock). The connection-changed callback updates this atomic instead.
     std::atomic<protocol::ConnectionState> conn_state_cached_{
         protocol::ConnectionState::DISCONNECTED};
+    // #70 STAGE2: after this station PONGs a PING it is a RESPONDER expecting the
+    // initiator's CONNECT (a DATA frame), so the robust bare-chirp PING emit is disarmed
+    // (bare_chirp_expected_=false) for the initiator's connect-attempt window — else a
+    // badly-faded CONNECT, indistinguishable from a bare PING to the chirp-lock gate, gets
+    // re-PONGed instead of decoded (the responder-side analogue of #27). SDL_GetTicks() ms
+    // deadline; 0 = not armed. Re-armed by the tick when the window elapses while still
+    // DISCONNECTED. Written on the decode thread (PONG) + main thread (tick), so atomic.
+    std::atomic<uint32_t> responder_connect_expected_until_ms_{0};
 
     // Scenario scripting state (see Options auto_* fields). tickScenario() runs
     // each render frame and drives the real UI actions at the right lifecycle

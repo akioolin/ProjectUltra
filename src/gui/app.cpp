@@ -694,6 +694,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // Cache for the carrier-sense gate (read on the TX-callback path where
         // calling protocol_.getState() would re-enter the engine mutex).
         conn_state_cached_.store(state, std::memory_order_relaxed);
+        // #70 STAGE2: any real transition out of DISCONNECTED (e.g. the initiator's CONNECT
+        // landed -> CONNECTED) resolves the responder's expects-CONNECT window, so clear the
+        // re-arm deadline; bare_chirp_expected_ is then set correctly by the state->flag
+        // mapping below (CONNECTED/CONNECTING -> false).
+        if (state != protocol::ConnectionState::DISCONNECTED) {
+            responder_connect_expected_until_ms_.store(0, std::memory_order_relaxed);
+        }
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
 
         // Update modem engine connection state (affects waveform selection)
@@ -847,6 +854,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         if (!samples.empty()) {
             queueRealTxSamples(samples, "PONG audio");
         }
+        // #70 STAGE2: we just PONGed, so we are the RESPONDER and the initiator's CONNECT (a
+        // DATA frame) is now expected — disarm the robust bare-chirp PING emit exactly as the
+        // initiator does on PROBING->CONNECTING, so a badly-faded CONNECT is retried-as-data,
+        // not re-PONGed (the responder-side analogue of #27). Window covers one CONNECT
+        // reception + margin (the initiator sends CONNECT immediately on PONG; a 4-CW MC-DPSK
+        // frame + turnaround is ~10-15 s). SOUND FOR ANY WINDOW: if it re-arms mid-attempt and
+        // re-PONGs a still-faded CONNECT, the initiator is CONNECTING and half-duplex-TXing, so
+        // that PONG is a verified no-op (connection_handlers.cpp:39-48) and this same callback
+        // just re-armed the FALSE window — permanent starvation becomes occasional harmless
+        // waste. Shorter is chosen to bound the rare lost-PONG deafness (initiator re-PINGs from
+        // PROBING); the tick re-arms after the window. Rig-tunable. No-op unless the knob is on.
+        constexpr uint32_t kResponderConnectExpectedMs = 20000;  // ~1 CONNECT reception + margin
+        modem_.setBareChirpExpected(false);
+        responder_connect_expected_until_ms_.store(
+            SDL_GetTicks() + kResponderConnectExpectedMs, std::memory_order_relaxed);
     });
 
     // Wire up modem ping detection to protocol
@@ -2096,6 +2118,22 @@ void App::render() {
 
     if (elapsed > 0 && elapsed < 1000) {
         protocol_.tick(elapsed);
+    }
+
+    // #70 STAGE2 re-arm: if we PONGed but the initiator's connect attempt elapsed with no
+    // CONNECT (still DISCONNECTED), go back to expecting a bare-chirp PING so future PINGs are
+    // still answered (a spurious PONG must not leave us permanently deaf). A successful
+    // CONNECT clears the deadline via the state callback (CONNECTED != DISCONNECTED).
+    {
+        const uint32_t deadline =
+            responder_connect_expected_until_ms_.load(std::memory_order_relaxed);
+        if (deadline != 0 && static_cast<int32_t>(now - deadline) >= 0) {
+            responder_connect_expected_until_ms_.store(0, std::memory_order_relaxed);
+            if (conn_state_cached_.load(std::memory_order_relaxed) ==
+                protocol::ConnectionState::DISCONNECTED) {
+                modem_.setBareChirpExpected(true);
+            }
+        }
     }
 
     // Scenario scripting: drive the real connect/accept/send actions.
