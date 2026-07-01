@@ -487,7 +487,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
     const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
 
-    // ROBUST LOW-SNR IDLE PING (#70, env-gated, default-OFF; opt IN via ULTRA_ROBUST_IDLE_PING=1):
+    // ROBUST LOW-SNR IDLE PING (#70): now DEFAULT-ON; opt OUT via ULTRA_ROBUST_IDLE_PING=0.
     // The ping/connect classifier is level/ratio-based (kPingMaxDataToTrainingRMSRatio
     // = 0.5, absolute floor 0.16). A bare PING is just a chirp with a SILENT data
     // region; at low SNR the broadband noise floods that region (data/train RMS ratio
@@ -501,15 +501,16 @@ void StreamingDecoder::decodeCurrentFrame() {
     // CONNECT/CONNECT_ACK (good LLR -> CW0 magic peek) is never short-circuited. Both
     // starvation directions are now GATED: initiator #27 by bare_chirp_expected_=FALSE
     // during CONNECTING, responder by STAGE2 (app.cpp: PONG -> expects-CONNECT window).
-    // DEFAULT-ON DEFERRED (2026-07-01): flipping it regresses the faithful sim gate at
-    // good@20 — a robust emit fires on the near-silent high-SNR PONG (ratio just above
-    // 0.5 -> data_bearing + low-LLR + chirp-lock) -> spurious PING/PONG churn -> slow
-    // connect. Needs a high-SNR-safe emit gate (e.g. a higher data_bearing floor that
-    // separates a genuinely noise-FLOODED PING from high-SNR PONG residual) before the
-    // flip. Rig low-SNR connect proven with the knob ON (MPG@9, MPM@8 pure-default+knob).
+    // PROMOTED default-ON 2026-07-01. A first flip regressed the good@20 sim gate — the
+    // ratio-based data_bearing test fired the robust emit on strong high-SNR false-syncs
+    // (data_rms ~0.3) as well as genuine flooded PINGs -> PING/PONG churn. Fixed by the
+    // high-SNR-safe emit gate below (data_rms <= kPingChirpLockMaxDataRMS separates the two;
+    // measured good@20 0.28-0.33 vs rig low-SNR 0.04-0.09). Now: good@20 PASS with the emit
+    // active; rig low-SNR connect (MPG@9/MPM@8) preserved. Both starvation directions gated
+    // (initiator #27 + responder STAGE2). Opt OUT via ULTRA_ROBUST_IDLE_PING=0.
     static const bool robust_idle_ping = [] {
         const char* v = std::getenv("ULTRA_ROBUST_IDLE_PING");
-        return v && v[0] == '1';
+        return !(v && v[0] == '0');  // default-ON; "0" opts out
     }();
     const size_t mc_dpsk_symbol_samples =
         (allow_ping_detection && waveform_)
@@ -1214,8 +1215,21 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // noise floods a bare PING's silent gap, a solid chirp signature is the
                 // trustworthy discriminator (it carries the chirp's processing gain).
                 // Emit the PING on chirp-lock alone instead of waiting for a CONNECT.
+                // #70 HIGH-SNR-SAFE GATE (2026-07-01): the data/train RATIO cannot separate a
+                // flooded PING from a strong false-sync-on-data (BOTH read ratio ~1.0 —
+                // measured good@20 spurious 1.007-1.014 vs rig low-SNR 0.52-1.11). What DOES
+                // separate them is the ABSOLUTE data-region power: a noise-flooded PING is
+                // quiet (rig data_rms 0.04-0.09) while a false lock on a real high-SNR data
+                // frame is loud (good@20 data_rms 0.28-0.33). So require the data region to be
+                // quiet enough to be a PING — kPingChirpLockMaxDataRMS (0.16), its documented
+                // purpose. This is what let default-ON regress the good@20 handshake (spurious
+                // emits -> PING/PONG churn). NOTE: an absolute level is fragile per #74's
+                // lesson (RX level varies on a real radio); a noise-floor-RELATIVE gate is the
+                // level-invariant refinement, but the observed margins here are 2-8x and
+                // bare_chirp_expected_ (STAGE2) backstops the residual low-SNR ambiguity.
                 if (data_bearing_mcdpsk && robust_idle_ping &&
                     bare_chirp_expected_.load(std::memory_order_relaxed) &&
+                    reject_ping.data_rms <= frame_policy::kPingChirpLockMaxDataRMS &&
                     reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
                     std::abs(reject_ping.gap_error_samples) <=
                         frame_policy::kPingMaxGapError) {

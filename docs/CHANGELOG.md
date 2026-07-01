@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — fix(handshake): #70 high-SNR-safe robust-PING gate -> ULTRA_ROBUST_IDLE_PING promoted DEFAULT-ON
+
+**What was blocking the flip.** The previous commit landed STAGE2 but DEFERRED the default-on flip because
+flipping it regressed the good@20 sim gate (spurious robust emits -> PING/PONG churn -> slow connect). This
+commit fixes that and completes the flip.
+
+**Root cause of the good@20 churn (measured, not guessed).** The robust emit's `data_bearing` test is the
+data/train RMS RATIO (> 0.5). But that ratio CANNOT separate the two frame types that reach it: a genuine
+noise-flooded low-SNR PING and a strong false-sync on a real high-SNR data frame BOTH read ratio ~1.0 (measured:
+good@20 spurious 1.007-1.014 vs rig low-SNR 0.52-1.11). What separates them is the ABSOLUTE data-region power: the
+flooded PING is quiet (rig data_rms 0.04-0.09) while the high-SNR false-sync is loud (good@20 data_rms 0.28-0.33).
+
+**Fix (streaming_ofdm_decode.cpp).** Gate the robust emit on `reject_ping.data_rms <= kPingChirpLockMaxDataRMS`
+(0.16, its documented "quiet enough to be a PING" purpose): the good@20 false-syncs (0.28-0.33) are excluded, the
+low-SNR PINGs (0.04-0.09) pass, with 2-8x margins. Then flipped `robust_idle_ping` DEFAULT-ON (opt-out
+ULTRA_ROBUST_IDLE_PING=0). Both starvation directions remain gated (initiator #27 via CONNECTING; responder via
+STAGE2). NOTE (documented in code): an absolute level is fragile per #74's level-deficit lesson; a
+noise-floor-RELATIVE gate is the level-invariant refinement, backstopped for now by bare_chirp_expected_.
+
+**Verification.**
+- **good@20 sim gate PASS** with the emit ACTIVE (default-on): QPSK R2/3, 1860 bps, CRC-clean, PING/PONG churn
+  2/2 (was 9/11 + FAIL). The regression is gone.
+- **Rig MPM@8 pure-default (zero env vars) connects + delivers CRC-clean** (2/2 runs), MC-DPSK DBPSK R1/4. Every
+  rig PING-check data_rms 0.034-0.086 is < 0.16, so genuine PINGs pass the gate; the pre-gate run's robust emit
+  fired at 0.0427 (passes).
+- `ctest` clean (only pre-existing UltraTncSimAudio + fixture-only ImageUtil fail).
+
+**Impact.** With #70 (robust PING) + #74 (ratiometric SNR) both default-on and #71 (window/floor) landed, the
+low-SNR path is now DEFAULT on a real radio: the modem connects below the old ~15 dB Good handshake floor and
+selects the correct robust mode with zero env knobs (rig-proven at MPM@8). Closes BUG-HANDSHAKE-PING-FLOOR.
+
+---
+
 ## 2026-07-01 — fix(handshake): #70 STAGE2 — responder expects-CONNECT window closes the robust-idle-PING starvation hole (default-on flip DEFERRED)
 
 **What was the gap.** The robust-idle-PING emit (streaming_ofdm_decode.cpp, ULTRA_ROBUST_IDLE_PING, still
