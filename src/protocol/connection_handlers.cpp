@@ -761,10 +761,17 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // override across mode changes — otherwise auto-pick from rate.
     // Without this, a later MODE_CHANGE would silently drop the user's
     // override (caught by Codex, 2026-05-04).
+    // CW count for the new rung: uses the Doppler-coherence-REFINED fading index
+    // (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE follow-through: this is the mid-stream
+    // negotiate site, where the coherence verdict CAN be valid — equals the raw
+    // fading_index until it is).
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
         : connection_policy::recommendCWCountForChannel(
-              new_mod, new_rate, negotiated_mode_, fading_index_, measured_snr));
+              new_mod, new_rate, negotiated_mode_,
+              connection_policy::coherenceAdjustedFadingIndex(
+                  fading_index_, coherence_score_, coherence_valid_),
+              measured_snr));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,

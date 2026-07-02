@@ -35,6 +35,7 @@
 #include "ultra/types.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 namespace ultra {
@@ -46,13 +47,18 @@ public:
         // quality in [0,1]: 1 = lots of decode headroom, 0 = group failed.
         float drop_below = 0.25f;   // below this -> step down immediately
         float climb_above = 0.70f;  // at/above this for climb_streak groups -> step up
-        // Climbs are deliberately SLOWER than drops. Bumped 2 -> 3 (2026-05-28)
-        // after the g4+adapt seed-2 thrash: climb_streak=2 climbed back to R3/4
-        // ~17 s after escaping a fade and immediately dropped into the next one;
-        // 940 bps net. Three consecutive comfortable groups (~20 s at group=4)
-        // gives the recovering channel a longer "rest" before risking a climb
-        // back into freshly-arrived fade activity.
-        int climb_streak = 3;
+        // Climbs are deliberately SLOWER than drops. History: 2 -> 3 (2026-05-28)
+        // after the g4+adapt seed-2 thrash — but that was PRE-EMA (the raw quality
+        // drove the policy). 3 -> 2 (2026-07-02, fade-riding ladder): the ladder now
+        // RIDES the Good-channel fade cycle (~10-20 s crests at ~8 s group cadence),
+        // so reaction within ~2 ACKed groups is the requirement, and the 2026-06-09
+        // EMA + reset-to-midpoint already supplies the sustained-evidence inertia the
+        // old 3-streak existed for (post-change the EMA needs ~2 more groups to
+        // re-reach climb_above, so an effective climb still needs ~4 groups of clean
+        // evidence end-to-end; the ssthresh ceiling below still suppresses the
+        // bounce-back-into-a-failed-rung oscillation). Env ULTRA_RATE_CLIMB_STREAK
+        // [1..16] overrides for sweeps.
+        int climb_streak = 2;
         // EMA weight for the quality low-pass (the churn fix). alpha=0.4 => a single
         // bad group only pulls ema down ~40% (1.0 -> 0.6, still above drop_below), so a
         // transient fade does NOT drop the rung; ~3 consecutive bad groups are needed to
@@ -76,6 +82,12 @@ public:
 
     RateController() : RateController(Config{}) {}
     explicit RateController(Config cfg) : cfg_(std::move(cfg)) {
+        // Sweep knob for the climb reaction time (see climb_streak above). Read here so
+        // every construction site (Connection) honors it; tests construct with env unset.
+        if (const char* e = std::getenv("ULTRA_RATE_CLIMB_STREAK")) {
+            const int n = std::atoi(e);
+            if (n >= 1 && n <= 16) cfg_.climb_streak = n;
+        }
         if (cfg_.ladder.empty()) {
             // R5/6 RETIRED from the auto ladder (2026-06-17). It was added (2026-05-28)
             // as a "toward-3000" climb target above R3/4, but multi-anchor measurement

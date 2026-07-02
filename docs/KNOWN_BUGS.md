@@ -137,22 +137,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - **STAGE2 (2026-07-01, LANDED — responder hole CLOSED):** on PONG-TX the responder now sets `bare_chirp_expected_`=FALSE + arms a ~20 s expects-CONNECT window (app.cpp), mirroring the initiator's PROBING→CONNECTING disarm, then the tick re-arms. Sound for any window: while CONNECTING the initiator re-SENDS CONNECT (never re-PINGs, connection.cpp:2421-2442) and a stray PONG to a CONNECTING initiator is a no-op + half-duplex-inaudible, so worst case is occasional harmless waste, never permanent starvation.
 - **Remaining before default-ON (the NEW blocker):** flipping `ULTRA_ROBUST_IDLE_PING` default-ON REGRESSES the faithful sim gate at good@20 — the near-silent HIGH-SNR PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real chirp, so the robust emit fires SPURIOUSLY → PING/PONG churn (11/9) → ~30 s connect → gate overrun. Isolation-proven: same build with `=0` → good@20 PASS (1860 bps); STAGE2 alone is clean. FIX NEEDED: a high-SNR-safe emit gate (e.g. a higher data_bearing floor separating a noise-FLOODED low-SNR PING (ratio 0.68–0.88) from high-SNR PONG residual (~0.5–0.6)). Also: throughput below ~8 dB is a separate lever (#71), not this bug.
 
-### BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE: rate-change wipes the Good/Moderate coherence pool — precondition before enabling ULTRA_RATE_ADAPT
-- Status: **OPEN but GATED-INERT (no default-path impact).** Tracked by the 2026-06-16 four-tier
-  review of the Doppler-coherence discriminator (CHANGELOG 2026-06-16, design doc §11).
-- **What:** the discriminator is hosted in `StreamingDecoder` so it survives the per-group OFDM
-  demodulator recreation during a normal (fixed-rate) burst transfer — and it does (GUI-proven:
-  good 0.70 [GOOD] 27/27, moderate −0.11 [MODERATE/POOR] 78/78). BUT a MODE_CHANGE recreates more
-  than the demodulator; the coherence verdict reverts to the blind `fading_index` during the
-  ~30 s re-convergence window after a rate move.
-- **Why it doesn't bite today:** mid-stream rate moves originate only from the `ULTRA_RATE_ADAPT`
-  (default-OFF) machinery. At CONNECT the coherence is always invalid (no OFDM data pooled), so the
-  rate pick is byte-identical to today → zero default-path regression.
-- **Fix before enabling ULTRA_RATE_ADAPT:** persist `coherence_score_`/`coherence_valid_` across the
-  MODE_CHANGE (carry at the Connection layer, or keep the estimator pool across the rebuild), AND
-  route the CW-count/negotiate sites through `connection_policy::coherenceAdjustedFadingIndex`. See
-  `docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md` §11 follow-up #2.
-
 ### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
 - Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First
   Mac↔IONOS↔Pi5 bringup. After the CONNECT-decode code fix (CHANGELOG 2026-06-14), Mac→Pi5 completes
@@ -660,6 +644,23 @@ Current blockers:
 
 ## Fixed Bugs
 
+- 2026-07-02: BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE fixed — the `ULTRA_RATE_ADAPT` precondition
+  (2026-06-16 four-tier review): a mid-stream MODE_CHANGE could revert the Good/Moderate coherence
+  verdict to the blind `fading_index` during the ~30 s re-pooling window. As-verified mechanics
+  (2026-07-02 code read — the original "pool wiped every rate move" claim was PARTLY STALE): the
+  decoder-hosted estimator pool + its atomics already survive `applyPendingConnectedOFDMMode`
+  (waveform rebuild) and the pre-TX echo-clears (post 06-17/#67 `reset_doppler_coherence=false`
+  paths); the remaining hole was that ANY modem-layer reset that does wipe the pool
+  (`ModemEngine::reset`, future rebuild paths) immediately overwrote the Connection's valid verdict
+  with invalid via the per-frame binding refresh. Fix per the named option: CARRY at the Connection
+  layer — `Connection::setChannelCoherence` now holds the last VALID verdict while CONNECTED (the
+  estimator is a cumulative mean and never un-validates on its own, so an invalid feed while
+  connected can only mean "pool reset"), made safe by NEW per-connection clearing in
+  `enterConnected()`/`reset()` (also fixes a latent cross-connection verdict leak). The mid-stream
+  `requestModeChange` CW-count pick now routes through `coherenceAdjustedFadingIndex` (the
+  CONNECT-time sites already did; remaining CONNECT-time raw-`fading_index` sites are provably
+  identical there since coherence is invalid at CONNECT). Shipped with the fade-riding ladder
+  default-ON (CHANGELOG 2026-07-02).
 - 2026-05-13: BUG-PING-DETECTOR-001 fixed - real-HF PINGs now classify via additive chirp-lock plus LDPC-invalid PATH 2 while preserving the clean-cable/AWGN RMS-silence PATH 1.
 - 2026-05-13: BUG-TNC-SESSION-001 fixed — R1 added the full RX decoder/session reset on disconnect; R2 added audio-producer quiesce/drain plus a reset-generation guard for in-flight decode callbacks, so a persistent `ultra_tnc` starts the next back-to-back PAT CONNECT from a fresh modem session boundary without stale capture backlog or stale cursor commits.
 - 2026-05-08: BUG-CARRIER-LDPC-001 fixed — CarrierLDPC v1 was a new OFDM coded-bit wire image, but SP4 enabled the runtime as a local modem default instead of a negotiated peer capability. A partially upgraded Mac↔Pi pair applied the TX permutation on one endpoint while the peer decoded legacy ordering, producing the AWGN R1/2 1KB 0-ACK/15-timeout failure. The repair uses the existing `PHY_MASK_V1` capability: modern-modern CONNECT/CONNECT_ACK enables CarrierLDPC on both TX/RX; modern-legacy leaves the legacy ordering active. Synchronized upgraded hardware now passes AWGN / Good / Moderate at SNR=15 R1/2 1KB with DATA `Ncw=8` active and ACK/control `Ncw=1` inactive.

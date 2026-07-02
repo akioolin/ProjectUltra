@@ -10,6 +10,86 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-02 — feat(rate): the fade-riding adaptive ladder goes LIVE (default-ON) — crest→16QAM R2/3, trough→QPSK; coherence carried across MODE_CHANGE (closes BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE)
+
+**Campaign redirection (fable_analysis/NEXT_SESSION_BRIEF item 2):** no single rung reaches the
+leader's measured-delivered ~3.1k — the leader RIDES THE FADE CYCLE with fast rate/mod adaptation.
+This change makes our assembled (mostly default-OFF) ladder machinery LIVE and FAST. All mid-stream
+moves still go through the MANDATORY clean-boundary gate + synchronized `requestModeChange`
+(06-09/06-10 — gate-less was built and REJECTED: mid-stream ARQ renumber deadlocks) and the
+`applyDataMode` HARQ flush still fires on any mod/rate/CW change. Connect-time selection is
+UNTOUCHED (the 07-01 #58 basis, `ULTRA_R23_BASIS`, floors — all byte-identical at CONNECT).
+
+### 1. fix(coherence): BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE — carry the verdict at the Connection layer
+The named precondition for enabling the ladder. As-verified mechanics (the KNOWN_BUGS "pool wiped
+every rate move" claim was PARTLY STALE): the decoder-hosted estimator pool + atomics already
+survive `applyPendingConnectedOFDMMode` and the pre-TX echo-clears (post 06-17/#67); the remaining
+hole was that any modem-layer reset that DOES wipe the pool immediately overwrote the Connection's
+valid verdict via the per-frame binding refresh. Fix (`connection.hpp setChannelCoherence`): while
+CONNECTED, an invalid feed never clears a valid verdict (the estimator is a cumulative mean — it
+never un-validates on its own, so invalid-while-connected can only mean "pool reset"); paired with
+NEW per-connection clearing in `enterConnected()`/`reset()` (also fixes a latent cross-connection
+verdict leak — Connection-level coherence was never reset anywhere). The mid-stream
+`requestModeChange` CW pick now routes through `coherenceAdjustedFadingIndex`
+(`connection_handlers.cpp`); CONNECT-time sites keep raw `fading_index` (provably identical —
+coherence is always invalid at CONNECT).
+
+### 2. feat(rate): loop speed for fade-cycle tracking (~10-20 s Good cycle, ~8 s ACKed groups)
+- `RateController.climb_streak` 3 → 2 (`rate_controller.hpp`, env `ULTRA_RATE_CLIMB_STREAK`
+  [1..16]). The 2026-05-28 "2 thrashes" history predates the EMA: with EMA α=0.4 +
+  reset-to-midpoint, a post-change climb still needs ~4 clean groups end-to-end (EMA re-reach
+  0.70 ≈ 2 groups + streak 2); the ssthresh ceiling still suppresses bounce-back into a failed rung.
+- QAM16 climb streak 4 → 2 (`qam16ClimbStreak()`, env `ULTRA_QAM16_CLIMB_STREAK` unchanged):
+  a Good crest only lasts a few groups; a 4-group streak forfeited most of each crest.
+- QAM16 demote IMMEDIATE on ONE bad group (`kQam16DemoteBadStreak` 2 → 1; NACK demote unchanged):
+  the trough exit must be as prompt as the cliff exit.
+- **Sticky no-reclimb REMOVED** (`qam16_sticky_demoted_` deleted) — replaced by a re-climb
+  COOLDOWN: after a demote the climb streak may not begin until 3 CLEAN groups pass
+  (`ULTRA_QAM16_RECLIMB_COOLDOWN` [0..64]), DOUBLING per demote this connection (cap ×4;
+  escape-drop counts double) — `noteQam16Demoted()`. WHY: under fade-riding the QPSK↔QAM16
+  oscillation IS the mechanism — the rung SHOULD oscillate with the ~10-20 s fade cycle
+  (crest→16QAM R2/3, trough→QPSK R3/4). The 06-17 sticky design assumed oscillation was pathology
+  and permanently forfeited every later crest. The cooldown+backoff bounds the overhead instead:
+  per-move cost from code ≈ `kWideOFDMFullAnchorExtraMs` 1200 ms full re-anchor + control
+  round-trip (1-CW MODE_CHANGE + ACK + turnarounds ~0.6 s sim / ~1.5 s rig each) ≈ **2.4-3 s/move
+  sim, ~4 s rig**; worst-case sustained thrash (climb, crater in 1 group, demote, re-climb after
+  cooldown 3 + streak 2 = 5 clean groups) = 2 moves per ≥6×~8.4 s ≈ ~9-10% of airtime at base
+  cooldown, dropping to ~6.5% → ~4% as the backoff doubles (3→6→12) — meets the <10% bound.
+
+### 3. feat(rate): DEFAULT-ON for connected wideband OFDM file transfers
+- `rateAdaptationActive()`: env unset → **ON for `OFDM_CHIRP`** (the burst-transport file path
+  whose gate/MODE_CHANGE/ssthresh/climb machinery is GUI-proven). Explicit `ULTRA_RATE_ADAPT=1`
+  keeps the old any-OFDM semantics; `=0` opts out; `ULTRA_LOCK_RATE=1` still pins. MC-DPSK /
+  OFDM_NARROW stay fixed-rate by default (unvalidated there).
+- `ULTRA_QAM16_CLIMB`: default-ON ("0" opts out). `ULTRA_ENABLE_QAM16_LADDER` (the CONNECT-time
+  16QAM selection knob) stays default-OFF — this change is mid-stream only, by design.
+- `tools/gui_qso_scenario.sh`: `ULTRA_LOCK_RATE` default 1 → **0** (a bare run is now the
+  out-of-box adaptive run; pin explicitly for fixed-rung baselines) + the pinning
+  "unexpected data mode" watchdog is disabled when the ladder is free (`ULTRA_LOCK_RATE=0`) —
+  mid-transfer moves are the mechanism, not a failure.
+- ACK-loss during a move is covered by the existing MODE_CHANGE retry (`modeChangeRetryMs`, up to
+  `MODE_CHANGE_MAX_RETRIES=2`, then keep-current-mode) + `mode_change_pending_` blocking new
+  submits; a demote decided during a busy window HOLDs and re-asserts on the next bad-group ack
+  (the 06-10 deferred-boundary semantics, unchanged).
+
+### 4. feat(telemetry): per-transfer [LADDER] summary
+Sender logs ONCE at transfer completion (success/fail/cancel — wrapped in `setFileSentCallback`):
+`Connection: [LADDER] qpsk_r23=27% qpsk_r34=10% 16qam_r23=63% moves=2 (197s, ok)` — time-in-rung
+percentages + mid-stream move count (`ladderTelemetry*` in `connection.cpp`, segments closed in
+`applyDataMode`). Pure observability.
+
+### Verification
+- `cmake --build build -j4` clean; `ctest --test-dir build --output-on-failure -j4` → **80/81**
+  (only the pre-existing `UltraTncSimAudio` fails). `test_rate_controller.cpp` updated to the
+  climb_streak=2 defaults (climb at 2 good groups; ssthresh holds through the first climb window,
+  re-probes ~5th good group).
+- Faithful gate (`gui_qso_scenario.sh`, 50 KB, out-of-box defaults — no env): see the table below
+  (filled from /tmp/ladder_gate). good@20 seed 42: **PASS 2070 bps vs pinned fixed-rate baseline
+  1960 (QPSK R2/3)**, ladder trajectory R2/3 →(83 s) R3/4 →(103 s) 16QAM R2/3, 63% of the
+  transfer at 16QAM, moves=2, CRC-clean.
+
+---
+
 ## 2026-07-02 — feat(alc): closed-loop TX-drive control (software-ALC, default-ON) — BUG-QAM16-RIG-LEVEL-BUDGET lever, **WIRE-BREAKING tone-burst ACK**
 
 > **WIRE-BREAKING:** the tone-burst ACK's 2 reserved bits [30..31] now carry a drive
