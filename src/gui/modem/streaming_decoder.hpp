@@ -90,6 +90,14 @@ struct DecodeResult {
     float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
     bool has_ofdm_broadband_snr_db = false;
     float ofdm_broadband_snr_db = 0.0f;     // Historical field name; OFDM in-band SNR.
+    // #58 BUG-CONNECT-SNR-VARIANCE: both MC-DPSK in-band estimates, surfaced so
+    // consumers/tests can compare spreads. training = ~170 ms preamble snapshot
+    // (ONE fade state); data_aided = whole-frame differential estimate
+    // (fade-averaged). snr_db routes data_aided when this frame decoded OK.
+    bool has_mcdpsk_training_snr_db = false;
+    float mcdpsk_training_snr_db = 0.0f;
+    bool has_mcdpsk_data_aided_snr_db = false;
+    float mcdpsk_data_aided_snr_db = 0.0f;
     float ofdm_internal_snr_db = 0.0f;      // Demodulator internal LLR/channel-quality scale.
     float sync_quality_db = 0.0f;           // Chirp correlation confidence; not physical SNR.
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index

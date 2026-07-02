@@ -91,6 +91,23 @@ bool connectRatiometricSnrEnabled() {
     return enabled;
 }
 
+// #58 BUG-CONNECT-SNR-VARIANCE (2026-07-02): when a decoded MC-DPSK frame also
+// carries a data-aided whole-frame SNR estimate, route THAT as MCDPSK_IN_BAND
+// instead of the ~170 ms training snapshot. Same basis (level-invariant,
+// in-band 50-2950 Hz ratio), lower variance: the training window is ONE fade
+// state (Tc ~ 4.2 s on Good -> rig connect snapshots spread ~10 dB), while the
+// frame's CWs span seconds, so the per-symbol average is fade-averaged by
+// construction. Decode-then-measure: only routed when THIS frame's LDPC decode
+// succeeded. Default-ON; opt OUT via ULTRA_CONNECT_DATA_AIDED_SNR=0.
+bool connectDataAidedSnrEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_CONNECT_DATA_AIDED_SNR");
+        if (!value || value[0] == '\0') return true;      // default-ON
+        return !(value[0] == '0' && value[1] == '\0');    // "0" opts out
+    }();
+    return enabled;
+}
+
 }  // namespace
 
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
@@ -190,17 +207,48 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     } else {
         result.snr_source = SNRSource::SYNC_QUALITY;
         const auto* mc_waveform = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
+        const bool training_snr_valid =
+            mc_waveform && mc_waveform->hasEstimatedSNR() &&
+            std::isfinite(mc_waveform->estimatedSNR());
+        const bool data_aided_snr_valid =
+            mc_waveform && mc_waveform->hasDataAidedSNR() &&
+            std::isfinite(mc_waveform->getDataAidedSNRdB());
+        if (training_snr_valid) {
+            result.has_mcdpsk_training_snr_db = true;
+            result.mcdpsk_training_snr_db = mc_waveform->estimatedSNR();
+        }
+        if (data_aided_snr_valid) {
+            result.has_mcdpsk_data_aided_snr_db = true;
+            result.mcdpsk_data_aided_snr_db = mc_waveform->getDataAidedSNRdB();
+        }
         // connected_ OR the opt-in knob: when ULTRA_CONNECT_RATIOMETRIC_SNR is
         // set, the level-invariant MC-DPSK training SNR also routes for the
         // un-connected handshake frames (so the connect-time rate decision uses
         // an honest, level-agnostic SNR instead of the reference-assuming idle
         // meter). Knob OFF => (connected_ || false) == connected_ => byte-identical.
         if ((connected_ || connectRatiometricSnrEnabled()) &&
-            mode_ == protocol::WaveformMode::MC_DPSK &&
-            mc_waveform && mc_waveform->hasEstimatedSNR() &&
-            std::isfinite(mc_waveform->estimatedSNR())) {
-            result.snr_db = mc_waveform->estimatedSNR();
+            mode_ == protocol::WaveformMode::MC_DPSK && training_snr_valid) {
+            // #58 BUG-CONNECT-SNR-VARIANCE: prefer the whole-frame data-aided
+            // fade-AVERAGED estimate over the single-fade-state training
+            // snapshot when this frame's LDPC decode SUCCEEDED
+            // (decode-then-measure). Same source tag: same basis, lower
+            // variance. Fall back to the training value otherwise.
+            const bool route_data_aided = connectDataAidedSnrEnabled() &&
+                                          result.success && data_aided_snr_valid;
+            result.snr_db = route_data_aided ? result.mcdpsk_data_aided_snr_db
+                                             : result.mcdpsk_training_snr_db;
             result.snr_source = SNRSource::MCDPSK_IN_BAND;
+            if (data_aided_snr_valid) {
+                LOG_MODEM(INFO,
+                          "[%s] MC-DPSK SNR: training=%.1f data_aided=%.1f (routed=%s)",
+                          log_prefix_.c_str(), result.mcdpsk_training_snr_db,
+                          result.mcdpsk_data_aided_snr_db,
+                          route_data_aided ? "data_aided" : "training");
+            } else {
+                LOG_MODEM(INFO,
+                          "[%s] MC-DPSK SNR: training=%.1f data_aided=n/a (routed=training)",
+                          log_prefix_.c_str(), result.mcdpsk_training_snr_db);
+            }
         } else if (result.has_idle_in_band_snr_db) {
             result.snr_db = result.idle_in_band_snr_db;
             result.snr_source = SNRSource::IDLE_IN_BAND;

@@ -78,6 +78,11 @@ public:
     bool hasData() const override;
     bool hasEstimatedSNR() const { return last_snr_valid_; }
     float estimatedSNR() const override;
+    // #58 data-aided fade-averaged SNR over the last demodulated frame's whole
+    // data span (vs the ~170 ms training snapshot in estimatedSNR()). The
+    // consumer must gate on the frame's LDPC decode success before routing it.
+    bool hasDataAidedSNR() const { return last_data_aided_snr_valid_; }
+    float getDataAidedSNRdB() const { return last_data_aided_snr_; }
     float estimatedCFO() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
 
@@ -131,6 +136,9 @@ private:
     std::vector<float> soft_bits_;
     float last_snr_ = 0.0f;
     bool last_snr_valid_ = false;
+    // #58: whole-frame data-aided fade-averaged SNR (sibling of last_snr_).
+    float last_data_aided_snr_ = 0.0f;
+    bool last_data_aided_snr_valid_ = false;
     float last_cfo_ = 0.0f;
 };
 

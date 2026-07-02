@@ -343,6 +343,16 @@ public:
     bool hasEstimatedSNR() const { return last_snr_valid_; }
     float getEstimatedSNR() const { return last_snr_db_; }
 
+    // Data-aided fade-averaged SNR over the last demodulated DATA span (#58 /
+    // BUG-CONNECT-SNR-VARIANCE). Unlike the training estimate (~170 ms = ONE
+    // fade state), this averages per-symbol differential SNR linearly across
+    // the whole frame (a CONNECT frame spans seconds ~ multiple coherence
+    // times) -> fade-averaged by construction. Validity here means "enough
+    // data symbols were measured"; the CONSUMER must additionally gate on the
+    // frame's LDPC decode success (decode-then-measure) before trusting it.
+    bool hasDataAidedSNR() const { return last_data_aided_snr_valid_; }
+    float getDataAidedSNRdB() const { return last_data_aided_snr_db_; }
+
     // Set CFO (from external estimation like dual chirp)
     void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; cfo_initial_phase_ = 0.0f; }
 
@@ -441,6 +451,8 @@ public:
         temporal_fading_index_ = 0.0f;
         last_snr_valid_ = false;
         last_snr_db_ = 0.0f;
+        last_data_aided_snr_valid_ = false;
+        last_data_aided_snr_db_ = 0.0f;
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
@@ -862,6 +874,8 @@ public:
             temporal_fading_index_ = 0.0f;
         }
 
+        updateDataAidedSNREstimate(cached_phases, theta_c, psi_per_sym, valid_symbols);
+
         return soft_bits;
     }
 
@@ -1137,6 +1151,172 @@ private:
         last_snr_valid_ = true;
     }
 
+    // Data-aided fade-averaged SNR over the demodulated DATA span (#58 /
+    // BUG-CONNECT-SNR-VARIANCE). updateTrainingSNREstimate above measures ONLY
+    // the ~170 ms training preamble = ONE fade state (Tc ~ 4.2 s on Good), so
+    // connect-time snapshots spread ~10 dB pick-to-pick on a fading rig. A
+    // CONNECT frame's 4 CWs span seconds (> Tc), so a per-symbol estimate
+    // averaged LINEARLY over the whole frame is fade-averaged by construction,
+    // with zero handshake latency (decode-then-measure).
+    //
+    // Differential-level design (immune to channel drift across the frame — no
+    // static channel reconstruction): per (symbol, carrier) the differential
+    // product d = curr * conj(prev) is already reduced to a UNIT phasor
+    // (pass 1 normalizes carrier outputs), so the error to the nearest
+    // constellation point (hard decision on d's phase; DBPSK 2 points, DQPSK 4
+    // points, from config_.bits_per_symbol) is the chord
+    //   |e|^2 = |exp(j*phi) - exp(j*phi_hat)|^2 = 4 sin^2(phi_err/2) ~ phi_err^2,
+    // a PHASE-only residual. Calibration from first principles: with
+    // per-carrier post-correlator SNR rho, each coherent phase has variance
+    // 1/(2*rho) (only the tangential noise half moves the phase); the
+    // differential doubles it -> E[phi_err^2] ~ 1/rho. So
+    //   SNR_diff(sym) = signal/error = num_carriers / sum_c |e_c|^2
+    // estimates rho DIRECTLY: the magnitude normalization discards the radial
+    // noise half, which exactly cancels the differential +3.01 dB doubling (the
+    // naive "SNR = 2 x SNR_diff" applies only to a non-normalized error vector).
+    // Three analytic corrections, all derived from parameters in scope (no
+    // per-modulation constants — CLAUDE.md adaptivity rule):
+    //   * deterministic ICI: the carriers are NOT orthogonal on the symbol grid
+    //     (spacing is not a multiple of the symbol rate), so each carrier's
+    //     correlator leaks neighbor power |G(df)|^2 = (sin(pi*df*T) /
+    //     (Nsps*sin(pi*df/fs)))^2 — a geometry-computable error floor
+    //     (~-29 dB/carrier for the 8x1024 CONNECT geometry, CONFIRMED: the
+    //     measured high-SNR excess error 1.1-1.4e-3 matches the computed
+    //     1.25e-3). It enters the phase-error metric exactly like noise
+    //     (tangential half, doubled by the differential), so subtract the
+    //     computed sum from the measured error power.
+    //   * block averaging: per-symbol inversion has only num_carriers
+    //     chi-square dof -> heavy-tailed 1/x bias and an unstable ICI
+    //     subtraction. Average the error over ~0.2 s blocks first: >= 8x
+    //     symbols the dof, still << Tc of every supported channel (Good ~4.2 s,
+    //     Moderate ~1 s), so the linear block-SNR average stays fade-averaged
+    //     by construction. Remaining inverse-chi-square bias k/(k-2) (k = block
+    //     dof) is corrected analytically.
+    //   * in-band basis: each carrier's symbol correlator has noise bandwidth
+    //     = symbol_rate and the TX power splits across num_carriers, so
+    //     SNR_inband = rho * num_carriers * symbol_rate / 2900 (same 50-2950 Hz
+    //     passband convention as updateTrainingSNREstimate / the AWGN truth).
+    // Measured residual calibration + hard-decision bias: see
+    // kDataAidedResidualCalDb below and tests/test_mcdpsk_snr_calibration.cpp.
+    void updateDataAidedSNREstimate(const std::vector<float>& cached_phases,
+                                    const std::vector<float>& theta_c,
+                                    const std::vector<float>& psi_per_sym,
+                                    int valid_symbols) {
+        last_data_aided_snr_valid_ = false;
+        last_data_aided_snr_db_ = 0.0f;
+
+        const int nc = config_.num_carriers;
+        // Need >2 carriers and enough symbols for a meaningful average
+        // (mirrors the fading-index gate).
+        if (valid_symbols < 4 || nc < 3) {
+            return;
+        }
+
+        // Deterministic ICI floor of this carrier/symbol geometry (see header
+        // comment): sum over carrier pairs of the correlator leakage power,
+        // per symbol (relative to the unit-normalized per-carrier signal).
+        const double nsps = static_cast<double>(config_.samples_per_symbol);
+        const double fs = static_cast<double>(config_.sample_rate);
+        double ici_sum = 0.0;
+        for (int c = 0; c < nc; ++c) {
+            for (int o = 0; o < nc; ++o) {
+                if (o == c) continue;
+                const double df = static_cast<double>(carrier_freqs_[static_cast<size_t>(o)]) -
+                                  static_cast<double>(carrier_freqs_[static_cast<size_t>(c)]);
+                const double den = nsps * std::sin(M_PI * df / fs);
+                if (std::abs(den) < 1e-12) continue;
+                const double g = std::sin(M_PI * df * nsps / fs) / den;
+                ici_sum += g * g;
+            }
+        }
+
+        // Block length: ~0.2 s of symbols (min 8) — small vs every supported
+        // channel's coherence time, large enough for stable statistics.
+        const float symbol_rate = config_.getSymbolRate();
+        const int block_syms = std::max(
+            8, static_cast<int>(std::lround(0.2f * symbol_rate)));
+
+        const float two_pi = 2.0f * static_cast<float>(M_PI);
+        const float quad = static_cast<float>(M_PI) / 2.0f;
+        double snr_sum = 0.0;
+        int block_count = 0;
+        int sym = 0;
+        while (sym < valid_symbols) {
+            // Fold a short trailing remainder into the final block.
+            int len = std::min(block_syms, valid_symbols - sym);
+            if (valid_symbols - (sym + len) < block_syms / 2) {
+                len = valid_symbols - sym;
+            }
+            double err_power = 0.0;
+            for (int s = sym; s < sym + len; ++s) {
+                for (int c = 0; c < nc; ++c) {
+                    float phase = cached_phases[static_cast<size_t>(s) * nc + c]
+                                  - theta_c[static_cast<size_t>(c)]
+                                  - psi_per_sym[static_cast<size_t>(s)];
+                    while (phase > static_cast<float>(M_PI)) phase -= two_pi;
+                    while (phase < -static_cast<float>(M_PI)) phase += two_pi;
+                    float phase_error;
+                    if (config_.bits_per_symbol == 2) {
+                        // DQPSK differential constellation: +-pi/4, +-3pi/4
+                        const float shifted = phase - static_cast<float>(M_PI) / 4.0f;
+                        const float k = std::round(shifted / quad);
+                        phase_error = phase - (k * quad + static_cast<float>(M_PI) / 4.0f);
+                    } else {
+                        // DBPSK differential constellation: 0, pi
+                        const float k = std::round(phase / static_cast<float>(M_PI));
+                        phase_error = phase - k * static_cast<float>(M_PI);
+                    }
+                    while (phase_error > static_cast<float>(M_PI)) phase_error -= two_pi;
+                    while (phase_error < -static_cast<float>(M_PI)) phase_error += two_pi;
+                    const float half_sin = std::sin(0.5f * phase_error);
+                    err_power += 4.0 * static_cast<double>(half_sin) * half_sin;
+                }
+            }
+            // Subtract the deterministic ICI floor. Keep >= 20% of the raw
+            // measurement so a lucky block cannot go negative/explode: this
+            // bounds the correction at +7 dB, i.e. the estimator saturates
+            // ~7 dB above the raw ICI ceiling instead of recovering unbounded
+            // SNR from an ICI-dominated residual (honest saturation).
+            const double err_noise =
+                std::max(err_power - ici_sum * len, 0.2 * err_power);
+            // Signal power per (symbol, carrier) is 1 by construction (unit
+            // phasor). Inverse-chi-square correction (k-2)/k, k = block dof
+            // (1 phase dof per carrier per symbol).
+            const double dof = static_cast<double>(len) * nc;
+            const double signal_power = static_cast<double>(len) * nc;
+            snr_sum += (signal_power / std::max(err_noise, signal_power * 1e-6)) *
+                       ((dof - 2.0) / dof);
+            ++block_count;
+            sym += len;
+        }
+        if (block_count == 0) {
+            return;
+        }
+
+        const double mean_rho = snr_sum / block_count;
+        // 50-2950 Hz in-band noise bandwidth: the same passband the training
+        // estimator (and the AWGN truth calibration) ratios over.
+        constexpr double kInBandNoiseBandwidthHz = 2900.0;
+        // Residual calibration, MEASURED on tests/test_mcdpsk_snr_calibration
+        // (AWGN, CONNECT geometry 8 x DQPSK @ 46.875 baud, 5 seeds/point):
+        // see the measured table in the test file. Covers the second-order
+        // differential noise term the first-order derivation drops.
+        constexpr double kDataAidedResidualCalDb = 0.5;
+        const double snr_inband =
+            mean_rho * static_cast<double>(nc) *
+            static_cast<double>(symbol_rate) / kInBandNoiseBandwidthHz *
+            std::pow(10.0, kDataAidedResidualCalDb / 10.0);
+        if (snr_inband <= 0.0) {
+            return;
+        }
+        const float snr_db = static_cast<float>(10.0 * std::log10(snr_inband));
+        if (!std::isfinite(snr_db)) {
+            return;
+        }
+        last_data_aided_snr_db_ = std::clamp(snr_db, -20.0f, 60.0f);
+        last_data_aided_snr_valid_ = true;
+    }
+
     // Demodulate one symbol period for one carrier
     // CFO correction: mix at carrier frequency, but the samples have already been
     // frequency-corrected if cfo_hz_ != 0 (done in applyCFOCorrection)
@@ -1180,6 +1360,9 @@ private:
     float temporal_fading_index_ = 0.0f;
     bool last_snr_valid_ = false;
     float last_snr_db_ = 0.0f;
+    // #58: data-aided fade-averaged SNR over the last demodulated data span.
+    bool last_data_aided_snr_valid_ = false;
+    float last_data_aided_snr_db_ = 0.0f;
 
     // Precomputed sizes
     size_t chirp_samples_;

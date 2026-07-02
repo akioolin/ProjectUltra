@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-02 — feat(snr): #58 data-aided fade-averaged connect-time SNR (BUG-CONNECT-SNR-VARIANCE increment 2, default-ON)
+
+**Broken:** the connect-time SNR is `updateTrainingSNREstimate` over ONLY the ~170 ms MC-DPSK
+training preamble = ONE fade state (Tc ≈ 4.2 s at Good) → rig connect snapshots at dial-20
+spread 8.4–18.2 dB (~10 dB pick-to-pick); the +2 dB basis correction (increment 1) fixed the
+BIAS, not the VARIANCE. **Changed:** new data-aided whole-frame estimator
+`updateDataAidedSNREstimate` (`src/psk/multi_carrier_dpsk.hpp`, sibling of the training
+estimator): per (symbol,carrier) the unit-normalized differential product's chord error to the
+nearest constellation point (DBPSK/DQPSK from `config_.bits_per_symbol`) is accumulated over
+~0.2 s blocks (≪ Tc, ≥8× the per-symbol dof), block-linear-averaged over the WHOLE frame
+(4 CWs ≈ seconds ≈ multiple Tc) → fade-averaged by construction, zero handshake latency
+(decode-then-measure). Calibration fully derived, no tuned constants: the magnitude
+normalization discards the radial noise half which exactly cancels the differential +3.01 dB;
+geometry-computed non-orthogonal-carrier ICI (−29 dB/carrier at 8×1024; matched the measured
+high-SNR excess error) subtracted analytically; inverse-chi-square (k−2)/k block correction;
+in-band 2900 Hz basis (same as training); measured residual +0.5 dB pinned. Surfaced via
+`MCDPSKWaveform::hasDataAidedSNR()/getDataAidedSNRdB()` + `DecodeResult
+mcdpsk_{training,data_aided}_snr_db`; `populateDecodeMetrics` (non-OFDM branch,
+`streaming_sync_acquisition.cpp`) routes the data-aided value as `MCDPSK_IN_BAND` when the
+frame's LDPC decode SUCCEEDED (else training), gated by `ULTRA_CONNECT_DATA_AIDED_SNR`
+(default-ON, `=0` opts out); logs `MC-DPSK SNR: training=X data_aided=Y (routed=...)` once per
+frame for rig spread analysis. `connectRatiometricSnrEnabled()` (#74) still governs whether
+MCDPSK_IN_BAND routes at connect; `kFadingAwgnMax`/`connectSelectionSnrDb` untouched
+(recalibration is the planned follow-up). **Verification:** `test_mcdpsk_snr_calibration`
+extended + gated — data-aided AWGN tracks true within 1 dB at 0/5/10/15/20/25 dB (measured
+errors +0.5/−0.1/−0.1/−0.0/+0.4/+0.1); training gate unchanged-green; full ctest green
+(pre-existing UltraTncSimAudio only); gui_qso good@20 seed42 QPSK R2/3 PASS with the new
+estimator routed at CONNECT (see KNOWN_BUGS entry for the rig re-measure follow-up).
+
 ## 2026-07-02 (overnight) — feat(harq): FRESH-ONLY rescue — combining is now harm-free by construction
 
 The structural fix behind the 07-01 poison-loop verdict: `decodeFixedFrame` keeps the
