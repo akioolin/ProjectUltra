@@ -3830,6 +3830,9 @@ Connection::harqProvisionalContext() const {
     ctx.sender_hash = v2::hashCallsign(remote_call_);
     ctx.seq = arq_.getRxBaseSeq();
     ctx.window_size = arq_.getWindowSize();
+    // The receiver's mirror of the sender's next-burst fill (see
+    // predictedIncomingSeqs) — indexed by burst logical position.
+    ctx.predicted_seqs = arq_.predictedIncomingSeqs(arq_.getWindowSize());
     if (!ctx.valid()) {
         return std::nullopt;
     }

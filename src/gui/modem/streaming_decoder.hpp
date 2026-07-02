@@ -799,6 +799,21 @@ private:
     // mid-burst re-search with no decode attempt (group head nulled -> accumulation
     // never armed). Monotonic since construction; [HEADNULL] log per event.
     uint32_t headnull_resync_drop_count_ = 0;
+    // HARQ provisional keys (2026-07-01, restricted design — fable_analysis/09 §3.4):
+    // when a burst logical frame's CW0 peek fails, key its soft bits by the
+    // POSITION-PREDICTED seq (receiver's ARQ mirror, pulled once per group via
+    // harq_context_callback_) so the resend can chase-combine. Gates: burst
+    // finalize loop only (index >= 0), >=4 bits/sym mods, warm-anchored groups
+    // (escalated/timeout groups have a different fill rule — D2), prediction not
+    // yet invalidated by a decoded-header mismatch (prefix consistency), and the
+    // descriptor's src_hash matching the session peer.
+    int burst_logical_index_ = -1;
+    std::optional<fec::SoftCombineBuffer::ProvisionalContext> burst_harq_ctx_;
+    bool burst_harq_ctx_pulled_ = false;
+    bool burst_harq_prediction_invalid_ = false;
+    bool burst_group_full_anchor_ = false;
+    uint32_t last_burst_src_hash_ = 0;
+    uint64_t last_descriptor_abs_sample_ = 0;  // sample-clock gap gate (D2)
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     std::vector<BurstPhysicalDiag> burst_physical_diag_;

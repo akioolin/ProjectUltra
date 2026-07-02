@@ -1978,7 +1978,8 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 bool use_channel_deinterleave, size_t bits_per_symbol,
                                 fec::SoftCombineBuffer* harq_buffer,
                                 const fec::SoftCombineBuffer::Key* harq_key,
-                                int lifting_z) {
+                                int lifting_z,
+                                bool harq_key_provisional) {
     using namespace fec;
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
@@ -2061,6 +2062,26 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         if (!harq_has_key) {
             return;
         }
+        // Provisional-key finalize guard (2026-07-01, design-review MANDATORY):
+        // if the key was position-predicted and the frame's header CW decoded,
+        // verify the prediction against the real header seq. On mismatch, touch
+        // NOTHING under this key — a drop would destroy the real seq's
+        // legitimate accumulation, and a retain would poison it.
+        if (harq_key_provisional && !final_status.decoded.empty() &&
+            final_status.decoded[0] && !final_status.data.empty() &&
+            !final_status.data[0].empty()) {
+            const auto hdr = parseHeader(final_status.data[0]);
+            if (hdr.valid && hdr.seq != harq_key->seq) {
+                ultra::timing::globalDecoderProfile()
+                    .harq_prediction_mismatch.fetch_add(1,
+                                                        std::memory_order_relaxed);
+                LOG_MODEM(INFO,
+                          "HARQ provisional finalize guard: predicted seq=%u but "
+                          "decoded header seq=%u — skipping drop/retain",
+                          harq_key->seq, hdr.seq);
+                return;
+            }
+        }
         for (int cw = 0; cw < cw_count; ++cw) {
             const auto cw_key = keyForCodeword(cw);
             if (cw < static_cast<int>(final_status.decoded.size()) &&
@@ -2081,7 +2102,8 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                               final_status.allSuccess() ? 1 : 0,
                               meanAbsLlr(decoder_soft_bits[static_cast<size_t>(cw)]));
                 }
-                harq_buffer->retain(cw_key, decoder_soft_bits[static_cast<size_t>(cw)]);
+                harq_buffer->retain(cw_key, decoder_soft_bits[static_cast<size_t>(cw)],
+                                    harq_key_provisional);
             }
         }
     };

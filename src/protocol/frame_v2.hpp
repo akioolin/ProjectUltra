@@ -1168,7 +1168,13 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 bool use_channel_deinterleave, size_t bits_per_symbol = 106,
                                 fec::SoftCombineBuffer* harq_buffer = nullptr,
                                 const fec::SoftCombineBuffer::Key* harq_key = nullptr,
-                                int lifting_z = 27);  // 27 -> n=648 (default), 81 -> n=1944 (file class)
+                                int lifting_z = 27,  // 27 -> n=648 (default), 81 -> n=1944 (file class)
+                                // harq_key was position-PREDICTED (CW0 undecodable), not
+                                // header-verified: retains are tagged provisional, and a
+                                // successful decode whose header seq contradicts the key
+                                // skips finalize entirely (never drop/pollute the real
+                                // seq's accumulation on a misprediction).
+                                bool harq_key_provisional = false);
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 
 /**

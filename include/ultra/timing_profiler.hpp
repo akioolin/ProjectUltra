@@ -175,6 +175,11 @@ struct DecoderProfile {
     std::atomic<uint64_t> harq_key_build_success{0};
     std::atomic<uint64_t> harq_key_build_failed{0};
     std::atomic<uint64_t> harq_key_build_provisional{0};
+    // Provisional-key mirror proven wrong: a header-verified seq contradicted
+    // the position prediction (prefix gate), or a decode under a provisional
+    // key revealed a different seq (finalize guard). The default-ON decision
+    // for provisional keys rides on this staying ~0 across multi-seed runs.
+    std::atomic<uint64_t> harq_prediction_mismatch{0};
 
     void reset() {
         detect_data_sync.reset();
@@ -200,6 +205,7 @@ struct DecoderProfile {
         harq_key_build_success.store(0);
         harq_key_build_failed.store(0);
         harq_key_build_provisional.store(0);
+        harq_prediction_mismatch.store(0);
     }
 };
 

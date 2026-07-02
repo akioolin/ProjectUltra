@@ -71,6 +71,13 @@ public:
         uint32_t sender_hash = 0;
         uint16_t seq = 0;
         size_t window_size = 0;
+        // #58-follow-on (HARQ provisional keys, 2026-07-01): the receiver's
+        // mirror of the sender's next-burst seq fill — ascending !received
+        // seqs in the rx window (holes first, unseen tail after; the sender's
+        // [resends][new] concatenation is globally ascending and window-bound,
+        // so the complement-of-received IS the exact mirror whenever the
+        // sender acted on our last SACK). Indexed by burst logical position.
+        std::vector<uint16_t> predicted_seqs;
 
         bool valid() const {
             return sender_hash != 0 && window_size > 0;
@@ -81,7 +88,13 @@ public:
 
     int combine(const Key& key, const std::vector<float>& incoming_llrs,
                 std::vector<float>& out_llrs);
-    void retain(const Key& key, std::vector<float> combined_llrs);
+    // provisional (2026-07-01): the key was PREDICTED (CW0 undecodable), not
+    // header-verified. Tagged entries get no age-refresh on re-retain (hard
+    // TTL) and are evicted FIRST on overflow, so a misprediction can never
+    // outlive or displace header-verified accumulations. A later retain under
+    // a header-verified key promotes the entry (once real, stays real).
+    void retain(const Key& key, std::vector<float> combined_llrs,
+                bool provisional = false);
     void drop(const Key& key);
     void retainOnlySeqWindow(uint16_t base_seq, size_t window_size);
     void clear();
@@ -99,6 +112,7 @@ private:
         std::vector<float> llrs;
         uint32_t age_ms = 0;
         int attempts = 1;
+        bool provisional = false;  // predicted key, not header-verified
         std::list<Key>::iterator lru_it;
     };
 

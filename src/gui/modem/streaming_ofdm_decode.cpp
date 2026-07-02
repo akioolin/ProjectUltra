@@ -801,6 +801,35 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // setBurstGroupSeq). The following group's
                                 // logical frames inherit it for whole-burst ACK.
                                 last_burst_group_seq_ = hdr.seq;
+                                // HARQ provisional keys: reset per-group state at
+                                // descriptor consume. Gate D2 (timeout-batch resend,
+                                // whose fill rule differs from the steady-state
+                                // mirror) keys on the SAMPLE-CLOCK inter-descriptor
+                                // gap — the observable faithful to the mechanism:
+                                // steady-state groups arrive every burst+turnaround
+                                // (<= ~11.5 s worst case: 8.6 s duty-capped burst +
+                                // rig turnaround), while a timeout resend can only
+                                // arrive after the sender's ACK RTO (>= ~19 s of
+                                // silence). 15 s sits between the two populations.
+                                // Two prior gates FAILED here: expect_full_ofdm_anchor_
+                                // is armed by the routine full-chirp cadence (blocked
+                                // every group -> provisional=0), and sync-distress
+                                // counters fire exactly during the fades the feature
+                                // targets (blocked the target population).
+                                {
+                                    constexpr uint64_t kTimeoutBatchGapSamples =
+                                        15ull * 48000ull;
+                                    burst_group_full_anchor_ =
+                                        last_descriptor_abs_sample_ != 0 &&
+                                        frame_sync_abs > last_descriptor_abs_sample_ &&
+                                        (frame_sync_abs - last_descriptor_abs_sample_) >
+                                            kTimeoutBatchGapSamples;
+                                    last_descriptor_abs_sample_ = frame_sync_abs;
+                                }
+                                last_burst_src_hash_ = hdr.src_hash;
+                                burst_harq_ctx_.reset();
+                                burst_harq_ctx_pulled_ = false;
+                                burst_harq_prediction_invalid_ = false;
                                 LOG_MODEM(INFO,
                                     "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
@@ -2902,6 +2931,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
+        bool built_key_provisional = false;  // set by buildHarqKey's fallback path
         auto buildHarqKey = [&](int cw_count, fec::SoftCombineBuffer::Key& out_key) -> bool {
             if (!harq_buffer_ || !harq_buffer_->enabled()) {
                 return false;
@@ -2949,9 +2979,76 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 ultra::timing::SingleCWCallSite::Cw0Peek);
             const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
             if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
-                // Do not fabricate a provisional QAM16 HARQ key from rx_base.
-                // Receive-order guesses collide under bursts/retransmissions,
-                // and false chase-combines are worse than losing this copy.
+                // CW0 undecodable -> no header-verified key. RESTRICTED provisional
+                // fallback (2026-07-01, design-review verdict — fable_analysis/09
+                // §3.4): key by the receiver's ARQ-mirror-predicted seq for this
+                // burst position so the resend can chase-combine. Blind
+                // receive-order guesses stay rejected (the original objection
+                // stands); the mirror is exact whenever the sender acted on our
+                // last SACK, and the gates + the finalize seq-match guard bound
+                // every divergence case. Gates: burst finalize loop only, dense
+                // coherent mods (>=4 bits/sym — where the measured loss lives and
+                // ULPAD pads are impossible), warm-anchored groups only (escalated
+                // timeout batches have a different fill rule), prediction not yet
+                // invalidated (prefix consistency), descriptor src == session peer.
+                static const bool kProvisionalEnabled = [] {
+                    const char* e = std::getenv("ULTRA_HARQ_PROVISIONAL");
+                    return !(e && *e == '0');
+                }();
+                // Gate trace ([HARQKEY]): three gate designs in a row measured
+                // provisional=0 — never debug this blind again.
+                LOG_MODEM(DEBUG,
+                          "[%s] [HARQKEY] cw0-peek FAIL pos=%d gates: en=%d gap_block=%d "
+                          "invalid=%d bps=%d cb=%d",
+                          log_prefix_.c_str(), burst_logical_index_,
+                          kProvisionalEnabled ? 1 : 0, burst_group_full_anchor_ ? 1 : 0,
+                          burst_harq_prediction_invalid_ ? 1 : 0,
+                          getBitsPerSymbol(current_modulation_),
+                          harq_context_callback_ ? 1 : 0);
+                if (kProvisionalEnabled && burst_logical_index_ >= 0 &&
+                    !burst_group_full_anchor_ && !burst_harq_prediction_invalid_ &&
+                    getBitsPerSymbol(current_modulation_) >= 4 &&
+                    harq_context_callback_) {
+                    if (!burst_harq_ctx_pulled_) {
+                        burst_harq_ctx_ = harq_context_callback_();
+                        burst_harq_ctx_pulled_ = true;
+                        LOG_MODEM(DEBUG,
+                                  "[%s] [HARQKEY] ctx pulled: have=%d valid=%d pred_n=%zu "
+                                  "src=0x%06X desc_src=0x%06X",
+                                  log_prefix_.c_str(), burst_harq_ctx_ ? 1 : 0,
+                                  (burst_harq_ctx_ && burst_harq_ctx_->valid()) ? 1 : 0,
+                                  burst_harq_ctx_ ? burst_harq_ctx_->predicted_seqs.size()
+                                                  : size_t{0},
+                                  burst_harq_ctx_ ? burst_harq_ctx_->sender_hash : 0u,
+                                  last_burst_src_hash_);
+                    }
+                    // sender_hash comes from the SESSION context (authoritative,
+                    // Connection::remote_call_). A descriptor-side src cross-check
+                    // was tried and REMOVED: the BURST_HEADER is a compact
+                    // ControlFrame whose bytes parse differently from a data
+                    // header, so the captured value never matched (measured
+                    // desc_src=0x001505 vs session 0x536C71 -> vetoed every key).
+                    if (burst_harq_ctx_ && burst_harq_ctx_->valid() &&
+                        static_cast<size_t>(burst_logical_index_) <
+                            burst_harq_ctx_->predicted_seqs.size()) {
+                        const uint16_t predicted_seq =
+                            burst_harq_ctx_->predicted_seqs
+                                [static_cast<size_t>(burst_logical_index_)];
+                        if (fillKey(burst_harq_ctx_->sender_hash, predicted_seq,
+                                    cw_count)) {
+                            built_key_provisional = true;
+                            ultra::timing::globalDecoderProfile()
+                                .harq_key_build_provisional.fetch_add(
+                                    1, std::memory_order_relaxed);
+                            LOG_MODEM(DEBUG,
+                                      "[%s] HARQ provisional key: pos=%d seq=%u "
+                                      "(CW0 peek failed; ARQ-mirror predicted)",
+                                      log_prefix_.c_str(), burst_logical_index_,
+                                      predicted_seq);
+                            return true;
+                        }
+                    }
+                }
                 return false;
             }
             if (peek_data.size() > bytes_per_fixed_cw) {
@@ -2969,6 +3066,29 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 return false;
             }
 
+            // Prefix consistency (provisional-key gate): a header-verified seq that
+            // contradicts the position prediction proves the mirror is wrong for
+            // this group (lost SACK / stale-ack divergence) — disable provisional
+            // keys for the REMAINING positions.
+            if (burst_logical_index_ >= 0 && burst_harq_ctx_pulled_ &&
+                burst_harq_ctx_ &&
+                static_cast<size_t>(burst_logical_index_) <
+                    burst_harq_ctx_->predicted_seqs.size() &&
+                burst_harq_ctx_->predicted_seqs
+                        [static_cast<size_t>(burst_logical_index_)] != hdr.seq) {
+                burst_harq_prediction_invalid_ = true;
+                ultra::timing::globalDecoderProfile()
+                    .harq_prediction_mismatch.fetch_add(1,
+                                                        std::memory_order_relaxed);
+                LOG_MODEM(INFO,
+                          "[%s] HARQ prediction mismatch at pos=%d: predicted=%u "
+                          "actual=%u — provisional keys disabled for this group",
+                          log_prefix_.c_str(), burst_logical_index_,
+                          burst_harq_ctx_->predicted_seqs
+                              [static_cast<size_t>(burst_logical_index_)],
+                          hdr.seq);
+            }
+
             return fillKey(hdr.src_hash, hdr.seq, hdr.total_cw);
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
@@ -2976,6 +3096,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             fec::SoftCombineBuffer::Key harq_key;
             fec::SoftCombineBuffer::Key* harq_key_ptr = nullptr;
             fec::SoftCombineBuffer* harq_buffer = nullptr;
+            built_key_provisional = false;
             // Only count when HARQ is actually wanted (buffer enabled).
             // A "failed key build" only matters if HARQ would otherwise
             // have engaged — counting when HARQ is off would make every
@@ -2984,7 +3105,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             if (buildHarqKey(cw_count, harq_key)) {
                 harq_key_ptr = &harq_key;
                 harq_buffer = harq_buffer_;
-                if (harq_active) {
+                if (harq_active && !built_key_provisional) {
                     ultra::timing::globalDecoderProfile()
                         .harq_key_build_success.fetch_add(
                             1, std::memory_order_relaxed);
@@ -3005,7 +3126,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             const int ldpc_z = activeBurstLiftingZ();
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
                                         apply_channel_deinterleave, bps,
-                                        harq_buffer, harq_key_ptr, ldpc_z);
+                                        harq_buffer, harq_key_ptr, ldpc_z,
+                                        built_key_provisional);
         };
         auto cw_status = decodeFixed(decode_cw_count);
 

@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 — feat(harq): provisional combine keys — deep-faded frames now chase-combine across retries (restricted design, default-ON)
+
+Roadmap item 4 (fable_analysis/09 §3.4/§5): soft-combine keys required the frame's CW0 to
+decode (header → src+seq), so the dominant Good-fade loss class (CW0-dead frames) built no key
+and every retry decoded standalone — measured live as a 7-retry tail saga at 5/8-6/8 CWs with
+zero energy accumulation. The pre-provisioned-but-dead `harqProvisionalContext` plumb (wired
+through every layer since the original HARQ work, never invoked) is now live.
+
+**Design (adversarially reviewed BEFORE implementation; as-proposed was REJECTED on 3 defects
+and the restricted form specified):** when CW0-peek fails for burst logical position i, key by
+the receiver's ARQ-mirror prediction — `SelectiveRepeatARQ::predictedIncomingSeqs()` = ascending
+un-received seqs in the rx window, which EXACTLY mirrors the sender's [resends][new] fill
+whenever the sender acted on our last SACK. Guards (all measured): (1) burst finalize loop +
+≥4 bits/sym mods only; (2) timeout-batch exclusion via a SAMPLE-CLOCK inter-descriptor gap gate
+(15 s — steady groups ≤~11.5 s, timeout resends ≥ sender RTO ~19 s); (3) prefix-consistency —
+one decoded header contradicting the prediction disables provisional keys for the rest of the
+group; (4) MANDATORY finalize guard in `decodeFixedFrame` — a decode revealing a different seq
+touches nothing (no drop/retain), closing the destroy-good-accumulation hole; (5) provisional
+entries are tagged in `SoftCombineBuffer`: evicted FIRST on overflow, hard TTL (no age refresh),
+promoted to real on a header-verified retain. `ULTRA_HARQ_PROVISIONAL=0` opts out.
+
+**Debug trail (why the counters exist):** three gate designs measured `provisional=0` before
+the [HARQKEY] instrumentation found each blocker in one run — (v1) `expect_full_ofdm_anchor_`
+is routine cadence, not escalation; (v2) sync-distress counters fire exactly during the target
+fades; (v3 final) the descriptor src-hash cross-check parsed a compact ControlFrame with the
+data-header layout and vetoed every key (removed; the session hash is authoritative).
+
+**Validation (paired A/B, forced 16QAM R2/3 Good@20, 3 seeds ×2, 50 KB):** mismatch **0/212
+provisional keys** (the safety bar); combining events 28 → 289/run; all 6 PASS; mean goodput
++6% = WITHIN the ±25% gate noise — **the mean-throughput win is NOT claimed**. Attempt-tail
+truncation is directional (max retry 4 vs 9 on matched-damage pairs) but fade-realization
+confounded at n=3. Shipped default-ON because the guards measure zero-cost, energy accumulation
+is the correct-physics behavior, and the expected payoff (retry-tail sagas, worst on the rig)
+is below this gate's resolution — rig saga measurement is the follow-up. Per-group telemetry:
+`[HARQ] keys real= failed= provisional= mismatch=` (INFO, both ends).
+Files: soft_combine.{hpp,cpp}, selective_repeat_arq.{hpp,cpp}, connection.cpp,
+frame_v2.{hpp,cpp}, streaming_decoder.hpp, streaming_ofdm_decode.cpp,
+streaming_burst_interleave.cpp, timing_profiler.hpp. ctest green (pre-existing UltraTncSimAudio
+only).
+
 ## 2026-07-01 — fix(policy,ack): #58 connect-SNR basis correction + §15.5 ACK staircase revived (feed + fade edge) + [HEADNULL] counter
 
 Three changes from the re-audit's ranked plan (items 1-3), all gated: build clean, ctest green

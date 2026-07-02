@@ -1862,6 +1862,18 @@ uint32_t SelectiveRepeatARQ::buildRXBitmap() const {
     return bitmap;
 }
 
+std::vector<uint16_t> SelectiveRepeatARQ::predictedIncomingSeqs(size_t max_n) const {
+    std::vector<uint16_t> out;
+    out.reserve(std::min(max_n, config_.window_size));
+    for (size_t i = 0; i < config_.window_size && out.size() < max_n; i++) {
+        const uint16_t seq = (rx_base_seq_ + static_cast<uint16_t>(i)) & 0xFFFF;
+        if (!rx_window_[seqToSlot(seq)].received) {
+            out.push_back(seq);
+        }
+    }
+    return out;
+}
+
 size_t SelectiveRepeatARQ::seqToSlot(uint16_t seq) const {
     return seq % MAX_WINDOW;
 }

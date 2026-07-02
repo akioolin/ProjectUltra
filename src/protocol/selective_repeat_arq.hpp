@@ -144,6 +144,15 @@ public:
     }
     size_t getWindowSize() const { return config_.window_size; }
     uint16_t getRxBaseSeq() const { return rx_base_seq_; }
+    // HARQ provisional keys (2026-07-01): the receiver's mirror of the
+    // sender's next-burst seq fill = ascending !received seqs in the rx
+    // window. The sender fills bursts [unacked holes in window order][new
+    // sequential seqs] (sendNextFileChunk), both window-bound, so the
+    // concatenation is globally ascending and equals this complement
+    // EXACTLY whenever the sender acted on our last SACK. Indexed by burst
+    // logical position; divergence cases (lost SACK, timeout batch) are
+    // handled by the caller's gates + the frame-CRC guard.
+    std::vector<uint16_t> predictedIncomingSeqs(size_t max_n) const;
 
     // ACK batch size: send SACK after this many in-order data frames received.
     // 0 (default) means "track window_size" — preserves prior behavior bit

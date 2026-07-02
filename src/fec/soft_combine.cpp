@@ -201,7 +201,8 @@ int SoftCombineBuffer::combine(const Key& key, const std::vector<float>& incomin
     return next_attempts;
 }
 
-void SoftCombineBuffer::retain(const Key& key, std::vector<float> combined_llrs) {
+void SoftCombineBuffer::retain(const Key& key, std::vector<float> combined_llrs,
+                               bool provisional) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!enabled_ || key.sender_hash == 0 || max_entries_ == 0 || combined_llrs.empty()) {
         return;
@@ -209,20 +210,41 @@ void SoftCombineBuffer::retain(const Key& key, std::vector<float> combined_llrs)
 
     auto it = entries_.find(key);
     int attempts = 1;
+    // Provisional discipline (2026-07-01): a predicted-key entry keeps its
+    // accumulated age across re-retains (hard TTL — a misprediction must not
+    // live forever on retry refreshes), and once an entry has been touched
+    // under a header-verified key it stays real.
+    uint32_t carried_age_ms = 0;
+    bool entry_provisional = provisional;
     if (it != entries_.end()) {
         attempts = std::max(1, it->second.attempts) + 1;
+        entry_provisional = it->second.provisional && provisional;
+        if (entry_provisional) {
+            carried_age_ms = it->second.age_ms;
+        }
         eraseLocked(key);
     } else {
         while (entries_.size() >= max_entries_ && !lru_.empty()) {
-            eraseLocked(lru_.back());
+            // Evict provisional entries FIRST so a misprediction can never
+            // displace a header-verified accumulation (capacity is sized to
+            // exactly the legitimate window x cw population).
+            auto victim = lru_.end();
+            for (auto lit = lru_.begin(); lit != lru_.end(); ++lit) {
+                auto eit = entries_.find(*lit);
+                if (eit != entries_.end() && eit->second.provisional) {
+                    victim = lit;  // keep scanning: oldest provisional = closest to back
+                }
+            }
+            eraseLocked(victim != lru_.end() ? *victim : lru_.back());
         }
     }
 
     lru_.push_front(key);
     Entry entry;
     entry.llrs = std::move(combined_llrs);
-    entry.age_ms = 0;
+    entry.age_ms = carried_age_ms;
     entry.attempts = attempts;
+    entry.provisional = entry_provisional;
     entry.lru_it = lru_.begin();
     entries_.emplace(key, std::move(entry));
     logHarqVector("retain", key, attempts, entries_.find(key)->second.llrs);

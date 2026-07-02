@@ -655,7 +655,12 @@ void StreamingDecoder::finalizeBurstGroup() {
     for (int i = 0; i < burst_group_size; i++) {
         const int saved_pending_total_cw = pending_total_cw_;
         pending_total_cw_ = fixed_frame_codewords_;
+        // HARQ provisional keys: expose the logical position to buildHarqKey
+        // (same save/set/restore pattern as pending_total_cw_); -1 outside the
+        // burst finalize loop doubles as the burst-path-only gate.
+        burst_logical_index_ = i;
         DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
+        burst_logical_index_ = -1;
         pending_total_cw_ = saved_pending_total_cw;
         if (i < static_cast<int>(burst_metric_templates_.size())) {
             const auto& metrics = burst_metric_templates_[static_cast<size_t>(i)];
@@ -754,6 +759,22 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "max_iters=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
+        // HARQ key telemetry (cumulative since start) — the provisional-key
+        // default-ON decision rides on mismatch staying ~0 (design review).
+        {
+            const auto& prof = ultra::timing::globalDecoderProfile();
+            LOG_MODEM(INFO,
+                      "[%s] [HARQ] keys real=%llu failed=%llu provisional=%llu mismatch=%llu",
+                      log_prefix_.c_str(),
+                      static_cast<unsigned long long>(prof.harq_key_build_success.load()),
+                      static_cast<unsigned long long>(prof.harq_key_build_failed.load()),
+                      static_cast<unsigned long long>(prof.harq_key_build_provisional.load()),
+                      static_cast<unsigned long long>(prof.harq_prediction_mismatch.load()));
+        }
+        // Per-group provisional context is stale once the group is delivered
+        // (the ARQ state advances on this very delivery) — drop it.
+        burst_harq_ctx_.reset();
+        burst_harq_ctx_pulled_ = false;
         // §16.8 step 1: end-of-group warm-sync snapshot. Logs the
         // state we have RIGHT NOW, before the inter-group gap erodes
         // it. Pair with the BURST_HEADER-consume snapshot at
