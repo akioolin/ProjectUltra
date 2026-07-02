@@ -48,7 +48,16 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   basis correction (the Jensen penalty of a fade-AVERAGED effective SNR is smaller) —
   deliberately untouched in increment 2.
 
-### BUG-QAM16-RIG-LEVEL-BUDGET (investigation 3b RESOLVED 2026-07-02): rig 16QAM is FADE-TROUGH-LIMITED at the current level calibration — not a code defect; the fix is a level/operator lever
+### BUG-QAM16-RIG-LEVEL-BUDGET — CLOSED 2026-07-02 (final): there is NO hidden level deficit anywhere on the bench; the IONOS dial is the only SNR lever. 16QAM at MPG@20 is trough-limited physics; it opens at dial ~22+ (matches the sim crossover)
+- **Every gain lever measured, all dead:** (1) TX drive walk +4.6 dB digital (software-ALC, live)
+  arrived as −0.8 dB at the Mac — the IONOS normalizes its input; (2) Mac input volume 60→90:
+  the noise FLOOR scaled +9.0 dB with the gain — the floor is the IONOS's own calibrated output
+  noise, not ADC self-noise, so RX gain moves signal and noise together. The bench delivers
+  exactly what the dial says. The earlier "raise CH-OUT / +4-5 dB level" advice is RETRACTED —
+  measurably wrong. The ladder's QPSK R2/3 pick at MPG@20 is the bench's true optimum (~1.7 kbps).
+- **To test 16QAM on this bench: turn the SNR dial** to MPG@22-24 (sim crossover data: Good@22 =
+  2710/2150/2050 for 16QAM R2/3). The software-ALC remains correct and valuable for REAL radios
+  (no box normalizes your level there); it is proven mechanically end-to-end on the rig.
 - **FIX IN VALIDATION (2026-07-02, software-ALC — CHANGELOG entry of same date):** the "level
   lever" is now CLOSED-LOOP instead of operator-manual. Receiver measures per-burst data-RMS
   over chain noise + crest factor (`[ALC-RX]` / `LEVEL ADVISORY:` log lines, thresholds
