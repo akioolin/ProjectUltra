@@ -421,7 +421,18 @@ inline float connectSnrFadeBasisDb() {
             if (parsed <= 0.0f) return 0.0f;
             if (parsed <= 6.0f) return parsed;
         }
-        return 2.0f;
+        return 5.0f;  // 2026-07-02 recalibration: the connect reading is now the
+                      // DATA-AIDED fade-AVERAGED estimate (#58 increment 2), whose
+                      // offset vs the dial-calibrated floors is LARGER than the old
+                      // snapshot's +2 (AWGN-only calibration misses the fading EVM
+                      // inflation): measured across 7 rig+sim Good connects,
+                      // data_aided reads 9.8-13.7 at dial/effective ~16-20 → ~5 dB.
+                      // Consequences at +5: sim good@20 s43 (10.6→15.6) clears the
+                      // Moderate floor; rig picks recover R2/3 (yesterday 2/3 fell
+                      // to R1/2); true-low-SNR safety holds (MPM@8 effective 1-5
+                      // → 6-10 < floors → MC-DPSK unchanged). AWGN untouched
+                      // (fading gate). Revisit when the estimator itself gains a
+                      // sim-Good calibration term (the cleaner long-term home).
     }();
     return v;
 }
