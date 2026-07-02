@@ -2991,9 +2991,22 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 // ULPAD pads are impossible), warm-anchored groups only (escalated
                 // timeout batches have a different fill rule), prediction not yet
                 // invalidated (prefix consistency), descriptor src == session peer.
+                // DEFAULT-OFF (2026-07-01 rig verdict, flipped the same evening it
+                // shipped): on live IONOS MPG@20 the provisional path POISON-LOOPED —
+                // the stuck group re-failed 0/8 with 285 combines feeding it, while
+                // the ULTRA_HARQ_PROVISIONAL=0 falsification run made forward
+                // progress on the same channel. Mechanism: real-rig first-attempt
+                // fade LLRs are confidently-WRONG (not sim's near-zero nulls), the
+                // combine path REPLACES fresh LLRs with the sum (no standalone
+                // fallback, frame_v2.cpp decode loop), and mismatch=0 cannot
+                // exonerate an 0/N loop (detection requires a decode). Sim measured
+                // 0/212 mispredictions — the divergence is the LLR character, a
+                // sim-fidelity gap. RE-ENABLE only after the structural fix:
+                // combine-then-fail retries the CW standalone (fresh-only), making
+                // combining harm-free by construction regardless of key correctness.
                 static const bool kProvisionalEnabled = [] {
                     const char* e = std::getenv("ULTRA_HARQ_PROVISIONAL");
-                    return !(e && *e == '0');
+                    return e && *e == '1';  // opt-IN
                 }();
                 // Gate trace ([HARQKEY]): three gate designs in a row measured
                 // provisional=0 — never debug this blind again.

@@ -14,9 +14,12 @@
 >    (3b) BUG-QAM16-RIG-ANCHOR-COLLAPSE diagnosis — GATES all hardware 16QAM work
 >        (one instrumented paired rig session: per-burst normalization factor +
 >        chirp-segment RMS/corr decides PAPR-vs-backlog),
->    (4) HARQ provisional combine keys — DONE 2026-07-01 (default-ON, ULTRA_HARQ_PROVISIONAL;
->        mismatch 0/212, combines 28→289/run; mean win within gate noise — the open
->        validation is the RIG retry-saga measurement),
+>    (4) HARQ provisional keys — BUILT but flipped DEFAULT-OFF same evening (rig
+>        poison-loop: real fade LLRs are confidently-wrong, combine has no standalone
+>        fallback; sim's 0/212-clean was a fidelity artifact). NEXT INCREMENT: the
+>        combine-then-fail STANDALONE RETRY in decodeFixedFrame (fresh-only LLR pass on
+>        combined-and-failed CWs) — makes ALL combining harm-free by construction, then
+>        re-evaluate the default with a rig A/B,
 >    (5) cw16 frames for 16QAM (`kMaxFixedFrameCodewords` 8→16; 5-frame groups — 6 needs item 6; HW pends 3b),
 >    (6) budget-aware anchor-skip (+6-8% QPSK),
 >    (7) joint RTO/group-timeout tightening (floor 14-17 s — do NOT go lower),

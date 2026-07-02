@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-01 (LATE) — fix(harq): provisional keys flipped to DEFAULT-OFF — rig poison-loop verdict (same evening)
+
+**The rig falsified the default within hours (the gates worked; the LLR-character assumption did
+not).** Live IONOS MPG@20, forced 16QAM R2/3: with provisional keys ON the transfer POISON-LOOPED —
+the same group re-failed 0/8→0/8→1/8 at the LDPC cap while 285 combining events fed provisional-keyed
+accumulations into every retry; the immediate `ULTRA_HARQ_PROVISIONAL=0` falsification run on the
+same channel made forward progress (clean 8/8-at-3-iters groups alternating with transient fade
+failures that MOVED ON). **Mechanism:** real-rig first-attempt fade LLRs are confidently-WRONG
+(Mode-B character), not sim's near-zero nulls — accumulating them actively fights later good copies,
+and the combine path REPLACES fresh LLRs with the sum (no standalone fallback). `mismatch=0` cannot
+exonerate an 0/N loop (misprediction detection requires a decode). Sim's 0/212 clean verdict was a
+SIM-FIDELITY artifact of benign null LLRs. **Flip:** `ULTRA_HARQ_PROVISIONAL` now opt-IN (`=1`).
+**Re-enable path (structural, next session):** combine-then-fail must retry the CW STANDALONE
+(fresh-only LLRs) — that single change makes combining harm-free by construction regardless of key
+correctness (and would also de-risk real-key combines against the same LLR pathology). Also noted
+tonight: a SECOND distinct rig 16QAM failure mode — acquisition clean (full groups, good corr) but
+decode-dead on alternating groups — different from the afternoon's anchor collapse; both live under
+the 16QAM-on-hardware investigation (3b).
+
 ## 2026-07-01 — feat(harq): provisional combine keys — deep-faded frames now chase-combine across retries (restricted design, default-ON)
 
 Roadmap item 4 (fable_analysis/09 §3.4/§5): soft-combine keys required the frame's CW0 to

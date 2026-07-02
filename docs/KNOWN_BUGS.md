@@ -18,6 +18,26 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Status: **OPEN — measured occupancy 2026-07-01 (sim + rig).** The §15.5 staircase (`tone_burst_constants.hpp:99-105`) picks 12 ms symbols (324 ms ACK) at ≥18 dB, but the receiver feeds it the cached fade-effective in-band SNR (`app.cpp:645-651`), which reads ~16-17 dB at Good@20 (fading/Jensen penalty). Measured: sim Good@20 16QAM 29/29 ACKs at 675 ms, stock 26/26 at 675 ms (only forced QPSK R3/4 reached 324 ms, 20/25); **rig MPG@20: 30/30 at 675 ms**. The hardware-proven fast rung is dormant at the operating point it was built for: ~350 ms/cycle ≈ 4-5% goodput, taxing the short-burst dense rung (16QAM) hardest.
 - **Fix:** express the staircase bin edges in fade-effective terms (~16 dB edge for the 12 ms rung) or feed the basis it was calibrated on; validate ACK FER at the new edge on Watterson before shipping (each lost ACK costs a full RTO — same trap class as the 12 ms design review of 2026-06-12). Same disease family as #74/#58: fade-aware measurements fed into AWGN-calibrated thresholds.
 
+### BUG-CONNECT-SNR-VARIANCE (#58 completion): the connect-time SNR is a single 170 ms snapshot on a ~4 s-fade channel → ~10 dB pick-to-pick spread; the +2 dB basis correction fixes the BIAS, not the VARIANCE
+- Status: **OPEN — the designed fix is specified; the +2 dB selection correction (2026-07-01,
+  default-ON) is increment 1 only.** Rig MPG@20 evidence (one evening, 6 connects): snapshots
+  18.2 / 17.0 / 14.6 / 14.5 / 12.4 / **8.4** while the chirp-quality proxy read 22-27
+  throughout. The 8.4 connect survived to OFDM only by 0.4 dB (sel=10.4 vs Good floor 10) and
+  picked **QPSK R1/2** — half throughput on a channel that carries R2/3. Deeper dips than the
+  +2 average penalty WILL occasionally cross into the MC-DPSK branch (the residual coin-flip).
+- **Root cause is architectural, not the estimator** (AWGN-accurate to 30 dB,
+  test_mcdpsk_snr_calibration): `updateTrainingSNREstimate` measures ONLY the ~170 ms training
+  preamble = one fade state (Tc ≈ 4.2 s at Good).
+- **Designed fix (zero handshake latency):** the CONNECT frame's 4 CWs span ~7.1 s ≈ 1.7 Tc on
+  the air and are fully decoded before the pick. A DATA-AIDED ratiometric estimate over the
+  whole decoded frame (post-LDPC known bits → per-carrier signal/residual across ~7 s) is
+  fade-AVERAGED by construction and available at exactly the same moment the pick happens
+  today. Implementation: MC-DPSK demodulator accumulator (sibling of
+  `updateTrainingSNREstimate`), decode-then-measure; route as `mcdpsk_in_band` (same basis,
+  lower variance). Once landed: re-evaluate shrinking the +2 basis correction (the Jensen
+  penalty of a fade-AVERAGED effective SNR is smaller) and re-run the rig connect-spread
+  measurement (expect the ~10 dB spread to collapse to ~±1-2 dB).
+
 ### BUG-QAM16-RIG-ANCHOR-COLLAPSE: 16QAM bursts stop being ACQUIRED on the real rig (sync corr 0.95 → 0.2) while their PHY decodes clean — root cause NOT isolated
 - Status: **OPEN — observed 2026-07-01 on IONOS MPG@20 (Mac↔Pi5, HEAD a81725d), forced 16QAM R2/3.** The transfer decoded 9+ groups cleanly (**77/77 deinterleave SUCCESS, 0 FAILED — zero fade-damage tax**), then fell into a persistent no-delivery saga: 117 nack + 74 timeout retx, no completion in 480 s. Sender escalates full-anchor resends; receiver pinned in `Full-anchor wait rejected DATA fallback (corr=0.34 < 0.50)`.
 - **The discriminating signature:** same channel, minutes apart — QPSK R3/4 run sync-corr modes 0.92-0.99 (delivered 1.62 kbps clean); 16QAM run corr modes **0.16-0.29**. The constellation doesn't fail; the *acquisition* of its bursts does. Burst-erasure gate hits: 0.
