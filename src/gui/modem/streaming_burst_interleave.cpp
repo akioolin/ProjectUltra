@@ -174,8 +174,26 @@ void StreamingDecoder::logBurstDiagnosticsAbort(const char* reason,
 
 void StreamingDecoder::accumulateBurstFrames() {
     const int burst_group_size = std::max(2, burst_group_size_);
-    const int burst_timeout_ms =
-        static_cast<int>(BURST_TIMEOUT_MS_BASE * (burst_group_size / 4.0f));
+    // Group timeout — AIRTIME-DERIVED (2026-07-02, replaces the fixed
+    // BURST_TIMEOUT_MS_BASE x group/4 wall-clock constant, an adaptivity-rule
+    // violation: it ignored mod/rate/cw/z, over-budgeting short 16QAM frames
+    // and under-budgeting long DBPSK ones). The timer starts at the FIRST data
+    // frame's decode, so the remaining span is (group-1) frames of airtime;
+    // burst_min_block_ is THIS group's measured samples-per-frame (cached from
+    // frame 1), so the budget is ratiometric across every waveform/modulation
+    // by construction: remaining airtime x1.5 + 3 s decode/jitter margin,
+    // floored at the legacy 8 s so slow-CPU hosts keep their old slack.
+    const int burst_timeout_ms = [&]() -> int {
+        if (burst_min_block_ > 0) {
+            const float remaining_ms =
+                static_cast<float>(burst_group_size - 1) *
+                (static_cast<float>(burst_min_block_) * 1000.0f / 48000.0f);
+            return std::max(static_cast<int>(BURST_TIMEOUT_MS_BASE),
+                            static_cast<int>(remaining_ms * 1.5f + 3000.0f));
+        }
+        return static_cast<int>(BURST_TIMEOUT_MS_BASE *
+                                (burst_group_size / 4.0f));
+    }();
 
     // Timeout check
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

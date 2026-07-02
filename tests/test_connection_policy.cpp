@@ -716,40 +716,54 @@ void test_unified_burst_ack_timeout() {
                         const uint32_t to = unifiedBurstAckTimeoutMs(
                             m, r, cw, f, z, control_mod, cfg_sack);
                         const size_t frames = std::max<size_t>(1, f);
-                        // Hard lower bound the deadline MUST cover: the receiver cannot ACK before
-                        // (burst on air) + (its SACK holdoff) + (1-CW ack return). decode margin /
-                        // turnaround slack are additional headroom on top.
+                        // Hard lower bound the deadline MUST cover (2026-07-02 contract,
+                        // BUG-ACK-TIMEOUT-DOUBLECOUNT closed): the receiver cannot respond
+                        // later than (burst on air) + (its group-timeout fast-NACK budget:
+                        // remaining-airtime/2 + 3000 ms — rig-calibrated: the clean-path
+                        // SACK hold measured 0-1 ms over 124 groups) + (1-CW ack return).
+                        // decode margin / turnaround slack are headroom on top.
                         const uint32_t burst =
                             wideOFDMBurstAirtimeMs(m, r, frames, cw, 0, z);
-                        const uint32_t sack_hold = std::max<uint32_t>(
-                            cfg_sack, wideOFDMSackDelayMs(m, r, frames, cw, 0));
+                        const uint32_t data_ms =
+                            wideOFDMFrameTiming(m, r, cw, z).data_ms;
+                        const uint32_t rx_response =
+                            (frames > 1 ? static_cast<uint32_t>(
+                                              (frames - 1) *
+                                              static_cast<size_t>(data_ms) / 2)
+                                        : 0u) +
+                            3000u;
                         const uint32_t ack_ret =
                             wideOFDMFrameTiming(control_mod, CodeRate::R1_4).ack_ms;
-                        const uint32_t required = burst + sack_hold + ack_ret;
+                        const uint32_t required = burst + rx_response + ack_ret;
                         if (to < required) all_cover = false;
                         ++cells;
                     }
     CHECK(cells == 4 * 4 * 5 * 5 * 2, "burst ACK timeout matrix fully swept");
     CHECK(all_cover,
-          "unified burst ACK timeout must cover burst airtime + receiver SACK holdoff + ack "
-          "return for EVERY mod/rate/cw/frame/z");
+          "unified burst ACK timeout must cover burst airtime + the receiver's fast-NACK "
+          "response budget + ack return for EVERY mod/rate/cw/frame/z");
 
-    // The SACK-coalesce term is actually wired into the deadline (the fix): the deadline includes
-    // at least the configured receiver holdoff (set a value well above any modeled hold).
+    // DOUBLECOUNT regression (2026-07-02): the deadline must be COHERENT, not padded — for
+    // the live QPSK R2/3 cw8 g5 geometry it must sit well below the old ~24.5 s
+    // double-counted value while still covering the required floor above.
     CHECK(unifiedBurstAckTimeoutMs(Modulation::QPSK, CodeRate::R2_3, 8, 5, 27,
-                                   control_mod, 20000) >= 20000,
-          "configured receiver SACK-coalesce delay must flow into the burst ACK deadline");
+                                   control_mod, cfg_sack) < 20000,
+          "burst ACK deadline must not double-count burst airtime (was ~24.5 s pre-fix)");
 
-    // E5 regression: the exact live case (QPSK R2/3, cw8, 5-frame burst, z=27). Pre-fix the
-    // deadline was < burst + SACK holdoff and resent seq63-67 prematurely.
+    // E5 regression: the exact live case (QPSK R2/3, cw8, 5-frame burst, z=27). Pre-06-19 the
+    // deadline fired before the receiver's in-flight SACK and resent seq63-67 prematurely. The
+    // deadline must exceed burst airtime + the worst receiver response (fast-NACK budget).
     const uint32_t e5_to = unifiedBurstAckTimeoutMs(
         Modulation::QPSK, CodeRate::R2_3, 8, 5, 27, control_mod, cfg_sack);
     const uint32_t e5_burst =
         wideOFDMBurstAirtimeMs(Modulation::QPSK, CodeRate::R2_3, 5, 8, 0, 27);
-    const uint32_t e5_sack = std::max<uint32_t>(
-        cfg_sack, wideOFDMSackDelayMs(Modulation::QPSK, CodeRate::R2_3, 5, 8, 0));
-    CHECK(e5_to > e5_burst + e5_sack,
-          "E5: QPSK R2/3 cw8 5-frame burst deadline must exceed burst airtime + SACK holdoff");
+    const uint32_t e5_data_ms =
+        wideOFDMFrameTiming(Modulation::QPSK, CodeRate::R2_3, 8, 27).data_ms;
+    const uint32_t e5_rx_response =
+        static_cast<uint32_t>(4 * static_cast<size_t>(e5_data_ms) / 2) + 3000u;
+    CHECK(e5_to > e5_burst + e5_rx_response,
+          "E5: QPSK R2/3 cw8 5-frame burst deadline must exceed burst airtime + the "
+          "receiver's fast-NACK response budget");
 
     // NARROW path shares the bug: computeNarrowOFDMAckTimeoutMs previously omitted the 1500 ms
     // receiver tone-burst SACK hold and went 0.3-1.5 s short for QPSK/8PSK/QAM16 at window=3. The

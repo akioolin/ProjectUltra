@@ -863,11 +863,26 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
     // (1) actual on-air burst airtime (frames + first-frame anchor), mod/rate/cw/z-derived.
     const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
         data_mod, data_rate, frames, sanitized_cw, reanchor_ms, data_lifting_z);
-    // (2) receiver SACK-coalesce holdoff — the term the legacy burst formula OMITTED. Match the
-    // larger of the configured delay and the mod/rate-modeled physical hold (mirrors the sibling).
-    const uint32_t physical_sack_hold_ms = std::max<uint32_t>(
-        configured_sack_delay_ms,
-        wideOFDMSackDelayMs(data_mod, data_rate, frames, sanitized_cw, reanchor_ms));
+    // (2) receiver response envelope — RE-DERIVED 2026-07-02 (closes
+    // BUG-ACK-TIMEOUT-DOUBLECOUNT). Rig calibration (124 groups across 4 MPG@20
+    // transfers) measured the CLEAN-path group-end->SACK hold at 0-1 ms — the
+    // old max(configured window-hold, burstAirtime+30) term modeled a hold the
+    // receiver never applies on the burst path (it double-counted the burst
+    // airtime, ~+8-12 s of deadline). The REAL worst-case delayed response is
+    // the receiver's group-timeout fast-NACK, whose airtime-derived budget
+    // (accumulateBurstFrames: remaining x1.5 + 3000 ms from first-frame decode)
+    // lands at most 0.5 x remaining-airtime + 3000 ms after burst end. Using
+    // the SAME formula family keeps sender deadline and receiver timer coherent
+    // by construction across every mod/rate/cw/z. configured_sack_delay_ms is
+    // deliberately NOT consumed here anymore (it carries the sender-side
+    // window-hold arming, which the burst-path receiver does not apply); the
+    // parameter stays for call-site stability.
+    (void)configured_sack_delay_ms;
+    const uint32_t rx_response_ms =
+        (frames > 1 ? static_cast<uint32_t>(
+                          (frames - 1) * static_cast<size_t>(timing.data_ms) / 2)
+                    : 0u) +
+        3000u;
     // (3) peer LDPC decode-jitter envelope — a floor plus half a data-frame, so it scales with size.
     const uint32_t decode_margin_ms =
         std::max<uint32_t>(700, timing.data_ms / 2) + 700;
@@ -879,7 +894,7 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
     // cycles, the ack-monitor auto-disarms the instant an ACK decodes).
     const uint32_t reliability_full_anchor_ms = kWideOFDMFullAnchorExtraMs;
 
-    return burst_ms + physical_sack_hold_ms + decode_margin_ms + ack_return_ms +
+    return burst_ms + rx_response_ms + decode_margin_ms + ack_return_ms +
            kRoundTripSlackMs + reliability_full_anchor_ms;
 }
 
