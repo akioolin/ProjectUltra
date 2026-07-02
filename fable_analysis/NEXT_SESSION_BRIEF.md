@@ -5,6 +5,13 @@
 > the June historical record; several of their numbers are corrected in 09).
 > 1. Run the CLAUDE.md fresh-session protocol (AI_COLLABORATION, PROJECT_GOALS,
 >    KNOWN_BUGS, git log).
+> 2a. **LIVE-LADDER STATUS (07-02): implementation EXISTS on branch
+>    `wip/live-ladder-unvalidated` — ctest green but the faithful gate FAILS
+>    (freeze_guard kills both GUIs, alpha.log never written = early freeze/deadlock;
+>    the agent also flipped LOCK_RATE=0 in gui_qso_scenario.sh). DEBUG THE FREEZE
+>    FIRST (suspects: the coherence-carry across applyDataMode, the harness change,
+>    or a mode-change loop at connect). Do NOT merge until good@20/awgn/moderate
+>    cells pass. Main is clean at the last validated commit.**
 > 2. **CAMPAIGN REDIRECTION (2026-07-02, user-corrected): the leader's 3080@20 is MEASURED
 >    DELIVERED (Winlink bytes/min; our own 01 doc confirms comparability — 'the accounting
 >    is not the gap'). No single rung reaches it (all proven); the leader RIDES THE FADE
