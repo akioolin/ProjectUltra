@@ -764,12 +764,14 @@ void StreamingDecoder::finalizeBurstGroup() {
         {
             const auto& prof = ultra::timing::globalDecoderProfile();
             LOG_MODEM(INFO,
-                      "[%s] [HARQ] keys real=%llu failed=%llu provisional=%llu mismatch=%llu",
+                      "[%s] [HARQ] keys real=%llu failed=%llu provisional=%llu "
+                      "mismatch=%llu fresh_rescue=%llu",
                       log_prefix_.c_str(),
                       static_cast<unsigned long long>(prof.harq_key_build_success.load()),
                       static_cast<unsigned long long>(prof.harq_key_build_failed.load()),
                       static_cast<unsigned long long>(prof.harq_key_build_provisional.load()),
-                      static_cast<unsigned long long>(prof.harq_prediction_mismatch.load()));
+                      static_cast<unsigned long long>(prof.harq_prediction_mismatch.load()),
+                      static_cast<unsigned long long>(prof.harq_fresh_rescue.load()));
         }
         // Per-group provisional context is stale once the group is delivered
         // (the ARQ state advances on this very delivery) — drop it.

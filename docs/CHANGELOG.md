@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-02 (overnight) — feat(harq): FRESH-ONLY rescue — combining is now harm-free by construction
+
+The structural fix behind the 07-01 poison-loop verdict: `decodeFixedFrame` keeps the
+un-combined fresh LLRs whenever a combine replaces them; a combined-and-failed CW gets a
+bounded standalone pass (primary + 2 factor retries) on the fresh copy. If the stored
+accumulation was poisoned (wrong-keyed or confidently-wrong prior LLRs), the fresh copy can
+decode where the sum cannot — and the finalize drop() then purges the poisoned entry. On a
+double-fail under a PROVISIONAL key the retained accumulator RESETS to the fresh copy
+(caps poison persistence at one round); header-verified keys keep their Chase state.
+New counter/telemetry: `harq_fresh_rescue` (+ [HARQ] log field).
+
+**Validation:** sim smoke (16QAM R2/3 good@20 seed7, provisional=1): PASS 2490, 13
+provisional keys, 0 mismatch, 0 rescues (sim nulls are benign — expected). RIG MPG@20
+16QAM: **fresh_rescue fired 6x on real poison** (combined sums failed, fresh decoded) and
+the poison-LOOP signature is gone (failures move across groups); the run still failed to
+complete because tonight's rig 16QAM channel is decode-dead on most groups REGARDLESS
+(33/40 quality-0 with clean acquisition — the second rig failure mode, investigation 3b),
+so a fair ON/OFF throughput A/B is not obtainable tonight. **`ULTRA_HARQ_PROVISIONAL`
+therefore STAYS default-OFF** (no demonstrable rig win yet); the fresh-rescue ships
+unconditionally since it also protects real-key combines. ctest green (pre-existing
+UltraTncSimAudio only).
+
 ## 2026-07-01 (LATE) — fix(harq): provisional keys flipped to DEFAULT-OFF — rig poison-loop verdict (same evening)
 
 **The rig falsified the default within hours (the gates worked; the LLR-character assumption did

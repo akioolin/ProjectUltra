@@ -180,6 +180,10 @@ struct DecoderProfile {
     // key revealed a different seq (finalize guard). The default-ON decision
     // for provisional keys rides on this staying ~0 across multi-seed runs.
     std::atomic<uint64_t> harq_prediction_mismatch{0};
+    // Fresh-only rescue fired: a combined LLR sum failed every decode attempt
+    // but the un-combined fresh copy decoded — direct evidence the stored
+    // accumulation was hurting (poisoned or confidently-wrong prior copy).
+    std::atomic<uint64_t> harq_fresh_rescue{0};
 
     void reset() {
         detect_data_sync.reset();
@@ -206,6 +210,7 @@ struct DecoderProfile {
         harq_key_build_failed.store(0);
         harq_key_build_provisional.store(0);
         harq_prediction_mismatch.store(0);
+        harq_fresh_rescue.store(0);
     }
 };
 

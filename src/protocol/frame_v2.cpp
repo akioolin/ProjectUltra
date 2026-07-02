@@ -2116,12 +2116,20 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             cw_bits = interleaver->deinterleave(cw_bits);
         }
 
+        // Fresh-only copy of THIS attempt's LLRs, kept whenever combining
+        // replaces cw_bits — the combined sum can be POISONED (a stored copy
+        // with confidently-wrong LLRs actively fights a good fresh copy; the
+        // 2026-07-01 rig poison-loop), so a combined-and-failed CW gets one
+        // standalone pass on the fresh bits below. This makes combining
+        // harm-free by construction regardless of stored-copy quality.
+        std::vector<float> fresh_cw_bits;
         if (harq_active) {
             std::vector<float> combined_cw_bits;
             const auto cw_key = keyForCodeword(cw);
             const int attempts = harq_buffer->combine(cw_key, cw_bits, combined_cw_bits);
             harq_attempts[static_cast<size_t>(cw)] = attempts;
             if (!combined_cw_bits.empty()) {
+                fresh_cw_bits = cw_bits;  // preserve the un-combined copy
                 cw_bits = std::move(combined_cw_bits);
             }
             if (attempts > 1) {
@@ -2225,6 +2233,49 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             }
             // Phases 2-6 REMOVED (2026-03-15): excessive perturbation caused false
             // positives and decoder backlog. ARQ handles frame loss more efficiently.
+
+            // Phase F — FRESH-ONLY rescue (2026-07-01, the rig poison-loop fix):
+            // when this CW was COMBINED and every attempt on the sum failed, give
+            // the un-combined fresh copy a bounded shot (primary + 2 factor
+            // retries). If the stored accumulation is poisoned (wrong-keyed or
+            // confidently-wrong prior LLRs — real rig fades produce the latter),
+            // the fresh copy may decode where the sum cannot; on success the
+            // finalize drop() purges the poisoned entry. This bounds HARQ's
+            // downside at ~3 extra LDPC passes per combined-and-failed CW and
+            // makes combining strictly non-harmful.
+            if (!success && !fresh_cw_bits.empty()) {
+                static constexpr float fresh_factors[] = {
+                    kFixedFrameDefaultMinSumFactor, 0.875f, 0.75f};
+                for (int retry = 0; retry < 3 && !success; retry++) {
+                    decoder.setMinSumFactor(fresh_factors[retry]);
+                    {
+                        ultra::timing::ScopedTimer _ldpc_(
+                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
+                        decoded = decoder.decodeSoft(fresh_cw_bits);
+                    }
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        ultra::timing::globalDecoderProfile()
+                            .harq_fresh_rescue.fetch_add(1,
+                                                         std::memory_order_relaxed);
+                        LOG_MODEM(INFO,
+                                  "CW[%d]: FRESH-ONLY RESCUE (combined sum failed; "
+                                  "factor=%.4f, iters=%d) — stored accumulation "
+                                  "was hurting",
+                                  cw, fresh_factors[retry], iterations);
+                    }
+                }
+                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+                // If BOTH the sum and the fresh copy failed under a PROVISIONAL
+                // (unverified) key, retain the FRESH bits instead of the sum:
+                // resetting a suspect accumulator to the latest copy caps poison
+                // persistence at one round. Header-verified keys keep the sum
+                // (their accumulations are trustworthy Chase state).
+                if (!success && harq_key_provisional) {
+                    decoder_soft_bits[static_cast<size_t>(cw)] = fresh_cw_bits;
+                }
+            }
         }
 
         if (used_perturbation && success) perturbation_cw_count++;
