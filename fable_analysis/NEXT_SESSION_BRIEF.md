@@ -5,7 +5,17 @@
 > the June historical record; several of their numbers are corrected in 09).
 > 1. Run the CLAUDE.md fresh-session protocol (AI_COLLABORATION, PROJECT_GOALS,
 >    KNOWN_BUGS, git log).
-> 2. NEW TOP ITEM (2026-07-02, user principle: 'software must adapt to anything'):
+> 2. **CAMPAIGN REDIRECTION (2026-07-02, user-corrected): the leader's 3080@20 is MEASURED
+>    DELIVERED (Winlink bytes/min; our own 01 doc confirms comparability — 'the accounting
+>    is not the gap'). No single rung reaches it (all proven); the leader RIDES THE FADE
+>    CYCLE with fast fine-grained rate/mod adaptation. Our own rig data shows the crests
+>    carry flawless 16QAM. THE BUILD: make the ladder LIVE — per-group (1-2 group reaction)
+>    rate/mod adaptation, crest->16QAM/duck->QPSK, demote as safety. Preconditions to clear:
+>    BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE, climb streak 4->1-2, ULTRA_RATE_ADAPT default.
+>    Fade-avg arithmetic on our numbers: ~0.45x5.1k + 0.55x2.7k x ~0.75 cycle = ~2.9-3.0k.
+>    Testable at dial 20 AS-IS. Retract yesterday's 'scoreboard convention' discount.**
+> 2b. PREVIOUS top item (software-ALC): built+committed; bench-moot (IONOS normalizes),
+>    real-radio feature. Increment-1 advisory live.
 >    **closed-loop TX-drive control (software-ALC)** — receiver measures crest-factor
 >    (clip detect) + signal-to-chain-noise headroom, feeds back in the ACK/quality
 >    channel, sender walks tx_drive within [safe bounds]. Rationale: rig 16QAM's
