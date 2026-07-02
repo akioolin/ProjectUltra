@@ -5,7 +5,15 @@
 > the June historical record; several of their numbers are corrected in 09).
 > 1. Run the CLAUDE.md fresh-session protocol (AI_COLLABORATION, PROJECT_GOALS,
 >    KNOWN_BUGS, git log).
-> 2. Work ONE item from 09 §5's ranked plan per session. As of 2026-07-01 the order is:
+> 2. NEW TOP ITEM (2026-07-02, user principle: 'software must adapt to anything'):
+>    **closed-loop TX-drive control (software-ALC)** — receiver measures crest-factor
+>    (clip detect) + signal-to-chain-noise headroom, feeds back in the ACK/quality
+>    channel, sender walks tx_drive within [safe bounds]. Rationale: rig 16QAM's
+>    missing +4-5dB is unused level headroom the modem can't see blindly
+>    (BUG-QAM16-RIG-LEVEL-BUDGET); chain-noise-dominated links are a universal real-
+>    radio condition. Increment 1 = detect level-limited condition + operator advisory;
+>    increment 2 = the closed loop. THEN re-run the 16QAM ladder on the rig.
+> 3. Work ONE item from 09 §5's ranked plan per session. As of 2026-07-01 the order is:
 >    (1) #58 connect-time coin-flip fix (reliability first — rig stock at MPG@20 was a
 >        zero-delivery coin-flip: DBPSK R1/4 ~94 bps nominal / 0 bytes vs QPSK R2/3 1.5k),
 >    (2) BUG-ACK-STAIRCASE-FADE-BIN re-bin (+4-5%, trivially safe, validate ACK FER at
