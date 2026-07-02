@@ -5,13 +5,16 @@
 > the June historical record; several of their numbers are corrected in 09).
 > 1. Run the CLAUDE.md fresh-session protocol (AI_COLLABORATION, PROJECT_GOALS,
 >    KNOWN_BUGS, git log).
-> 2a. **LIVE-LADDER STATUS (07-02): implementation EXISTS on branch
->    `wip/live-ladder-unvalidated` — ctest green but the faithful gate FAILS
->    (freeze_guard kills both GUIs, alpha.log never written = early freeze/deadlock;
->    the agent also flipped LOCK_RATE=0 in gui_qso_scenario.sh). DEBUG THE FREEZE
->    FIRST (suspects: the coherence-carry across applyDataMode, the harness change,
->    or a mode-change loop at connect). Do NOT merge until good@20/awgn/moderate
->    cells pass. Main is clean at the last validated commit.**
+> 2a. **LIVE-LADDER STATUS (07-02, corrected): branch `wip/live-ladder-unvalidated`
+>    is PROMISING but 2/4 cells hard-fail. Agent's own gates (its binary):
+>    awgn@20 PASS 3370 bps 5 moves (CAMPAIGN RECORD, +47% vs pinned 2290!);
+>    good@20 s42 PASS 2070, 9 moves; good@20 s43 FAIL@0 (1 move) and s7 FAIL@0
+>    (0 moves) = a reproducible move-path stall (the historical mid-stream
+>    deadlock hazard class). My separate 'freeze_guard' failure was probably a
+>    CONCURRENT-RUN collision (the agent queued runs in parallel — never trust
+>    gate results with two OTA sims alive). NEXT: on the branch, debug seeds
+>    43/7 with the clean-boundary/requeue path under suspicion; do NOT merge
+>    until 3/3 good + awgn + moderate pass sequentially.**
 > 2. **CAMPAIGN REDIRECTION (2026-07-02, user-corrected): the leader's 3080@20 is MEASURED
 >    DELIVERED (Winlink bytes/min; our own 01 doc confirms comparability — 'the accounting
 >    is not the gap'). No single rung reaches it (all proven); the leader RIDES THE FADE
