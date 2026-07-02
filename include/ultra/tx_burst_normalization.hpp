@@ -25,6 +25,17 @@ inline constexpr float kHardwareTxMaxPeakTarget = 0.7f;
 // radio/audio chain. Above this, DAC clipping and radio ALC pumping risk rise
 // sharply. 0.7 full scale is -3.1 dBFS.
 
+inline constexpr float kSoftwareAlcMaxPeakTarget = 0.85f;
+// Absolute digital ceiling for the CLOSED-LOOP software-ALC (2026-07-02,
+// BUG-QAM16-RIG-LEVEL-BUDGET). Higher than the 0.7 operator ceiling because the
+// loop — unlike a blind static setting — is guarded by the receiver's per-burst
+// crest-factor clip detector, which pulls drive down -2 dB the moment the chain
+// clips. 0.85 is -1.4 dBFS: still real headroom below the 0.95 peak-warning /
+// 1.0 clip thresholds, and 0.5 -> 0.85 is the +4.6 dB walk that covers the
+// measured ~4-5 dB unused level headroom on the rig. normalizeTxBurstForHardware
+// clamps its target to THIS value; the operator settings slider stays clamped to
+// kHardwareTxMaxPeakTarget.
+
 inline constexpr float kHardwareTxMinPeakTarget = 0.05f;
 // Practical lower bound for real soundcard drive: below this, DAC/input noise
 // floor dominates and SNR collapses regardless of channel conditions.

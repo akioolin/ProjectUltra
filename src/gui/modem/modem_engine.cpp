@@ -974,6 +974,14 @@ bool ModemEngine::getDopplerCoherenceValid() const {
     return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceValid() : false;
 }
 
+int ModemEngine::getRxLevelVerdict() const {
+    return streaming_decoder_ ? streaming_decoder_->getRxLevelVerdict() : 0;
+}
+
+uint32_t ModemEngine::getRxLevelVerdictSeq() const {
+    return streaming_decoder_ ? streaming_decoder_->getRxLevelVerdictSeq() : 0;
+}
+
 bool ModemEngine::hasLastOFDMBroadbandSNR() const {
     return streaming_decoder_ ? streaming_decoder_->hasLastOFDMBroadbandSNREstimate() : false;
 }

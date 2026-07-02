@@ -133,6 +133,89 @@ inline bool burstCrossFrameInterleaveOn(Modulation mod) {
     // lossier channels where fine-grained retransmit is the proven robustness lever.
     return ofdm_link_adaptation::isCoherentModulation(mod) && getBitsPerSymbol(mod) >= 4;
 }
+// ═════════════════════ Software-ALC (closed-loop TX-drive control, 2026-07-02) ═════════════════════
+// BUG-QAM16-RIG-LEVEL-BUDGET: rig wire captures showed OFDM data arriving at only ~6-7 dB
+// broadband SNR over the receiver's chain-noise floor with ~4-5 dB of unused TX level headroom
+// — a chain-noise-dominated link the sender cannot see blindly. The RECEIVER measures, per
+// decoded burst: (a) data-segment RMS over the group's kept data frames, (b) its idle
+// chain-noise floor (IdleNoiseSNREstimator), (c) the burst crest factor CF = peak/RMS (clip
+// signature). It derives a verdict — LOW (headroom available), CLIPPED (upstream clipping),
+// OK — and feeds a 2-bit drive advisory back on the tone-burst ACK (bits [30..31]); the
+// SENDER walks its per-burst peak target (tx_drive) within [configured baseline, 0.85].
+//
+// ULTRA_SOFTWARE_ALC=0 disables the LOOP on both ends (receiver always advises hold, sender
+// ignores advisories); the receiver-side LEVEL ADVISORY log line stays active either way.
+inline bool softwareAlcEnabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("ULTRA_SOFTWARE_ALC");
+        return !(e && e[0] == '0');  // default ON
+    }();
+    return enabled;
+}
+
+// Per-burst RX level verdict (receiver-side measurement, decoder-computed).
+enum class RxLevelVerdict : int {
+    OK = 0,       // healthy level, no advisory
+    LOW = 1,      // data rides < kAlcLowHeadroomDb over the chain-noise floor
+    CLIPPED = 2,  // crest factor collapsed below kAlcClipCfDb (upstream clipping)
+};
+
+// LOW threshold: burst data RMS over the idle chain-noise floor, in dB (env
+// ULTRA_ALC_LOW_DB). Default 12 dB, derived from three anchors:
+//  1. MEASURED separation: the level-limited rig state reads ~6-7 dB (wire captures,
+//     BUG-QAM16-RIG-LEVEL-BUDGET), a healthy sim-reference link at Good@20 reads ~20 dB
+//     — 12 splits them with >=5 dB margin each side.
+//  2. FIRST PRINCIPLES: with data >=12 dB above the noise floor, the floor degrades a
+//     channel-noise-limited link by <= 10*log10(1+10^-1.2) ~= 0.27 dB — the chain has
+//     stopped being the bottleneck, so no drive-up is warranted; below it, the arriving
+//     level itself caps the dense-constellation rungs (16QAM R1/2 needs ~11-13 dB eff.).
+//  3. LOOP GEOMETRY: the full ALC walk (0.5 -> 0.85 peak target) is +4.6 dB — from the
+//     measured 6-7 dB it reaches ~11-12 dB, i.e. the loop converges AT this threshold
+//     (or at the digital ceiling), never chasing an unreachable target.
+inline float alcLowHeadroomDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_ALC_LOW_DB")) {
+            const float f = static_cast<float>(std::atof(e));
+            if (f > 0.0f && f < 40.0f) return f;
+        }
+        return 12.0f;
+    }();
+    return v;
+}
+
+// CLIPPED threshold: burst data crest factor (peak/RMS) in dB below which upstream
+// clipping is assumed (env ULTRA_ALC_CLIP_CF_DB). Default 6.5 dB:
+//  - healthy OFDM data arrives at CF ~9-14 dB (near-Gaussian sum of ~59 carriers:
+//    max|x| over an N-sample burst ~ sqrt(2 ln N)*sigma ~= 12-13 dB at N~3e4; wire
+//    captures measured 9-14);
+//  - a noise-dominated segment (the LOW case) is itself Gaussian -> CF ~10-12 dB, so
+//    a buried burst can NOT false-trigger CLIPPED;
+//  - hard upstream clipping collapses CF toward 0-6 dB (the 2026-06-15 IONOS
+//    square-wave disaster measured CF=1.01 ~= 0.1 dB).
+//  6.5 dB sits >=2.5 dB below the healthy floor and >=3 dB above the collapse signature.
+inline float alcClipCrestFactorDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_ALC_CLIP_CF_DB")) {
+            const float f = static_cast<float>(std::atof(e));
+            if (f > 0.0f && f < 12.0f) return f;
+        }
+        return 6.5f;
+    }();
+    return v;
+}
+
+// Advisory hysteresis: consecutive LOW bursts required before advising "up". A single
+// LOW can be a deep-fade artifact (the burst-average is fade-averaged over ~1-2 Tc,
+// but a whole-burst trough remains possible); two consecutive multi-second bursts
+// decorrelate across Tc. CLIPPED advises "down" IMMEDIATELY (clipping destroys frames
+// now; asymmetric fast-attack/slow-release is classic ALC).
+inline constexpr int kAlcLowStreakForUp = 2;
+
+// Sender step sizes: +0.5 dB per advised-up ACK (slow release), -2 dB per advised-down
+// (fast attack). One adjustment per ACKed group (repeat-ACK detections are deduped).
+inline constexpr float kAlcUpStepFactor = 1.0593f;    // 10^(0.5/20)
+inline constexpr float kAlcDownStepFactor = 0.7943f;  // 10^(-2/20)
+
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
 inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;

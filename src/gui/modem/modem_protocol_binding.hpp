@@ -101,6 +101,13 @@ inline void wireModemToProtocol(ModemEngine& modem,
                                         stats.snr_source, /*used_for_quality=*/false);
                 }
             }
+            // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): feed the decoder's per-burst
+            // RX level verdict BEFORE onBurstGroupReceived — that call emits THIS
+            // group's tone-burst ACK, which carries the drive advisory derived from
+            // the verdict. The seq lets the Connection ignore stale re-feeds (e.g. a
+            // timed-out group re-delivering the previous measurement).
+            protocol.setRxLevelVerdict(modem.getRxLevelVerdict(),
+                                       modem.getRxLevelVerdictSeq());
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                           interleaved, group_size);
         });

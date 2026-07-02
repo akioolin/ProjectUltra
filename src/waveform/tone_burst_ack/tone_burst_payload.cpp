@@ -36,13 +36,32 @@ bool ToneBurstAckPayload::clampToWireWidths() {
     const uint8_t group_seq_max = (1u << kPayloadGroupSeqBits) - 1u;
     const uint8_t frame_mask_max = (1u << kPayloadFrameMaskBits) - 1u;
     const uint8_t rate_hint_max = (1u << kPayloadRateHintBits) - 1u;
+    const uint8_t drive_advisory_max = (1u << kPayloadDriveAdvisoryBits) - 1u;
 
     bool clean = true;
     if (group_seq > group_seq_max) { group_seq &= group_seq_max; clean = false; }
     if (frame_mask > frame_mask_max) { frame_mask &= frame_mask_max; clean = false; }
     if (rate_hint > rate_hint_max) { rate_hint &= rate_hint_max; clean = false; }
+    if (drive_advisory > drive_advisory_max) {
+        drive_advisory &= drive_advisory_max;
+        clean = false;
+    }
     return clean;
 }
+
+namespace {
+
+// Assemble the 20-bit CRC message: 18 useful bits (0..17) + the 2 drive-advisory
+// bits appended as message bits 18..19. The advisory rides ABOVE the CRC field on
+// the wire (bits 30..31), so the message is built explicitly rather than masked.
+inline uint32_t crcMessage(uint32_t raw) {
+    const uint32_t useful = raw & ((1u << kPayloadUsefulBits) - 1u);
+    const uint32_t advisory =
+        getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits);
+    return useful | (advisory << kPayloadUsefulBits);
+}
+
+}  // namespace
 
 // ============================================================================
 // Pack / unpack
@@ -58,11 +77,11 @@ uint32_t packPayload(const ToneBurstAckPayload& p) {
     raw = putBits(raw, kBitOffsetRateHint, kPayloadRateHintBits, sanitized.rate_hint);
     raw = putBits(raw, kBitOffsetType, kPayloadTypeBits,
                   static_cast<uint32_t>(sanitized.type));
+    raw = putBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits,
+                  sanitized.drive_advisory);
 
-    const uint32_t useful = raw & ((1u << kPayloadUsefulBits) - 1u);
-    const uint16_t crc = crc12(useful, kPayloadUsefulBits);
+    const uint16_t crc = crc12(crcMessage(raw), kPayloadCrcMessageBits);
     raw = putBits(raw, kBitOffsetCRC, kPayloadCRCBits, crc);
-    // Reserved bits stay zero.
     return raw;
 }
 
@@ -72,6 +91,8 @@ ToneBurstAckPayload unpackPayload(uint32_t raw) {
     p.frame_mask = static_cast<uint8_t>(getBits(raw, kBitOffsetFrameMask, kPayloadFrameMaskBits));
     p.rate_hint = static_cast<uint8_t>(getBits(raw, kBitOffsetRateHint, kPayloadRateHintBits));
     p.type = static_cast<AckType>(getBits(raw, kBitOffsetType, kPayloadTypeBits));
+    p.drive_advisory = static_cast<uint8_t>(
+        getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits));
     return p;
 }
 
@@ -100,8 +121,7 @@ uint16_t crc12(uint32_t value, uint32_t bits) {
 }
 
 bool verifyPayloadCRC(uint32_t raw) {
-    const uint32_t useful = raw & ((1u << kPayloadUsefulBits) - 1u);
-    const uint16_t expected = crc12(useful, kPayloadUsefulBits);
+    const uint16_t expected = crc12(crcMessage(raw), kPayloadCrcMessageBits);
     const uint16_t observed = static_cast<uint16_t>(getBits(raw, kBitOffsetCRC, kPayloadCRCBits));
     return expected == observed;
 }

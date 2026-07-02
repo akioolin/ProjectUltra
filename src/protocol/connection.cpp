@@ -259,6 +259,24 @@ Connection::Connection(const ConnectionConfig& config)
                     ? static_cast<uint8_t>(std::lround(
                           std::clamp(last_group_quality_, 0.0f, 1.0f) * 7.0f))
                     : 0;
+                // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): stamp the drive advisory
+                // from the per-burst RX level verdict fed via setRxLevelVerdict just
+                // before this group's delivery. Down IMMEDIATELY on a clip signature
+                // (fast attack); up only after kAlcLowStreakForUp consecutive fresh
+                // LOW verdicts (fade hysteresis, slow release). ULTRA_SOFTWARE_ALC=0
+                // pins the advisory to hold (the receiver advisory LOG still runs in
+                // the decoder). Repeated ACK emits for the same group re-carry the
+                // same advisory; the sender dedups by group_seq.
+                if (connection_policy::softwareAlcEnabled()) {
+                    if (rx_level_clipped_) {
+                        tba.drive_advisory =
+                            ultra::waveform::tone_burst_ack::kDriveAdvisoryDown;
+                    } else if (rx_level_low_streak_ >=
+                               connection_policy::kAlcLowStreakForUp) {
+                        tba.drive_advisory =
+                            ultra::waveform::tone_burst_ack::kDriveAdvisoryUp;
+                    }
+                }
                 on_transmit_tone_burst_ack_(tba);
             });
     }
@@ -1648,6 +1666,20 @@ bool Connection::onToneBurstAck(
                 ? 0.0f
                 : static_cast<float>(detection.payload.rate_hint) / 7.0f;
         applyAdaptiveRateFeedback(fed_quality);
+        // Software-ALC sender side (BUG-QAM16-RIG-LEVEL-BUDGET): the receiver's
+        // drive advisory rides bits [30..31] of this ACK. Hand a non-hold advisory
+        // to the host (the host owns tx_drive), which applies at most ONE step per
+        // ACKed group (dedup by group_seq), clamped to [configured baseline, 0.85].
+        // Advisory 3 (reserved) is treated as hold. ACK loss is stateless-safe:
+        // the advisory simply doesn't arrive and the next group's ACK re-derives it.
+        {
+            const uint8_t advisory = detection.payload.drive_advisory;
+            if (connection_policy::softwareAlcEnabled() && on_drive_advisory_ &&
+                (advisory == ultra::waveform::tone_burst_ack::kDriveAdvisoryUp ||
+                 advisory == ultra::waveform::tone_burst_ack::kDriveAdvisoryDown)) {
+                on_drive_advisory_(advisory, detection.payload.group_seq);
+            }
+        }
         if (outermost) {
             arq_callback_defer_refill_ = false;
             // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
@@ -1925,6 +1957,28 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         std::snprintf(buf, sizeof(buf), "hold %s (q=%.2f)", codeRateToString(prev), quality);
     }
     last_adaptive_action_ = buf;
+}
+
+void Connection::setRxLevelVerdict(int verdict, uint32_t seq) {
+    if (seq == rx_level_verdict_seq_seen_) {
+        return;  // stale re-feed — no fresh per-burst measurement since last time
+    }
+    rx_level_verdict_seq_seen_ = seq;
+    using connection_policy::RxLevelVerdict;
+    switch (static_cast<RxLevelVerdict>(verdict)) {
+        case RxLevelVerdict::CLIPPED:
+            rx_level_clipped_ = true;
+            rx_level_low_streak_ = 0;
+            break;
+        case RxLevelVerdict::LOW:
+            rx_level_clipped_ = false;
+            ++rx_level_low_streak_;
+            break;
+        default:
+            rx_level_clipped_ = false;
+            rx_level_low_streak_ = 0;
+            break;
+    }
 }
 
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
@@ -3515,6 +3569,9 @@ void Connection::enterConnected() {
     qam16_clean_streak_ = 0;
     qam16_bad_streak_ = 0;
     qam16_sticky_demoted_ = false;
+    // Software-ALC receiver-side state is per-connection.
+    rx_level_low_streak_ = 0;
+    rx_level_clipped_ = false;
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
@@ -3570,6 +3627,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_ack_frame_.clear();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
+    rx_level_low_streak_ = 0;   // software-ALC: per-connection
+    rx_level_clipped_ = false;
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;

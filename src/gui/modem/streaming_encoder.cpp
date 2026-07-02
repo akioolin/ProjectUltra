@@ -856,7 +856,7 @@ std::vector<float> StreamingEncoder::encodeToneBurstAck(
     auto samples = enc.encode(payload, symbol_ms);
     LOG_MODEM(INFO,
               "[%s] ToneBurstAck encoded: group_seq=%u type=%s frame_mask=0x%02X "
-              "rate_hint=%u symbol_ms=%u samples=%zu (%.0f ms airtime)",
+              "rate_hint=%u drive_advisory=%u symbol_ms=%u samples=%zu (%.0f ms airtime)",
               log_prefix_.c_str(),
               static_cast<unsigned>(payload.group_seq),
               payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
@@ -864,6 +864,7 @@ std::vector<float> StreamingEncoder::encodeToneBurstAck(
                   : "ACK",
               static_cast<unsigned>(payload.frame_mask),
               static_cast<unsigned>(payload.rate_hint),
+              static_cast<unsigned>(payload.drive_advisory),
               static_cast<unsigned>(symbol_ms),
               samples.size(),
               static_cast<float>(samples.size()) * 1000.0f /

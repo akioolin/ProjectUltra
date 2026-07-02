@@ -4,6 +4,7 @@
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_frame_policy.hpp"
+#include "protocol/connection_policy.hpp"  // software-ALC thresholds (RxLevelVerdict)
 #include "sync/signal_policy.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
@@ -438,6 +439,23 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         return BurstFrameResult::SUCCESS;
     }
 
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): this data frame passed the erasure
+    // gate — fold its BROADBAND wire level (raw ring samples, pre-CFO-shift) into
+    // the per-group accumulator. Kept frames only: an erasure-gated frame is mostly
+    // noise and would bias the data-segment RMS toward a false LOW verdict.
+    {
+        double sum_sq = 0.0;
+        float peak = burst_level_peak_;
+        for (float s : block) {
+            sum_sq += static_cast<double>(s) * static_cast<double>(s);
+            const float mag = std::abs(s);
+            if (mag > peak) peak = mag;
+        }
+        burst_level_sum_sq_ += sum_sq;
+        burst_level_sample_count_ += block.size();
+        burst_level_peak_ = peak;
+    }
+
     // Pre-correct CFO on burst block
     bool is_ofdm_burst = protocol::isOFDMMode(mode_);
     float burst_pre_cfo = 0.0f;
@@ -568,10 +586,112 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     return BurstFrameResult::SUCCESS;
 }
 
+// Software-ALC increment 1 (BUG-QAM16-RIG-LEVEL-BUDGET): per-burst RX level verdict.
+// Inputs (all already measured on this RX):
+//   data_rms  — broadband RMS over the group's KEPT data frames (frames 2..N; the
+//               chirp-anchored frame 1 and erasure-gated frames are excluded),
+//   noise_rms — the idle chain-noise floor (IdleNoiseSNREstimator, in-band FIR RMS,
+//               measured on lock-free SEARCHING-state audio between bursts),
+//   CF        — burst crest factor peak/RMS over the same kept frames.
+// Fade-robustness of the LOW verdict (self-adversarial check, documented): the
+// numerator is averaged over the WHOLE multi-second group (~1-2 coherence times at
+// Good — fade-averaged by construction) while the denominator is the noise floor the
+// receiver actually hears, which on a chain-noise-dominated link does NOT move with
+// the ionospheric path gain (and under RX AGC a signal fade LIFTS the audio noise
+// floor into the data segment, partially cancelling the dip — the ratio moves LESS
+// than the fade depth). Residual whole-burst troughs are absorbed by the 2-burst LOW
+// hysteresis (connection side) and bounded by the sender's +0.5 dB step / 0.85
+// ceiling / immediate CF down-step — a spurious "up" is small, capped, and
+// self-correcting.
+void StreamingDecoder::computeBurstLevelVerdict() {
+    namespace alc = ::ultra::protocol::connection_policy;
+    // Need >= one full kept data frame and a valid idle-noise reference; otherwise
+    // skip (no seq bump): an erased-out group is evidence about FADING, not LEVEL.
+    if (burst_level_sample_count_ == 0 ||
+        (burst_min_block_ > 0 && burst_level_sample_count_ < burst_min_block_)) {
+        return;
+    }
+    const auto idle = idle_noise_snr_estimator_.snapshot();
+    if (!idle.valid || !(idle.normalized_noise_rms > 0.0f)) {
+        return;
+    }
+    const float data_rms = static_cast<float>(std::sqrt(
+        burst_level_sum_sq_ / static_cast<double>(burst_level_sample_count_)));
+    if (!(data_rms > 0.0f) || !std::isfinite(data_rms)) {
+        return;
+    }
+
+    // Basis note: data_rms/peak are BROADBAND wire quantities; the noise reference is
+    // the idle estimator's in-band (50-2950 Hz FIR) RMS. The modem signal is fully
+    // inside the FIR passband, so the mismatch only OVERSTATES headroom when the chain
+    // carries out-of-band noise — i.e. it fails toward OK/hold (never asks for drive
+    // the link doesn't need).
+    const float headroom_db = 20.0f * std::log10(
+        data_rms / std::max(idle.normalized_noise_rms, 1e-9f));
+    const float cf_db = 20.0f * std::log10(
+        std::max(burst_level_peak_, 1e-9f) / data_rms);
+
+    // CLIPPED wins over LOW: clipping is a hard fault (raising drive on a clipped
+    // chain destroys frames). A clipped-AND-buried burst reads LOW first (noise
+    // Gaussianizes the CF toward ~10-12 dB) — still convergent: up-steps lift the
+    // level until the clip signature emerges, then the fast down-step engages.
+    alc::RxLevelVerdict verdict = alc::RxLevelVerdict::OK;
+    if (cf_db < alc::alcClipCrestFactorDb()) {
+        verdict = alc::RxLevelVerdict::CLIPPED;
+    } else if (headroom_db < alc::alcLowHeadroomDb()) {
+        verdict = alc::RxLevelVerdict::LOW;
+    }
+
+    rx_level_verdict_.store(static_cast<int>(verdict), std::memory_order_relaxed);
+    rx_level_verdict_seq_.fetch_add(1, std::memory_order_relaxed);
+
+    // Per-group measurement line (rig-greppable A/B trace).
+    LOG_MODEM(INFO,
+              "[%s] [ALC-RX] data_rms=%.4f noise_rms=%.4f headroom_db=%.1f "
+              "cf_db=%.1f peak=%.3f samples=%zu verdict=%s",
+              log_prefix_.c_str(), data_rms, idle.normalized_noise_rms, headroom_db,
+              cf_db, burst_level_peak_, burst_level_sample_count_,
+              verdict == alc::RxLevelVerdict::CLIPPED ? "CLIPPED"
+              : verdict == alc::RxLevelVerdict::LOW   ? "LOW"
+                                                      : "OK");
+
+    // Operator advisory: once per verdict change (rate-limited by state). Always
+    // logs, independent of ULTRA_SOFTWARE_ALC (the knob gates only the closed loop).
+    if (static_cast<int>(verdict) != rx_level_last_logged_verdict_) {
+        rx_level_last_logged_verdict_ = static_cast<int>(verdict);
+        switch (verdict) {
+            case alc::RxLevelVerdict::LOW:
+                LOG_MODEM(INFO,
+                          "[%s] LEVEL ADVISORY: RX level-limited (data %.1f dB over "
+                          "chain noise, need >= %.1f dB) — sender should increase drive",
+                          log_prefix_.c_str(), headroom_db, alc::alcLowHeadroomDb());
+                break;
+            case alc::RxLevelVerdict::CLIPPED:
+                LOG_MODEM(INFO,
+                          "[%s] LEVEL ADVISORY: TX clipping suspected (burst crest "
+                          "factor %.1f dB; healthy OFDM arrives ~9-14 dB) — sender "
+                          "should reduce drive",
+                          log_prefix_.c_str(), cf_db);
+                break;
+            case alc::RxLevelVerdict::OK:
+                LOG_MODEM(INFO,
+                          "[%s] LEVEL ADVISORY: RX level OK (data %.1f dB over chain "
+                          "noise, CF %.1f dB)",
+                          log_prefix_.c_str(), headroom_db, cf_db);
+                break;
+        }
+    }
+}
+
 void StreamingDecoder::finalizeBurstGroup() {
     const int burst_group_size = std::max(2, burst_group_size_);
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
               log_prefix_.c_str(), burst_group_size);
+
+    // Software-ALC: fold this group's level accumulation into a fresh verdict BEFORE
+    // the group callback below — the callback chain feeds it to the Connection, which
+    // stamps the drive advisory onto THIS group's tone-burst ACK.
+    computeBurstLevelVerdict();
 
     // Bytes-per-codeword: 243 at z=81 (N=1944), 81 at z=27. The active z is
     // announced by the sender in BURST_HEADER payload[5] and cached on

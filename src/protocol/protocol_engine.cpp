@@ -739,6 +739,11 @@ void ProtocolEngine::setChannelCoherence(float coherence_score, bool valid) {
     connection_.setChannelCoherence(coherence_score, valid);
 }
 
+void ProtocolEngine::setRxLevelVerdict(int verdict, uint32_t seq) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setRxLevelVerdict(verdict, seq);
+}
+
 bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     const auto header = v2::parseHeader(data);

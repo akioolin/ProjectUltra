@@ -437,6 +437,24 @@ public:
     float getCoherenceScore() const { return coherence_score_; }
     bool coherenceValid() const { return coherence_valid_; }
 
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET) receiver side: per-burst RX level
+    // verdict from the decoder (connection_policy::RxLevelVerdict as int) with its
+    // measurement seq. Fed by the modem binding BEFORE onBurstGroupReceived so the
+    // advisory derived here rides on THIS group's tone-burst ACK. A repeated seq
+    // (stale re-feed, e.g. a timed-out group) is ignored — LOW streaks only grow on
+    // fresh measurements.
+    void setRxLevelVerdict(int verdict, uint32_t seq);
+
+    // Software-ALC sender side: fires when a decoded tone-burst ACK carries a
+    // non-hold drive advisory (1=up, 2=down) while we have in-flight data. Runs
+    // under the ProtocolEngine mutex — the host must NOT call back into the
+    // protocol from it (atomics + logging only). group_seq lets the host dedup
+    // repeat-ACK detections (one adjustment per ACKed group).
+    using DriveAdvisoryCallback = std::function<void(uint8_t advisory, uint8_t group_seq)>;
+    void setDriveAdvisoryCallback(DriveAdvisoryCallback cb) {
+        on_drive_advisory_ = std::move(cb);
+    }
+
     // Callback when remote station requests mode change
     // Data-mode-changed callback. cw_count is the negotiated fixed-frame CW
     // count for the new rate (1..8) — host updates encoder/decoder from this
@@ -637,6 +655,13 @@ private:
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
+    // Software-ALC receiver-side state (per-connection; reset in enterConnected /
+    // enterDisconnected). low_streak counts CONSECUTIVE fresh LOW verdicts (>=
+    // kAlcLowStreakForUp -> advise "up"); clipped latches the latest verdict's clip
+    // signature (advise "down" IMMEDIATELY); seq_seen dedups stale verdict re-feeds.
+    int rx_level_low_streak_ = 0;
+    bool rx_level_clipped_ = false;
+    uint32_t rx_level_verdict_seq_seen_ = 0;
     std::string last_adaptive_action_;      // GUI: short human-readable action
     // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-OFF). See
     // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK
@@ -773,6 +798,7 @@ private:
     TransmitCallback on_transmit_;
     TransmitInfoCallback on_transmit_info_;
     TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
+    DriveAdvisoryCallback on_drive_advisory_;  // software-ALC sender-side hook
     ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;

@@ -151,6 +151,11 @@ public:
     // staircase (BUG-ACK-STAIRCASE-FADE-BIN layer 2).
     bool hasLastOFDMBroadbandSNR() const;
     float getLastOFDMBroadbandSNR() const;
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): latest per-burst RX level verdict
+    // (connection_policy::RxLevelVerdict as int: 0=OK, 1=LOW, 2=CLIPPED) + its
+    // measurement seq (fresh-vs-stale dedup). Lock-free decoder atomics.
+    int getRxLevelVerdict() const;
+    uint32_t getRxLevelVerdictSeq() const;
 
     // Set known CFO for light preamble mode (for testing or external CFO source)
     void setKnownCFO(float cfo_hz);

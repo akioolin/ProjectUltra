@@ -149,19 +149,25 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // Payload + FEC layout
 // ============================================================================
 //
-// Payload (packed into 32 bits with reserved/padding):
+// Payload (packed into 32 bits):
 //   bits  0..5   group_seq (6 bits, mod-64 sequence number)
 //   bits  6..13  frame_mask (8 bits, 1 = frame OK, 0 = frame FAIL)  [widened 6->8 2026-06-17
 //                so a thin-frame cw5 burst can carry 8 frames and fill the PA-duty budget
 //                instead of stalling window-bound at 6 — see connection_policy kToneBurstAckWindowCapFrames]
 //   bits 14..16  rate_hint (3 bits, RateController feedback per §14.43)
 //   bit  17      type (0 = ACK, 1 = NACK; receiver always emits a burst)
-//   bits 18..29  crc12 (CRC-12 over the preceding 18 useful bits)
-//   bits 30..31  reserved (must be 0)
+//   bits 18..29  crc12 (CRC-12 over the 18 useful bits AND the 2 drive-advisory bits;
+//                coverage widened 18->20 bits 2026-07-02, see below)
+//   bits 30..31  drive_advisory (software-ALC TX-drive feedback, formerly reserved:
+//                0 = hold, 1 = up (+0.5 dB), 2 = down (-2 dB), 3 = reserved/treat-as-hold.
+//                Receiver-derived from the per-burst RX level verdict — see
+//                BUG-QAM16-RIG-LEVEL-BUDGET / ULTRA_SOFTWARE_ALC.)
 //
-// WIRE-BREAKING (2026-06-17): no version field on the tone-burst payload — both
-// stations MUST run the same build (the offset shift moves the CRC field, so a
-// mixed-version pair mis-parses every ACK -> CRC fail -> retx storm).
+// WIRE-BREAKING (2026-06-17, again 2026-07-02): no version field on the tone-burst
+// payload — both stations MUST run the same build. 2026-06-17: the frame_mask widen
+// moved the CRC field. 2026-07-02: the drive-advisory bits were pulled INTO the CRC
+// coverage (18 -> 20 message bits), so even an advisory=0 payload's CRC differs from
+// pre-change builds. A mixed-version pair mis-parses every ACK -> CRC fail -> retx storm.
 //
 // FEC: (15,11) Hamming code applied per nibble-block. 32 payload bits ->
 // three 11-bit groups (padded), each encoded to 15 coded bits = 45 coded
@@ -175,11 +181,11 @@ inline constexpr uint32_t kPayloadFrameMaskBits = 8;  // widened 6->8 (2026-06-1
 inline constexpr uint32_t kPayloadRateHintBits = 3;
 inline constexpr uint32_t kPayloadTypeBits = 1;
 inline constexpr uint32_t kPayloadCRCBits = 12;
-inline constexpr uint32_t kPayloadReservedBits = 2;
+inline constexpr uint32_t kPayloadDriveAdvisoryBits = 2;  // formerly reserved (2026-07-02)
 static_assert(kPayloadUsefulBits == kPayloadGroupSeqBits + kPayloadFrameMaskBits +
               kPayloadRateHintBits + kPayloadTypeBits, "payload bit layout mismatch");
 static_assert(kPayloadBits == kPayloadUsefulBits + kPayloadCRCBits +
-              kPayloadReservedBits, "payload total mismatch");
+              kPayloadDriveAdvisoryBits, "payload total mismatch");
 
 // Bit-field offsets in the packed 32-bit payload.
 inline constexpr uint32_t kBitOffsetGroupSeq = 0;
@@ -187,7 +193,20 @@ inline constexpr uint32_t kBitOffsetFrameMask = 6;
 inline constexpr uint32_t kBitOffsetRateHint = 14;
 inline constexpr uint32_t kBitOffsetType = 17;
 inline constexpr uint32_t kBitOffsetCRC = 18;
-inline constexpr uint32_t kBitOffsetReserved = 30;
+inline constexpr uint32_t kBitOffsetDriveAdvisory = 30;
+
+// CRC message = the 18 useful bits with the 2 drive-advisory bits appended above
+// them (LSB-first: message bit 18 = advisory bit 0, bit 19 = advisory bit 1). The
+// advisory sits ABOVE the CRC field on the wire, so it cannot occupy contiguous
+// message positions — pack/verify assemble this 20-bit message explicitly.
+inline constexpr uint32_t kPayloadCrcMessageBits =
+    kPayloadUsefulBits + kPayloadDriveAdvisoryBits;  // 20
+
+// Drive-advisory wire values (software-ALC, 2026-07-02).
+inline constexpr uint8_t kDriveAdvisoryHold = 0;
+inline constexpr uint8_t kDriveAdvisoryUp = 1;    // receiver chain-noise-limited: raise drive
+inline constexpr uint8_t kDriveAdvisoryDown = 2;  // receiver sees clip signature: drop drive
+inline constexpr uint8_t kDriveAdvisoryReserved = 3;  // treat as hold
 
 // (15,11) Hamming: 11 info bits -> 15 coded bits per block.
 // 32 payload bits / 11 = 3 blocks (last block partially populated with 0s).

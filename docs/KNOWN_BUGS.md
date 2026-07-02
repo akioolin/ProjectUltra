@@ -49,6 +49,16 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   deliberately untouched in increment 2.
 
 ### BUG-QAM16-RIG-LEVEL-BUDGET (investigation 3b RESOLVED 2026-07-02): rig 16QAM is FADE-TROUGH-LIMITED at the current level calibration — not a code defect; the fix is a level/operator lever
+- **FIX IN VALIDATION (2026-07-02, software-ALC — CHANGELOG entry of same date):** the "level
+  lever" is now CLOSED-LOOP instead of operator-manual. Receiver measures per-burst data-RMS
+  over chain noise + crest factor (`[ALC-RX]` / `LEVEL ADVISORY:` log lines, thresholds
+  `ULTRA_ALC_LOW_DB`=12 / `ULTRA_ALC_CLIP_CF_DB`=6.5); a 2-bit drive advisory rides the
+  tone-burst ACK (bits [30..31], **WIRE-BREAKING — lockstep builds only**); sender walks
+  tx_drive +0.5 dB/−2 dB within [baseline, 0.85] on connected OFDM data bursts only
+  (`ULTRA_SOFTWARE_ALC=0` disables the loop). Sim-proven no-op at reference levels (gate PASS,
+  zero `ALC:` moves). **PENDING: rig A/B** — expect the loop to walk 0.5→~0.85 (+4.6 dB) at
+  MPG@20, lifting arriving data SNR from ~6-7 dB toward the ~11-12 dB the 16QAM rungs need;
+  then re-run the 16QAM ladder. Grep `ALC: tx_drive` (sender) + `\[ALC-RX\]` (receiver).
 - Status: **DIAGNOSED via wire capture + rung falsification (overnight 07-02).** The Mac-input
   ffmpeg captures (paired QPSK vs 16QAM forced runs, MPG@20) show IDENTICAL level structure for
   both mods: data segments ~0.077-0.079 RMS, anchors ~0.16-0.18, noise floor ~0.037 → the data

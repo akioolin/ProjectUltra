@@ -414,6 +414,15 @@ public:
         return idle_noise_snr_estimator_.snapshot();
     }
 
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): latest per-burst RX level verdict
+    // (protocol::connection_policy::RxLevelVerdict as int: 0=OK, 1=LOW, 2=CLIPPED)
+    // and its measurement sequence number (bumps once per fresh per-group
+    // measurement; consumers dedup on it). Lock-free.
+    int getRxLevelVerdict() const { return rx_level_verdict_.load(std::memory_order_relaxed); }
+    uint32_t getRxLevelVerdictSeq() const {
+        return rx_level_verdict_seq_.load(std::memory_order_relaxed);
+    }
+
     // Get buffer fill level (0-100%)
     float getBufferFillPercent() const;
 
@@ -623,6 +632,12 @@ private:
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
     void finalizeBurstGroup();
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): derive the per-burst RX level
+    // verdict (OK/LOW/CLIPPED) from the group's kept-data-frame RMS/peak vs the
+    // idle chain-noise floor. Called at the top of finalizeBurstGroup (fresh
+    // measurement per completed group) — the burst-group callback chain then
+    // carries it to the Connection BEFORE this group's tone-burst ACK is emitted.
+    void computeBurstLevelVerdict();
     void beginBurstDiagnosticsGroup(size_t abs_start_sample,
                                     const std::vector<float>& soft_bits,
                                     float rms,
@@ -772,6 +787,12 @@ private:
     mutable std::atomic<bool> last_ofdm_broadband_snr_db_valid_{false};
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
+    // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as
+    // int) + a monotonically increasing measurement sequence so consumers can tell a
+    // FRESH per-burst measurement from a stale re-read (e.g. a timed-out group's
+    // callback re-feeding the previous verdict must not extend a LOW streak).
+    std::atomic<int> rx_level_verdict_{0};
+    std::atomic<uint32_t> rx_level_verdict_seq_{0};
     std::atomic<float> last_fading_index_{0.0f};
     mutable std::atomic<float> last_doppler_coherence_score_{0.0f};
     mutable std::atomic<float> last_doppler_hz_{0.0f};
@@ -836,6 +857,16 @@ private:
                                          // RMS — the relative-erasure-gate reference; tracks
                                          // the per-group RX operating level so the gate is
                                          // not pinned to an absolute sim-reference amplitude
+    // Software-ALC per-burst RX level accumulation (BUG-QAM16-RIG-LEVEL-BUDGET):
+    // broadband sum-of-squares + peak over the group's KEPT data frames (frames
+    // 2..N; the erasure-gated and the hot chirp-anchored frame-1 are excluded so
+    // the measurement is the pure data-segment operating level). Reset at group
+    // start (streaming_ofdm_decode.cpp burst-marker branch), folded into a
+    // verdict by computeBurstLevelVerdict().
+    double burst_level_sum_sq_ = 0.0;
+    size_t burst_level_sample_count_ = 0;
+    float burst_level_peak_ = 0.0f;
+    int rx_level_last_logged_verdict_ = -1;  // LEVEL ADVISORY log: once per change
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
     int burst_group_size_ = 8;
     static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin

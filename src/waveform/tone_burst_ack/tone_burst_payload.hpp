@@ -39,6 +39,13 @@ struct ToneBurstAckPayload {
 
     AckType type = AckType::Ack;
 
+    // drive_advisory: 2-bit software-ALC TX-drive feedback (2026-07-02, formerly
+    // the reserved bits [30..31]): 0=hold, 1=up (+0.5 dB), 2=down (-2 dB fast),
+    // 3=reserved (treat as hold). The receiver sets it from its per-burst RX level
+    // verdict (LOW = chain-noise-limited for 2 consecutive bursts -> up; CLIPPED
+    // crest-factor signature -> down immediately). CRC-covered on the wire.
+    uint8_t drive_advisory = 0;
+
     // Sanitize fields to their bit-widths. Returns true if all fields are
     // already within range (no truncation occurred).
     bool clampToWireWidths();
@@ -54,10 +61,12 @@ struct ToneBurstAckPayload {
 //   bits 14..16  rate_hint
 //   bit  17      type (0=ACK, 1=NACK)
 //   bits 18..29  crc12
-//   bits 30..31  reserved (zero)
+//   bits 30..31  drive_advisory (software-ALC; formerly reserved, 2026-07-02)
 //
-// The CRC is computed over the 18 "useful" bits (bits 0..17), using
-// CRC-12-CCITT (poly 0x80F, init 0xFFF). All offsets/widths come from
+// The CRC is computed over a 20-bit message: the 18 "useful" bits (bits 0..17)
+// with the 2 drive-advisory bits appended above them, using CRC-12-CCITT
+// (poly 0x80F, init 0xFFF). WIRE-BREAKING vs pre-2026-07-02 builds (the CRC
+// value changes even for advisory=0). All offsets/widths come from
 // tone_burst_constants.hpp (kBitOffset*/kPayload*Bits) — this comment is
 // descriptive; the code reads the constants.
 //

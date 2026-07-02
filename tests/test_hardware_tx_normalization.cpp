@@ -228,12 +228,26 @@ void proof2_operatorTargets() {
               "Proof2 sequential target measured");
     }
 
+    // 2026-07-02 software-ALC: the normalizer's upper clamp is the ALC ceiling
+    // (kSoftwareAlcMaxPeakTarget = 0.85), not the 0.7 operator-settings ceiling —
+    // the closed loop may legitimately request (0.7, 0.85] and is guarded by the
+    // receiver's crest-factor clip detector. Operator settings stay clamped to
+    // 0.7 upstream (settings.cpp).
     std::vector<float> high = makeSyntheticBurst(0.4f, 0x2210u);
     const auto high_result = sim::normalizeTxBurstForHardware(high, 1.5f);
-    CHECK(std::abs(high_result.target_peak - sim::kHardwareTxMaxPeakTarget) <= kTolerance,
-          "Proof2 high target clamps to max");
-    CHECK(std::abs(samplePeak(high) - sim::kHardwareTxMaxPeakTarget) <= kTolerance,
+    CHECK(std::abs(high_result.target_peak - sim::kSoftwareAlcMaxPeakTarget) <= kTolerance,
+          "Proof2 high target clamps to ALC ceiling");
+    CHECK(std::abs(samplePeak(high) - sim::kSoftwareAlcMaxPeakTarget) <= kTolerance,
           "Proof2 high clamp peak measured");
+
+    // The ALC ceiling itself passes through un-clamped (the loop's top rung).
+    std::vector<float> alc_top = makeSyntheticBurst(0.4f, 0x2230u);
+    const auto alc_top_result =
+        sim::normalizeTxBurstForHardware(alc_top, sim::kSoftwareAlcMaxPeakTarget);
+    CHECK(std::abs(alc_top_result.target_peak - sim::kSoftwareAlcMaxPeakTarget) <= kTolerance,
+          "Proof2 ALC ceiling target accepted");
+    CHECK(std::abs(samplePeak(alc_top) - sim::kSoftwareAlcMaxPeakTarget) <= kTolerance,
+          "Proof2 ALC ceiling peak measured");
 
     std::vector<float> low = makeSyntheticBurst(0.4f, 0x2220u);
     const auto low_result = sim::normalizeTxBurstForHardware(low, 0.01f);

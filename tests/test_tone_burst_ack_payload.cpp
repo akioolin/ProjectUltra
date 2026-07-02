@@ -72,21 +72,25 @@ void test_pack_unpack_round_trip() {
     {
         ToneBurstAckPayload p;
         p.group_seq = 0; p.frame_mask = 0; p.rate_hint = 0; p.type = AckType::Ack;
+        p.drive_advisory = kDriveAdvisoryHold;
         cases.push_back(p);
     }
     {
         ToneBurstAckPayload p;
         p.group_seq = 63; p.frame_mask = 63; p.rate_hint = 7; p.type = AckType::Nack;
+        p.drive_advisory = 3;  // reserved value must round-trip intact
         cases.push_back(p);
     }
     {
         ToneBurstAckPayload p;
         p.group_seq = 42; p.frame_mask = 0b101010; p.rate_hint = 4; p.type = AckType::Ack;
+        p.drive_advisory = kDriveAdvisoryUp;
         cases.push_back(p);
     }
     {
         ToneBurstAckPayload p;
         p.group_seq = 13; p.frame_mask = 0b010101; p.rate_hint = 2; p.type = AckType::Nack;
+        p.drive_advisory = kDriveAdvisoryDown;
         cases.push_back(p);
     }
 
@@ -98,6 +102,23 @@ void test_pack_unpack_round_trip() {
         EXPECT_EQ(rt.frame_mask, orig.frame_mask);
         EXPECT_EQ(rt.rate_hint, orig.rate_hint);
         EXPECT_EQ(static_cast<int>(rt.type), static_cast<int>(orig.type));
+        EXPECT_EQ(rt.drive_advisory, orig.drive_advisory);
+    }
+
+    // Software-ALC advisory is CRC-covered: two payloads differing ONLY in the
+    // drive_advisory bits must produce different CRC fields (a flipped advisory
+    // can't ride an unchanged CRC).
+    {
+        ToneBurstAckPayload a;
+        a.group_seq = 7; a.frame_mask = 0b1100; a.rate_hint = 3; a.type = AckType::Ack;
+        a.drive_advisory = kDriveAdvisoryHold;
+        ToneBurstAckPayload b = a;
+        b.drive_advisory = kDriveAdvisoryUp;
+        const uint32_t raw_a = packPayload(a);
+        const uint32_t raw_b = packPayload(b);
+        const uint32_t crc_a = (raw_a >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u);
+        const uint32_t crc_b = (raw_b >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u);
+        EXPECT(crc_a != crc_b);
     }
 }
 
@@ -108,6 +129,7 @@ void test_pack_clamps_out_of_range_fields() {
     p.frame_mask = 200;         // 0b11001000: fits the WIDENED 8-bit frame_mask, incl. bits 6 & 7
     p.rate_hint = 15;           // > 7 (3-bit) -> clamps
     p.type = AckType::Ack;
+    p.drive_advisory = 7;       // > 3 (2-bit) -> clamps
     const uint32_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
     const auto rt = unpackPayload(raw);
@@ -116,6 +138,7 @@ void test_pack_clamps_out_of_range_fields() {
     EXPECT_EQ(rt.group_seq, static_cast<uint8_t>(200 & 0x3F));
     EXPECT_EQ(rt.frame_mask, static_cast<uint8_t>(200 & 0xFF));
     EXPECT_EQ(rt.rate_hint, static_cast<uint8_t>(15 & 0x07));
+    EXPECT_EQ(rt.drive_advisory, static_cast<uint8_t>(7 & 0x03));
 }
 
 // ============================================================================
@@ -126,15 +149,24 @@ void test_crc12_detects_single_bit_flips() {
     std::printf("[test] crc12_detects_single_bit_flips\n");
     ToneBurstAckPayload p;
     p.group_seq = 17; p.frame_mask = 0b110001; p.rate_hint = 3; p.type = AckType::Ack;
+    p.drive_advisory = kDriveAdvisoryUp;
     const uint32_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
-    // Flip each of the 16 useful bits and confirm CRC catches it.
+    // Flip each of the 18 useful bits and confirm CRC catches it.
     int caught = 0;
     for (uint32_t i = 0; i < kPayloadUsefulBits; ++i) {
         const uint32_t flipped = raw ^ (1u << i);
         if (!verifyPayloadCRC(flipped)) ++caught;
     }
     EXPECT_EQ(caught, static_cast<int>(kPayloadUsefulBits));
+    // The drive-advisory bits [30..31] are inside the CRC coverage (widened
+    // 2026-07-02): a flipped advisory bit must also fail the CRC.
+    int advisory_caught = 0;
+    for (uint32_t i = 0; i < kPayloadDriveAdvisoryBits; ++i) {
+        const uint32_t flipped = raw ^ (1u << (kBitOffsetDriveAdvisory + i));
+        if (!verifyPayloadCRC(flipped)) ++advisory_caught;
+    }
+    EXPECT_EQ(advisory_caught, static_cast<int>(kPayloadDriveAdvisoryBits));
 }
 
 void test_crc12_detects_two_bit_flips_in_useful_bits() {
@@ -203,6 +235,7 @@ void test_payload_dibits_round_trip_clean() {
     std::printf("[test] payload_dibits_round_trip_clean\n");
     ToneBurstAckPayload p;
     p.group_seq = 21; p.frame_mask = 0b111100; p.rate_hint = 4; p.type = AckType::Ack;
+    p.drive_advisory = kDriveAdvisoryDown;
     const auto dibits = encodePayloadDibits(p);
     EXPECT_EQ(dibits.size(), static_cast<size_t>(kPayloadSymbols));
     for (uint8_t d : dibits) EXPECT(d < kNumTones);
@@ -217,6 +250,7 @@ void test_payload_dibits_round_trip_clean() {
         EXPECT_EQ(recovered->frame_mask, p.frame_mask);
         EXPECT_EQ(recovered->rate_hint, p.rate_hint);
         EXPECT_EQ(static_cast<int>(recovered->type), static_cast<int>(p.type));
+        EXPECT_EQ(recovered->drive_advisory, p.drive_advisory);
     }
 }
 
@@ -241,6 +275,7 @@ void test_single_dibit_error_recovery() {
     std::printf("[test] single_dibit_error_recovery\n");
     ToneBurstAckPayload p;
     p.group_seq = 34; p.frame_mask = 0b110011; p.rate_hint = 2; p.type = AckType::Ack;
+    p.drive_advisory = kDriveAdvisoryUp;
     auto dibits = encodePayloadDibits(p);
 
     int decoded_ok = 0;
@@ -262,7 +297,8 @@ void test_single_dibit_error_recovery() {
                     recovered->group_seq == p.group_seq &&
                     recovered->frame_mask == p.frame_mask &&
                     recovered->rate_hint == p.rate_hint &&
-                    recovered->type == p.type;
+                    recovered->type == p.type &&
+                    recovered->drive_advisory == p.drive_advisory;
                 if (matches_original) ++decoded_ok;
                 else {
                     // CRC ok but mis-decoded -> Hamming mis-correction that

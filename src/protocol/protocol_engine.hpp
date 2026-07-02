@@ -209,6 +209,10 @@ public:
     // Set the OFDM Doppler-coherence verdict (Good/Moderate discriminator), measured
     // separately from fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
     void setChannelCoherence(float coherence_score, bool valid);
+    // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): feed the decoder's per-burst RX level
+    // verdict (connection_policy::RxLevelVerdict as int) + measurement seq. Call BEFORE
+    // onBurstGroupReceived so the drive advisory rides that group's tone-burst ACK.
+    void setRxLevelVerdict(int verdict, uint32_t seq);
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
 
@@ -240,6 +244,14 @@ public:
     using ArmToneBurstAckMonitorCallback = Connection::ArmToneBurstAckMonitorCallback;
     void setArmToneBurstAckMonitorCallback(ArmToneBurstAckMonitorCallback cb) {
         connection_.setArmToneBurstAckMonitorCallback(std::move(cb));
+    }
+
+    // Software-ALC sender-side hook: a decoded ACK carried a non-hold drive
+    // advisory. Fires under the engine mutex — host must not re-enter the protocol
+    // from it (atomics + logging only).
+    using DriveAdvisoryCallback = Connection::DriveAdvisoryCallback;
+    void setDriveAdvisoryCallback(DriveAdvisoryCallback cb) {
+        connection_.setDriveAdvisoryCallback(std::move(cb));
     }
 
     // Half-duplex INTERACTIVE (bidirectional) data path — the TNC / Winlink-B2F

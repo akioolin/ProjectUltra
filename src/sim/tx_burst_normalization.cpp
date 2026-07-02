@@ -183,9 +183,14 @@ TxBurstHardwareMeasurement normalizeTxBurstForHardware(std::vector<float>& sampl
     if (!std::isfinite(target_peak)) {
         target_peak = kHardwareTxDefaultPeakTarget;
     }
+    // Upper clamp is the software-ALC ceiling (0.85), not the 0.7 operator ceiling:
+    // the closed loop may legitimately request targets in (0.7, 0.85] — it is
+    // guarded by the receiver's crest-factor clip detector (see
+    // kSoftwareAlcMaxPeakTarget). Operator SETTINGS remain clamped to 0.7 upstream
+    // (settings.cpp), so nothing but the ALC can reach this range.
     result.target_peak = std::clamp(target_peak,
                                     kHardwareTxMinPeakTarget,
-                                    kHardwareTxMaxPeakTarget);
+                                    kSoftwareAlcMaxPeakTarget);
 
     const ActiveRegion active = detectActiveRegion(samples);
     result.active_begin = active.begin;

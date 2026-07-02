@@ -256,6 +256,30 @@ private:
     // 16 dB edge, AWGN the 18 dB one (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01).
     std::atomic<float> cached_fading_index_{0.0f};
 
+    // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
+    // Closed-loop TX-drive: the peer's per-burst level verdict rides back on the
+    // tone-burst ACK (drive_advisory bits [30..31]); handleDriveAdvisory() walks
+    // this per-connection peak target within [settings_.tx_drive baseline,
+    // kSoftwareAlcMaxPeakTarget]. Applied ONLY to connected OFDM data bursts
+    // (context "TX burst audio") — handshake/control/MC-DPSK keep the configured
+    // baseline. Written on the protocol-callback thread, read on the main TX
+    // thread → atomic. Reset to baseline on CONNECTED and DISCONNECTED
+    // transitions (per-connection scope).
+    std::atomic<float> alc_tx_drive_{ultra::sim::kHardwareTxDefaultPeakTarget};
+    // Repeat-ACK dedup (one adjustment per ACKed group): last group_seq/advisory
+    // acted on. Written by handleDriveAdvisory (tone-burst detection path) and
+    // resetSoftwareAlc (connection-state callback); the two never overlap in
+    // practice (no in-flight data ACKs at a CONNECT/DISCONNECT edge) and the worst
+    // possible race outcome is one duplicate/missed ±step, bounded by the clamps —
+    // plain fields are fine.
+    int alc_last_group_seq_ = -1;
+    uint8_t alc_last_advisory_ = 0;
+    void handleDriveAdvisory(uint8_t advisory, uint8_t group_seq);
+    void resetSoftwareAlc(const char* reason);
+    // Effective per-burst peak target for this TX context: the ALC-walked drive
+    // for connected OFDM data bursts, the configured baseline for everything else.
+    float effectiveTxDriveForContext(const char* context) const;
+
     bool operator_log_file_suppressed_ = false;
     uint32_t operator_log_slow_ms_ = 0;
     size_t operator_event_drain_limit_ = 128;

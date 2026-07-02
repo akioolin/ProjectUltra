@@ -10,6 +10,77 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-02 — feat(alc): closed-loop TX-drive control (software-ALC, default-ON) — BUG-QAM16-RIG-LEVEL-BUDGET lever, **WIRE-BREAKING tone-burst ACK**
+
+> **WIRE-BREAKING:** the tone-burst ACK's 2 reserved bits [30..31] now carry a drive
+> advisory AND were pulled INTO the CRC-12 coverage (message 18 → 20 bits) — the CRC of
+> EVERY ACK differs from pre-change builds (even advisory=0). Both stations MUST run
+> lockstep builds (same rule as the 2026-06-17 frame_mask widen; a mixed pair CRC-fails
+> every ACK → retx storm).
+
+**Broken:** rig wire captures (BUG-QAM16-RIG-LEVEL-BUDGET) showed OFDM data arriving at only
+~6-7 dB broadband SNR over the receiver's chain-noise floor with ~4-5 dB of UNUSED TX level
+headroom — a chain-noise-dominated link the sender cannot see blindly (the modem had no RX→TX
+level feedback at all), gating the entire 16QAM/3000-bps path behind a manual operator
+re-staging session.
+
+**Changed (increment 1 — receiver-side detection + operator advisory, always-on):**
+- `streaming_burst_interleave.cpp` / `streaming_ofdm_decode.cpp` / `streaming_decoder.hpp`:
+  per OFDM burst group the decoder accumulates the KEPT data frames' broadband RMS + peak
+  (frames 2..N; the hot chirp-anchored frame 1 and erasure-gated frames excluded) and folds
+  them in `computeBurstLevelVerdict()` against the idle chain-noise floor
+  (`IdleNoiseSNREstimator`, fed on SEARCHING-state audio between bursts): verdict **LOW**
+  (headroom < `ULTRA_ALC_LOW_DB`, default 12 dB), **CLIPPED** (crest factor <
+  `ULTRA_ALC_CLIP_CF_DB`, default 6.5 dB — the 2026-06-15 IONOS CF=1.01 square-wave
+  signature), else **OK**. Threshold derivations documented at
+  `connection_policy.hpp::alcLowHeadroomDb/alcClipCrestFactorDb` (measured separation
+  6-7 dB rig vs ~20 dB sim reference; 12 dB = the point where the floor costs ≤0.27 dB;
+  Gaussian CF floor math). Per-group `[ALC-RX]` INFO line (rig-greppable) + operator
+  `LEVEL ADVISORY:` INFO line rate-limited to once per verdict change.
+**Changed (increment 2 — the closed loop, default-ON, `ULTRA_SOFTWARE_ALC=0` disables):**
+- Wire: `tone_burst_constants.hpp`/`tone_burst_payload.{hpp,cpp}` — `drive_advisory` field at
+  bits [30..31] (0=hold, 1=up, 2=down, 3=reserved→hold), CRC coverage widened to include it.
+- Receiver: decoder verdict → `ModemEngine::getRxLevelVerdict[Seq]()` →
+  `modem_protocol_binding.hpp` feeds `ProtocolEngine/Connection::setRxLevelVerdict(v, seq)`
+  BEFORE `onBurstGroupReceived` (so the advisory rides THIS group's ACK; the seq dedups
+  stale re-feeds so LOW streaks only grow on fresh measurements). Connection stamps the
+  advisory in the tone-burst SACK emit: **down IMMEDIATELY on CLIPPED** (fast attack), **up
+  only after 2 consecutive LOW bursts** (`kAlcLowStreakForUp` fade hysteresis, slow release).
+- Sender: `Connection::onToneBurstAck` → `setDriveAdvisoryCallback` → `App::handleDriveAdvisory`
+  walks a per-connection `alc_tx_drive_`: up ×1.0593 (+0.5 dB), down ×0.7943 (−2 dB), clamped
+  **[configured `settings_.tx_drive` baseline, 0.85 absolute digital ceiling]**
+  (`kSoftwareAlcMaxPeakTarget`; `normalizeTxBurstForHardware`'s upper clamp widened 0.7→0.85 —
+  operator settings stay clamped to 0.7), deduped to ONE step per ACKed group (repeat-ACK
+  detections carry the same group_seq). Logs `ALC: tx_drive X -> Y (advisory=up/down)`.
+  Applied in `App::doQueueRealTxSamples` via `effectiveTxDriveForContext()`: **connected OFDM
+  data bursts ONLY** (context "TX burst audio" + CONNECTED + OFDM waveform mode) — handshake/
+  control/ACK/MC-DPSK always keep the configured baseline; one scalar per whole burst (never
+  mid-burst); reset to baseline on CONNECT and DISCONNECT. Sim: the default OTASim TX path
+  RMS-normalizes to reference and ignores drive (loop is a no-op there by construction); the
+  `ULTRA_SIM_PAPR_PENALTY` path now uses the same effective drive so the loop is A/B-able
+  rig-free.
+
+**Failure modes considered (self-adversarial):** oscillation → 2-burst LOW hysteresis +
+±asymmetric steps + one-step-per-group rate limit (worst case at the clip boundary: −2 dB
+then 4 slow +0.5 dB re-steps ≈ bounded ~1-2 dB ripple); fade trough mistaken for LOW → the
+data RMS is fade-AVERAGED over the whole multi-second group (~1-2 Tc) while the chain-noise
+denominator doesn't fade (and under RX AGC a signal fade LIFTS the audio noise floor into the
+data segment, so the ratio moves LESS than the fade depth) — residual whole-burst troughs are
+absorbed by the hysteresis and bounded by the +0.5 dB step/0.85 ceiling/CF guard (documented
+at `computeBurstLevelVerdict`); ACK loss → advisory just doesn't arrive, no sender state
+pends (stateless-safe); clipping overshoot → immediate −2 dB on the CF signature + the 0.85
+ceiling keeps ≥1.4 dB below digital full scale; clipped-AND-buried burst reads LOW first
+(noise Gaussianizes CF) → up-steps until the clip signature emerges, then fast-down.
+
+**Verification:** `cmake --build build -j4` clean; ctest green except pre-existing
+UltraTncSimAudio (`ToneBurstAckPayload` extended: advisory round-trip incl. reserved=3,
+2-bit clamp, CRC catches advisory-bit flips, CRC differs on advisory-only change;
+`TxBurstHardwareNormalization` updated for the 0.85 upper clamp + ALC-ceiling pass-through);
+faithful gate `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --expect-mod
+QPSK --expect-rate R2/3 --file-kb 21` PASS with **zero** `ALC: tx_drive` changes and verdict
+OK/hold at sim reference levels (headroom ~20 dB ≫ 12 — the loop must not move at reference
+level). Rig A/B (the actual level-recovery proof) pending — see KNOWN_BUGS.
+
 ## 2026-07-02 — feat(snr): #58 data-aided fade-averaged connect-time SNR (BUG-CONNECT-SNR-VARIANCE increment 2, default-ON)
 
 **Broken:** the connect-time SNR is `updateTrainingSNREstimate` over ONLY the ~170 ms MC-DPSK

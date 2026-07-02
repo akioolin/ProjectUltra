@@ -1342,6 +1342,12 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_cfo_ = cfo_update.accepted_cfo;
         const float anchor_rms = sampleRMS(frame_buffer);
         burst_anchor_rms_ = anchor_rms;  // relative-erasure-gate reference for this group
+        // Software-ALC: fresh per-group level accumulator (kept data frames 2..N only;
+        // the chirp-anchored frame 1 rides 6-7 dB hotter under per-burst peak
+        // normalization and would bias the data-segment level).
+        burst_level_sum_sq_ = 0.0;
+        burst_level_sample_count_ = 0;
+        burst_level_peak_ = 0.0f;
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
                                    anchor_rms,
                                    frame_demodulator_.preCorrectionCfo(), residual_cfo,

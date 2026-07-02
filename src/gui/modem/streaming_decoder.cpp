@@ -194,8 +194,8 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
             [this](const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
                 LOG_MODEM(INFO,
                           "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
-                          "frame_mask=0x%02X rate_hint=%u peak=%.1f symbol_ms=%u "
-                          "hamming_corrected=%d stream_offset=%llu",
+                          "frame_mask=0x%02X rate_hint=%u drive_advisory=%u peak=%.1f "
+                          "symbol_ms=%u hamming_corrected=%d stream_offset=%llu",
                           log_prefix_.c_str(),
                           static_cast<unsigned>(d.payload.group_seq),
                           d.payload.type ==
@@ -204,6 +204,7 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
                               : "ACK",
                           static_cast<unsigned>(d.payload.frame_mask),
                           static_cast<unsigned>(d.payload.rate_hint),
+                          static_cast<unsigned>(d.payload.drive_advisory),
                           d.correlation_peak,
                           static_cast<unsigned>(d.symbol_ms_used),
                           d.hamming_corrected_blocks,

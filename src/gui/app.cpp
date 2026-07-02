@@ -690,6 +690,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             modem_.armToneBurstAckMonitor(window_ms);
         });
 
+    // Software-ALC sender side (BUG-QAM16-RIG-LEVEL-BUDGET): the peer's per-burst
+    // RX level verdict rides back on the tone-burst ACK (drive_advisory bits).
+    // Runs under the ProtocolEngine mutex — handleDriveAdvisory touches only the
+    // ALC atomics + logging, NEVER protocol_ (same discipline as the tone-burst
+    // ACK TX callback above).
+    protocol_.setDriveAdvisoryCallback(
+        [this](uint8_t advisory, uint8_t group_seq) {
+            handleDriveAdvisory(advisory, group_seq);
+        });
+
     // Half-duplex INTERACTIVE (bidirectional file / B2F role-swap): the same three
     // callbacks ultra_tnc wires. setHalfDuplexInteractive keeps the ISS/IRS turn gate on
     // burst sends so the two directions serialize (A->B then B->A) instead of colliding;
@@ -725,6 +735,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // mapping below (CONNECTED/CONNECTING -> false).
         if (state != protocol::ConnectionState::DISCONNECTED) {
             responder_connect_expected_until_ms_.store(0, std::memory_order_relaxed);
+        }
+        // Software-ALC is per-connection: latch the configured baseline at CONNECT
+        // and drop back to it at DISCONNECT (the walked drive must never leak into
+        // the next session's handshake or a different peer's link budget).
+        if (state == protocol::ConnectionState::CONNECTED ||
+            state == protocol::ConnectionState::DISCONNECTED) {
+            resetSoftwareAlc(state == protocol::ConnectionState::CONNECTED
+                                 ? "connect" : "disconnect");
         }
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
 
@@ -2813,6 +2831,85 @@ void App::tickScenario() {
     }
 }
 
+// ─── Software-ALC (closed-loop TX drive, BUG-QAM16-RIG-LEVEL-BUDGET 2026-07-02) ───
+
+void App::resetSoftwareAlc(const char* reason) {
+    const float baseline = settings_.tx_drive;
+    const float prev = alc_tx_drive_.exchange(baseline, std::memory_order_relaxed);
+    alc_last_group_seq_ = -1;
+    alc_last_advisory_ = 0;
+    if (std::fabs(prev - baseline) > 1e-4f) {
+        LOG_MODEM(INFO, "ALC: tx_drive %.3f -> %.3f (reset: %s)",
+                  prev, baseline, reason ? reason : "-");
+    }
+}
+
+void App::handleDriveAdvisory(uint8_t advisory, uint8_t group_seq) {
+    // Belt-and-braces: Connection already gates on ULTRA_SOFTWARE_ALC before
+    // firing this callback; keep the loop inert here too if it ever changes.
+    if (!protocol::connection_policy::softwareAlcEnabled()) {
+        return;
+    }
+    // Rate limit: at most ONE adjustment per ACKed group. The receiver's ACK for a
+    // group can be detected more than once (sliding-timer SACK repeats); every
+    // repeat carries the same group_seq + advisory, so dedup on the pair.
+    if (alc_last_group_seq_ == static_cast<int>(group_seq) &&
+        alc_last_advisory_ == advisory) {
+        return;
+    }
+    alc_last_group_seq_ = static_cast<int>(group_seq);
+    alc_last_advisory_ = advisory;
+
+    const float baseline = settings_.tx_drive;
+    const float ceiling = ultra::sim::kSoftwareAlcMaxPeakTarget;  // 0.85 abs digital
+    const float floor = std::min(baseline, ceiling);  // never below configured drive
+    const float cur = alc_tx_drive_.load(std::memory_order_relaxed);
+    float next = cur;
+    const char* dir = nullptr;
+    if (advisory == ultra::waveform::tone_burst_ack::kDriveAdvisoryUp) {
+        next = cur * protocol::connection_policy::kAlcUpStepFactor;    // +0.5 dB
+        dir = "up";
+    } else if (advisory == ultra::waveform::tone_burst_ack::kDriveAdvisoryDown) {
+        next = cur * protocol::connection_policy::kAlcDownStepFactor;  // -2 dB fast
+        dir = "down";
+    } else {
+        return;  // hold / reserved
+    }
+    next = std::clamp(next, floor, ceiling);
+    if (std::fabs(next - cur) < 1e-4f) {
+        // Clamped no-op (already at the ceiling/baseline): don't spam the log.
+        LOG_MODEM(DEBUG,
+                  "ALC: advisory=%s group_seq=%u clamped, tx_drive stays %.3f "
+                  "(baseline=%.3f ceiling=%.3f)",
+                  dir, static_cast<unsigned>(group_seq), cur, baseline, ceiling);
+        return;
+    }
+    alc_tx_drive_.store(next, std::memory_order_relaxed);
+    // Applied to SUBSEQUENT bursts only: the drive is read once per queued burst
+    // in doQueueRealTxSamples (one scalar per whole burst — never mid-burst).
+    LOG_MODEM(INFO, "ALC: tx_drive %.3f -> %.3f (advisory=%s group_seq=%u)",
+              cur, next, dir, static_cast<unsigned>(group_seq));
+}
+
+float App::effectiveTxDriveForContext(const char* context) const {
+    // Scope: connected OFDM data bursts ONLY. "TX burst audio" is the single
+    // context string of the burst-transport TX path (live callback + deferred
+    // flush both carry it). Handshake/control ("TX audio", PING/PONG) and ACKs
+    // keep the configured baseline by context; MC-DPSK data bursts share the
+    // burst context but are excluded by the waveform-mode check.
+    if (!context || std::strcmp(context, "TX burst audio") != 0) {
+        return settings_.tx_drive;
+    }
+    if (conn_state_cached_.load(std::memory_order_relaxed) !=
+        protocol::ConnectionState::CONNECTED) {
+        return settings_.tx_drive;
+    }
+    if (!protocol::isOFDMMode(modem_.getWaveformMode())) {
+        return settings_.tx_drive;
+    }
+    return alc_tx_drive_.load(std::memory_order_relaxed);
+}
+
 bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context,
                              bool in_qso_data) {
     if (samples.empty()) {
@@ -3062,7 +3159,12 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
                 const char* e = std::getenv("ULTRA_SIM_TX_PEAK");
                 return (e && *e) ? static_cast<float>(std::atof(e)) : -1.0f;
             }();
-            const float peak_target = (kSimTxPeak > 0.0f) ? kSimTxPeak : settings_.tx_drive;
+            // Software-ALC: PAPR-penalty sim TX rides the same effective drive as the
+            // hardware path (connected OFDM data bursts walk with the loop; everything
+            // else = configured baseline) so the loop is A/B-able rig-free. The DEFAULT
+            // sim path below RMS-normalizes to reference and ignores drive entirely.
+            const float peak_target = (kSimTxPeak > 0.0f)
+                ? kSimTxPeak : effectiveTxDriveForContext(context);
             const auto hw = ultra::sim::normalizeTxBurstForHardware(sim_samples, peak_target);
             const auto post = ultra::sim::measureTxBurstInBandRms(sim_samples);
             LOG_WARN("AUDIO",
@@ -3152,8 +3254,12 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
     }
 
     std::vector<float> hardware_samples(samples.begin(), samples.end());
-    const auto measurement =
-        ultra::sim::normalizeTxBurstForHardware(hardware_samples, settings_.tx_drive);
+    // Software-ALC: connected OFDM data bursts use the closed-loop-walked drive
+    // (alc_tx_drive_, clamped [settings baseline, 0.85]); handshake/control/ACK/
+    // MC-DPSK keep the configured settings_.tx_drive. One scalar per whole burst —
+    // adjustments land between bursts, never inside one.
+    const auto measurement = ultra::sim::normalizeTxBurstForHardware(
+        hardware_samples, effectiveTxDriveForContext(context));
     if (measurement.burst_fragment_warning) {
         LOG_WARN("AUDIO",
                  "%s: hardware TX peak normalization bypassed fragment "
