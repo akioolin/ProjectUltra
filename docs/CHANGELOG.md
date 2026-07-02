@@ -39,6 +39,25 @@ errors +0.5/−0.1/−0.1/−0.0/+0.4/+0.1); training gate unchanged-green; full
 (pre-existing UltraTncSimAudio only); gui_qso good@20 seed42 QPSK R2/3 PASS with the new
 estimator routed at CONNECT (see KNOWN_BUGS entry for the rig re-measure follow-up).
 
+## 2026-07-02 (early) — investigation 3b RESOLVED: rig 16QAM is fade-trough-limited at the current level calibration (wire-capture diagnosis; PAPR-clip dead end tested + reverted)
+
+Autonomous overnight session, method = measure-at-the-wire: paired ffmpeg captures of the Mac's
+RX input during forced 16QAM and QPSK runs (MPG@20). VERDICT: identical level structure both
+mods (data ~0.078 RMS, anchors ~0.17, noise 0.037) -> data arrives at ~6-7 dB BROADBAND wire
+SNR; anchors ride 6-7 dB hotter (per-burst peak normalization vs the measured 14.3 dB OFDM
+crest). No 16QAM-specific TX defect. Rung falsification: 16QAM R1/2 (sim-clean, +4-5 dB margin
+vs R2/3) still fails/limps on the rig — decode BIMODAL (13 groups 8/8 flawless vs 13 groups 0/8
+dead at median 22.7 dB effective): fade TROUGHS at this wire level annihilate dense
+constellations whole-group; crests pass 16QAM perfectly; QPSK bridges. Rig numbers: R2/3
+no-completion; R1/2 = 1/2 completions, 1.45 kbps (77 nacks) < QPSK R2/3's 1.7k. **The ladder's
+QPSK R2/3 pick is CORRECT at this calibration; the 16QAM unlock is ~+4-5 dB of arriving level
+(tx_drive/IONOS gain re-staging at the CF panel — operator lever, quantified).**
+Dead end (tested, reverted same night): coherent-OFDM PAPR soft-clip — sim EVM cost >> benefit
+at every depth (9 dB: 181 vs 30 deint-fails hard FAIL; 12 dB: 78 fails, 2210->1320 bps).
+`ULTRA_COHERENT_PAPR_DB` ships default-0 (experiment knob only; blanket linear-TX gate stands).
+The 07-01 ANCHOR-COLLAPSE mode did not reproduce across 6 runs (kept as historical).
+KNOWN_BUGS: BUG-QAM16-RIG-LEVEL-BUDGET (resolved diagnosis) supersedes the 3b investigation.
+
 ## 2026-07-02 (overnight) — feat(harq): FRESH-ONLY rescue — combining is now harm-free by construction
 
 The structural fix behind the 07-01 poison-loop verdict: `decodeFixedFrame` keeps the

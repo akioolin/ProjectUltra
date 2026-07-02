@@ -65,8 +65,40 @@ void markFirstLTSSymbolForBurstGroup(Samples& preamble, size_t symbol_samples) {
     }
 }
 
+// Coherent-OFDM PAPR policy (2026-07-02, rig 16QAM diagnosis). The old blanket
+// skip ("pilots require a linear transmit waveform") left coherent bursts at
+// their natural ~10-12 dB PAPR — and the TX chain PEAK-normalizes each burst
+// to tx_drive, so every dB of crest is a dB of lost AVERAGE power on the air.
+// Measured at the Mac's RX input (wire capture, MPG@20): the 16QAM data
+// segments arrived ~6-7 dB below the burst's own anchor and only single-digit
+// dB above the noise floor — below 16QAM's requirement while the meters (LTS/
+// anchor-referenced) read healthy. A bounded soft-clip at a CONSERVATIVE
+// threshold touches only rare peaks (small EVM cost, shared by pilots and
+// data so the LS pilot estimate stays representative) and converts directly
+// into arriving data SNR under peak normalization — with the burst PEAK
+// unchanged, so no new clipping risk at the radio/IONOS input.
+// ULTRA_COHERENT_PAPR_DB: 0 = off (legacy linear TX), [4..12] dB = clip
+// threshold; default 9 dB (conservative; sim A/B must show ~no decode cost,
+// the rig A/B shows the net win).
+inline float coherentPaprThresholdDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_COHERENT_PAPR_DB")) {
+            const float p = std::strtof(e, nullptr);
+            if (p <= 0.0f) return 0.0f;
+            if (p >= 4.0f && p <= 12.0f) return p;
+        }
+        return 0.0f;  // DEFAULT OFF (2026-07-02 sim A/B: EVM cost > benefit for
+                      // 16QAM at every tested depth — 9dB target: 181 deint-fails
+                      // vs 30 linear, hard FAIL; 12dB: 78 fails, goodput 2210->1320.
+                      // The blanket linear-TX rationale stands; knob kept for
+                      // future PAPR-reduction implementations w/ pilot protection).
+    }();
+    return v;
+}
+
 bool paprReductionWouldCorruptCoherentPilots(Modulation mod) {
-    return ofdm_link_adaptation::isCoherentModulation(mod);
+    return ofdm_link_adaptation::isCoherentModulation(mod) &&
+           coherentPaprThresholdDb() <= 0.0f;
 }
 
 }  // namespace
@@ -123,15 +155,21 @@ void StreamingEncoder::applyPaprReductionIfNeeded(std::vector<float>& samples,
     if (paprReductionWouldCorruptCoherentPilots(modulation_)) {
         LOG_MODEM(DEBUG,
                   "[%s] PAPR reduction skipped for %s %s: coherent OFDM "
-                  "pilots require a linear transmit waveform",
+                  "linear TX requested (ULTRA_COHERENT_PAPR_DB=0)",
                   log_prefix_.c_str(),
                   modulationToString(modulation_),
                   codeRateToString(code_rate_));
         return;
     }
 
+    // Coherent mods clip at their own conservative threshold; differential
+    // mods keep the historical default.
+    const float threshold_db =
+        ofdm_link_adaptation::isCoherentModulation(modulation_)
+            ? coherentPaprThresholdDb()
+            : papr_reduction_threshold_db_;
     last_papr_reduction_ = phy::applyPaprReduction(
-        samples, papr_reduction_threshold_db_, true);
+        samples, threshold_db, true);
     if (last_papr_reduction_.applied) {
         LOG_MODEM(INFO,
                   "[%s] PAPR reduction %s threshold=%.2f dB pre=%.2f dB "

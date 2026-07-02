@@ -48,6 +48,30 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   basis correction (the Jensen penalty of a fade-AVERAGED effective SNR is smaller) —
   deliberately untouched in increment 2.
 
+### BUG-QAM16-RIG-LEVEL-BUDGET (investigation 3b RESOLVED 2026-07-02): rig 16QAM is FADE-TROUGH-LIMITED at the current level calibration — not a code defect; the fix is a level/operator lever
+- Status: **DIAGNOSED via wire capture + rung falsification (overnight 07-02).** The Mac-input
+  ffmpeg captures (paired QPSK vs 16QAM forced runs, MPG@20) show IDENTICAL level structure for
+  both mods: data segments ~0.077-0.079 RMS, anchors ~0.16-0.18, noise floor ~0.037 → the data
+  arrives at only **~6-7 dB broadband wire SNR**, while anchors ride 6-7 dB hotter (per-burst
+  PEAK normalization: OFDM crest ~14.3 dB eats average power). No 16QAM-specific TX defect.
+- **Rung falsification:** 16QAM R1/2 (4-5 dB more margin than R2/3, sim-clean 5/5 at Good@18)
+  ALSO fails to complete on the rig — decode is **bimodal** (13 groups 8/8 flawless, 13 groups
+  0/8 dead at median 22.7 dB effective): the fade TROUGHS at this wire level kill any dense
+  constellation whole-group; the crests pass 16QAM perfectly. QPSK's phase-only margins bridge
+  the troughs. 16QAM transfers PROGRESS (~26 KB of clean groups in 480 s) but can't finish at
+  ~50% group loss.
+- **Dead end tested + reverted same night:** coherent-OFDM PAPR soft-clip (recover average power
+  under peak normalization). Sim A/B: EVM cost >> benefit for 16QAM at every depth (9 dB target:
+  181 vs 30 deint-fails, hard FAIL; 12 dB: 78 fails, 2210->1320). `ULTRA_COHERENT_PAPR_DB`
+  ships default-0 (off) as an experiment knob only.
+- **The fix is a LEVEL lever, not code:** ~+4-5 dB of arriving data SNR moves the troughs above
+  16QAM R1/2's floor (tx_drive 0.5->~0.8 and/or IONOS CH-gain re-staging — needs the operator at
+  the IONOS CF/level panel per the 2026-06-15 calibration method; peaks must stay under the
+  1800 mVpp input clip). Alternates if level can't move: cw16 (raises per-bit efficiency, same
+  trough problem), fade-phase-aware scheduling (research). The prior ANCHOR-COLLAPSE observation
+  (07-01 afternoon: corr 0.95->0.2) did NOT reproduce in any of 6 subsequent 16QAM runs — kept
+  below as historical until seen again.
+
 ### BUG-QAM16-RIG-ANCHOR-COLLAPSE: 16QAM bursts stop being ACQUIRED on the real rig (sync corr 0.95 → 0.2) while their PHY decodes clean — root cause NOT isolated
 - Status: **OPEN — observed 2026-07-01 on IONOS MPG@20 (Mac↔Pi5, HEAD a81725d), forced 16QAM R2/3.** The transfer decoded 9+ groups cleanly (**77/77 deinterleave SUCCESS, 0 FAILED — zero fade-damage tax**), then fell into a persistent no-delivery saga: 117 nack + 74 timeout retx, no completion in 480 s. Sender escalates full-anchor resends; receiver pinned in `Full-anchor wait rejected DATA fallback (corr=0.34 < 0.50)`.
 - **The discriminating signature:** same channel, minutes apart — QPSK R3/4 run sync-corr modes 0.92-0.99 (delivered 1.62 kbps clean); 16QAM run corr modes **0.16-0.29**. The constellation doesn't fail; the *acquisition* of its bursts does. Burst-erasure gate hits: 0.
