@@ -424,14 +424,19 @@ void Connection::acceptCall() {
     // +5 basis was calibrated on, so the basis composes unchanged and is applied ONCE,
     // downstream); knob-off it is exactly the raw measured_snr_db_ scalar.
     const float snr_db = rateSelectionSnrDb();
+    const bool accept_snr_data_aided = rateSelectionSnrDataAided();
     const float accept_selection_snr_db =
         connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
-                                                 rateSelectionSnrDataAided());
+                                                 accept_snr_data_aided);
     recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
-    // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
+    // Bootstrap safety: the connect-time reading can overestimate first OFDM frame
+    // quality (historically the chirp snapshot; since #58 it is the data-aided
+    // fade-averaged estimate). ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided
+    // reading clearing the R3/4 anchor by >= 1 sigma enter at R3/4.
     if (isOFDMMode(negotiated_mode_)) {
-        CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, fading_index_, rec_rate, rec_mod);
+        CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, fading_index_, rec_rate, rec_mod,
+                                             accept_snr_data_aided);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                       codeRateToString(rec_rate), codeRateToString(capped), snr_db,

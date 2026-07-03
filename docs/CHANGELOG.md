@@ -10,6 +10,51 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(connect): **data-aided R3/4 entry cap** — `ULTRA_ENTRY_CAP_R34`, default-OFF/byte-identical — ctest green, **sim/rig A/B PENDING**
+
+**What was (arguably) broken:** the connect-time entry rate is clamped to QPSK R2/3 by
+`capInitialOFDMRate`'s `ULTRA_R23_BASIS` branch, justified as "bootstrap safety: chirp SNR
+can overestimate first OFDM frame quality." Since #58 increments 2/3, the entry reading is
+NOT the chirp snapshot — it is the DATA-AIDED fade-AVERAGED MC-DPSK estimate
+(`Connection::rateSelectionSnrDb()/rateSelectionSnrDataAided()`), a conservative
+lower-bound-leaning estimator (differential EVM only ADDS error). Rig evidence (12 connects
+at dial MPG@20): entries read 12.9-19.3 data-aided, then every run spends ~60-90 s climbing
+R2/3→R3/4→16QAM through the EMA+streak arithmetic — the largest remaining goodput loss
+(~90-140 s below 16QAM per ~250 s transfer).
+
+**What changed (all default-OFF, knob unset/`=0` → byte-identical):**
+1. `waveform_selection.hpp`: `entryCapR34Enabled()` (static-lambda, read ONCE);
+   `kConnectSnrReadingSigmaDb = 3.15` — NOT a tuned constant: the MEASURED per-connect
+   reading sigma from the #58 forensics (12 connects at constant dial MPG@20 read
+   3.9-17.9 dB, σ 3.15 — see the connect-SNR-pool entry below and the `ConnectSnrPool`
+   block in `connection_policy.hpp`); `coherentLadderAnchorDb()` (rung-anchor lookup,
+   single source = `kCoherentLadder`); `dataAidedEntryClearsR34()` — THE gate (pure).
+2. `capInitialOFDMRate(…, Modulation)` gains a `bool data_aided = false` parameter and
+   delegates to `capInitialOFDMRateImpl(…, entry_cap_r34_on)` (explicit-knob seam so the
+   boundary tests exercise ON without racing the latch-once env cache). Inside the
+   `ULTRA_R23_BASIS` clamp: if `dataAidedEntryClearsR34(...)` → return
+   `min(candidate, R3/4)`; else `R2_3` exactly as before. **GATE:** knob ON **AND**
+   reading data-aided **AND** `fading_index < kFadingGoodMax` (Moderate-class keeps the
+   R2/3 cap unconditionally — saturation-bound entries are deliberately marginal) **AND**
+   selection SNR ≥ ladder QPSK-R3/4 anchor for the fading class (Good 20.0) +
+   `kConnectSnrReadingSigmaDb` (⇒ ≥ 23.15 on Good) — i.e. R3/4 remains the ladder pick
+   even if this single reading over-read by 1σ. The cap never RAISES the candidate and
+   never admits >R3/4; the 16QAM hop stays adaptive-only.
+3. Call sites plumbed: `connection_handlers.cpp` handleConnect and `connection.cpp`
+   acceptCall pass `rateSelectionSnrDataAided()` (the same flag feeding
+   `connectSelectionSnrDb`, hoisted to a shared local so all views stay consistent).
+   Stale "chirp SNR" bootstrap comments corrected at both sites.
+
+**Test verification:** `test_waveform_policy` `test_entry_cap_r34` (127/127): knob-off
+pinned unchanged (data-aided Good@25 still R2/3); knob-on via the impl seam — data-aided
+Good@25 → R3/4, training reading → R2/3, Moderate-class → R2/3, marginal Good@22/23.1 →
+R2/3, boundary Good@23.2 clears, R2/3 candidate never raised, AWGN path unchanged. Knob
+pinned "0" in both policy-test mains (latch-once hermeticity). Full ctest: 81 tests, only
+pre-existing `UltraTncSimAudio` red. **Faithful-gate + rig A/B PENDING** — this entry is
+sim/rig-unvalidated; graduate/revert on the A/B.
+
+---
+
 ## 2026-07-03 — feat(connect): **connect-SNR pool** (#58 increment 3, BUG-CONNECT-SNR-VARIANCE) — `ULTRA_CONNECT_SNR_POOL` / `ULTRA_CONNECT_PICK_DEFER` / `ULTRA_WIRE_SNR_FRESH`, all default-OFF/byte-identical — UNVALIDATED, edits-only, awaiting build + gates
 
 **What was broken (rig campaign forensics, 12 connects at dial MPG@20):** the entry pick and

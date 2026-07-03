@@ -1104,6 +1104,9 @@ int main() {
     setenv("ULTRA_CONNECT_SNR_POOL", "0", 1);
     setenv("ULTRA_CONNECT_PICK_DEFER", "0", 1);
     setenv("ULTRA_WIRE_SNR_FRESH", "0", 1);
+    // Same latch-once pattern: pin the data-aided R3/4 entry-cap A/B knob to its
+    // disabled default (boundary tests live in test_waveform_policy).
+    setenv("ULTRA_ENTRY_CAP_R34", "0", 1);
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();

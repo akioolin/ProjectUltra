@@ -207,9 +207,10 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the +5 fade basis is applied exactly ONCE, here, downstream of the pool
         // aggregation (the pool population is the SAME one the basis was calibrated
         // on, so it composes unchanged).
+        const bool selection_snr_data_aided = rateSelectionSnrDataAided();
         const float selection_snr_db =
             connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
-                                                     rateSelectionSnrDataAided());
+                                                     selection_snr_data_aided);
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -308,10 +309,14 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
-        // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
-        // Start one step more robust when channel is borderline.
+        // Bootstrap safety: the connect-time reading can overestimate first OFDM frame
+        // quality (historically the chirp snapshot; since #58 it is the data-aided
+        // fade-averaged estimate). Start one step more robust when channel is
+        // borderline; ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided reading that
+        // clears the R3/4 anchor by >= 1 sigma enter at R3/4 (waveform_selection.hpp).
         if (isOFDMMode(negotiated_mode_)) {
-            CodeRate capped = capInitialOFDMRate(selection_snr_db, rate_fading, rec_rate, rec_mod);
+            CodeRate capped = capInitialOFDMRate(selection_snr_db, rate_fading, rec_rate, rec_mod,
+                                                 selection_snr_data_aided);
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                           codeRateToString(rec_rate), codeRateToString(capped), snr_db,

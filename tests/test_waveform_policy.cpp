@@ -4,6 +4,7 @@
 #include "ultra/types.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 using namespace ultra;
@@ -244,6 +245,65 @@ void test_bootstrap_caps() {
           "AWGN below the R1/2 gate caps to the QPSK R1/4 ladder floor");
 }
 
+void test_entry_cap_r34() {
+    // ULTRA_ENTRY_CAP_R34 (default OFF, pinned "0" in main BEFORE any policy call —
+    // the knob is read ONCE via static lambda). Knob-OFF behavior must be byte-identical
+    // to the pre-knob R2/3 basis clamp even when the reading is data-aided and high;
+    // the knob-ON path is exercised through capInitialOFDMRateImpl's explicit seam.
+    CHECK(!entryCapR34Enabled(), "ULTRA_ENTRY_CAP_R34=0 must read as disabled");
+
+    // Knob OFF: a data-aided high reading still gets the R2/3 basis clamp (unchanged).
+    CHECK(capInitialOFDMRate(25.0f, 0.40f, CodeRate::R3_4, Modulation::QPSK,
+                             /*data_aided=*/true) == CodeRate::R2_3,
+          "knob OFF: data-aided Good@25 entry stays clamped to R2/3 (byte-identical)");
+
+    // Gate threshold derivation: Good-class QPSK R3/4 ladder anchor (20.0) + the
+    // measured per-reading sigma (3.15) = 23.15. Just above clears, just below holds.
+    CHECK(coherentLadderAnchorDb(Modulation::QPSK, CodeRate::R3_4, 0.40f) == 20.0f,
+          "Good-class QPSK R3/4 anchor lookup matches the ladder (20.0)");
+    CHECK(dataAidedEntryClearsR34(true, 23.2f, 0.40f, true),
+          "gate: data-aided Good@23.2 clears anchor(20)+sigma(3.15)");
+    CHECK(!dataAidedEntryClearsR34(true, 23.1f, 0.40f, true),
+          "gate: data-aided Good@23.1 is below anchor+sigma -> holds");
+    CHECK(!dataAidedEntryClearsR34(true, 25.0f, 0.40f, false),
+          "gate: training (non-data-aided) reading never clears");
+    CHECK(!dataAidedEntryClearsR34(true, 25.0f, 0.90f, true),
+          "gate: Moderate-class fading never clears (unconditional R2/3 cap)");
+    CHECK(!dataAidedEntryClearsR34(false, 25.0f, 0.40f, true),
+          "gate: knob off never clears");
+
+    // Knob ON (via the impl seam): data-aided high reading enters at R3/4.
+    CHECK(capInitialOFDMRateImpl(25.0f, 0.40f, CodeRate::R3_4, Modulation::QPSK,
+                                 /*data_aided=*/true, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R3_4,
+          "knob ON: data-aided Good@25 enters at R3/4");
+    // Training-routed reading keeps the R2/3 cap even when high.
+    CHECK(capInitialOFDMRateImpl(25.0f, 0.40f, CodeRate::R3_4, Modulation::QPSK,
+                                 /*data_aided=*/false, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R2_3,
+          "knob ON: training reading keeps the R2/3 cap");
+    // Moderate-class fading keeps the R2/3 cap unconditionally.
+    CHECK(capInitialOFDMRateImpl(25.0f, 0.90f, CodeRate::R3_4, Modulation::QPSK,
+                                 /*data_aided=*/true, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R2_3,
+          "knob ON: Moderate-class keeps the R2/3 cap");
+    // Marginal reading (below anchor+sigma) keeps the R2/3 cap.
+    CHECK(capInitialOFDMRateImpl(22.0f, 0.40f, CodeRate::R3_4, Modulation::QPSK,
+                                 /*data_aided=*/true, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R2_3,
+          "knob ON: marginal Good@22 (< 20+3.15) keeps the R2/3 cap");
+    // The cap never RAISES the candidate: an R2/3 candidate stays R2/3 through the gate.
+    CHECK(capInitialOFDMRateImpl(25.0f, 0.40f, CodeRate::R2_3, Modulation::QPSK,
+                                 /*data_aided=*/true, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R2_3,
+          "knob ON: R2/3 candidate is never raised (min(candidate, R3/4))");
+    // AWGN never hits the basis clamp; the knob changes nothing there.
+    CHECK(capInitialOFDMRateImpl(20.0f, 0.05f, CodeRate::R3_4, Modulation::QPSK,
+                                 /*data_aided=*/true, /*entry_cap_r34_on=*/true) ==
+              CodeRate::R3_4,
+          "knob ON: AWGN path unchanged (ladder rate R3/4)");
+}
+
 void test_waveform_recommendations() {
     // AWGN entry floor lowered to 8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
     auto low = recommendWaveformAndRate(7.9f, 0.00f);
@@ -378,10 +438,16 @@ void test_waveform_factory() {
 }  // namespace
 
 int main() {
+    // ULTRA_ENTRY_CAP_R34 is read ONCE (static lambda): pin it OFF before the first
+    // policy call so the knob-off checks are hermetic regardless of the parent env.
+    // The knob-ON path is tested through capInitialOFDMRateImpl's explicit seam.
+    setenv("ULTRA_ENTRY_CAP_R34", "0", 1);
+
     test_ofdm_rate_thresholds();
     test_narrow_data_mode();
     test_coherent_ladder_selection();
     test_bootstrap_caps();
+    test_entry_cap_r34();
     test_waveform_recommendations();
     test_data_mode_policy();
     test_ofdm_chirp_qam16_configuration();

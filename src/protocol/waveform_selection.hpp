@@ -334,6 +334,75 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
     return selectCoherentOFDM(snr_db, fading_index).rate;
 }
 
+// ── Data-aided entry cap (2026-07-03): env-gated A/B knob ──────────────────────
+// ULTRA_ENTRY_CAP_R34=1 lets the connect-time bootstrap cap admit a QPSK **R3/4 ENTRY**
+// instead of the unconditional ULTRA_R23_BASIS R2/3 clamp (capInitialOFDMRate below).
+// WHY: the R2/3 clamp's rationale was "chirp SNR can overestimate first OFDM frame
+// quality" — but since #58 increment 2/3 the entry reading is the DATA-AIDED
+// fade-AVERAGED MC-DPSK estimate (Connection::rateSelectionSnrDb/DataAided), a
+// conservative LOWER-BOUND-leaning estimator (EVM only ADDS error), not the chirp
+// snapshot. Rig evidence (12 connects at dial MPG@20): entries read 12.9-19.3
+// data-aided, then every run spends ~60-90 s climbing R2/3→R3/4→16QAM through the
+// EMA+streak arithmetic — the largest remaining goodput loss (~90-140 s below 16QAM
+// per ~250 s transfer). Rate hop only — the modulation hop (→16QAM) stays
+// adaptive-only. Default OFF → byte-identical. Read ONCE (static).
+inline bool entryCapR34Enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_ENTRY_CAP_R34");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return on;
+}
+
+// Per-connect-reading dispersion (1 sigma, dB) of the connect-time SNR estimate.
+// NOT a tuned constant — MEASURED: #58 rig campaign forensics, 12 connects at a
+// constant dial (MPG@20) read 3.9-17.9 dB, sigma 3.15 (docs/CHANGELOG.md 2026-07-03
+// "connect-SNR pool" entry; same population cited in connection_policy.hpp's
+// ConnectSnrPool block). Used as the entry-cap margin: a single reading must clear a
+// ladder threshold by >= 1 sigma before the entry pick may act on the excess.
+inline constexpr float kConnectSnrReadingSigmaDb = 3.15f;
+
+// Ladder-anchor lookup for one (mod, rate) rung at the given fading class. SINGLE
+// source of truth = kCoherentLadder (the QPSK rows of the experimental QAM16 ladder
+// are identical by construction, so this cannot drift between them). Returns
+// kRungDisabledDb when the rung is not auto-selectable on that class.
+inline float coherentLadderAnchorDb(Modulation mod, CodeRate rate, float fading_index) {
+    const int cls = static_cast<int>(classifyFading(fading_index));
+    for (const auto& rung : kCoherentLadder) {
+        if (rung.mod == mod && rung.rate == rate) {
+            return rung.min_snr_db[cls];
+        }
+    }
+    return kRungDisabledDb;
+}
+
+// THE ULTRA_ENTRY_CAP_R34 gate (pure; knob state passed explicitly so boundary tests
+// can exercise ON/OFF without racing the process-wide static env cache). R3/4 entry
+// is allowed IFF ALL of:
+//   1. the knob is ON;
+//   2. the reading is DATA-AIDED (the fade-averaged estimator the argument rests on —
+//      a training-snapshot reading keeps the R2/3 cap: it fade-crest OVER-reads);
+//   3. fading is below Moderate-class (fading_index < kFadingGoodMax) — Moderate
+//      entries ride the saturation bound and are deliberately marginal, so the R2/3
+//      cap holds unconditionally there (the QPSK R3/4 Moderate rung is disabled
+//      anyway: kRungDisabledDb);
+//   4. the selection SNR clears the ladder's own QPSK R3/4 anchor for this fading
+//      class (kCoherentLadder, e.g. Good 20.0) by >= kConnectSnrReadingSigmaDb —
+//      i.e. R3/4 would still be the ladder pick even if this single reading
+//      over-read by one measured per-reading sigma.
+inline bool dataAidedEntryClearsR34(bool entry_cap_r34_on, float snr_db,
+                                    float fading_index, bool data_aided) {
+    if (!entry_cap_r34_on || !data_aided) {
+        return false;
+    }
+    if (fading_index >= kFadingGoodMax) {
+        return false;  // Moderate-class guard: keep the R2/3 cap unconditionally
+    }
+    const float r34_anchor_db =
+        coherentLadderAnchorDb(Modulation::QPSK, CodeRate::R3_4, fading_index);
+    return snr_db >= r34_anchor_db + kConnectSnrReadingSigmaDb;
+}
+
 // Initial OFDM rate at handshake bootstrap: start at the LADDER rate for the measured
 // (snr, fading) — never above what the ladder supports, but no more conservative either.
 // The per-class anchors (kCoherentLadder: AWGN measure_ack_fer 2026-06-06, GOOD measured
@@ -349,10 +418,14 @@ inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate ca
                : ladder_rate;
 }
 
-inline CodeRate capInitialOFDMRate(float snr_db,
-                                   float fading_index,
-                                   CodeRate candidate,
-                                   Modulation modulation) {
+// Implementation seam: entry_cap_r34_on is passed explicitly so the boundary tests can
+// exercise the ULTRA_ENTRY_CAP_R34 ON path (the public wrapper below reads the knob).
+inline CodeRate capInitialOFDMRateImpl(float snr_db,
+                                       float fading_index,
+                                       CodeRate candidate,
+                                       Modulation modulation,
+                                       bool data_aided,
+                                       bool entry_cap_r34_on) {
     // ULTRA_FORCE_DATA_RATE: the operator is probing a specific rung — no demotion.
     if (std::getenv("ULTRA_FORCE_DATA_RATE") != nullptr) {
         return candidate;
@@ -368,19 +441,43 @@ inline CodeRate capInitialOFDMRate(float snr_db,
     //   R2/3 pin there is a pure ~11% throughput loss (OTASim AWGN@20: R3/4 2150 vs R2/3 1920
     //   bps). The fading_index cannot split Good from Moderate but it cleanly separates AWGN
     //   (~0) from any fading channel (~0.5), which is exactly the distinction this gate needs.
-    // Entry-only: called only from the two initial-mode sites (connection.cpp:405,
-    // connection_handlers.cpp:269); the rate_controller climb path is not gated, so
-    // R2/3->R3/4 still works when adaptation is on.
+    // Entry-only: called only from the two initial-mode sites (connection.cpp acceptCall,
+    // connection_handlers.cpp handleConnect); the rate_controller climb path is not gated,
+    // so R2/3->R3/4 still works when adaptation is on.
     {
         const char* b = std::getenv("ULTRA_R23_BASIS");
         const bool r23_basis_on = !(b && b[0] == '0');  // default ON
         if (r23_basis_on && modulation == Modulation::QPSK && snr_db >= 18.0f &&
             fading_index >= kFadingAwgnMax) {
+            // ULTRA_ENTRY_CAP_R34 exception (default OFF; gate documented at
+            // dataAidedEntryClearsR34): a DATA-AIDED reading clearing the ladder's own
+            // QPSK R3/4 anchor by >= 1 measured per-reading sigma, below Moderate-class
+            // fading, may enter at R3/4. min(candidate, R3/4): the cap never RAISES the
+            // candidate, and never admits anything above R3/4 — the 16QAM hop stays
+            // adaptive-only (this branch is QPSK-gated and rate-only regardless).
+            if (dataAidedEntryClearsR34(entry_cap_r34_on, snr_db, fading_index,
+                                        data_aided)) {
+                return (ofdmCodeRateValue(candidate) < ofdmCodeRateValue(CodeRate::R3_4))
+                           ? candidate
+                           : CodeRate::R3_4;
+            }
             return CodeRate::R2_3;
         }
     }
     // Coherent-only band: modulation no longer changes the cap.
     return capInitialOFDMRate(snr_db, fading_index, candidate);
+}
+
+// data_aided: whether the (selection) snr_db rests on the data-aided fade-averaged
+// MC-DPSK estimate — pass Connection::rateSelectionSnrDataAided() at the entry sites.
+// Defaults to false so every unplumbed/legacy caller keeps the conservative cap.
+inline CodeRate capInitialOFDMRate(float snr_db,
+                                   float fading_index,
+                                   CodeRate candidate,
+                                   Modulation modulation,
+                                   bool data_aided = false) {
+    return capInitialOFDMRateImpl(snr_db, fading_index, candidate, modulation,
+                                  data_aided, entryCapR34Enabled());
 }
 
 // Recommend waveform and rate based on SNR and fading index
