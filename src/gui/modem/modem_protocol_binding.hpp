@@ -53,9 +53,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
             const SNRSource snr_source = stats.snr_source;
             const float fading = modem.getFadingIndex();
             const bool use_quality = protocol.shouldUseRxFrameForChannelQuality(data);
-            protocol.setMeasuredSNR(snr_db, snr_source);
+            const bool snr_data_aided = stats.mcdpsk_snr_routed_data_aided;
+            protocol.setMeasuredSNR(snr_db, snr_source, snr_data_aided);
             if (use_quality) {
-                protocol.setChannelQuality(snr_db, fading, snr_source);
+                protocol.setChannelQuality(snr_db, fading, snr_source, snr_data_aided);
                 // Doppler coherence (Good/Moderate discriminator) — refines the channel
                 // classification once enough OFDM data has pooled (see design doc).
                 protocol.setChannelCoherence(modem.getDopplerCoherenceScore(),

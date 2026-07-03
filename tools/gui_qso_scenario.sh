@@ -21,7 +21,8 @@
 #   tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed N \
 #       --expect-rate R3/4 --expect-mod QPSK --file-kb 21 --out /tmp/X
 # Override any knob inline, e.g.:
-#   ULTRA_LOCK_RATE=0 tools/gui_qso_scenario.sh ...          (adaptive rate ladder)
+#   ULTRA_LOCK_RATE=1 tools/gui_qso_scenario.sh ...          (pin the rate; adaptive
+#                       fade-riding ladder is the default since 2026-07-02)
 # Multi-seed: loop this script over seeds (it is the single test harness).
 set -euo pipefail
 
@@ -131,12 +132,15 @@ done
 # Warm-handoff burst-transport config — the "warm thing" this harness exists to
 # test (§16 warm-handoff + one-way burst transport, 2026-05-29). Baked in here so
 # Each is an OVERRIDABLE default (`:=`), so the caller can still flip any of them — e.g.
-#   ULTRA_LOCK_RATE=0         (let the adaptive rate ladder drop/promote)
+#   ULTRA_LOCK_RATE=1         (pin the negotiated rate — the pre-2026-07-02 fixed-rate cell)
 #   ULTRA_FORCE_DATA_MOD=8PSK ULTRA_FORCE_DATA_RATE=R3_4  (force a rung)
 # (warm-sync hand-off is now the PRODUCTION DEFAULT — the ULTRA_S16_WARM_HANDOFF flag was
 #  removed 2026-05-31; there is no longer a full-chirp-every-group OFF baseline to select.)
+# 2026-07-02: the fade-riding adaptive ladder is the PRODUCTION DEFAULT (ULTRA_RATE_ADAPT
+# default-ON for wideband OFDM), so the harness no longer pins the rate — a bare run is
+# the out-of-box adaptive run. Pin with ULTRA_LOCK_RATE=1 for fixed-rung baselines/probes.
 : "${ULTRA_ADAPTIVE_RATE:=1}"        ; export ULTRA_ADAPTIVE_RATE
-: "${ULTRA_LOCK_RATE:=1}"            ; export ULTRA_LOCK_RATE
+: "${ULTRA_LOCK_RATE:=0}"            ; export ULTRA_LOCK_RATE
 # No longer pinned (now code defaults, reconciled 2026-05-30):
 #   ULTRA_BURST_TRANSPORT  -> default ON (the production OFDM file path)
 #   ULTRA_LDPC_Z           -> derived by the traffic-class policy (81 for file bursts)
@@ -256,8 +260,13 @@ collect_metrics() {
   # modulation change is EXPECTED, not a failure. Same disable so the watchdog doesn't
   # false-kill a legitimate promotion. PASS still requires CRC-clean delivery + Transfer
   # complete; only the modulation-pinning check is relaxed.
+  #
+  # 2026-07-02: with the fade-riding ladder default-ON (ULTRA_LOCK_RATE=0), mid-transfer
+  # rate/modulation moves are the MECHANISM, not a failure — the pinning watchdog only
+  # applies when the operator pinned the rate (ULTRA_LOCK_RATE=1).
   if [[ -n "${ULTRA_FORCE_DATA_MOD:-}" || -n "${ULTRA_FORCE_WAVEFORM:-}" \
-        || "$EXPECT_MOD" == "any" || "$EXPECT_MOD" == "coherent" ]]; then
+        || "$EXPECT_MOD" == "any" || "$EXPECT_MOD" == "coherent" \
+        || "${ULTRA_LOCK_RATE:-0}" == "0" ]]; then
     alpha_unexpected_modes=0
     bravo_unexpected_modes=0
   fi

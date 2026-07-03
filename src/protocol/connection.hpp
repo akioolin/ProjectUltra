@@ -396,13 +396,17 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
-    // Set measured SNR from modem layer (call this when decoding frames)
-    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE) {
+    // Set measured SNR from modem layer (call this when decoding frames).
+    // data_aided: snr_db is the MC-DPSK data-aided (fade-averaged) estimate — the
+    // only source the connectSelectionSnrDb saturation bound may act on.
+    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE,
+                        bool data_aided = false) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
             return;
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
     }
     float getMeasuredSNR() const { return measured_snr_db_; }
@@ -411,12 +415,14 @@ public:
     // Set channel quality including fading detection
     // fading_index: combined freq_cv + temporal_cv, where > 0.65 indicates significant fading
     void setChannelQuality(float snr_db, float fading_index,
-                           SNRSource source = SNRSource::NONE) {
+                           SNRSource source = SNRSource::NONE,
+                           bool data_aided = false) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
             return;
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
@@ -431,6 +437,18 @@ public:
     // connection_policy::coherenceAdjustedFadingIndex in the rate-decision handlers.
     // See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
     void setChannelCoherence(float coherence_score, bool valid) {
+        // BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE fix (2026-07-02): while CONNECTED, a valid
+        // Good/Moderate verdict is CARRIED at the Connection layer across any modem-layer
+        // rebuild (MODE_CHANGE waveform recreation, full re-anchor, RX drains). The estimator
+        // is a cumulative mean that never un-validates on its own, so an invalid feed while
+        // connected can only mean "the decoder-side pool was reset" — hold the last valid
+        // verdict instead of reverting the rate ladder to the blind fading_index during the
+        // ~30 s re-pooling window. Cleared at the connection boundary (enterConnected /
+        // reset), so a stale verdict never leaks across connections or into the CONNECT-time
+        // pick (which stays byte-identical: coherence is always invalid at CONNECT).
+        if (!valid && coherence_valid_ && state_ == ConnectionState::CONNECTED) {
+            return;
+        }
         coherence_score_ = coherence_score;
         coherence_valid_ = valid;
     }
@@ -513,6 +531,7 @@ private:
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // Routed SNR measured by modem (see source).
     SNRSource measured_snr_source_ = SNRSource::NONE;
+    bool measured_snr_data_aided_ = false;  // measured_snr_db_ is the data-aided MC-DPSK estimate
     bool measured_snr_valid_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
     float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading
@@ -636,12 +655,13 @@ private:
     uint32_t interactive_yield_log_throttle_ms_ = 0;
     uint32_t interactive_anchor_rearm_ms_ = 0;
 
-    // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
-    // default OFF. The SENDER runs the controller on the receiver's per-group decode
-    // headroom (carried on the GROUP_ACK; a GROUP_NACK feeds quality 0 -> step down).
+    // §14.36 Phase 5c BER-driven per-block rate adaptation. The SENDER runs the controller
+    // on the receiver's per-group decode headroom (carried on the GROUP_ACK; a GROUP_NACK
+    // feeds quality 0 -> step down).
     void applyAdaptiveRateFeedback(float quality);
-    // Operator has actually enabled mid-transfer rate MOVES (ULTRA_RATE_ADAPT set, not
-    // ULTRA_LOCK_RATE; feature on). adaptive_rate_enabled_/ULTRA_ADAPTIVE_RATE only enables the
+    // Mid-transfer rate/mod MOVES are live. DEFAULT-ON for connected wideband OFDM
+    // (2026-07-02 fade-riding ladder); opt out with ULTRA_RATE_ADAPT=0 or pin with
+    // ULTRA_LOCK_RATE=1. adaptive_rate_enabled_/ULTRA_ADAPTIVE_RATE only enables the
     // feedback computation + GUI bar; this gates the rate physically changing.
     bool rateAdaptationActive() const;
     // Polled from tick(): a frame stuck at a too-aggressive rate (the fade troughs keep killing it,
@@ -649,9 +669,10 @@ private:
     void maybeEscapeStuckFrame();
     bool adaptive_rate_enabled_ = true;  // default ON: drives the GUI "Adapt:" observability bar +
                                          // decode-headroom quality feedback. The actual rate CHANGE
-                                         // stays gated by rateAdaptationActive() (ULTRA_RATE_ADAPT,
-                                         // default off), so this is pure visibility. Opt out with
-                                         // ULTRA_ADAPTIVE_RATE=0.
+                                         // is gated by rateAdaptationActive() (default-ON for
+                                         // wideband OFDM since 2026-07-02; ULTRA_RATE_ADAPT=0 or
+                                         // ULTRA_LOCK_RATE=1 opts out). Opt out of the feedback
+                                         // computation itself with ULTRA_ADAPTIVE_RATE=0.
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
@@ -663,14 +684,41 @@ private:
     bool rx_level_clipped_ = false;
     uint32_t rx_level_verdict_seq_seen_ = 0;
     std::string last_adaptive_action_;      // GUI: short human-readable action
-    // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-OFF). See
+    // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON since 2026-07-02). See
     // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK
     // R3/4 (the climb gate AND a low-variance Good/Moderate proxy — a Moderate channel's fades
     // keep resetting it); bad_streak = consecutive bad groups on QAM16 (the prompt-demote
-    // trigger); sticky = demoted once -> do not re-climb QAM16 for the rest of this connection.
+    // trigger).
     int qam16_clean_streak_ = 0;
     int qam16_bad_streak_ = 0;
-    bool qam16_sticky_demoted_ = false;
+    // Re-climb COOLDOWN (2026-07-02, replaces the 06-17 sticky no-reclimb). Under fade-riding
+    // the QPSK<->QAM16 oscillation IS the mechanism — the rung SHOULD oscillate with the
+    // ~10-20 s Good fade cycle (crest -> 16QAM R2/3, trough -> QPSK R3/4); the 06-17 sticky
+    // design assumed oscillation was pathology and permanently forfeited every later crest.
+    // Instead, after a demote the climb streak may not begin again until this many CLEAN
+    // groups pass (base 3, ULTRA_QAM16_RECLIMB_COOLDOWN), DOUBLING per demote this connection
+    // (cap x4 — ssthresh-family multiplicative backoff): a channel that keeps cratering QAM16
+    // re-probes ever more rarely, bounding worst-case MODE_CHANGE move overhead <10% of
+    // airtime (per-move cost arithmetic: CHANGELOG 2026-07-02). Reset in enterConnected.
+    int qam16_reclimb_cooldown_ = 0;
+    int qam16_demote_count_ = 0;
+    void noteQam16Demoted(int weight);
+    // [LADDER] per-transfer telemetry (sender-side, pure observability): time-in-rung
+    // percentages + mid-stream move count, logged ONCE at transfer completion, e.g.
+    //   [LADDER] qpsk_r23=54% qam16_r23=38% moves=9 (52s, ok)
+    // Started in startFileTransferNow; a rung segment closes on every applyDataMode
+    // mod/rate change while active; finished (logged) by the setFileSentCallback wrapper.
+    struct LadderRungStat { Modulation mod; CodeRate rate; double seconds; };
+    bool ladder_telemetry_active_ = false;
+    int ladder_moves_ = 0;
+    std::chrono::steady_clock::time_point ladder_transfer_start_{};
+    std::chrono::steady_clock::time_point ladder_rung_start_{};
+    Modulation ladder_cur_mod_ = Modulation::QPSK;
+    CodeRate ladder_cur_rate_ = CodeRate::R1_4;
+    std::vector<LadderRungStat> ladder_rung_stats_;
+    void ladderTelemetryStart();
+    void ladderTelemetryNoteRung(Modulation mod, CodeRate rate, bool count_move);
+    void ladderTelemetryFinish(bool success);
     // Raw file payload (TYPE+OFFSET headers stripped) + a byte cursor used by the
     // chunk-at-rate form fn. Populated by startBurstFileTransfer when adaptive
     // rate is on; the cursor advances by burst_pending_advance_ only on ACK.

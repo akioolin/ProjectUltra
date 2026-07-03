@@ -160,6 +160,9 @@ bool FileTransferController::startSend(const std::string& filepath) {
     tx_metadata_sent_ = false;
     chunks_sent_ = 0;
     chunks_acked_ = 0;
+    // An inbound FILE_START can trample SENDING->RECEIVING without resetTxState,
+    // orphaning ledger entries that would poison this transfer's requeue offsets.
+    tx_pending_ledger_.clear();
     state_ = FileTransferState::SENDING;
 
     notifyProgress();
@@ -175,16 +178,21 @@ Bytes FileTransferController::getNextChunk() {
     // handles multiple frames in flight. The ARQ window controls pacing.
 
     Bytes payload;
+    bool is_metadata = false;
+    uint32_t chunk_offset = 0;
 
     if (!tx_metadata_sent_) {
         payload = buildMetadataPayload();
         tx_metadata_sent_ = true;  // Mark sent immediately (ARQ handles retries)
+        is_metadata = true;
     } else if (tx_offset_ < tx_data_.size()) {
+        chunk_offset = tx_offset_;  // buildDataPayload advances tx_offset_
         payload = buildDataPayload();
     }
 
     if (!payload.empty()) {
         chunks_sent_++;
+        tx_pending_ledger_.push_back({chunk_offset, is_metadata});
     }
 
     return payload;
@@ -207,21 +215,23 @@ void FileTransferController::requeuePendingChunks() {
     }
 
     const uint32_t pending = chunks_sent_ - chunks_acked_;
-    if (chunks_acked_ == 0) {
+    if (tx_pending_ledger_.empty() || tx_pending_ledger_.front().metadata) {
+        // Empty ledger with pending counts means the count/ledger bookkeeping
+        // diverged (identity-blind acks) — restart from scratch. A rewind is
+        // always SAFE (FILE_DATA carries explicit offsets, duplicates are
+        // idempotent at the receiver); a forward jump silently loses bytes.
         tx_metadata_sent_ = false;
         tx_offset_ = 0;
     } else {
         tx_metadata_sent_ = true;
-        const uint64_t acked_data_chunks = static_cast<uint64_t>(chunks_acked_ - 1);
-        const uint64_t first_unacked_offset = acked_data_chunks * static_cast<uint64_t>(chunk_size_);
-        const uint64_t data_size = static_cast<uint64_t>(tx_data_.size());
-        tx_offset_ = static_cast<uint32_t>(std::min(first_unacked_offset, data_size));
+        tx_offset_ = tx_pending_ledger_.front().offset;
     }
 
+    tx_pending_ledger_.clear();
     chunks_sent_ = chunks_acked_;
 
     LOG_MODEM(WARN,
-              "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, offset=%u)",
+              "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, resume_offset=%u)",
               pending, chunks_acked_, tx_offset_);
     notifyProgress();
 }
@@ -233,6 +243,9 @@ void FileTransferController::onChunkAcked() {
 
     // Track how many chunks have been ACKed for progress
     chunks_acked_++;
+    if (!tx_pending_ledger_.empty()) {
+        tx_pending_ledger_.pop_front();  // retirement is in send order
+    }
 
     notifyProgress();
 
@@ -411,6 +424,7 @@ Bytes FileTransferController::getSingleBlockPayload(size_t max_payload) {
     tx_metadata_sent_ = true;
     tx_offset_ = static_cast<uint32_t>(tx_data_.size());
     chunks_sent_++;
+    tx_pending_ledger_.push_back({0, true});  // single block rebuilds from scratch on requeue
     notifyProgress();
     return payload;
 }
@@ -497,22 +511,43 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
     rx_final_chunk_seen_ = rx_prestart_final_seen_;
     rx_prestart_final_seen_ = false;
     rx_prestart_overflow_ = false;
-    while (!rx_pending_chunks_.empty()) {
-        uint32_t next_expected = static_cast<uint32_t>(rx_data_.size());
-        auto it = rx_pending_chunks_.find(next_expected);
-        if (it == rx_pending_chunks_.end()) break;
-        rx_data_.insert(rx_data_.end(), it->second.begin(), it->second.end());
-        LOG_MODEM(INFO,
-                  "FileTransfer: Drained STAGED chunk offset=%u len=%zu (total=%zu)",
-                  next_expected, it->second.size(), rx_data_.size());
-        rx_pending_chunks_.erase(it);
-    }
+    drainPendingChunks();
 
     notifyProgress();
     // A tiny file whose final chunk was staged ahead of FILE_START is already complete
     // after the drain — finalize now instead of waiting for a data frame that won't come.
     checkAndFinalizeReceive();
     return true;
+}
+
+// Drain buffered out-of-order chunks against the contiguous edge. Overlap-aware:
+// after a sender requeue resends on a CHANGED chunk grid (mid-stream rate/mod
+// move), buffered old-grid entries can be fully covered by the advancing edge
+// (drop — the bytes carry no new information) or straddle it (append only the
+// unseen tail). An exact-offset-only drain strands covered entries forever,
+// which permanently blocks the compressed finalization predicate
+// (rx_pending_chunks_.empty()) even with every byte present.
+void FileTransferController::drainPendingChunks() {
+    while (!rx_pending_chunks_.empty()) {
+        auto it = rx_pending_chunks_.begin();  // std::map: lowest offset first
+        const size_t have = rx_data_.size();
+        const uint32_t off = it->first;
+        if (static_cast<size_t>(off) > have) {
+            break;  // still a gap before the earliest buffered entry
+        }
+        const Bytes& buf = it->second;
+        if (static_cast<size_t>(off) + buf.size() > have) {
+            rx_data_.insert(rx_data_.end(), buf.begin() + (have - off), buf.end());
+            LOG_MODEM(INFO,
+                      "FileTransfer: Drained buffered chunk offset=%u len=%zu (total=%zu)",
+                      off, buf.size(), rx_data_.size());
+        } else {
+            LOG_MODEM(DEBUG,
+                      "FileTransfer: Dropped fully-covered buffered chunk offset=%u len=%zu (have=%zu)",
+                      off, buf.size(), have);
+        }
+        rx_pending_chunks_.erase(it);
+    }
 }
 
 bool FileTransferController::processFileData(const Bytes& payload, bool more_data) {
@@ -568,13 +603,23 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     // Buffer out-of-order chunks and insert them when the gap is filled.
     uint32_t expected_offset = static_cast<uint32_t>(rx_data_.size());
     if (offset < expected_offset) {
-        LOG_MODEM(DEBUG,
-                  "FileTransfer: Ignoring duplicate/overlap chunk offset=%u len=%zu (have=%zu)",
-                  offset, data_len, rx_data_.size());
-        return true;
-    }
-
-    if (offset > expected_offset) {
+        if (static_cast<size_t>(offset) + data_len <= expected_offset) {
+            LOG_MODEM(DEBUG,
+                      "FileTransfer: Ignoring duplicate/overlap chunk offset=%u len=%zu (have=%zu)",
+                      offset, data_len, rx_data_.size());
+            return true;
+        }
+        // Straddles the contiguous edge: a sender requeue (ARQ abort on a rate/mod
+        // move) resends on the NEW chunk grid, so a resent chunk can start below
+        // the edge and extend past it. Bytes at equal offsets are identical
+        // (absolute offsets into the same transmitted stream) — append only the
+        // unseen tail; dropping the whole chunk would lose those bytes forever.
+        const size_t skip = expected_offset - offset;
+        rx_data_.insert(rx_data_.end(), data + skip, data + data_len);
+        LOG_MODEM(INFO,
+                  "FileTransfer: Merged straddling chunk offset=%u len=%zu tail=%zu (total=%zu)",
+                  offset, data_len, data_len - skip, rx_data_.size());
+    } else if (offset > expected_offset) {
         // Out-of-order: buffer for later insertion. The bytes ARE received and kept
         // (SR-ARQ), they just can't be written until the earlier gap fills. Notify so
         // the bar reflects the true received total now, not only when the gap closes.
@@ -584,21 +629,13 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
                   offset, data_len, expected_offset, rx_pending_chunks_.size());
         notifyProgress();
         return true;
+    } else {
+        // In-order: append directly
+        rx_data_.insert(rx_data_.end(), data, data + data_len);
     }
 
-    // In-order: append directly
-    rx_data_.insert(rx_data_.end(), data, data + data_len);
-
-    // Drain any buffered chunks that are now in sequence
-    while (!rx_pending_chunks_.empty()) {
-        uint32_t next_expected = static_cast<uint32_t>(rx_data_.size());
-        auto it = rx_pending_chunks_.find(next_expected);
-        if (it == rx_pending_chunks_.end()) break;
-        rx_data_.insert(rx_data_.end(), it->second.begin(), it->second.end());
-        LOG_MODEM(INFO, "FileTransfer: Drained buffered chunk offset=%u len=%zu (total=%zu)",
-                  next_expected, it->second.size(), rx_data_.size());
-        rx_pending_chunks_.erase(it);
-    }
+    // Drain any buffered chunks that are now in sequence (overlap-aware)
+    drainPendingChunks();
 
     notifyProgress();
 
@@ -811,6 +848,7 @@ void FileTransferController::resetTxState() {
     tx_metadata_sent_ = false;
     chunks_sent_ = 0;
     chunks_acked_ = 0;
+    tx_pending_ledger_.clear();
     state_ = FileTransferState::IDLE;
 }
 

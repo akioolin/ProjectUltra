@@ -6,6 +6,7 @@
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <filesystem>
 
@@ -175,11 +176,11 @@ Connection::Connection(const ConnectionConfig& config)
     // deletion follow-up). NOTE: burst is itself selective-repeat (GROUP_ACK carries
     // the 8-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
     // narrow/control; this is NOT "remove SR-ARQ".
-    // §14.36 Phase 5c: per-block decode-headroom quality feedback. Default ON for OBSERVABILITY
-    // (drives the GUI "Adapt:" bar + diagnostics on sim AND hardware); opt OUT with
-    // ULTRA_ADAPTIVE_RATE=0. The actual rate CHANGE is separately gated by rateAdaptationActive()
-    // (ULTRA_RATE_ADAPT, default off), so default-on here is pure visibility — no behavior change
-    // to the shipping rate path.
+    // §14.36 Phase 5c: per-block decode-headroom quality feedback. Default ON (drives the GUI
+    // "Adapt:" bar + diagnostics on sim AND hardware); opt OUT with ULTRA_ADAPTIVE_RATE=0
+    // (which also disables the rate-change path). The actual rate CHANGE is separately gated by
+    // rateAdaptationActive() — default-ON for connected wideband OFDM since 2026-07-02
+    // (fade-riding ladder); ULTRA_RATE_ADAPT=0 / ULTRA_LOCK_RATE=1 opt out.
     if (const char* ar = std::getenv("ULTRA_ADAPTIVE_RATE"); ar && ar[0] == '0') {
         adaptive_rate_enabled_ = false;
     }
@@ -419,7 +420,8 @@ void Connection::acceptCall() {
     // is basis-corrected (fade-effective reading vs dial-calibrated anchors); the raw
     // measured_snr_db_ stays untouched for the wire/logs.
     const float accept_selection_snr_db =
-        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_);
+        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
+                                                 measured_snr_data_aided_);
     recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
@@ -1459,6 +1461,9 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
         return false;
     }
 
+    // [LADDER] per-transfer telemetry (time-in-rung + move count, logged at completion).
+    ladderTelemetryStart();
+
     // TRANSPORT MERGE (2026-06-06): the unified arq_ path is the only OFDM file transport —
     // it bursts + interleaves via sendNextFileChunk() -> flushBurstBuffer() over ONE 16-bit
     // seq space, one tone-burst ack, one retransmit window (legacy burst_transport_ removed).
@@ -1708,32 +1713,63 @@ static constexpr int kStuckRetransmitEscape = 5;
 
 // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB). Climb to QAM16 only after this many
 // CONSECUTIVE clean groups (quality >= climb_above) while pinned at the QPSK R3/4 top rung — a
-// modulation hop costs a full MODE_CHANGE (T/R + re-anchor) and QAM16 is fragile. Default 4
-// (lowered from 8 on 2026-06-17: at 8 the hop took ~30% of a transfer to fire; 4 is still a
-// meaningful "sustained clean" run — a Moderate channel's ~1-2 s fades break a 4-group streak most
-// of the time — and switches ~2x sooner). Env-tunable for rig sweeps via ULTRA_QAM16_CLIMB_STREAK
-// [1..64]; lower = faster switch but a weaker Good-vs-Moderate proxy (the sticky prompt drop-back
-// is the safety net). Demote off QAM16 after kQam16DemoteBadStreak consecutive sub-drop_below
-// groups (or immediately on a NACK) — drops are prompt.
+// modulation hop costs a full MODE_CHANGE (T/R + re-anchor) and QAM16 is fragile. Default 2
+// (history 8 -> 4 on 2026-06-17, 4 -> 2 on 2026-07-02 fade-riding ladder: the crests of a
+// Good ~10-20 s fade cycle only last a few ~8 s groups, so a 4-group streak forfeited most of
+// each crest; 2 clean groups is the fastest gate that still requires a SUSTAINED reading, and
+// the immediate demote + re-climb cooldown are the safety net). Env-tunable for rig sweeps via
+// ULTRA_QAM16_CLIMB_STREAK [1..64]; lower = faster switch but a weaker Good-vs-Moderate proxy.
+// Demote off QAM16 IMMEDIATELY on a bad group (kQam16DemoteBadStreak=1, was 2 — fade-riding
+// needs the trough exit to be as prompt as the cliff NACK exit) or on a NACK.
 static int qam16ClimbStreak() {
     static const int v = [] {
         if (const char* e = std::getenv("ULTRA_QAM16_CLIMB_STREAK")) {
             const int n = std::atoi(e);
             if (n >= 1 && n <= 64) return n;
         }
-        return 4;
+        return 2;
     }();
     return v;
 }
-static constexpr int kQam16DemoteBadStreak = 2;
+static constexpr int kQam16DemoteBadStreak = 1;
+
+// Re-climb cooldown BASE after a QAM16 demote, in CLEAN groups (quality >= climb_above).
+// ULTRA_QAM16_RECLIMB_COOLDOWN [0..64]; 0 = no cooldown. Doubles per demote this connection
+// (cap x4) via noteQam16Demoted — see the member comment in connection.hpp and the move-
+// overhead arithmetic in CHANGELOG 2026-07-02.
+static int qam16ReclimbCooldownBase() {
+    static const int v = [] {
+        if (const char* e = std::getenv("ULTRA_QAM16_RECLIMB_COOLDOWN")) {
+            const int n = std::atoi(e);
+            if (n >= 0 && n <= 64) return n;
+        }
+        return 3;
+    }();
+    return v;
+}
+
+// Register a QAM16 demote and arm the re-climb cooldown. weight=1 for the ack-driven soft
+// demote; weight=2 for the escape-drop (a frame nearly DIED at QAM16 — stronger evidence, so
+// the backoff advances two steps). Cooldown = base << min(demotes-1, 2): 3, 6, 12, 12...
+void Connection::noteQam16Demoted(int weight) {
+    qam16_demote_count_ = std::min(qam16_demote_count_ + weight, 8);
+    const int scale = 1 << std::min(qam16_demote_count_ - 1, 2);
+    qam16_reclimb_cooldown_ = qam16ReclimbCooldownBase() * scale;
+    qam16_clean_streak_ = 0;
+}
 
 bool Connection::rateAdaptationActive() const {
     if (!adaptive_rate_enabled_) return false;
-    const char* e = std::getenv("ULTRA_RATE_ADAPT");
-    const bool adapt = e != nullptr && std::atoi(e) != 0;
     const char* l = std::getenv("ULTRA_LOCK_RATE");
-    const bool locked = l != nullptr && std::atoi(l) != 0;
-    return adapt && !locked;
+    if (l != nullptr && std::atoi(l) != 0) return false;  // operator pin always wins
+    const char* e = std::getenv("ULTRA_RATE_ADAPT");
+    if (e != nullptr) return std::atoi(e) != 0;  // explicit override (any OFDM mode, as before)
+    // DEFAULT (2026-07-02, fade-riding ladder): ON for connected wideband OFDM — the
+    // burst-transport file path whose clean-boundary gate (06-10), synchronized
+    // MODE_CHANGE (06-09), ssthresh ceiling (06-11) and QAM16 climb/demote machinery
+    // (06-17) are GUI-proven. MC-DPSK and OFDM_NARROW keep their fixed negotiated rate
+    // unless explicitly enabled (their adaptation is unvalidated on the faithful gate).
+    return negotiated_mode_ == WaveformMode::OFDM_CHIRP;
 }
 
 void Connection::maybeEscapeStuckFrame() {
@@ -1749,9 +1785,10 @@ void Connection::maybeEscapeStuckFrame() {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
         // NO tone-burst ack at all, so the ack-driven demote in applyAdaptiveRateFeedback never sees
         // it — this escape path is the only one that fires. Demote STRAIGHT to the robust QPSK R3/4
-        // home gear (not a QAM16 code-rate step) and make the modulation sticky so we don't re-climb
-        // into the same fade. requestModeChange re-anchors both stations at a clean boundary.
-        qam16_sticky_demoted_ = true;
+        // home gear (not a QAM16 code-rate step) and arm a DOUBLE-weight re-climb cooldown (a frame
+        // nearly died — stronger evidence than a soft demote, but not a permanent forfeit of the
+        // next fade crest). requestModeChange re-anchors both stations at a clean boundary.
+        noteQam16Demoted(2);
         LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 R2/3 -> QPSK R3/4 (frame stuck, %d retx)",
                   arq_.maxInFlightRetryCount());
         requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
@@ -1796,12 +1833,12 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     // signal; a graded decode-headroom would need the tone-burst rate_hint field wired through
     // (TODO) — but binary already drives the green/red bar instead of "waiting" all run.
     last_group_quality_ = quality;
-    // Rate ADAPTATION is OFF BY DEFAULT (2026-06-07). The §14.43 closed-loop quality feedback is
-    // now wired end-to-end (receiver LDPC headroom -> rate_hint -> here), but the sender does NOT
-    // auto-change the data rate until the loop is validated and explicitly enabled with
-    // ULTRA_RATE_ADAPT=1. Until then the graded quality still drives the GUI "Adapt:" bar
-    // (last_group_quality_, set above) + the action text, so we can SEE what the controller WOULD
-    // do without it moving the rate. ULTRA_LOCK_RATE=1 also pins it (legacy lock; kept).
+    // Rate ADAPTATION is DEFAULT-ON for connected wideband OFDM (2026-07-02, fade-riding
+    // ladder; was default-OFF 2026-06-07..07-01). The §14.43 closed-loop quality feedback is
+    // wired end-to-end (receiver LDPC headroom -> rate_hint -> here). Opt out with
+    // ULTRA_RATE_ADAPT=0 or pin with ULTRA_LOCK_RATE=1 — then the graded quality still drives
+    // the GUI "Adapt:" bar (last_group_quality_, set above) + the action text, so we can SEE
+    // what the controller WOULD do without it moving the rate.
     if (!rateAdaptationActive()) {
         const bool rate_locked = [] {
             const char* l = std::getenv("ULTRA_LOCK_RATE");
@@ -1814,17 +1851,22 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         return;
     }
 
-    // ───────── QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-OFF) ─────────
+    // ───────── QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON) ─────────
+    // Default-ON since 2026-07-02 (fade-riding ladder): above QPSK R3/4 the next throughput
+    // step is the QAM16 R2/3 modulation hop, and riding the Good fade crests requires taking
+    // it. "0" opts out.
     const bool qam16_climb_enabled = [] {
         const char* e = std::getenv("ULTRA_QAM16_CLIMB");
-        return e != nullptr && std::atoi(e) != 0;
+        if (e == nullptr || e[0] == '\0') return true;
+        return std::atoi(e) != 0;
     }();
     if (data_modulation_ == Modulation::QAM16) {
         // While on the QAM16 top-gear we do NOT walk the QPSK code-rate ladder (the RateController
         // is QPSK-blind — its R2/3 index is a QPSK rung, not QAM16 R2/3). QAM16 is fragile on
         // frequency-selective fading (the decodability cliff: 55-70% loss / link-death — fable_07),
         // so the only transitions are HOLD or an asymmetric PROMPT demote straight back to the
-        // robust QPSK R3/4 home gear, made sticky so a fading channel can't thrash QPSK<->QAM16.
+        // robust QPSK R3/4 home gear; the re-climb cooldown (noteQam16Demoted) bounds how often a
+        // fading channel can thrash QPSK<->QAM16 without forfeiting the next fade crest.
         // We use RAW quality here (not the RateController EMA): a cliff demands a prompt reaction,
         // not a smoothed one (the EMA is the right tool for a GRADUAL code-rate rung, not a dense
         // constellation that fails abruptly). NOTE: when QAM16 craters so hard it emits NO ack, this
@@ -1836,7 +1878,6 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         if (quality < drop_below) ++qam16_bad_streak_; else qam16_bad_streak_ = 0;
         char buf[96];
         if (nack || qam16_bad_streak_ >= kQam16DemoteBadStreak) {
-            qam16_sticky_demoted_ = true;  // do not re-climb QAM16 this connection
             qam16_bad_streak_ = 0;
             const bool busy =
                 file_transfer_.getState() == FileTransferState::SENDING &&
@@ -1845,6 +1886,10 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 std::snprintf(buf, sizeof(buf),
                               "hold QAM16 R2/3 (demote->QPSK R3/4 at clean boundary, q=%.2f)", quality);
             } else {
+                // Count the demote + arm the re-climb cooldown only when the MODE_CHANGE actually
+                // fires (a busy-held decision re-asserts on the next bad group; counting the hold
+                // would double-charge the backoff for one logical demote).
+                noteQam16Demoted(1);
                 requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
                                   v2::ModeChangeReason::CHANNEL_DEGRADED);
                 std::snprintf(buf, sizeof(buf),
@@ -1889,15 +1934,25 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     // as a low-variance Good-vs-Moderate gate (a Moderate channel's fades keep resetting it) — the
     // sender-side proxy for "confirmed-Good" that needs no wire change. The LTS coherence disc (the
     // sharper gate) lives on the RECEIVER, which is deaf to its own channel while sending, and its
-    // HW threshold is not yet validated, so disc-gating is a deliberate later add. Sticky after a
-    // demote so a channel that already proved it can't hold QAM16 isn't re-climbed this connection.
+    // HW threshold is not yet validated, so disc-gating is a deliberate later add. After a demote,
+    // the re-climb COOLDOWN (noteQam16Demoted) must first be spent in CLEAN groups before the
+    // streak may accrue again — the fade-riding replacement for the 06-17 sticky no-reclimb.
     Modulation target_mod = data_modulation_;
     CodeRate target_rate = next;
     bool qam16_hop = false;
-    if (qam16_climb_enabled && !qam16_sticky_demoted_ &&
+    if (qam16_climb_enabled &&
         data_modulation_ == Modulation::QPSK && prev == CodeRate::R3_4 && next == CodeRate::R3_4) {
         const float climb_above = rate_controller_.config().climb_above;
-        if (quality >= climb_above) ++qam16_clean_streak_; else qam16_clean_streak_ = 0;
+        if (quality >= climb_above) {
+            if (qam16_reclimb_cooldown_ > 0) {
+                --qam16_reclimb_cooldown_;  // a clean group spends cooldown; streak stays 0
+                qam16_clean_streak_ = 0;
+            } else {
+                ++qam16_clean_streak_;
+            }
+        } else {
+            qam16_clean_streak_ = 0;
+        }
         if (qam16_clean_streak_ >= qam16ClimbStreak()) {
             target_mod = Modulation::QAM16;
             target_rate = CodeRate::R2_3;
@@ -3453,6 +3508,76 @@ void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index) {
                           mc_dpsk ? config_.mc_dpsk_samples_per_symbol : 0);
 }
 
+// ─────────────────────── [LADDER] per-transfer telemetry ────────────────────────
+// Sender-side observability for the fade-riding ladder: accumulates wall time per
+// (modulation, rate) rung between startFileTransferNow and transfer completion, and
+// counts mid-stream moves (applyDataMode mod/rate changes). Logged ONCE at completion:
+//   [LADDER] qpsk_r34=54% qam16_r23=38% moves=9 (52s, ok)
+// Pure telemetry — no control effect; wall clock is fine (the faithful gate and the
+// rig both run wall==sample time).
+
+// "QPSK"+"R3/4" -> "qpsk_r34" (lowercase, slash dropped) — grep-stable rung labels.
+static std::string ladderRungLabel(Modulation mod, CodeRate rate) {
+    std::string label = modulationToString(mod);
+    label += '_';
+    label += codeRateToString(rate);
+    std::string out;
+    out.reserve(label.size());
+    for (char c : label) {
+        if (c == '/') continue;
+        out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+void Connection::ladderTelemetryStart() {
+    ladder_telemetry_active_ = true;
+    ladder_moves_ = 0;
+    ladder_rung_stats_.clear();
+    ladder_transfer_start_ = ladder_rung_start_ = std::chrono::steady_clock::now();
+    ladder_cur_mod_ = data_modulation_;
+    ladder_cur_rate_ = data_code_rate_;
+}
+
+void Connection::ladderTelemetryNoteRung(Modulation mod, CodeRate rate, bool count_move) {
+    if (!ladder_telemetry_active_) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - ladder_rung_start_).count();
+    bool found = false;
+    for (auto& s : ladder_rung_stats_) {
+        if (s.mod == ladder_cur_mod_ && s.rate == ladder_cur_rate_) {
+            s.seconds += seconds;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        ladder_rung_stats_.push_back({ladder_cur_mod_, ladder_cur_rate_, seconds});
+    }
+    ladder_rung_start_ = now;
+    ladder_cur_mod_ = mod;
+    ladder_cur_rate_ = rate;
+    if (count_move) ++ladder_moves_;
+}
+
+void Connection::ladderTelemetryFinish(bool success) {
+    if (!ladder_telemetry_active_) return;
+    ladderTelemetryNoteRung(data_modulation_, data_code_rate_, /*count_move=*/false);
+    ladder_telemetry_active_ = false;
+    double total_s = 0.0;
+    for (const auto& s : ladder_rung_stats_) total_s += s.seconds;
+    if (total_s <= 0.0) return;
+    std::string line;
+    char buf[64];
+    for (const auto& s : ladder_rung_stats_) {
+        std::snprintf(buf, sizeof(buf), "%s%s=%.0f%%", line.empty() ? "" : " ",
+                      ladderRungLabel(s.mod, s.rate).c_str(), 100.0 * s.seconds / total_s);
+        line += buf;
+    }
+    LOG_MODEM(INFO, "Connection: [LADDER] %s moves=%d (%.0fs, %s)",
+              line.c_str(), ladder_moves_, total_s, success ? "ok" : "fail");
+}
+
 void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                                LadderRungId rung_id) {
     if (rung_id != LadderRungId::UNKNOWN) {
@@ -3502,6 +3627,11 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         file_transfer_.getState() == FileTransferState::SENDING;
     if (requeue_file) {
         file_transfer_.requeuePendingChunks();
+    }
+
+    // [LADDER] telemetry: close the current rung segment on a real mid-transfer move.
+    if ((rate_changed || mod_changed) && ladder_telemetry_active_) {
+        ladderTelemetryNoteRung(mod, rate, /*count_move=*/true);
     }
 
     data_modulation_ = mod;
@@ -3565,10 +3695,16 @@ void Connection::enterConnected() {
     yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
-    // QAM16 climb state is per-connection (sticky-demote persists for the connection, resets here).
+    // QAM16 climb state is per-connection (the re-climb cooldown/backoff resets here).
     qam16_clean_streak_ = 0;
     qam16_bad_streak_ = 0;
-    qam16_sticky_demoted_ = false;
+    qam16_reclimb_cooldown_ = 0;
+    qam16_demote_count_ = 0;
+    // Doppler-coherence verdict is per-connection: setChannelCoherence holds the last VALID
+    // verdict while CONNECTED (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE), so it must start
+    // invalid here or a previous connection's channel class would leak into this one.
+    coherence_score_ = 0.0f;
+    coherence_valid_ = false;
     // Software-ALC receiver-side state is per-connection.
     rx_level_low_streak_ = 0;
     rx_level_clipped_ = false;
@@ -3853,7 +3989,13 @@ void Connection::setFileReceivedCallback(FileReceivedCallback cb) {
 }
 
 void Connection::setFileSentCallback(FileSentCallback cb) {
-    file_transfer_.setSentCallback(std::move(cb));
+    // Wrap so the [LADDER] per-transfer telemetry summary is emitted exactly once at
+    // completion (success OR failure/cancel — every on_sent_ path), before the app callback.
+    file_transfer_.setSentCallback(
+        [this, cb = std::move(cb)](bool success, const std::string& error) {
+            ladderTelemetryFinish(success);
+            if (cb) cb(success, error);
+        });
 }
 
 // =============================================================================
@@ -3956,6 +4098,10 @@ void Connection::reset() {
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
     clearOutboundMessageTracking();
+    // Per-connection channel-coherence verdict (see setChannelCoherence hold-last-valid).
+    coherence_score_ = 0.0f;
+    coherence_valid_ = false;
+    ladder_telemetry_active_ = false;
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 

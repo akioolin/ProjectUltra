@@ -436,9 +436,30 @@ inline float connectSnrFadeBasisDb() {
     }();
     return v;
 }
-inline float connectSelectionSnrDb(float measured_snr_db, float fading_index) {
+inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
+                                   bool snr_is_data_aided) {
     if (fading_index >= kFadingAwgnMax) {
-        return measured_snr_db + connectSnrFadeBasisDb();
+        float sel = measured_snr_db + connectSnrFadeBasisDb();
+        // SATURATION BOUND (2026-07-02, Moderate-class fading): the data-aided
+        // differential-EVM estimator saturates at the Doppler-EVM floor (~7-9 dB
+        // at 0.5 Hz Doppler — the fade itself injects differential error), so on
+        // fast fading NO additive basis can recover the true SNR: MPM@20 reads
+        // 7.7 while MPM@8 reads 1-5 (measured). But EVM only ADDS error, so the
+        // reading is a LOWER BOUND on true SNR: a reading AT/ABOVE the
+        // saturation zone (>= 6.5) on Moderate-class fading implies the true
+        // channel is >= ~10+ dB (a genuinely weak channel pulls the reading
+        // BELOW saturation) -> OFDM entry is justified; the ladder's
+        // conservative R1/4 Moderate entry + demote machinery makes a marginal
+        // call recoverable. Below the zone the reading is trustworthy and the
+        // MC-DPSK fallback logic applies unchanged (MPM@8 safety preserved).
+        // The lower-bound argument holds ONLY for the data-aided estimator: the
+        // training snapshot fade-crest OVER-reads (measured up to 7.8 at true
+        // Moderate@8), so a training-routed reading must never trip this.
+        if (snr_is_data_aided &&
+            fading_index >= kFadingGoodMax && measured_snr_db >= 6.5f) {
+            sel = std::max(sel, kOFDMEntryFloorModerateDb + 0.5f);
+        }
+        return sel;
     }
     return measured_snr_db;  // AWGN: reading and thresholds share the basis already
 }

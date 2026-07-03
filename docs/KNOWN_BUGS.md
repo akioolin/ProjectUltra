@@ -120,6 +120,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ### BUG-MCDPSK-CONTROL-BAUD: CONNECT_ACK shipped at the data rung's mod/baud → handshake strand on sps≠1024 rungs — **FIXED (#72, 2026-06-29, CHANGELOG)**
 - Standardized MC-DPSK on sps=1024 + routed handshake-negotiation frames through the DBPSK control profile. Forced rungs now CONNECT; no regression. See CHANGELOG.
 
+### BUG-FILE-ACK-IDENTITY: ARQ send-complete dispatch is identity-blind — a non-file frame retiring while a file is SENDING pops a file-chunk ledger entry / inflates chunks_acked_
+- **Found 2026-07-02** by adversarial review of the requeue-ledger fix; **pre-existing in kind**
+  (the same blindness inflated the old count arithmetic). `Connection::setSendCompleteCallback`
+  (connection.cpp:~285) routes EVERY successful DATA-frame retirement to
+  `file_transfer_.onChunkAcked()` while FileTransferState==SENDING — frame identity is never
+  checked. Mixed windows are reachable because the burst-transport `sendFile` bypass
+  (connection.cpp:~1407) skips the fragment-in-flight guards its sibling paths enforce, so a
+  message/binary fragment already in flight shares the window with file chunks; its retirement
+  mis-pops the ledger → a later requeue resumes one chunk forward (silent skip) and
+  chunks_acked_ over-count can declare COMPLETE with a chunk still in flight.
+- **Not exercised by any shipped flow today:** GUI operator messaging is a stub, the sim
+  scenario driver drains messages before the file phase, and ultra_tnc sets
+  half_duplex_interactive_=true (takes the guarded path). Triggerable via the public API
+  (sendMessage/sendBinary then sendFile within the ACK RTT) or scenario configs combining
+  auto-reply-message with auto-send-file.
+- **Fix (structural, deferred):** identity-aware retirement — tag each ARQ TX submission with
+  its origin (FILE_CHUNK / MESSAGE_FRAGMENT / OTHER) in the slot and pass it through
+  `on_send_complete_(success, origin)`; dispatch by origin, not by FileTransferState. This also
+  fixes the mirror fragment-starvation bug. NOTE: the tempting "guard parity" patch (queue the
+  file when fragments are in flight) is STRAND-PRONE on the burst path — the queued-file pump
+  (`tryStartQueuedFileIfReady`) requires `local_data_turn_`, which burst transport deliberately
+  bypasses; don't take that shortcut.
+
 ### BUG-HANDSHAKE-PING-FLOOR: low-SNR PING/CONNECT classifier starves → handshake never connects below ~15 dB Good (caps ALL operation) — **FIXED, DEFAULT-ON (2026-07-01) — RE-OPENED for the mid-SNR SIM window (see re-open note)**
 - **RE-OPEN NOTE (2026-07-01 evening, found by the #58 Good@12 boundary probe):** at SIM
   reference levels good@12 the PING's noise-flooded gap reads data_rms **0.23** — ABOVE the
@@ -131,27 +154,18 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   claim predates the 0.16 gate and no longer holds. Rig low-SNR (MPM@8 etc.) unaffected. Fix as
   already noted: noise-floor-RELATIVE emit gate. Until then, sim work at good@10-15 cannot
   connect out-of-box.
+- **ctest reproducer (2026-07-02):** `UltraTncSimAudio` (OTASim lobby awgn@15) now FAILS on
+  this window deterministically — PING gap reads data_rms 0.1653 (> the 0.16 emit gate),
+  ratio 0.547 (≥ 0.5 "data-bearing"), robust emit suppressed → no PONG → "timed out waiting
+  for command line". Verified pre-existing on main (fails at main HEAD with a clean tree,
+  2026-07-02); NOT a live-ladder or connect-policy regression. awgn@15 sits in the same
+  in-between band as good@10-15. The red ctest is THIS bug; fix = the noise-floor-relative
+  emit gate above.
 - Status: **FIXED + DEFAULT-ON (rig path); mid-SNR sim window re-opened by the emit gate.** `ULTRA_ROBUST_IDLE_PING` promoted DEFAULT-ON (opt-out `=0`) after all three sub-issues were closed: (1) initiator #27 (bare_chirp_expected_=FALSE during CONNECTING), (2) responder starvation (STAGE2 expects-CONNECT window), (3) high-SNR churn (data_rms≤0.16 emit gate). VERIFIED: good@20 sim PASS with the emit active (2/2 PING/PONG, 1860 bps); rig **MPM@8 pure-default (zero env vars) connects + delivers CRC-clean** (2/2). With #74 (ratiometric) also default-on, the low-SNR path is now the shipped default on a real radio. See CHANGELOG 2026-07-01.
 - **What:** a PING is a bare chirp with no data (`encodePing`→`generatePreamble`). The receiver tells a PING from a CONNECT with a LEVEL test (`data/training RMS ratio < 0.5`, abs floor 0.16). At low SNR broadband noise floods the PING's silent gap (ratio 0.68–0.88 > 0.5) → real PING reads as a faded CONNECT → waits for a 4-CW frame that never comes → no PONG → never connects. The chirp itself locks solid (corr 0.6–0.75). Floor map (faithful gate): never connects awgn@6/8 good@8/10/12; marginal good@15; reliable good@20. The published 5 dB AWGN *data* floor never caught this (`measure_ack_fer` skips the live handshake).
 - **Fix (env-gated):** when the knob is ON, a solid chirp-lock with a low-LLR (false-lock-rejected) frame emits the PING on chirp signature alone; gated on `bare_chirp_expected_` (FALSE during CONNECTING) so a faded CONNECT_ACK isn't mis-PONGed (#27-safe on the initiator). PROVEN: good@10/12 never-connect→PASS, good@20 no-regress.
 - **STAGE2 (2026-07-01, LANDED — responder hole CLOSED):** on PONG-TX the responder now sets `bare_chirp_expected_`=FALSE + arms a ~20 s expects-CONNECT window (app.cpp), mirroring the initiator's PROBING→CONNECTING disarm, then the tick re-arms. Sound for any window: while CONNECTING the initiator re-SENDS CONNECT (never re-PINGs, connection.cpp:2421-2442) and a stray PONG to a CONNECTING initiator is a no-op + half-duplex-inaudible, so worst case is occasional harmless waste, never permanent starvation.
 - **Remaining before default-ON (the NEW blocker):** flipping `ULTRA_ROBUST_IDLE_PING` default-ON REGRESSES the faithful sim gate at good@20 — the near-silent HIGH-SNR PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real chirp, so the robust emit fires SPURIOUSLY → PING/PONG churn (11/9) → ~30 s connect → gate overrun. Isolation-proven: same build with `=0` → good@20 PASS (1860 bps); STAGE2 alone is clean. FIX NEEDED: a high-SNR-safe emit gate (e.g. a higher data_bearing floor separating a noise-FLOODED low-SNR PING (ratio 0.68–0.88) from high-SNR PONG residual (~0.5–0.6)). Also: throughput below ~8 dB is a separate lever (#71), not this bug.
-
-### BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE: rate-change wipes the Good/Moderate coherence pool — precondition before enabling ULTRA_RATE_ADAPT
-- Status: **OPEN but GATED-INERT (no default-path impact).** Tracked by the 2026-06-16 four-tier
-  review of the Doppler-coherence discriminator (CHANGELOG 2026-06-16, design doc §11).
-- **What:** the discriminator is hosted in `StreamingDecoder` so it survives the per-group OFDM
-  demodulator recreation during a normal (fixed-rate) burst transfer — and it does (GUI-proven:
-  good 0.70 [GOOD] 27/27, moderate −0.11 [MODERATE/POOR] 78/78). BUT a MODE_CHANGE recreates more
-  than the demodulator; the coherence verdict reverts to the blind `fading_index` during the
-  ~30 s re-convergence window after a rate move.
-- **Why it doesn't bite today:** mid-stream rate moves originate only from the `ULTRA_RATE_ADAPT`
-  (default-OFF) machinery. At CONNECT the coherence is always invalid (no OFDM data pooled), so the
-  rate pick is byte-identical to today → zero default-path regression.
-- **Fix before enabling ULTRA_RATE_ADAPT:** persist `coherence_score_`/`coherence_valid_` across the
-  MODE_CHANGE (carry at the Connection layer, or keep the estimator pool across the rebuild), AND
-  route the CW-count/negotiate sites through `connection_policy::coherenceAdjustedFadingIndex`. See
-  `docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md` §11 follow-up #2.
 
 ### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
 - Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First
@@ -660,6 +674,46 @@ Current blockers:
 
 ## Fixed Bugs
 
+- 2026-07-02: BUG-FILE-REQUEUE-OFFSET fixed — the live-ladder Moderate@20 data-loss root cause.
+  `FileTransferController::requeuePendingChunks()` reconstructed the resume offset as
+  `(chunks_acked_-1) * chunk_size_` — wrong the moment chunk_size_ has EVER changed mid-file
+  (every mid-stream rate/mod move re-derives it). On the Moderate@20 gate cell the stuck-frame
+  ESCAPE-drop (gate-bypassing by design) aborted 8 in-flight 16QAM chunks; the formula computed
+  108×408=44064 where the true acked bytes were 34048, jumping the send cursor FORWARD 10016
+  bytes (8 aborted chunks + 6.7 KB never sent). Reused seqs kept the receiver's ARQ space
+  contiguous, the receiver-blind completion (count parity + cursor-at-EOF) declared done, and
+  the auto-disconnect cancelled the receive — sender "Transfer complete", receiver stuck at
+  expected=34048 with 16 buffered chunks. Fix: send-order ledger `tx_pending_ledger_`
+  ({offset, metadata} per chunk handed to the ARQ, popped on retirement — retirement is strictly
+  TX-base-order); requeue resumes exactly at `front().offset` for ANY chunk-size history;
+  forward jumps impossible by construction. Companion receiver hardening (adversarial-review
+  findings): `processFileData` tail-merges chunks that straddle the contiguous edge (a requeue
+  resend on a CHANGED grid can start below the edge — the old whole-chunk drop lost the unseen
+  tail forever), and the buffered-chunk drain is overlap-aware (covered entries drop, straddlers
+  tail-append; the old exact-offset drain stranded covered entries and permanently blocked
+  compressed finalization). `startSend` clears the ledger (SENDING→RECEIVING trample). Deferred
+  structural sibling: BUG-FILE-ACK-IDENTITY (active, above). Proof: new
+  test_file_transfer_controller cases (requeue-across-size-change reproduces 44064-vs-40 exactly;
+  straddle-merge + covered-drain byte-exact CRC) + full 5-cell sequential gate PASS incl. the
+  first-ever Moderate@20 pass (CRC-clean ×2, 1150 bps, 4 moves). See CHANGELOG 2026-07-02.
+
+- 2026-07-02: BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE fixed — the `ULTRA_RATE_ADAPT` precondition
+  (2026-06-16 four-tier review): a mid-stream MODE_CHANGE could revert the Good/Moderate coherence
+  verdict to the blind `fading_index` during the ~30 s re-pooling window. As-verified mechanics
+  (2026-07-02 code read — the original "pool wiped every rate move" claim was PARTLY STALE): the
+  decoder-hosted estimator pool + its atomics already survive `applyPendingConnectedOFDMMode`
+  (waveform rebuild) and the pre-TX echo-clears (post 06-17/#67 `reset_doppler_coherence=false`
+  paths); the remaining hole was that ANY modem-layer reset that does wipe the pool
+  (`ModemEngine::reset`, future rebuild paths) immediately overwrote the Connection's valid verdict
+  with invalid via the per-frame binding refresh. Fix per the named option: CARRY at the Connection
+  layer — `Connection::setChannelCoherence` now holds the last VALID verdict while CONNECTED (the
+  estimator is a cumulative mean and never un-validates on its own, so an invalid feed while
+  connected can only mean "pool reset"), made safe by NEW per-connection clearing in
+  `enterConnected()`/`reset()` (also fixes a latent cross-connection verdict leak). The mid-stream
+  `requestModeChange` CW-count pick now routes through `coherenceAdjustedFadingIndex` (the
+  CONNECT-time sites already did; remaining CONNECT-time raw-`fading_index` sites are provably
+  identical there since coherence is invalid at CONNECT). Shipped with the fade-riding ladder
+  default-ON (CHANGELOG 2026-07-02).
 - 2026-05-13: BUG-PING-DETECTOR-001 fixed - real-HF PINGs now classify via additive chirp-lock plus LDPC-invalid PATH 2 while preserving the clean-cable/AWGN RMS-silence PATH 1.
 - 2026-05-13: BUG-TNC-SESSION-001 fixed — R1 added the full RX decoder/session reset on disconnect; R2 added audio-producer quiesce/drain plus a reset-generation guard for in-flight decode callbacks, so a persistent `ultra_tnc` starts the next back-to-back PAT CONNECT from a fresh modem session boundary without stale capture backlog or stale cursor commits.
 - 2026-05-08: BUG-CARRIER-LDPC-001 fixed — CarrierLDPC v1 was a new OFDM coded-bit wire image, but SP4 enabled the runtime as a local modem default instead of a negotiated peer capability. A partially upgraded Mac↔Pi pair applied the TX permutation on one endpoint while the peer decoded legacy ordering, producing the AWGN R1/2 1KB 0-ACK/15-timeout failure. The repair uses the existing `PHY_MASK_V1` capability: modern-modern CONNECT/CONNECT_ACK enables CarrierLDPC on both TX/RX; modern-legacy leaves the legacy ordering active. Synchronized upgraded hardware now passes AWGN / Good / Moderate at SNR=15 R1/2 1KB with DATA `Ncw=8` active and ACK/control `Ncw=1` inactive.

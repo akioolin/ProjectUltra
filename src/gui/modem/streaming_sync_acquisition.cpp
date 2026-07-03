@@ -238,6 +238,7 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
             result.snr_db = route_data_aided ? result.mcdpsk_data_aided_snr_db
                                              : result.mcdpsk_training_snr_db;
             result.snr_source = SNRSource::MCDPSK_IN_BAND;
+            result.mcdpsk_snr_routed_data_aided = route_data_aided;
             if (data_aided_snr_valid) {
                 LOG_MODEM(INFO,
                           "[%s] MC-DPSK SNR: training=%.1f data_aided=%.1f (routed=%s)",

@@ -795,6 +795,46 @@ void test_unified_burst_ack_timeout() {
           "narrow QAM16 win=3 deadline must exceed burst + receiver SACK hold (the live short case)");
 }
 
+// Saturation bound (2026-07-02): on Moderate-class fading the data-aided
+// differential-EVM estimator saturates at the Doppler-EVM floor, so an
+// at/above-zone reading LOWER-BOUNDS true SNR and justifies OFDM entry. The
+// argument is estimator-specific: the training snapshot fade-crest OVER-reads
+// (7.8 measured at true Moderate@8) and must never trip the bound.
+void test_connect_selection_saturation_bound() {
+    const float mod_floor = kOFDMEntryFloorModerateDb;
+
+    // MPM@20 measured case: data-aided reads 7.7 (saturated) -> bound fires,
+    // selection clears the Moderate OFDM entry floor.
+    CHECK(connectSelectionSnrDb(7.7f, 0.70f, true) >= mod_floor,
+          "data-aided saturated reading on Moderate must clear the OFDM floor");
+
+    // MPM@8 measured case: training fade-crest reads up to 7.8 -> bound must
+    // NOT fire; basis alone (7.8+5=12.8) stays below the floor -> MC-DPSK.
+    CHECK(connectSelectionSnrDb(7.8f, 0.70f, false) < mod_floor,
+          "training crest reading on Moderate must NOT clear the OFDM floor");
+
+    // Below the saturation zone the reading is trustworthy: no bound even for
+    // data-aided (true weak channel pulls the reading below the zone).
+    CHECK(connectSelectionSnrDb(5.3f, 0.70f, true) < mod_floor,
+          "below-zone data-aided reading keeps the MC-DPSK fallback");
+
+    // Good-class fading (< kFadingGoodMax): bound never applies; basis only.
+    CHECK(std::fabs(connectSelectionSnrDb(7.7f, 0.40f, true) -
+                    (7.7f + connectSnrFadeBasisDb())) < 0.01f,
+          "Good-class fading gets basis only, no saturation bound");
+
+    // The good@20 s43 recalibration case is pure basis (10.6 -> 15.6).
+    CHECK(std::fabs(connectSelectionSnrDb(10.6f, 0.40f, true) -
+                    (10.6f + connectSnrFadeBasisDb())) < 0.01f,
+          "fading basis path unchanged for Good-class readings");
+
+    // AWGN passthrough regardless of the estimator flag.
+    CHECK(std::fabs(connectSelectionSnrDb(12.0f, 0.05f, true) - 12.0f) < 0.01f,
+          "AWGN selection is the raw reading (data-aided)");
+    CHECK(std::fabs(connectSelectionSnrDb(12.0f, 0.05f, false) - 12.0f) < 0.01f,
+          "AWGN selection is the raw reading (training)");
+}
+
 }  // namespace
 
 int main() {
@@ -810,6 +850,7 @@ int main() {
     test_variable_frame_payload_capacity();
     test_warm_short_anchor_descriptor_gate();
     test_unified_burst_ack_timeout();
+    test_connect_selection_saturation_bound();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

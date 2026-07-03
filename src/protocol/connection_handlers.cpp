@@ -200,7 +200,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // dial-calibrated floors/anchors, connection_policy::connectSelectionSnrDb);
         // snr_db stays raw for the wire byte and logs.
         const float selection_snr_db =
-            connection_policy::connectSelectionSnrDb(snr_db, fading_index_);
+            connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
+                                                     measured_snr_data_aided_);
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -761,10 +762,17 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // override across mode changes — otherwise auto-pick from rate.
     // Without this, a later MODE_CHANGE would silently drop the user's
     // override (caught by Codex, 2026-05-04).
+    // CW count for the new rung: uses the Doppler-coherence-REFINED fading index
+    // (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE follow-through: this is the mid-stream
+    // negotiate site, where the coherence verdict CAN be valid — equals the raw
+    // fading_index until it is).
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
         : connection_policy::recommendCWCountForChannel(
-              new_mod, new_rate, negotiated_mode_, fading_index_, measured_snr));
+              new_mod, new_rate, negotiated_mode_,
+              connection_policy::coherenceAdjustedFadingIndex(
+                  fading_index_, coherence_score_, coherence_valid_),
+              measured_snr));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
@@ -874,7 +882,8 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // #58: selection compares against dial-calibrated thresholds — use the
     // basis-corrected value (fade-effective reading + fading penalty).
     float snr = rate_selection_snr_valid
-        ? connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_)
+        ? connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
+                                                   measured_snr_data_aided_)
         : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
         config_.mode_capabilities,

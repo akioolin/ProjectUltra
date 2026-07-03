@@ -29,7 +29,9 @@ int tests_failed = 0;
     } while (0)
 
 // With the default EMA (alpha=0.4) and reset-to-midpoint(0.475) after a change, the
-// thresholds are drop_below=0.25, climb_above=0.70, climb_streak=3.
+// thresholds are drop_below=0.25, climb_above=0.70, climb_streak=2 (3 -> 2 on
+// 2026-07-02 for the fade-riding ladder: reaction within ~2 ACKed groups; the EMA +
+// reset-to-midpoint keep the sustained-evidence inertia).
 
 void test_first_bad_group_acts_no_history() {
     // The very first sample has no history -> ema = quality directly, so a failed
@@ -80,13 +82,12 @@ void test_sustained_failure_descends_to_floor() {
     CHECK(r == CodeRate::R1_4, "unrelenting failure descends to the R1/4 floor");
 }
 
-void test_climb_is_slow_and_deliberate() {
-    RateController c;  // climb_streak default 3
+void test_climb_is_deliberate() {
+    RateController c;  // climb_streak default 2 (fade-riding, 2026-07-02)
     CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R1_2, "1 good group: hold");
-    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R1_2, "2 good groups: hold");
-    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "3 consecutive good: climb");
-    // post-climb the EMA is reset to midpoint, so the next climb takes LONGER than 3
-    // (the EMA must first re-reach climb_above) — deliberately slow.
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "2 consecutive good: climb");
+    // post-climb the EMA is reset to midpoint, so the next climb takes LONGER than 2
+    // (the EMA must first re-reach climb_above) — still deliberate, not instant.
     CHECK(c.update(CodeRate::R2_3, 1.0f) == CodeRate::R2_3, "post-climb hold (ema reset below climb_above)");
     // sustained perfect quality eventually reaches the top rung.
     CodeRate r = CodeRate::R1_4;
@@ -119,7 +120,7 @@ void test_off_ladder_rate_passes_through() {
 
 void test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung() {
     // THE OSCILLATION FIX (2026-06-11). Without ssthresh, dropping off the top rung on a fade and
-    // then climbing straight back into it (every climb_streak=3 good groups) thrashed the rate
+    // then climbing straight back into it (every climb_streak good groups) thrashed the rate
     // ~15x in one transfer and burned the whole airtime budget (Good@20 seed 7/42). That was the
     // R3/4<->R5/6 boundary; R5/6 is now retired (2026-06-17) so the guard protects the new top
     // boundary R2/3<->R3/4 with identical mechanics.
@@ -135,15 +136,20 @@ void test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung() {
     CHECK(r == CodeRate::R2_3, "a sustained fade drops R3/4 -> R2/3");
     CHECK(c.ceilingRate() == CodeRate::R2_3, "the drop caps the ssthresh ceiling at R2/3");
 
-    // good channel again: the OLD controller would re-climb to R3/4 by the ~4th good group.
-    // ssthresh must HOLD below the failed rung across several good groups.
-    for (int i = 0; i < 6; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R2_3,
-          "ssthresh holds below the failed rung — 6 good groups do NOT bounce back to R3/4");
+    // good channel again: without ssthresh the controller would re-climb the instant one
+    // climb_streak window (EMA warm-up + 2 good groups) passes. ssthresh must HOLD below
+    // the failed rung through that FIRST climb-eligible window (no immediate bounce-back);
+    // with climb_streak=2 the first re-probe becomes eligible at the ~5th good group.
+    for (int i = 0; i < 4; ++i) {
+        r = c.update(r, 1.0f);
+        CHECK(r == CodeRate::R2_3,
+              "ssthresh holds below the failed rung through the first climb window");
+    }
 
-    // but a sustained good run DOES eventually re-probe the ceiling upward (channel may recover).
+    // but a sustained good run DOES eventually re-probe the ceiling upward (channel may
+    // recover) — ~ceiling_reprobe_climbs x climb_streak good groups after the drop.
     for (int i = 0; i < 30; ++i) r = c.update(r, 1.0f);
-    CHECK(r == CodeRate::R3_4, "after a long good run the ceiling re-probes back to the top rung");
+    CHECK(r == CodeRate::R3_4, "after a sustained good run the ceiling re-probes back to the top rung");
 }
 
 }  // namespace
@@ -153,7 +159,7 @@ int main() {
     test_single_transient_fade_does_not_drop();
     test_periodic_fade_does_not_ratchet_to_floor();
     test_sustained_failure_descends_to_floor();
-    test_climb_is_slow_and_deliberate();
+    test_climb_is_deliberate();
     test_no_thrash_in_hysteresis_gap();
     test_quality_from_iterations();
     test_off_ladder_rate_passes_through();

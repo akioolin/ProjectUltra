@@ -24,6 +24,7 @@ Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
 void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
     stats.snr_db = result.snr_db;
     stats.snr_source = result.snr_source;
+    stats.mcdpsk_snr_routed_data_aided = result.mcdpsk_snr_routed_data_aided;
     stats.has_idle_in_band_snr_db = result.has_idle_in_band_snr_db;
     stats.idle_in_band_snr_db = result.idle_in_band_snr_db;
     stats.has_ofdm_broadband_snr_db = result.has_ofdm_broadband_snr_db;
