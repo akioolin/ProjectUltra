@@ -10,14 +10,77 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-02 (late) — fix(file): requeue offset ledger + receiver overlap merge (closes BUG-FILE-REQUEUE-OFFSET) · fix(snr): Moderate saturation bound, data-aided-conditioned — the ladder's 5-cell gate goes 5/5
+
+**What broke (two independent gate failures on the live-ladder branch):**
+1. **Moderate@20 data loss** — the sender declared "Transfer complete" + DISCONNECT while the
+   receiver sat at in-order offset 34048/51200 with 16 buffered chunks (FILE_CRC_OK=0). Root
+   cause (multi-agent forensics + adversarial verify, refutation failed):
+   `requeuePendingChunks()` rebuilt the resume offset as `(chunks_acked_-1)*chunk_size_` — a
+   count × CURRENT-size product that is garbage across the heterogeneous chunk history the
+   ladder creates (56/296/408/456/408 B over 5 rungs). The gate-bypassing stuck-frame
+   ESCAPE-drop (16QAM frame at 5 retx) fired the requeue with 8 frames in flight: computed
+   44064, truth 34048 → cursor jumped FORWARD 10016 bytes; reused seqs kept the receiver's ARQ
+   space contiguous so everything ACKed; the receiver-blind completion condition fired. (The
+   branch CHANGELOG claim "all mid-stream moves go through the clean-boundary gate" was FALSE
+   for the escape path — the 06-10 gate MASKED this arithmetic, never fixed it.)
+2. **Estimator saturation at Moderate entry** — the data-aided differential-EVM connect SNR
+   saturates at the Doppler-EVM floor on fast fading (MPM@20 reads 7.7; sel 12.7 < Moderate
+   floor 14) → fell to DBPSK R1/4 → 0 delivery. And the first-cut bound keyed on the reading
+   alone was WRONG for the training fallback: training fade-crest snapshots OVER-read
+   (measured up to 7.8 at true Moderate@8) — the lower-bound argument is estimator-specific.
+
+**What changed:**
+- `file_transfer.{hpp,cpp}`: send-order `tx_pending_ledger_` ({offset, metadata}) pushed in
+  `getNextChunk`/`getSingleBlockPayload`, popped in `onChunkAcked` (ARQ retirement is strictly
+  TX-base-order — verified in selective_repeat_arq.cpp: both ACK paths pop from tx_base_seq_
+  upward, aborted slots never fire the callback); `requeuePendingChunks` resumes at
+  `front().offset` (metadata/empty front ⇒ full restart, always safe: FILE_DATA carries
+  absolute offsets, duplicates idempotent). RX side: straddling resent chunks tail-merge at the
+  contiguous edge and the buffered drain is overlap-aware (covered → drop, straddler →
+  tail-append) — required because a requeue resends on the NEW chunk grid over old-grid
+  buffered state; the old exact-match drain blocked compressed finalization forever.
+  `startSend` clears the ledger.
+- `connection_policy.hpp::connectSelectionSnrDb(measured, fading, snr_is_data_aided)`:
+  saturation bound (reading ≥6.5 on Moderate-class fading ⇒ sel ≥ ModerateFloor+0.5) now fires
+  ONLY for the data-aided estimator. Plumbed end-to-end:
+  `DecodeResult.mcdpsk_snr_routed_data_aided` (streaming_sync_acquisition.cpp routing site) →
+  LoopbackStats (both copySNRMetrics copies) → binding → `ProtocolEngine::setMeasuredSNR/
+  setChannelQuality(..., data_aided=false)` → `Connection::measured_snr_data_aided_` → the 3
+  policy call sites. Default-false = fail-safe (bound off) for every other caller.
+- Filed BUG-FILE-ACK-IDENTITY (identity-blind send-complete dispatch; structural, deferred —
+  see KNOWN_BUGS for why the guard-parity shortcut is strand-prone on the burst path).
+
+**Test verification:**
+- New unit cases: `test_file_transfer_controller` (requeue across chunk-size change reproduces
+  the 44064-vs-40 arithmetic exactly; metadata-in-flight restart; straddle-merge +
+  covered-drain byte-exact CRC round-trip) and `test_connection_policy`
+  (`test_connect_selection_saturation_bound`: data-aided 7.7@Moderate clears the floor,
+  training 7.8@Moderate must NOT, below-zone 5.3 must NOT, Good-class basis-only, AWGN
+  passthrough). ctest green (UltraTncSimAudio red is PRE-EXISTING on main — verified with a
+  clean tree at main HEAD; it is the re-opened BUG-HANDSHAKE-PING-FLOOR mid-SNR window, now
+  annotated there).
+- **Full 5-cell sequential faithful gate (one cell at a time): 5/5 PASS, all CRC-clean ×2** —
+  g42 1940 bps (16QAM R2/3 65%), g43 1210 bps (6 moves — the requeue fix survived the
+  churniest ride), g7 1310 bps, AWGN **3370 bps record reproduced** (16QAM R2/3 83%),
+  **Moderate@20 1150 bps, 4 moves, first-ever PASS on this cell** (entered OFDM via the
+  saturation bound, rode QPSK R1/4→R1/2→R2/3 66%, byte-exact delivery through every move).
+- MPM@8 safety (sim cell blocked by the PING-floor sim window): proven at the unit level —
+  training-routed crest readings can never clear the Moderate floor under the conditioning.
+
 ## 2026-07-02 — feat(rate): the fade-riding adaptive ladder goes LIVE (default-ON) — crest→16QAM R2/3, trough→QPSK; coherence carried across MODE_CHANGE (closes BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE)
 
 **Campaign redirection (fable_analysis/NEXT_SESSION_BRIEF item 2):** no single rung reaches the
 leader's measured-delivered ~3.1k — the leader RIDES THE FADE CYCLE with fast rate/mod adaptation.
-This change makes our assembled (mostly default-OFF) ladder machinery LIVE and FAST. All mid-stream
-moves still go through the MANDATORY clean-boundary gate + synchronized `requestModeChange`
-(06-09/06-10 — gate-less was built and REJECTED: mid-stream ARQ renumber deadlocks) and the
-`applyDataMode` HARQ flush still fires on any mod/rate/CW change. Connect-time selection is
+This change makes our assembled (mostly default-OFF) ladder machinery LIVE and FAST. Adaptive
+moves go through the clean-boundary gate + synchronized `requestModeChange` (06-09/06-10 —
+gate-less was built and REJECTED: mid-stream ARQ renumber deadlocks) and the `applyDataMode`
+HARQ flush still fires on any mod/rate/CW change. **CORRECTION (2026-07-02 late review): the
+original claim that ALL moves go through the gate was FALSE — the stuck-frame ESCAPE-drop
+(`maybeEscapeStuckFrame`, landed 8f378a5) bypasses it BY DESIGN and fires with frames in
+flight; that path executed the broken count-based requeue and caused the Moderate@20 data
+loss. Fixed by making the requeue itself exact (offset ledger, see the 07-02-late entry) —
+the gate is now an optimization, not a correctness crutch.** Connect-time selection is
 UNTOUCHED (the 07-01 #58 basis, `ULTRA_R23_BASIS`, floors — all byte-identical at CONNECT).
 
 ### 1. fix(coherence): BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE — carry the verdict at the Connection layer
