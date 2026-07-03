@@ -789,7 +789,9 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     pending_modulation_ = new_mod;
     pending_code_rate_ = new_rate;
     pending_snr_db_ = measured_snr;
-    pending_fading_index_ = fading_index_;
+    // Freshness-gated like the SNR byte (rig W5b/W8: peer_fading frozen on the
+    // wire for 300+ s); stale -> -1 -> wire "unknown" -> receiver's n/a render.
+    pending_fading_index_ = wireFadingIndex();
     pending_reason_ = reason;
     mode_change_pending_ = true;
     mode_change_retry_count_ = 0;

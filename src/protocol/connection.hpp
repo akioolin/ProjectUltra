@@ -435,6 +435,7 @@ public:
         connect_snr_pool_.addReading(snr_db, source, data_aided);
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
+            ms_since_fading_update_ = 0;
         }
     }
     float getFadingIndex() const { return fading_index_; }
@@ -574,6 +575,20 @@ private:
         return std::isfinite(agg) ? agg : connection_policy::kConnectSnrStaleSentinelDb;
     }
 
+    // Same freshness contract as wireSnrDb for the MODE_CHANGE fading byte: the
+    // sender's fading_index_ freezes between sparse control decodes exactly like
+    // the SNR did (rig W5b/W8: peer_fading pinned at 0.42/0.70 for 300+ s on the
+    // wire). Stale -> -1.0, which encodeFadingIndex maps to the existing wire
+    // "unknown" byte 0 -> the receiver's n/a render; zero receiver change.
+    float wireFadingIndex() const {
+        if (!connection_policy::wireSnrFreshEnabled()) {
+            return fading_index_;
+        }
+        const uint64_t fresh_ms =
+            connectSnrPoolTcMs() * connection_policy::kConnectWireSnrFreshTcMultiple;
+        return ms_since_fading_update_ <= fresh_ms ? fading_index_ : -1.0f;
+    }
+
     ConnectionConfig config_;
     ConnectionState state_ = ConnectionState::DISCONNECTED;
 
@@ -618,6 +633,10 @@ private:
     // enterDisconnected) — one defer per handshake, never a defer loop.
     bool connect_pick_deferred_once_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
+    // Modem-time ms since fading_index_ was last measured (saturating; aged in
+    // tick beside the SNR pool). Starts stale so a never-measured value can't
+    // masquerade as fresh on the wire.
+    uint32_t ms_since_fading_update_ = 0x7FFFFFFF;
     float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading
     float coherence_doppler_hz_ = 0.0f;  // measured RMS Doppler (Hz) riding the coherence feed;
                                          // 0 = not estimable (retx trough pacing falls back to

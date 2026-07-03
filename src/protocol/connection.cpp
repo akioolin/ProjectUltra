@@ -2828,6 +2828,11 @@ void Connection::tick(uint32_t elapsed_ms) {
     // the same clock every timer here runs on — never Date/wall-clock). Ticks in ALL
     // states: handshake readings accumulate age while DISCONNECTED/CONNECTING too.
     connect_snr_pool_.tick(elapsed_ms);
+    // The fading-freshness clock ages on the same tick (saturating).
+    ms_since_fading_update_ =
+        (ms_since_fading_update_ > 0x7FFFFFFF - elapsed_ms)
+            ? 0x7FFFFFFF
+            : ms_since_fading_update_ + elapsed_ms;
 
     switch (state_) {
         case ConnectionState::PROBING:
