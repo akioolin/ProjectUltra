@@ -19,6 +19,7 @@ namespace gui {
 struct LoopbackStats {
     float snr_db = 0.0f;  // Consumer-facing routed value; see snr_source.
     SNRSource snr_source = SNRSource::NONE;
+    bool mcdpsk_snr_routed_data_aided = false;  // snr_db is the data-aided MC-DPSK estimate
     bool has_idle_in_band_snr_db = false;
     float idle_in_band_snr_db = 0.0f;
     bool has_ofdm_broadband_snr_db = false;

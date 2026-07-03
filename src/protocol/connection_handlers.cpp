@@ -200,7 +200,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // dial-calibrated floors/anchors, connection_policy::connectSelectionSnrDb);
         // snr_db stays raw for the wire byte and logs.
         const float selection_snr_db =
-            connection_policy::connectSelectionSnrDb(snr_db, fading_index_);
+            connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
+                                                     measured_snr_data_aided_);
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -881,7 +882,8 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // #58: selection compares against dial-calibrated thresholds — use the
     // basis-corrected value (fade-effective reading + fading penalty).
     float snr = rate_selection_snr_valid
-        ? connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_)
+        ? connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
+                                                   measured_snr_data_aided_)
         : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
         config_.mode_capabilities,

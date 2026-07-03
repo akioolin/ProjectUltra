@@ -420,7 +420,8 @@ void Connection::acceptCall() {
     // is basis-corrected (fade-effective reading vs dial-calibrated anchors); the raw
     // measured_snr_db_ stays untouched for the wire/logs.
     const float accept_selection_snr_db =
-        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_);
+        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
+                                                 measured_snr_data_aided_);
     recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.

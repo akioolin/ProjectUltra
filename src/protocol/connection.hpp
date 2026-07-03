@@ -396,13 +396,17 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
-    // Set measured SNR from modem layer (call this when decoding frames)
-    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE) {
+    // Set measured SNR from modem layer (call this when decoding frames).
+    // data_aided: snr_db is the MC-DPSK data-aided (fade-averaged) estimate — the
+    // only source the connectSelectionSnrDb saturation bound may act on.
+    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE,
+                        bool data_aided = false) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
             return;
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
     }
     float getMeasuredSNR() const { return measured_snr_db_; }
@@ -411,12 +415,14 @@ public:
     // Set channel quality including fading detection
     // fading_index: combined freq_cv + temporal_cv, where > 0.65 indicates significant fading
     void setChannelQuality(float snr_db, float fading_index,
-                           SNRSource source = SNRSource::NONE) {
+                           SNRSource source = SNRSource::NONE,
+                           bool data_aided = false) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
             return;
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
@@ -525,6 +531,7 @@ private:
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // Routed SNR measured by modem (see source).
     SNRSource measured_snr_source_ = SNRSource::NONE;
+    bool measured_snr_data_aided_ = false;  // measured_snr_db_ is the data-aided MC-DPSK estimate
     bool measured_snr_valid_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
     float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading

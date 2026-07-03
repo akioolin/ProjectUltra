@@ -198,14 +198,18 @@ public:
 
     // --- Adaptive Data Mode ---
 
-    // Set measured SNR from modem (used for adaptive mode selection)
-    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE);
+    // Set measured SNR from modem (used for adaptive mode selection).
+    // data_aided: the value is the MC-DPSK data-aided (fade-averaged) estimate,
+    // not the training snapshot — see connectSelectionSnrDb's saturation bound.
+    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE,
+                        bool data_aided = false);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
 
     // Set channel quality including fading detection
     void setChannelQuality(float snr_db, float fading_index,
-                           SNRSource source = SNRSource::NONE);
+                           SNRSource source = SNRSource::NONE,
+                           bool data_aided = false);
     // Set the OFDM Doppler-coherence verdict (Good/Moderate discriminator), measured
     // separately from fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
     void setChannelCoherence(float coherence_score, bool valid);

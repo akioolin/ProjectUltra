@@ -98,6 +98,10 @@ struct DecodeResult {
     float mcdpsk_training_snr_db = 0.0f;
     bool has_mcdpsk_data_aided_snr_db = false;
     float mcdpsk_data_aided_snr_db = 0.0f;
+    // True when snr_db carries the data-aided (fade-averaged differential-EVM)
+    // estimate rather than the training snapshot. The saturation lower-bound rule
+    // in connectSelectionSnrDb() is only valid for the data-aided source.
+    bool mcdpsk_snr_routed_data_aided = false;
     float ofdm_internal_snr_db = 0.0f;      // Demodulator internal LLR/channel-quality scale.
     float sync_quality_db = 0.0f;           // Chirp correlation confidence; not physical SNR.
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
