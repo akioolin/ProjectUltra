@@ -20,6 +20,7 @@
 #include "protocol/frame_v2.hpp"
 #include "helpers/temp_dir.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -273,6 +274,23 @@ struct ConnectionAdaptiveTestAccess {
     static void forceCodeRate(Connection& c, CodeRate rate) {
         c.config_.forced_code_rate = rate;
     }
+
+    // §RETX-PACING (docs/RETX_PACING_DESIGN_2026_07_03.md) test hooks.
+    static void noteRoundOutcome(Connection& c, int progress_frames, const char* origin) {
+        c.noteArqRoundOutcome(progress_frames, origin);
+    }
+
+    static int zeroProgressRounds(const Connection& c) {
+        return c.zero_progress_rounds_;
+    }
+
+    static uint32_t paceHoldMs(const Connection& c) {
+        return c.retx_pace_hold_ms_;
+    }
+
+    static void pollCollapseEscape(Connection& c) {
+        c.maybeCollapseEscape();
+    }
 };
 
 } // namespace protocol
@@ -317,8 +335,14 @@ void test_local_mode_change_timeout_keeps_current_arq_mode() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "test setup should leave MODE_CHANGE pending");
-    CHECK(retry_ms == ConnectionAdaptiveTestAccess::arqAckTimeout(c),
-          "MODE_CHANGE retry should be derived from active ARQ/control timing");
+    // 2026-07-03 ratiometric timer: the retry is a CONTROL-exchange round trip
+    // (2x control guard + SACK coalesce), NOT the multi-frame burst ACK deadline
+    // it used to borrow (rig W4: 18.5 s retries for a ~5 s exchange). It must be
+    // strictly shorter than the burst deadline and scale with control airtime.
+    CHECK(retry_ms < ConnectionAdaptiveTestAccess::arqAckTimeout(c),
+          "MODE_CHANGE retry must be shorter than the data-burst ACK deadline");
+    CHECK(retry_ms >= 1000,
+          "MODE_CHANGE retry must cover a control round trip (anchor+ctl x2)");
 
     for (int i = 0; i < ConnectionAdaptiveTestAccess::modeChangeMaxRetries() + 1; ++i) {
         c.tick(retry_ms);
@@ -505,6 +529,55 @@ void test_responder_handshake_timer_does_not_false_confirm() {
           "responder timer must not switch TX to connected waveform without an initiator frame");
 }
 
+// §RETX-PACING round accounting (docs/RETX_PACING_DESIGN_2026_07_03.md §1.1/§2.3), with
+// both knobs pinned OFF in main(): counting is inert bookkeeping — no hold armed, no ARQ
+// timer touched, no escape fired (the knob-off byte-identical contract) — and the
+// g42-PROTECTIVE property holds: ANY progress resets the zero-round streak, and a
+// duplicate/stale ack (progress −1) is never a round.
+void test_zero_progress_round_counter_knob_off_and_g42_protective() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.40f, Modulation::QPSK);
+    TempPayloadFile payload("retx_pacing_rounds", 4096);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::fillArqWindow(c, 4);
+
+    const uint32_t rto_before = ConnectionAdaptiveTestAccess::arqAckTimeout(c);
+
+    // Two consecutive zero-progress rounds accumulate (scope: CONNECTED wideband OFDM,
+    // file SENDING, in-flight bytes — all true here).
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
+    CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 2,
+          "two zero-progress rounds should accumulate");
+    CHECK(ConnectionAdaptiveTestAccess::paceHoldMs(c) == 0,
+          "ULTRA_RETX_TROUGH_PACING=0: no pacing hold may be armed (byte-identical)");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) == rto_before,
+          "knob-off: the ARQ ack timeout base must be untouched");
+
+    // ULTRA_COLLAPSE_ESCAPE_ROUNDS=0: polling the escape must never fire a MODE_CHANGE.
+    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "ULTRA_COLLAPSE_ESCAPE_ROUNDS=0: no collapse escape may fire (byte-identical)");
+    CHECK(c.getDataCodeRate() == CodeRate::R2_3,
+          "knob-off: the data rate must not move");
+
+    // g42-protective (§2.3): a round in which ANY frame progressed resets the streak —
+    // a lone straggler retrying amid deliveries can never accumulate rounds.
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 1, "test");
+    CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 0,
+          "any delivered/SACKed frame must reset the zero-round streak");
+
+    // §1.1 dedup: progress −1 (duplicate/stale ack — no fresh ack processed) is NOT a round.
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, -1, "test");
+    CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 1,
+          "a duplicate/stale ack (progress -1) must not create or reset a round");
+}
+
 void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
     Connection c;
     std::vector<Bytes> tx_frames;
@@ -586,6 +659,13 @@ void test_normal_ofdm_ack_arms_full_anchor_expectation() {
 } // namespace
 
 int main() {
+    // §RETX-PACING A/B knobs are latched ONCE via function-local statics — pin BOTH to
+    // their disabled defaults BEFORE any Connection call so this binary deterministically
+    // tests the byte-identical baseline (no hold armed, no collapse escape fired), per the
+    // setenv-in-main pattern used by test_connection_policy.
+    setenv("ULTRA_RETX_TROUGH_PACING", "0", 1);
+    setenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS", "0", 1);
+
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();
     test_remote_mode_change_reconfigures_arq();
@@ -596,6 +676,7 @@ int main() {
     test_duplicate_connect_replays_cached_connect_ack_without_confirming();
     test_connect_retry_interval_is_control_airtime_derived();
     test_responder_handshake_timer_does_not_false_confirm();
+    test_zero_progress_round_counter_knob_off_and_g42_protective();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
 

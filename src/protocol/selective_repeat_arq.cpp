@@ -854,6 +854,10 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     last_ack_bitmap_ = bitmap;
     ack_dedup_timer_ms_ = arq_policy::ackDedupWindowMs(ack_repeat_delay_ms_);
 
+    // §RETX-PACING §1.1: forward progress of THIS (fresh — the dedup/stale/future guards
+    // above returned already) ack = frames retired by base advance + newly-set SACK bits.
+    int ack_progress_frames = 0;
+
     // --- Cumulative ACK: advance base past all frames up to seq ---
     uint16_t base_before_ack = tx_base_seq_;
     while (tx_in_flight_ > 0 && tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
@@ -871,6 +875,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             clearTXSlotRepairState(tx_window_[slot]);
             tx_in_flight_--;
             stats_.acks_received++;
+            ack_progress_frames++;
 
             if (on_send_complete_) {
                 on_send_complete_(true);
@@ -892,6 +897,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             if (tx_window_[slot].active && !tx_window_[slot].acked && tx_window_[slot].seq == sack_seq) {
                 tx_window_[slot].acked = true;
                 any_sacked = true;
+                ack_progress_frames++;
                 LOG_MODEM(INFO, "SR-ARQ: SACK seq=%d confirmed received (bitmap=0x%08X)", sack_seq, bitmap);
             }
         }
@@ -900,6 +906,9 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             advanceTXWindow();
         }
     }
+
+    // Publish the round outcome (consumed once per round boundary by the Connection).
+    last_ack_progress_frames_ = ack_progress_frames;
 
     // --- Hole-based fast retransmit for base gap frame ---
     // Trigger: ACK aligned to base (seq == tx_base-1), bit0=0, any higher bit set.
@@ -1595,6 +1604,33 @@ void SelectiveRepeatARQ::endGroupReceiveAndAck() {
     frames_since_ack_ = 0;
 }
 
+void SelectiveRepeatARQ::deferPendingRetransmits(uint32_t ms) {
+    // §RETX-PACING §1.3 trigger #2 (docs/RETX_PACING_DESIGN_2026_07_03.md): extend every
+    // pending slot's RTO by the trough-pacing hold, so tick() cannot blind-fire a timeout
+    // batch around the Connection-level hold. Resending LATER than RTO is always
+    // protocol-legal (the RTO is a lower bound on when a resend is permitted, not a
+    // deadline owed to the peer); the dangerous direction — resending while the ACK is
+    // still in flight — is the one this moves strictly away from.
+    if (ms == 0) {
+        return;
+    }
+    size_t deferred = 0;
+    for (size_t i = 0; i < config_.window_size; i++) {
+        size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
+        TXSlot& s = tx_window_[slot];
+        if (!s.active || s.acked) {
+            continue;
+        }
+        s.timeout_ms = (s.timeout_ms > UINT32_MAX - ms) ? UINT32_MAX : s.timeout_ms + ms;
+        ++deferred;
+    }
+    if (deferred > 0) {
+        LOG_MODEM(WARN,
+                  "SR-ARQ: TROUGH-PACING deferred %zu pending retransmit timer(s) by %ums",
+                  deferred, ms);
+    }
+}
+
 size_t SelectiveRepeatARQ::retransmitInFlightUnacked(size_t max_frames) {
     if (max_frames == 0) {
         return 0;
@@ -2007,6 +2043,7 @@ void SelectiveRepeatARQ::reset() {
     last_ack_seq_ = 0;
     last_ack_bitmap_ = 0;
     ack_dedup_timer_ms_ = 0;
+    last_ack_progress_frames_ = -1;
     arq_time_ms_ = 0;
     have_rtt_estimator_ = false;
     srtt_ms_ = 0.0f;

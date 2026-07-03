@@ -64,6 +64,26 @@ public:
     uint8_t lastRxFlags() const override { return last_rx_flags_; }
     v2::FrameType lastRxFrameType() const { return last_rx_frame_type_; }
 
+    // §RETX-PACING (docs/RETX_PACING_DESIGN_2026_07_03.md §1.1): forward progress of the
+    // most recent FRESH ack processed by handleAckFrame = (frames retired by the cumulative
+    // base advance) + (newly-set SACK bits). −1 = no fresh ack since the last
+    // consumeAckProgress() — stale/future/DUPLICATE acks (the existing ack-signature dedup)
+    // return early and never touch this, so re-heard SACK copies cannot fabricate a phantom
+    // zero-progress round. This ARQ-window state is the identity-agnostic ground truth for
+    // round accounting (never FileTransfer chunk counters — BUG-FILE-ACK-IDENTITY).
+    int lastAckProgressFrames() const { return last_ack_progress_frames_; }
+    // Round consumption: the Connection reads the outcome exactly once per round boundary,
+    // then re-arms the "no ack this round" sentinel.
+    void consumeAckProgress() { last_ack_progress_frames_ = -1; }
+
+    // §RETX-PACING §1.3 trigger #2: push every pending (active, un-acked) TX slot's
+    // retransmit timer out by `ms`, so the per-slot RTO cannot blind-fire around a
+    // trough-pacing hold armed at a round boundary (one hold state must gate BOTH the
+    // turn refill and the slot RTO, or the RTO leaks around the hold). Deliberately NOT
+    // a global freeze: acked/inactive slots, ACK-repeat jobs, SACK timers, hole-probe
+    // state and the receiver role are untouched.
+    void deferPendingRetransmits(uint32_t ms);
+
     void onFrameReceived(const Bytes& frame_data) override;
     void onPartialFrame(const v2::PartialFrameCodewords& partial);
 
@@ -375,6 +395,8 @@ private:
     uint16_t last_ack_seq_ = 0;
     uint32_t last_ack_bitmap_ = 0;
     uint32_t ack_dedup_timer_ms_ = 0;
+    // §RETX-PACING §1.1 round-progress accessor state (see lastAckProgressFrames()).
+    int last_ack_progress_frames_ = -1;
 
     // Monotonic ARQ time and adaptive RTO estimator (Karn-safe)
     uint64_t arq_time_ms_ = 0;

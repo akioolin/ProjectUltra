@@ -144,6 +144,10 @@ public:
     // Doppler coherence (Good/Moderate discriminator) from the OFDM demodulator.
     float getDopplerCoherenceScore() const;
     bool getDopplerCoherenceValid() const;
+    // RMS Doppler (Hz) from the same estimator — SECONDARY/approximate readout (fixed
+    // nominal cadence), 0 when not estimable. Rides the coherence feed into the protocol
+    // for the retx trough-pacing deferral only (docs/RETX_PACING_DESIGN_2026_07_03.md).
+    float getDopplerCoherenceDopplerHz() const;
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,

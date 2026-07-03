@@ -870,6 +870,67 @@ inline uint32_t coherenceTimeMsForDoppler(float doppler_hz) {
     return static_cast<uint32_t>(std::max(1.0f, tc_ms) + 0.5f);
 }
 
+// ─── Retx trough-pacing deferral (docs/RETX_PACING_DESIGN_2026_07_03.md §1.2) ───
+// f_D source for the deferral, in priority order: (1) the measured Doppler-coherence
+// estimate when available (>0 — SECONDARY/approximate, fixed nominal cadence; acceptable
+// because the deferral is order-of-magnitude machinery bounded by the clamps below, never
+// a decode decision); (2) the ITU-R F.1487 design Doppler of the (coherence-adjusted)
+// measured channel class — Good 0.1 Hz → Tc 4230 ms, Moderate 0.5 → 846 ms, Poor 1.0 →
+// 423 ms. Never a tuned ms constant.
+inline float retxTroughDopplerHz(float doppler_hz, float fading_index,
+                                 float coherence_score, bool coherence_valid) {
+    if (std::isfinite(doppler_hz) && doppler_hz > 0.0f) {
+        return doppler_hz;
+    }
+    return designDopplerForFadingIndex(
+        coherenceAdjustedFadingIndex(fading_index, coherence_score, coherence_valid));
+}
+
+// Absolute engineering clamp on any trough-pacing hold: no hold may exceed ~one burst-time
+// (kMaxBurstAirtimeMs-scale) regardless of estimator garbage.
+inline constexpr uint32_t kRetxTroughDeferAbsCapMs = 8000;
+
+// After a ZERO-PROGRESS resend round (no TX base advance AND no new SACK bit — the whole
+// key-down failed ⇒ trough-conditioned), defer the next resend round until the channel has
+// decorrelated from the state that just killed it (Clarke/Jakes A(τ)=exp(−4π²σ²τ²) ⇒
+// A(τ) ≤ 0.5 at τ ≥ Tc):
+//
+//   T_defer(n) = clamp( frac · Tc · 2^(n−1)  −  t_since_last_tx_end,   0,  T_cycle/2 )
+//
+// n = consecutive zero-progress rounds (≥1); Tc = coherenceTimeMsForDoppler(f_D);
+// T_cycle = 1000/f_D ms (Clarke fade-cycle period). The elapsed-listening subtraction means
+// the ~18 s RTO path adds ~nothing at Good (it already out-waited Tc); the ×2 escalation
+// encodes "the era is longer than one Tc"; the T_cycle/2 cap is the trough-dwell bound
+// (deferring past half a fade cycle overshoots the next crest — fast channels barely defer,
+// which is right: their troughs pass on their own). Pure and unit-testable across the whole
+// channel family. Partial-SACK rounds must NOT be fed here (§3: a partial round proves
+// usable crests within the last burst-time — resend immediately, status quo).
+inline uint32_t retxTroughDeferMs(float doppler_hz, float fading_index,
+                                  float coherence_score, bool coherence_valid,
+                                  int zero_rounds, uint32_t elapsed_since_tx_end_ms,
+                                  float tc_frac = 1.0f) {
+    const float fd = retxTroughDopplerHz(doppler_hz, fading_index,
+                                         coherence_score, coherence_valid);
+    if (!(fd > 0.0f)) {
+        return 0;
+    }
+    const double frac = (std::isfinite(tc_frac) && tc_frac > 0.0f)
+                            ? static_cast<double>(tc_frac)
+                            : 1.0;
+    const double tc_ms = static_cast<double>(coherenceTimeMsForDoppler(fd));
+    const double half_cycle_ms = 500.0 / static_cast<double>(fd);  // (1000/f_D)/2
+    const int n = std::max(1, zero_rounds);
+    const double escalation = static_cast<double>(1u << std::min(n - 1, 16));
+    double defer_ms = frac * tc_ms * escalation
+                      - static_cast<double>(elapsed_since_tx_end_ms);
+    defer_ms = std::min(defer_ms, half_cycle_ms);
+    defer_ms = std::min(defer_ms, static_cast<double>(kRetxTroughDeferAbsCapMs));
+    if (!(defer_ms > 0.0)) {
+        return 0;
+    }
+    return static_cast<uint32_t>(defer_ms + 0.5);
+}
+
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count

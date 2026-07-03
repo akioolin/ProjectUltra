@@ -1662,6 +1662,11 @@ bool Connection::onToneBurstAck(
     if (kInteractiveToneAckEnabled() && arq_.getTxInFlightBytes() > 0) {
         const bool outermost = !arq_callback_defer_refill_;
         if (outermost) arq_callback_defer_refill_ = true;
+        // §RETX-PACING §1.1: re-arm the progress sentinel FIRST so the reading below is
+        // exactly what THIS ack produced — a leftover value from any non-round ack path
+        // (e.g. a control-frame SACK through processArqFrame) must not leak into round
+        // accounting when this ack gets dedup/stale-dropped inside handleAckFrame.
+        arq_.consumeAckProgress();
         arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
         // §14.43: feed the RateController the RECEIVER's GRADED decode headroom carried in
         // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
@@ -1688,6 +1693,15 @@ bool Connection::onToneBurstAck(
         }
         if (outermost) {
             arq_callback_defer_refill_ = false;
+            // §RETX-PACING §1.1 round boundary: every tone-burst ack ends a resend round.
+            // Read the ARQ's identity-agnostic progress (base advance + new SACK bits;
+            // −1 = the ack was dedup/stale-dropped ⇒ NOT a round) exactly once. Progress
+            // resets the streak + releases any hold; a zero-progress round counts toward
+            // the collapse escape and (knob-gated) arms the trough deferral BEFORE the
+            // refill below, so the refill latches instead of re-blasting into the trough.
+            const int round_progress = arq_.lastAckProgressFrames();
+            arq_.consumeAckProgress();
+            noteArqRoundOutcome(round_progress, "toneburst-ack");
             // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
             // to send the next burst (resend remaining holes + new frames). Trigger the
             // refill even when the cumulative base did NOT advance: a SACK with a hole at
@@ -1722,6 +1736,51 @@ static int stuckRetransmitEscape() {
             if (n >= 2 && n <= 10) return n;
         }
         return 5;
+    }();
+    return v;
+}
+
+// ═══════ Retx trough pacing + collapse-conditioned escape (docs/RETX_PACING_DESIGN_2026_07_03.md) ═══════
+// ULTRA_RETX_TROUGH_PACING (default OFF ⇒ byte-identical): master switch for the §1
+// trough-aware resend deferral — after a ZERO-progress round (whole key-down failed ⇒
+// trough-conditioned), hold the next resend ~Tc so the channel decorrelates from the state
+// that just killed it, instead of re-blasting the same frames into the same trough (the
+// measured 6.3-retx/delivered collapse waste). Read ONCE (static).
+static bool retxTroughPacingEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_RETX_TROUGH_PACING");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+// ULTRA_TROUGH_DEFER_TC_FRAC [0.25..4.0] (default 1.0): `frac` in
+// T_defer(n) = clamp(frac·Tc·2^(n−1) − elapsed, 0, T_cycle/2) — §1.2. Out-of-range/garbage
+// values fall back to 1.0. Read ONCE (static).
+static float troughDeferTcFrac() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_TROUGH_DEFER_TC_FRAC")) {
+            const float f = static_cast<float>(std::atof(e));
+            if (std::isfinite(f) && f >= 0.25f && f <= 4.0f) return f;
+        }
+        return 1.0f;
+    }();
+    return v;
+}
+
+// ULTRA_COLLAPSE_ESCAPE_ROUNDS 0 (OFF, default ⇒ byte-identical) or [2..8]: N consecutive
+// zero-progress rounds at the current rung (with ≥ half the burst budget in flight) ⇒
+// escape-drop the rung (§2). Zero-DELIVERED evidence, not retry depth — the rejected
+// ULTRA_STUCK_ESCAPE_RETX=3 hair-trigger fled rungs that were delivering (g42 −28%); the
+// round condition cannot trip on a lone straggler amid deliveries (§2.3). The existing
+// 5-retx per-frame backstop (stuckRetransmitEscape above) stays untouched. Read ONCE (static).
+static int collapseEscapeRounds() {
+    static const int v = [] {
+        if (const char* e = std::getenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS")) {
+            const int n = std::atoi(e);
+            if (n >= 2 && n <= 8) return n;
+        }
+        return 0;
     }();
     return v;
 }
@@ -1790,15 +1849,11 @@ bool Connection::rateAdaptationActive() const {
     return negotiated_mode_ == WaveformMode::OFDM_CHIRP;
 }
 
-void Connection::maybeEscapeStuckFrame() {
-    if (!rateAdaptationActive()) return;
-    if (state_ != ConnectionState::CONNECTED) return;
-    if (mode_change_pending_) return;             // a rate change is already in flight
-    if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
-    if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
-    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
-    if (arq_.maxInFlightRetryCount() < stuckRetransmitEscape()) return;
-
+// Shared escape ACTION (§RETX_PACING_DESIGN_2026_07_03 §2.2 — refactored out of
+// maybeEscapeStuckFrame so the collapse-conditioned round escape REUSES it, not forks it).
+// All guards (rateAdaptationActive, CONNECTED, mode_change_pending_, floor, in-flight)
+// stay with the CALLERS — they keep first refusal exactly as before.
+void Connection::executeEscapeDrop(const char* trigger) {
     if (data_modulation_ == Modulation::QAM16) {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
         // NO tone-burst ack at all, so the ack-driven demote in applyAdaptiveRateFeedback never sees
@@ -1809,14 +1864,14 @@ void Connection::maybeEscapeStuckFrame() {
         // forfeit of the next fade crest). requestModeChange re-anchors both stations at a clean
         // boundary.
         noteQam16Demoted(2);
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (frame stuck, %d retx)",
-                  codeRateToString(data_code_rate_), arq_.maxInFlightRetryCount());
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (%s)",
+                  codeRateToString(data_code_rate_), trigger);
         requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
                           v2::ModeChangeReason::CHANNEL_DEGRADED);
         return;
     }
 
-    // A frame has been retransmitted stuckRetransmitEscape() times at the current rate: the fade
+    // A frame/window the current (over-climbed) rate genuinely cannot push through: the fade
     // troughs are killing it. It produces NO group ACK, so the ack-driven RateController never sees
     // it, and the clean-boundary gate defers any change because the stuck frame keeps the window
     // busy — so without this it grinds to max_retries and fails the whole transfer (Moderate@18:
@@ -1827,12 +1882,188 @@ void Connection::maybeEscapeStuckFrame() {
     // the controller from immediately climbing back into the rung that just failed.
     const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
     if (robust == data_code_rate_) return;
-    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (frame stuck, %d retx at current rate)",
-              codeRateToString(data_code_rate_), codeRateToString(robust),
-              arq_.maxInFlightRetryCount());
+    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s)",
+              codeRateToString(data_code_rate_), codeRateToString(robust), trigger);
     rate_controller_.noteRungFailed(data_code_rate_);
     requestModeChange(data_modulation_, robust, measured_snr_db_,
                       v2::ModeChangeReason::CHANNEL_DEGRADED);
+}
+
+void Connection::maybeEscapeStuckFrame() {
+    if (!rateAdaptationActive()) return;
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (mode_change_pending_) return;             // a rate change is already in flight
+    if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
+    if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
+    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
+    if (arq_.maxInFlightRetryCount() < stuckRetransmitEscape()) return;
+
+    // The pathological-single-frame 5-retx backstop (ULTRA_STUCK_ESCAPE_RETX), kept verbatim
+    // (§RETX_PACING_DESIGN_2026_07_03 §2.3). During genuine collapses the round-conditioned
+    // maybeCollapseEscape typically preempts this (2 rounds ≈ retry 2-3 < 5); on healthy
+    // windows only this backstop can fire — exactly the pre-pacing behavior.
+    char trigger[64];
+    std::snprintf(trigger, sizeof(trigger), "frame stuck, %d retx at current rate",
+                  arq_.maxInFlightRetryCount());
+    executeEscapeDrop(trigger);
+}
+
+// Collapse-conditioned escape (§RETX_PACING_DESIGN_2026_07_03 §2, behind
+// ULTRA_COLLAPSE_ESCAPE_ROUNDS, default OFF). Polled from the CONNECTED tick beside
+// maybeEscapeStuckFrame — NEVER fired from inside an ARQ callback (an RTO-batch round
+// increments the counter inside the ARQ transmit callback; the escape lands one tick
+// later in a proven-safe context). Zero-DELIVERED evidence: only a whole-window zero
+// streak (the g43/rig frozen-base signature) trips it; any progress reset the counter
+// (noteArqRoundOutcome), so a lone straggler amid deliveries cannot (g42-protective).
+void Connection::maybeCollapseEscape() {
+    const int rounds_needed = collapseEscapeRounds();
+    if (rounds_needed <= 0) return;               // knob OFF (default) — byte-identical
+    if (zero_progress_rounds_ < rounds_needed) return;
+    if (!rateAdaptationActive()) return;
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (mode_change_pending_) return;             // a rate change is already in flight
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // scope gate (§1.3/§6.2)
+    if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be collapsing
+    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
+
+    // §2.1 window-collapse evidence: ≥⌈burst_cap/2⌉ frames pending at the current rung.
+    // in_flight ≥ ceil(cap/2) ⇔ 2·in_flight ≥ cap (integer).
+    const size_t burst_cap = burstAirtimeBudgetFrames(arq_.getWindowSize());
+    const size_t in_flight_frames = arq_.getWindowSize() - arq_.getAvailableSlots();
+    if (2 * in_flight_frames < burst_cap) return;
+
+    LOG_MODEM(WARN, "Connection: COLLAPSE-escape (%d zero rounds)", zero_progress_rounds_);
+    char trigger[64];
+    std::snprintf(trigger, sizeof(trigger), "collapse, %d zero-progress rounds",
+                  zero_progress_rounds_);
+    // Reset the era before the drop — requestModeChange sets mode_change_pending_ and the
+    // commit path (applyDataMode) starts a new era anyway; this keeps the counter from
+    // double-firing if the MODE_CHANGE round-trip is slow.
+    zero_progress_rounds_ = 0;
+    retx_pace_hold_ms_ = 0;
+    executeEscapeDrop(trigger);
+}
+
+// §RETX_PACING_DESIGN_2026_07_03 §1.3 scope gate: CONNECTED **wideband** OFDM
+// (OFDM_CHIRP only) on the unified tone-burst burst path, file SENDING with bytes in
+// flight — the mirror of the escape's guards. MC-DPSK and OFDM_NARROW are explicitly OUT
+// of scope (§6.2): their ACK timers were just re-derived (BUG-MCDPSK-ACK-COLLISION /
+// BUG-MCDPSK-FILE-COMPLETION) and their RTT already dwarfs any Tc.
+bool Connection::retxPacingScopeActive() const {
+    return state_ == ConnectionState::CONNECTED &&
+           negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+           use_burst_transport_ && kUnifiedSeqEnabled() &&
+           file_transfer_.getState() == FileTransferState::SENDING &&
+           arq_.getTxInFlightBytes() > 0;
+}
+
+// §RETX-PACING: record the modeled END of an OFDM data-burst key-down (flush time +
+// airtime derived from the SAME wideOFDMBurstAirtimeMs model the budget/RTO use). This is
+// the reference point for T_defer's t_since_last_tx_end subtraction (§1.2): by the time
+// the sender LEARNS a round was zero-progress it has already spent part of Tc listening —
+// ~3-4 s on the fast-NACK path (deferral bites), ~10+ s on the RTO path (deferral ≈ 0 at
+// Good, correct: the RTO already over-paces that path). Recording is unconditional and
+// behavior-free (a clock read + member store); every DECISION stays knob-gated.
+void Connection::noteDataBurstKeydown(size_t frame_count) {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || frame_count == 0) {
+        return;
+    }
+    const uint32_t reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, data_modulation_, fading_index_)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
+        data_modulation_, data_code_rate_, frame_count, data_frame_cw_count_,
+        reanchor_ms, selectBurstLiftingZ());
+    last_data_burst_end_ =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(airtime_ms);
+    last_data_burst_end_valid_ = true;
+}
+
+uint32_t Connection::elapsedSinceLastDataBurstEndMs() const {
+    if (!last_data_burst_end_valid_) {
+        return 0;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now <= last_data_burst_end_) {
+        return 0;  // still (modeled as) keyed down — no listening time elapsed yet
+    }
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             now - last_data_burst_end_).count();
+    return static_cast<uint32_t>(std::min<long long>(ms, 0xFFFFFFFFll));
+}
+
+// §RETX_PACING_DESIGN_2026_07_03 §1.1/§1.2: one call per ROUND boundary.
+//   progress_frames > 0  → the channel just proved it delivers: reset the zero-round
+//                          streak and EARLY-RELEASE any armed hold (never wait out a hold
+//                          when a late/duplicate SACK finally decodes) — §2.3
+//                          g42-protective property.
+//   progress_frames == 0 → a fully-failed round (fresh ack with no base advance and no
+//                          new SACK bit, or a slot-RTO batch — a timeout IS the absence
+//                          of an ack): count it; knob-gated, arm the channel-derived
+//                          deferral on BOTH resend triggers (§1.3).
+//   progress_frames < 0  → no fresh ack was processed (duplicate/stale/future — the ARQ
+//                          ack-signature dedup): NOT a round, touch nothing.
+// Partial-SACK rounds land here with progress > 0 and therefore resend immediately
+// (status quo) — only zero-progress rounds ever defer (§3).
+void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
+    if (progress_frames > 0) {
+        if (retx_pace_hold_ms_ > 0) {
+            LOG_MODEM(INFO,
+                      "Connection: TROUGH-PACING early release (%d frames progressed, %s)",
+                      progress_frames, origin);
+        }
+        zero_progress_rounds_ = 0;
+        retx_pace_hold_ms_ = 0;
+        return;
+    }
+    if (progress_frames < 0) {
+        return;  // duplicate/stale ack — never a phantom round (§1.1 dedup)
+    }
+    if (!retxPacingScopeActive()) {
+        // Out of scope (MC-DPSK / OFDM_NARROW / no file in flight): never accumulate
+        // rounds or holds here — their timers must never see this machinery (§6.2).
+        zero_progress_rounds_ = 0;
+        retx_pace_hold_ms_ = 0;
+        return;
+    }
+
+    ++zero_progress_rounds_;
+    LOG_MODEM(INFO, "Connection: zero-progress ARQ round %d (%s)",
+              zero_progress_rounds_, origin);
+    // The §2 collapse escape is POLLED from the CONNECTED tick (maybeCollapseEscape), not
+    // fired here — this function runs inside ack processing AND inside the ARQ transmit
+    // callback (RTO batch), and requestModeChange must not re-enter the ARQ from the latter.
+    if (!retxTroughPacingEnabled()) {
+        return;  // §5.1 master knob OFF (default) — counting above is inert bookkeeping
+    }
+    if (mode_change_pending_) {
+        return;  // a rate change is already re-anchoring the era; don't stack a hold on it
+    }
+    const uint32_t elapsed_ms = elapsedSinceLastDataBurstEndMs();
+    const float doppler_hz = coherence_valid_ ? coherence_doppler_hz_ : 0.0f;
+    const uint32_t hold_ms = connection_policy::retxTroughDeferMs(
+        doppler_hz, fading_index_, coherence_score_, coherence_valid_,
+        zero_progress_rounds_, elapsed_ms, troughDeferTcFrac());
+    if (hold_ms == 0) {
+        return;  // e.g. the ~18 s RTO path already out-waited Tc (§1.2) — add nothing
+    }
+    retx_pace_hold_ms_ = hold_ms;                 // trigger #1: turn refill (runDeferredArqRefill)
+    arq_.deferPendingRetransmits(hold_ms);        // trigger #2: per-slot RTO (one state, both)
+    const float tc_s = static_cast<float>(connection_policy::coherenceTimeMsForDoppler(
+        connection_policy::retxTroughDopplerHz(doppler_hz, fading_index_,
+                                               coherence_score_, coherence_valid_))) /
+        1000.0f;
+    LOG_MODEM(WARN,
+              "Connection: TROUGH-PACING defer %ums (round %d, Tc=%.2fs, elapsed=%ums, %s)",
+              hold_ms, zero_progress_rounds_, tc_s, elapsed_ms, origin);
+    // Label the pause for the operator (2 AM waterfall rule, §4): a visible "Adapt:" text,
+    // not a silent hang. Also the A/B grep hook.
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "pace-hold %ums (zero-progress round %d)",
+                  hold_ms, zero_progress_rounds_);
+    last_adaptive_action_ = buf;
 }
 
 void Connection::applyAdaptiveRateFeedback(float quality) {
@@ -2545,7 +2776,12 @@ void Connection::runDeferredArqRefill() {
     if (state_ != ConnectionState::CONNECTED) {
         return;
     }
-    if (!local_data_turn_ || file_cancel_confirm_pending_ || data_turn_tx_guard_ms_ > 0) {
+    // §RETX-PACING §1.3 trigger #1: retx_pace_hold_ms_ > 0 blocks the turn refill exactly
+    // like the existing guards — the deferred-refill flags RE-LATCH below, so the refill
+    // fires automatically (same [holes]+[new] coalescing, untouched) when the hold expires
+    // in the CONNECTED tick. Default-off knob ⇒ the hold is never armed ⇒ byte-identical.
+    if (!local_data_turn_ || file_cancel_confirm_pending_ || data_turn_tx_guard_ms_ > 0 ||
+        retx_pace_hold_ms_ > 0) {
         deferred_file_refill_ = refill_file || deferred_file_refill_;
         deferred_fragment_refill_ = refill_fragments || deferred_fragment_refill_;
         return;
@@ -2635,6 +2871,14 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (data_turn_tx_guard_ms_ > 0) {
                 data_turn_tx_guard_ms_ =
                     elapsed_ms >= data_turn_tx_guard_ms_ ? 0 : data_turn_tx_guard_ms_ - elapsed_ms;
+            }
+            // §RETX-PACING §1.3: tick the trough-pacing hold down BEFORE the
+            // runDeferredArqRefill() below, so an expiring hold releases the latched
+            // deferred refill in the SAME tick (the deferred-refill flags stay latched
+            // while the hold runs — no resubmission logic changes).
+            if (retx_pace_hold_ms_ > 0) {
+                retx_pace_hold_ms_ =
+                    elapsed_ms >= retx_pace_hold_ms_ ? 0 : retx_pace_hold_ms_ - elapsed_ms;
             }
             if (turn_request_holdoff_ms_ > 0) {
                 turn_request_holdoff_ms_ =
@@ -2822,6 +3066,10 @@ void Connection::tick(uint32_t elapsed_ms) {
 
             arq_.tick(elapsed_ms);
             maybeEscapeStuckFrame();
+            // §RETX-PACING §2: the collapse-conditioned escape is POLLED here (proven-safe
+            // context, same as maybeEscapeStuckFrame) — rounds counted inside the ARQ
+            // transmit callback (RTO batch) escape one tick later, never re-entrantly.
+            maybeCollapseEscape();
             maybeYieldDataTurn();
             runDeferredArqRefill();
             sendNextQueuedPayloadIfReady();
@@ -3079,9 +3327,25 @@ uint32_t Connection::fileCancelConfirmDataGuardMs() const {
 }
 
 uint32_t Connection::modeChangeRetryMs() const {
-    const uint32_t arq_timeout_ms = arq_.getAckTimeout();
-    if (arq_timeout_ms > 0) {
-        return arq_timeout_ms;
+    // RATIOMETRIC control-exchange round trip at the CURRENT waveform (2026-07-03):
+    // MODE_CHANGE and its ACK are single control frames — anchor + ctl airtime each
+    // way + SACK coalesce — NOT a data-burst object. The old code preferred
+    // arq_.getAckTimeout(), the unified multi-frame BURST deadline: 3-4x larger and
+    // scaling with the ARQ window (worse at window 16). Rig W4 (IONOS MPG@20):
+    // retries spaced 18.5 s for a ~5 s exchange — ~74 s of one 328 s transfer burned
+    // waiting on MODE_CHANGE alone. dataTurnControlGuardMs derives from the current
+    // mode's anchor/control airtimes, so this scales with waveform automatically
+    // (MC-DPSK control is slower -> longer timer, by construction).
+    // ULTRA_MODE_CHANGE_RETRY_MS [1000..60000] pins it for A/B.
+    static const uint32_t env_pin = [] {
+        if (const char* e = std::getenv("ULTRA_MODE_CHANGE_RETRY_MS")) {
+            const long n = std::atol(e);
+            if (n >= 1000 && n <= 60000) return static_cast<uint32_t>(n);
+        }
+        return 0u;
+    }();
+    if (env_pin > 0) {
+        return env_pin;
     }
 
     const uint64_t control_round_trip_ms =
@@ -3717,6 +3981,10 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         ? rung_id
         : currentLadderRungId();
     configureArqForCurrentDataMode();
+    // §RETX-PACING: a mode/rate change starts a NEW era — the zero-round evidence and any
+    // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
+    zero_progress_rounds_ = 0;
+    retx_pace_hold_ms_ = 0;
     if (rate_changed || cw_changed || mod_changed) {
         soft_combine_harq_.clear();  // mod change => old-constellation LLRs would corrupt HARQ
         // 2026-05-28: recompute burst ack_timeout for the new mode (same
@@ -3780,7 +4048,12 @@ void Connection::enterConnected() {
     // verdict while CONNECTED (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE), so it must start
     // invalid here or a previous connection's channel class would leak into this one.
     coherence_score_ = 0.0f;
+    coherence_doppler_hz_ = 0.0f;
     coherence_valid_ = false;
+    // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
+    zero_progress_rounds_ = 0;
+    retx_pace_hold_ms_ = 0;
+    last_data_burst_end_valid_ = false;
     // Software-ALC receiver-side state is per-connection.
     rx_level_low_streak_ = 0;
     rx_level_clipped_ = false;
@@ -3976,6 +4249,9 @@ void Connection::flushBurstBuffer() {
             on_transmit_(frame);
         }
     }
+    // §RETX-PACING: stamp the modeled key-down end for this data burst (no-op off wideband
+    // OFDM; behavior-free — see noteDataBurstKeydown).
+    noteDataBurstKeydown(burst_tx_buffer_.size());
     burst_tx_buffer_.clear();
 }
 
@@ -3983,6 +4259,15 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     if (frame_data_list.empty()) {
         return;
     }
+
+    // §RETX-PACING §1.1: this callback fires ONLY as the ARQ slot-RTO batch (arq_.tick →
+    // transmitDataBatch), and an RTO round is zero-progress BY DEFINITION — a timeout IS
+    // the absence of an ack. Account the round BEFORE stamping this resend's own key-down
+    // end time (the elapsed-listening subtraction must reference the PREVIOUS burst). The
+    // collapse escape itself is polled from the CONNECTED tick, never fired from inside
+    // this ARQ transmit callback.
+    noteArqRoundOutcome(0, "rto");
+    noteDataBurstKeydown(frame_data_list.size());
 
     const bool burst_capable_mode =
         isOFDMMode(negotiated_mode_) || negotiated_mode_ == WaveformMode::MC_DPSK;
@@ -4176,7 +4461,12 @@ void Connection::reset() {
     clearOutboundMessageTracking();
     // Per-connection channel-coherence verdict (see setChannelCoherence hold-last-valid).
     coherence_score_ = 0.0f;
+    coherence_doppler_hz_ = 0.0f;
     coherence_valid_ = false;
+    // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
+    zero_progress_rounds_ = 0;
+    retx_pace_hold_ms_ = 0;
+    last_data_burst_end_valid_ = false;
     ladder_telemetry_active_ = false;
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }

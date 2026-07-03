@@ -890,6 +890,50 @@ void test_qam16_r34_cap_knob_off_keeps_r23() {
     }
 }
 
+// §RETX-PACING (docs/RETX_PACING_DESIGN_2026_07_03.md §1.2): the pure deferral policy —
+// T_defer(n) = clamp(frac·Tc·2^(n−1) − elapsed, 0, T_cycle/2), Tc = 0.423/f_D, abs cap
+// 8000 ms — across the whole channel family (Good/Moderate/Poor fallback + measured f_D).
+void test_retx_trough_defer() {
+    // f_D fallback = design Doppler by fading class (invalid coherence -> raw fading index):
+    // Good 0.1 Hz -> Tc 4230 ms, half-cycle 5000 ms.
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 1, 0) == 4230,
+          "Good fallback n=1 elapsed=0 defers one full Tc (4230 ms)");
+    // Elapsed-listening subtraction (fast-NACK path, ~3 s already spent listening).
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 1, 3000) == 1230,
+          "elapsed listening time is subtracted from the hold");
+    // The ~18 s RTO path already out-waited Tc -> defer exactly 0 (add nothing on top).
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 1, 10000) == 0,
+          "RTO path (elapsed >= target) must defer 0");
+    // x2 escalation at n=2 (2*4230=8460) hits the T_cycle/2 trough-dwell cap (5000).
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 2, 0) == 5000,
+          "n=2 escalation is capped at half the fade cycle (Good: 5000 ms)");
+    // Moderate fallback: 0.5 Hz -> Tc 846 ms, half-cycle 1000 ms (holds stay <= 1 s).
+    CHECK(retxTroughDeferMs(0.0f, 0.85f, 0.0f, false, 1, 0) == 846,
+          "Moderate fallback n=1 defers Tc = 846 ms");
+    CHECK(retxTroughDeferMs(0.0f, 0.85f, 0.0f, false, 2, 0) == 1000,
+          "Moderate n=2 capped at half cycle (1000 ms)");
+    // Poor fallback: 1.0 Hz -> Tc 423 ms — fast channels barely defer (their troughs pass).
+    CHECK(retxTroughDeferMs(0.0f, 1.50f, 0.0f, false, 1, 0) == 423,
+          "Poor fallback n=1 defers Tc = 423 ms");
+    // Measured Doppler (valid coherence feed) takes priority over the class fallback.
+    CHECK(retxTroughDeferMs(0.2f, 0.85f, 0.0f, true, 1, 0) == 2115,
+          "measured f_D=0.2 Hz overrides the Moderate fallback (Tc 2115 ms)");
+    // Coherence-ADJUSTED fallback: a Moderate fading index with a confident-Good coherence
+    // verdict re-classes to Good (0.1 Hz) — same refinement the rate ladder uses.
+    CHECK(retxTroughDeferMs(0.0f, 0.85f, 0.60f, true, 1, 0) == 4230,
+          "confident-Good coherence re-classes a Moderate fading index to Good Tc");
+    // frac knob scales Tc (0.5 * 4230 = 2115).
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 1, 0, 0.5f) == 2115,
+          "frac=0.5 halves the deferral");
+    // Absolute engineering clamp: estimator garbage (f_D=0.01 -> Tc 42.3 s, half-cycle
+    // 50 s) can never hold longer than ~one burst-time.
+    CHECK(retxTroughDeferMs(0.01f, 0.40f, 0.0f, true, 1, 0) == kRetxTroughDeferAbsCapMs,
+          "hold is absolutely capped at 8000 ms regardless of estimator garbage");
+    // Degenerate inputs are safe no-ops.
+    CHECK(retxTroughDeferMs(0.0f, 0.40f, 0.0f, false, 0, 0) == 4230,
+          "zero_rounds is floored at 1 (a round just failed when this is called)");
+}
+
 }  // namespace
 
 int main() {
@@ -917,6 +961,7 @@ int main() {
     test_connect_selection_saturation_bound();
     test_coherent_window_override_disabled_keeps_default();
     test_qam16_r34_cap_knob_off_keeps_r23();
+    test_retx_trough_defer();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

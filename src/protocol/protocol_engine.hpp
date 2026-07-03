@@ -212,7 +212,10 @@ public:
                            bool data_aided = false);
     // Set the OFDM Doppler-coherence verdict (Good/Moderate discriminator), measured
     // separately from fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
-    void setChannelCoherence(float coherence_score, bool valid);
+    // doppler_hz: the estimator's SECONDARY/approximate RMS-Doppler readout (0 = not
+    // estimable), riding the same feed — consumed only by the retx trough-pacing deferral
+    // (docs/RETX_PACING_DESIGN_2026_07_03.md), never a decode decision.
+    void setChannelCoherence(float coherence_score, float doppler_hz, bool valid);
     // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): feed the decoder's per-burst RX level
     // verdict (connection_policy::RxLevelVerdict as int) + measurement seq. Call BEFORE
     // onBurstGroupReceived so the drive advisory rides that group's tone-burst ACK.

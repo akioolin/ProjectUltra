@@ -109,9 +109,23 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - **Discriminating experiment:** paired QPSK-vs-16QAM rig runs logging the Pi5 per-burst normalization factor (AUDIO category) and the Mac chirp-segment RMS/corr per burst; if 16QAM's normalization factor is materially lower, it's (a) — mitigations: anchor power boost within the normalization budget, PAPR reduction (clip/tone-reserve) on the data symbols, or descriptor-profile robustness. If not, instrument the full-anchor-wait state residency.
 - **Impact:** blocks the entire 16QAM-on-hardware path (the only route to 3000 bps) regardless of the sim-side damage work. Sim CANNOT reproduce (fidelity gap — document per SIMULATOR FIDELITY rules). See `fable_analysis/09_WHY_STUCK_AT_2000_2026_07_01.md` §4.
 
-### BUG-ACK-TIMEOUT-DOUBLECOUNT: unified burst ACK deadline counts burst airtime ~twice (+ phantom reanchor term) → every timeout saga pays ~8-10 s extra dead air
-- Status: **OPEN (promoted from CHANGELOG 2026-06-19 follow-up; quantified 2026-07-01).** `unifiedBurstAckTimeoutMs` (`connection_policy.hpp:811-847`) adds `burst_ms` AND `physical_sack_hold_ms = max(configured, burstAirtime+30)` where the configured term on Good coherent is the full window-8 hold (12.1 s, `connection.cpp:3122-3127`), plus a phantom +100 ms/frame short-reanchor the encoder no longer emits (`connection_policy.hpp:558-568` vs `streaming_encoder.cpp:155`). QPSK R3/4 g5 deadline ≈ 24.5 s vs true clean RTT ≈ 9-9.5 s.
-- **Floor (do not cut below):** the deadline back-stops the receiver's wall-clock group-timeout fast-NACK (8000×n/4 ms, `streaming_decoder.hpp:814` — itself an adaptivity violation: wall-clock, not mod/rate/z-derived) and rig worst-case turnaround (measured ~5.8 s post-burst latency; #56 RXQ backlog). Documented floor ~14-17 s pending rig calibration; the 2026-06-19 premature-resend incident is the regression to avoid. **Move both timers together.**
+### BUG-ACK-TIMEOUT-DOUBLECOUNT: unified burst ACK deadline counted burst airtime ~twice (+ phantom reanchor term) → every timeout saga paid ~8-10 s extra dead air — **CLOSED IN CODE by the 2026-07-02 RTO re-derivation (register reconciled 2026-07-03)**
+- Status: **CLOSED in code — register was stale.** The 2026-07-02 `unifiedBurstAckTimeoutMs`
+  re-derivation (`connection_policy.hpp` ~1002-1053, comment: "RE-DERIVED 2026-07-02 (closes
+  BUG-ACK-TIMEOUT-DOUBLECOUNT)") replaced the double-counting `physical_sack_hold_ms =
+  max(configured window-hold, burstAirtime+30)` term with a receiver-response envelope derived
+  from the SAME formula family as the receiver's group-timeout fast-NACK (rig-calibrated: 124
+  groups across 4 MPG@20 transfers measured the clean-path group-end→SACK hold at 0-1 ms);
+  `configured_sack_delay_ms` is deliberately no longer consumed on the burst path. This entry
+  had stayed OPEN with pre-07-02 line numbers while the code claimed the fix — reconciled while
+  landing the retx trough-pacing design (its §6.4), which deliberately adds ZERO deferral on
+  the RTO path at Good so nothing in pacing depends on the RTO's exact length (a later RTO
+  tightening makes pacing MORE valuable, not less).
+- **Floor rule still binds (do not cut below):** the deadline back-stops the receiver's
+  wall-clock group-timeout fast-NACK (`streaming_decoder.hpp:877` `BURST_TIMEOUT_MS_BASE` —
+  its 8000 ms wall-clock floor is itself a tracked adaptivity item, NOT changed by pacing)
+  and rig worst-case turnaround (~5.8 s post-burst latency; #56 RXQ backlog). The 2026-06-19
+  premature-resend incident is the regression class to avoid. **Move both timers together.**
 
 ### BUG-MCDPSK-ACK-COLLISION: tone-burst partial-SACK fires < one MC-DPSK frame airtime → half-duplex collision livelock — **FIX IMPLEMENTED (2026-06-30), pending lossy-rig validation**
 - Status: **ROOT-CAUSED + REPRODUCED on the live IONOS rig + FIX IMPLEMENTED + ctest-clean (OFDM byte-identical). Pending: lossy-channel rig A/B (the faithful gate runs clean → no holes → can't exercise it; also confounded by BUG-MCDPSK-FILE-COMPLETION which blocks *completion* regardless).** Surfaced once #74 let MC-DPSK connect + transfer at low SNR (rig MPG@8, DQPSK R1/4, window=5).

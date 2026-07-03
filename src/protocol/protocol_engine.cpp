@@ -734,9 +734,10 @@ void ProtocolEngine::setChannelQuality(float snr_db, float fading_index,
     connection_.setChannelQuality(snr_db, fading_index, source, data_aided);
 }
 
-void ProtocolEngine::setChannelCoherence(float coherence_score, bool valid) {
+void ProtocolEngine::setChannelCoherence(float coherence_score, float doppler_hz,
+                                         bool valid) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.setChannelCoherence(coherence_score, valid);
+    connection_.setChannelCoherence(coherence_score, doppler_hz, valid);
 }
 
 void ProtocolEngine::setRxLevelVerdict(int verdict, uint32_t seq) {

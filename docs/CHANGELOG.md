@@ -10,6 +10,85 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(arq): retx **trough pacing** (`ULTRA_RETX_TROUGH_PACING`) + **collapse-conditioned escape** (`ULTRA_COLLAPSE_ESCAPE_ROUNDS`) — both default-OFF A/B, byte-identical unset — UNVALIDATED, edits-only, awaiting build + the §5.2 A/B matrix
+
+**Design implemented exactly per `docs/RETX_PACING_DESIGN_2026_07_03.md`** (the campaign's
+next lever after the wide window; see the 07-03 window entry below for the measured collapse
+signature: ~42-107 s frozen-base eras, 6.3 retx/delivered, the rejected `STUCK_ESCAPE_RETX=3`
+hair-trigger that fled g42 −28%).
+
+**What changed (all sender-side, ZERO wire change):**
+1. **ARQ round-progress accessor** (`selective_repeat_arq.{hpp,cpp}`):
+   `lastAckProgressFrames()` = frames retired by cumulative base advance + newly-set SACK
+   bits of the most recent FRESH ack; −1 after `consumeAckProgress()` and for
+   dedup/stale/future-dropped acks (the existing ack-signature dedup ⇒ duplicate SACK copies
+   can never fabricate a phantom round). ARQ-window state is the identity-agnostic ground
+   truth (never FileTransfer counters — BUG-FILE-ACK-IDENTITY untouched). Reset in `reset()`.
+2. **ARQ hold primitive** `deferPendingRetransmits(ms)`: bumps `timeout_ms` of every
+   active+unacked TX slot (overflow-clamped), one WARN log (`TROUGH-PACING deferred`).
+   Trigger #2 gating — without it `tick()` blind-fires the RTO batch around the hold.
+3. **Doppler plumb**: `DopplerCoherenceEstimator::dopplerHz()` already sat in the decoder
+   atomics (`getLastMeasuredDopplerHz`); added `ModemEngine::getDopplerCoherenceDopplerHz()`
+   and widened the coherence feed to `setChannelCoherence(score, doppler_hz, valid)`
+   (binding → ProtocolEngine → Connection member `coherence_doppler_hz_`, hold-last-valid
+   identical to the score — BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE semantics unchanged;
+   cleared in `enterConnected`/`reset`). SECONDARY/approximate readout, consumed ONLY by the
+   clamp-bounded deferral, never a decode decision.
+4. **Pure policy** `connection_policy::retxTroughDeferMs(...)` (+`retxTroughDopplerHz`,
+   `kRetxTroughDeferAbsCapMs=8000`): `T_defer(n) = clamp(frac·Tc·2^(n−1) − elapsed, 0,
+   T_cycle/2)`, Tc = 0.423/f_D; f_D = measured estimate when valid, else ITU-R design
+   Doppler of the (coherence-adjusted) fading class — no magic ms anywhere. Good Tc
+   4230/half-cycle 5000 ms; Moderate 846/1000; Poor 423/500.
+5. **Connection round accounting** (`noteArqRoundOutcome`): fed from BOTH round-enders —
+   the tone-burst ack outermost bracket in `onToneBurstAck` (progress read+consumed once)
+   and the slot-RTO batch entry `transmitFrameBatch` (an RTO round is zero-progress by
+   definition; a cratered 16QAM may emit NO ack at all). Progress >0 ⇒ streak reset +
+   early-release of any hold (g42-protective). Zero ⇒ count round; knob-gated, arm
+   `retx_pace_hold_ms_` + `deferPendingRetransmits` (one state, both triggers). −1 ⇒ not a
+   round. Scope gate `retxPacingScopeActive()`: CONNECTED + `OFDM_CHIRP` + unified burst
+   path + file SENDING + in-flight bytes; MC-DPSK/OFDM_NARROW structurally excluded.
+   `noteDataBurstKeydown` stamps flush-time+modeled-airtime per data burst for the
+   elapsed-listening subtraction (RTO path ⇒ defer ≈ 0 at Good, by design).
+6. **Hold enforcement**: `retx_pace_hold_ms_` decremented in the CONNECTED tick BEFORE
+   `runDeferredArqRefill()`; added to the refill re-latch guard (deferred-refill flags stay
+   latched — refill fires the burst automatically on expiry; `[holes]+[new]` coalescing
+   untouched). Holds arm only BETWEEN key-downs — no mid-burst pause, receiver group timer
+   can't strand (§4). Logs: `TROUGH-PACING defer Xms (round N, Tc=Ys, elapsed=Zms, ...)` +
+   `last_adaptive_action_` = `pace-hold Xms (zero-progress round N)`.
+7. **Collapse escape** (§2): `maybeEscapeStuckFrame`'s ACTION refactored into shared
+   `executeEscapeDrop(trigger)` (QAM16 either-rate → straight QPSK R3/4 +
+   `noteQam16Demoted(2)`; else one-rung + `noteRungFailed` — bodies verbatim, log lines now
+   carry the trigger text). New `maybeCollapseEscape()` polled from the CONNECTED tick
+   beside the backstop (never from inside an ARQ callback — no re-entry): N =
+   `ULTRA_COLLAPSE_ESCAPE_ROUNDS` consecutive zero rounds with ≥⌈burst_cap/2⌉ frames in
+   flight ⇒ `COLLAPSE-escape (N zero rounds)` + drop. The 5-retx
+   `ULTRA_STUCK_ESCAPE_RETX` backstop is UNCHANGED. Round/hold state reset in
+   `enterConnected`, `reset`, and `applyDataMode` (a mode change starts a new era).
+8. **Knobs** (all read-once statics, default-OFF ⇒ byte-identical): `ULTRA_RETX_TROUGH_PACING`
+   0/1, `ULTRA_TROUGH_DEFER_TC_FRAC` [0.25,4.0]=1.0, `ULTRA_COLLAPSE_ESCAPE_ROUNDS` 0|[2..8]=0.
+   Map rows added (🟡 EXPERIMENTAL A/B) + §7 register item 9b.
+9. **Tests (edited, NOT run — see verification):** `test_selective_repeat` — progress
+   accessor counts/dedup + `deferPendingRetransmits` gates the slot RTO across the hold;
+   `test_connection_policy` — `retxTroughDeferMs` across the family (fallback Tcs, elapsed
+   subtraction, ×2 escalation vs T_cycle/2 cap, measured-f_D priority, coherence-adjusted
+   class, frac, 8000 ms abs cap); `test_connection_adaptive` — knobs pinned OFF in main
+   (setenv-before-statics pattern) + round counter g42-protective property (progress resets,
+   −1 never counts, knob-off arms nothing/escapes nothing).
+10. **KNOWN_BUGS reconcile (§6.4 of the design):** BUG-ACK-TIMEOUT-DOUBLECOUNT register
+    updated — the 2026-07-02 `unifiedBurstAckTimeoutMs` re-derivation already closed the
+    double-count in code (`connection_policy.hpp` "closes BUG-ACK-TIMEOUT-DOUBLECOUNT")
+    while the register still said OPEN with pre-07-02 line numbers. Pacing deliberately adds
+    ZERO deferral on the RTO path at Good, so nothing here depends on the RTO's exact length.
+
+**Verification: NONE RUN — edits-only session by explicit constraint (live RF bench on the
+machine; no cmake/ctest/sim executed).** Every edit verified by inspection + caller/signature
+greps only. Gate before any claim: `cmake --build build -j4 && ctest --test-dir build
+--output-on-failure -j4` (expect only the pre-existing `UltraTncSimAudio` red), then the
+design §5.2 A/B matrix knob-off FIRST (byte-identical expectation: zero `TROUGH-PACING`/
+`COLLAPSE-escape`/`pace-hold` lines, goodput within noise), then knob-on (g43 collapse cells,
+g42 protective cells, AWGN zero-holds cell, Moderate ≤1 s-holds cell, rig MPG@20). §5.3
+failure-mode greps apply verbatim.
+
 ## 2026-07-03 — feat(ladder): 16QAM **R3/4 crest rung** behind `ULTRA_QAM16_R34` (default-OFF A/B, byte-identical when unset) — UNVALIDATED, edits-only, awaiting build + faithful-gate A/B
 
 **What/why (lever, not a bug):** `maxValidatedCoherentRate()` capped QAM16 at R2/3 citing a

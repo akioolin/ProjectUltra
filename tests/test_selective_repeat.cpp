@@ -802,6 +802,106 @@ bool test_timeout_window_retransmits_as_one_batch_when_callback_present() {
     return true;
 }
 
+// §RETX-PACING (docs/RETX_PACING_DESIGN_2026_07_03.md §1.1): lastAckProgressFrames() is the
+// zero-progress ROUND detector's ground truth — (frames retired by base advance) + (newly
+// set SACK bits) for the most recent FRESH ack; −1 after consumption; dedup-suppressed
+// duplicate acks must NEVER produce a fresh reading (phantom rounds).
+bool test_ack_progress_accessor_counts_and_dedups() {
+    TEST("lastAckProgressFrames counts base advance + new SACK bits; duplicates stay -1");
+
+    ARQConfig config;
+    config.window_size = 8;
+    config.ack_timeout_ms = 10000;
+    config.max_retries = 5;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setTransmitCallback([](const Bytes&) {});
+
+    if (tx.lastAckProgressFrames() != -1)
+        FAIL("initial progress sentinel should be -1 (no ack yet)");
+
+    for (int i = 0; i < 4; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to send DATA seq=" + std::to_string(i));
+    }
+
+    // Fresh ack: cumulative through seq=1 (retires seq 0,1 -> base=2) + SACK bit1
+    // (= seq 3 after the advance) -> progress = 2 + 1 = 3.
+    tx.onFrameReceived(makeSackAck(1, 0x02u).serialize());
+    if (tx.lastAckProgressFrames() != 3)
+        FAIL("expected progress 3 (2 retired + 1 new SACK bit), got " +
+             std::to_string(tx.lastAckProgressFrames()));
+
+    // Round consumption re-arms the sentinel.
+    tx.consumeAckProgress();
+    if (tx.lastAckProgressFrames() != -1)
+        FAIL("consumeAckProgress should reset the sentinel to -1");
+
+    // The identical ack re-heard inside the dedup window is SUPPRESSED by the existing
+    // ack-signature dedup -> it must NOT publish a fresh (phantom-round) reading.
+    tx.onFrameReceived(makeSackAck(1, 0x02u).serialize());
+    if (tx.lastAckProgressFrames() != -1)
+        FAIL("duplicate ack must not publish a progress reading (phantom round)");
+
+    // A fresh ZERO-progress ack (base-1 cumulative, no new SACK bit) publishes 0 —
+    // the §1.1 zero-progress round signal.
+    tx.onFrameReceived(makeSackAck(1, 0x00u).serialize());
+    if (tx.lastAckProgressFrames() != 0)
+        FAIL("fresh no-advance/no-new-bit ack should publish progress 0, got " +
+             std::to_string(tx.lastAckProgressFrames()));
+
+    PASS();
+    return true;
+}
+
+// §RETX-PACING §1.3 trigger #2: deferPendingRetransmits(ms) extends every pending slot's
+// RTO so tick() cannot blind-fire a timeout batch inside a trough-pacing hold; after the
+// hold elapses the RTO fires normally. Acked/inactive slots are untouched (by inspection:
+// the loop skips !active || acked).
+bool test_defer_pending_retransmits_gates_slot_rto() {
+    TEST("deferPendingRetransmits extends pending slot timers across the hold");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+    config.max_retries = 10;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    if (!tx.sendData(Bytes{0xAA}))
+        FAIL("Failed to send first DATA frame");
+    if (!tx.sendData(Bytes{0xBB}))
+        FAIL("Failed to send second DATA frame");
+    transmitted.clear();
+
+    tx.tick(900);  // 100 ms left on both slot timers
+    if (!transmitted.empty())
+        FAIL("no retransmit expected before the RTO");
+
+    tx.deferPendingRetransmits(2000);  // the trough hold: timers now at 2100 ms
+
+    tx.tick(1500);  // would have fired the original RTO 1.4 s ago without the deferral
+    if (!transmitted.empty())
+        FAIL("slot RTO must not blind-fire inside the pacing hold");
+
+    tx.tick(700);  // 600 ms remained -> both slots expire now
+    if (transmitted.size() != 2)
+        FAIL("both pending frames should retransmit after the hold expires, got " +
+             std::to_string(transmitted.size()));
+
+    auto stats = tx.getStats();
+    if (stats.timeouts != 2 || stats.retransmissions_timeout != 2)
+        FAIL("expected exactly the two post-hold timeout retransmissions");
+
+    PASS();
+    return true;
+}
+
 bool test_max_retries_failure() {
     TEST("Max retries triggers failure");
 
@@ -1903,6 +2003,8 @@ int main() {
     test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack();
     test_timeout_repair_retransmits_only_missing_slot_and_resets_timer();
     test_timeout_window_retransmits_as_one_batch_when_callback_present();
+    test_ack_progress_accessor_counts_and_dedups();
+    test_defer_pending_retransmits_gates_slot_rto();
 
     std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();

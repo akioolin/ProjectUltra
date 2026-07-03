@@ -58,8 +58,11 @@ inline void wireModemToProtocol(ModemEngine& modem,
             if (use_quality) {
                 protocol.setChannelQuality(snr_db, fading, snr_source, snr_data_aided);
                 // Doppler coherence (Good/Moderate discriminator) — refines the channel
-                // classification once enough OFDM data has pooled (see design doc).
+                // classification once enough OFDM data has pooled (see design doc). The
+                // approximate dopplerHz readout rides the same feed (retx trough-pacing
+                // deferral only — docs/RETX_PACING_DESIGN_2026_07_03.md).
                 protocol.setChannelCoherence(modem.getDopplerCoherenceScore(),
+                                             modem.getDopplerCoherenceDopplerHz(),
                                              modem.getDopplerCoherenceValid());
             }
             protocol.onRxData(data);

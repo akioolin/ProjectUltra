@@ -436,7 +436,7 @@ public:
     // valid only after enough OFDM data has pooled (~8 frames). Consumed via
     // connection_policy::coherenceAdjustedFadingIndex in the rate-decision handlers.
     // See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
-    void setChannelCoherence(float coherence_score, bool valid) {
+    void setChannelCoherence(float coherence_score, float doppler_hz, bool valid) {
         // BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE fix (2026-07-02): while CONNECTED, a valid
         // Good/Moderate verdict is CARRIED at the Connection layer across any modem-layer
         // rebuild (MODE_CHANGE waveform recreation, full re-anchor, RX drains). The estimator
@@ -446,13 +446,23 @@ public:
         // ~30 s re-pooling window. Cleared at the connection boundary (enterConnected /
         // reset), so a stale verdict never leaks across connections or into the CONNECT-time
         // pick (which stays byte-identical: coherence is always invalid at CONNECT).
+        //
+        // doppler_hz (§RETX-PACING plumb, 2026-07-03) rides the same feed with the same
+        // hold-last-valid semantics. It is the estimator's SECONDARY/approximate RMS-Doppler
+        // readout (fixed nominal cadence, doppler_coherence_estimator.hpp) — consumed ONLY
+        // by the order-of-magnitude retx trough-pacing deferral (clamp-bounded), never by a
+        // decode decision. 0 = "not estimable" (the policy falls back to the fading-index-
+        // derived ITU-R design Doppler).
         if (!valid && coherence_valid_ && state_ == ConnectionState::CONNECTED) {
             return;
         }
         coherence_score_ = coherence_score;
+        coherence_doppler_hz_ =
+            (std::isfinite(doppler_hz) && doppler_hz > 0.0f) ? doppler_hz : 0.0f;
         coherence_valid_ = valid;
     }
     float getCoherenceScore() const { return coherence_score_; }
+    float getCoherenceDopplerHz() const { return coherence_doppler_hz_; }
     bool coherenceValid() const { return coherence_valid_; }
 
     // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET) receiver side: per-burst RX level
@@ -535,6 +545,9 @@ private:
     bool measured_snr_valid_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
     float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading
+    float coherence_doppler_hz_ = 0.0f;  // measured RMS Doppler (Hz) riding the coherence feed;
+                                         // 0 = not estimable (retx trough pacing falls back to
+                                         // the fading-index-derived design Doppler)
     bool coherence_valid_ = false;   // true once enough OFDM data pooled for a trusted verdict
 
     // MODE_CHANGE timeout/retry tracking
@@ -548,7 +561,11 @@ private:
     float pending_snr_db_ = 15.0f;
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
-    static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
+    // 4 retries at the ratiometric ~5 s control-exchange timer (2026-07-03) has the
+    // same worst-case dead time as ONE retry at the old borrowed ~18.5 s burst
+    // deadline, while surviving 4x the ACK losses (rig W-runs lose 1-3 control ACKs
+    // per fade saga at calibrated levels).
+    static constexpr int MODE_CHANGE_MAX_RETRIES = 4;
     struct ModeChangeAckRepeatJob {
         Bytes frame_data;
         uint16_t seq = 0;
@@ -667,6 +684,47 @@ private:
     // Polled from tick(): a frame stuck at a too-aggressive rate (the fade troughs keep killing it,
     // so it produces no group ACK and the clean-boundary gate can't help) escape-drops one rung.
     void maybeEscapeStuckFrame();
+    // ── Retx trough pacing + collapse-conditioned escape ──────────────────────────────
+    // docs/RETX_PACING_DESIGN_2026_07_03.md. Both default-OFF (ULTRA_RETX_TROUGH_PACING /
+    // ULTRA_COLLAPSE_ESCAPE_ROUNDS) ⇒ byte-identical unset: no hold is ever armed, no ARQ
+    // timer touched, no escape fired; only the inert round counter ticks.
+    //
+    // Shared escape ACTION (§2.2 — refactored out of maybeEscapeStuckFrame, reuse not fork):
+    // QAM16 (either rate) drops STRAIGHT to QPSK R3/4 + noteQam16Demoted(2); otherwise one
+    // code-rate rung + noteRungFailed. Guards (mode_change_pending_, floor, in-flight) are
+    // the CALLER's responsibility — both callers keep first refusal.
+    void executeEscapeDrop(const char* trigger);
+    // Polled from tick() beside maybeEscapeStuckFrame (never fired from inside an ARQ
+    // callback): ≥ N consecutive zero-progress rounds with ≥⌈burst_cap/2⌉ frames in flight
+    // ⇒ the WINDOW is collapsing (the g43/rig frozen-base signature) ⇒ escape the rung.
+    // g42-protective by construction: any delivered/SACKed frame resets the round counter,
+    // so a lone straggler retrying amid deliveries can never trip it (§2.3).
+    void maybeCollapseEscape();
+    // §1.3 scope gate: CONNECTED wideband OFDM (OFDM_CHIRP only — MC-DPSK/OFDM_NARROW are
+    // explicitly out of scope, §6.2) on the unified tone-burst path, file SENDING with
+    // in-flight bytes.
+    bool retxPacingScopeActive() const;
+    // §1.1 round accounting: progress_frames = the ARQ's lastAckProgressFrames() at a round
+    // boundary (>0 progress ⇒ reset streak + early-release any hold; 0 ⇒ zero-progress round
+    // ⇒ count it and, knob-gated, arm the §1.2 deferral on BOTH triggers; <0 ⇒ no fresh ack
+    // (dup/stale) ⇒ not a round).
+    void noteArqRoundOutcome(int progress_frames, const char* origin);
+    // Record the modeled end-of-key-down time of an OFDM data burst (flush time + derived
+    // burst airtime) — the reference for T_defer's t_since_last_tx_end subtraction (§1.2).
+    // Recording is unconditional and behavior-free; all decisions stay knob-gated. Wall
+    // clock is correct here: the faithful gate and the rig both run wall==sample time.
+    void noteDataBurstKeydown(size_t frame_count);
+    uint32_t elapsedSinceLastDataBurstEndMs() const;
+    // Consecutive zero-progress resend rounds at the current rung (§1.1); reset on ANY
+    // progress, on mode change (applyDataMode — a new era), enterConnected and reset().
+    int zero_progress_rounds_ = 0;
+    // Active trough-pacing hold (sender-local, ticks down in the CONNECTED tick BEFORE
+    // runDeferredArqRefill; gates the turn refill — trigger #1. The slot-RTO trigger #2 is
+    // gated by SelectiveRepeatARQ::deferPendingRetransmits armed alongside this).
+    uint32_t retx_pace_hold_ms_ = 0;
+    // Modeled end time of the last OFDM data-burst key-down (see noteDataBurstKeydown).
+    std::chrono::steady_clock::time_point last_data_burst_end_{};
+    bool last_data_burst_end_valid_ = false;
     bool adaptive_rate_enabled_ = true;  // default ON: drives the GUI "Adapt:" observability bar +
                                          // decode-headroom quality feedback. The actual rate CHANGE
                                          // is gated by rateAdaptationActive() (default-ON for
