@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ultra/types.hpp"
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <string>
@@ -185,6 +186,20 @@ private:
     uint32_t chunks_sent_ = 0;      // Chunks queued to ARQ (for window tracking)
     uint32_t chunks_acked_ = 0;     // Chunks confirmed by ARQ
 
+    // Send-order ledger of chunks handed to the ARQ and not yet retired.
+    // ARQ retirement (onChunkAcked) happens strictly in send order (TX-base
+    // advance), so front() is always the oldest un-retired chunk and
+    // requeuePendingChunks() can resume exactly at front().offset. chunk_size_
+    // changes on every mid-stream rate/mod move, so the acked-chunk history is
+    // heterogeneous — any count*chunk_size_ reconstruction of the resume offset
+    // is wrong once the size has ever changed (it skipped 10 KB forward on the
+    // Moderate@20 ladder cell).
+    struct PendingTxChunk {
+        uint32_t offset = 0;
+        bool metadata = false;  // FILE_START / single block: requeue rebuilds from scratch
+    };
+    std::deque<PendingTxChunk> tx_pending_ledger_;
+
     // RX state
     std::string rx_dir_ = ".";
     std::string rx_filepath_;
@@ -221,6 +236,7 @@ private:
     Bytes buildSingleBlockPayload(size_t max_payload);
     bool processFileStart(const Bytes& payload);
     bool processFileData(const Bytes& payload, bool more_data);
+    void drainPendingChunks();  // overlap-aware: covered entries drop, straddlers tail-append
     bool processFileBlock(const Bytes& payload);
     void checkAndFinalizeReceive();  // CRC-check + write + callback once data is complete
     uint32_t calculateCRC32(std::istream& stream);
