@@ -70,26 +70,26 @@ inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 // Hard cap on the in-flight OFDM ARQ window when the interactive tone-burst ack is the
-// ack mechanism: the tone-burst carries an 8-bit per-frame SACK `frame_mask` (0xFF,
-// connection.cpp), so it can selectively acknowledge at most 8 in-flight frames.
-// A window > 8 leaves frames 9+ outside the mask — un-ackable, hence falsely "lost" and
-// resent forever. The wide/high-throughput windows above are therefore capped to this on
-// the unified tone-burst path (an N-frame message streams as ≤8-frame windows). SINGLE
-// source of truth for the 8 — code (configureArqForCurrentDataMode) and tests reference it.
-// 2026-06-17: widened 6->8 (with the tone-burst frame_mask 6->8) so a THIN-frame burst
-// (cw5: ~0.79s/frame) is no longer window-bound at 6 frames/~6.2s — it can carry 8 frames
-// and fill the ~8.6s PA-duty airtime budget, reclaiming the wasted ~2.4s/burst of duty.
-// (cw8 bursts stay airtime-bound at 5 frames, so R2/3 is unaffected.) WIRE-BREAKING:
+// ack mechanism: the cap exists because the tone-burst per-frame SACK `frame_mask` must
+// cover the whole in-flight window — a window wider than the mask leaves the trailing
+// frames outside it, un-ackable, hence falsely "lost" and resent forever. The wide/
+// high-throughput windows above are therefore capped to this on the unified tone-burst
+// path (an N-frame message streams as ≤cap-frame windows). SINGLE source of truth —
+// code (configureArqForCurrentDataMode) and tests reference it.
+// History: 2026-06-17 widened 6->8 (thin-frame cw5 bursts fill the ~8.6s PA-duty budget);
+// 2026-07-02 widened 8->16 with the tone-burst frame_mask 8->16 (wide coherent ARQ window
+// lever) — the cap now matches the 16-bit wire mask, so the high-throughput window (16)
+// and the env-gated coherent override below are fully SACK-addressable. WIRE-BREAKING:
 // both stations must run the same build (no version field on the tone-burst payload).
-inline constexpr size_t kToneBurstAckWindowCapFrames = 8;
+inline constexpr size_t kToneBurstAckWindowCapFrames = 16;
 // Burst group size for the INTERLEAVE-ON (Moderate/Poor) path's whole-group ACK and the
-// partial-burst padding. The SACK frame_mask is now 8 bits (2026-06-17), so the ceiling
-// is 8; this default stays 6 deliberately — the interleave-ON group size is a fade-
-// diversity-vs-loss tradeoff that has NOT been re-swept at 8, and the measured Good-path
-// win comes entirely from the WINDOW cap above (kToneBurstAckWindowCapFrames), not from
-// this. (The Good interleave-OFF SR burst sizes itself by airtime/window — it does not use
-// this constant.) 6 <= the 8-bit mask, so every group frame is still addressable. A group
-// larger than the mask width leaves trailing frames un-ACKable; keep it <= 8.
+// partial-burst padding. The SACK frame_mask is now 16 bits (2026-07-02; 8 on 2026-06-17),
+// so the ceiling is 16; this default stays 6 deliberately — the interleave-ON group size
+// is a fade-diversity-vs-loss tradeoff that has NOT been re-swept wider, and the measured
+// Good-path win comes entirely from the WINDOW cap above (kToneBurstAckWindowCapFrames),
+// not from this. (The Good interleave-OFF SR burst sizes itself by airtime/window — it does
+// not use this constant.) 6 <= the 16-bit mask, so every group frame is still addressable.
+// A group larger than the mask width leaves trailing frames un-ACKable; keep it <= 16.
 // Overridable for the interleave-ON path via ULTRA_BURST_GROUP_FRAMES (clamped [2,32]).
 inline constexpr size_t kBurstInterleaveGroupFrames = 6;
 
@@ -617,7 +617,46 @@ inline bool isBurstInterleavedOFDMMode(Modulation mod, CodeRate rate) {
     return isSpeculativeHighRateOFDM(mod, rate);
 }
 
+// Wide coherent ARQ window (ULTRA_COHERENT_WINDOW, 2026-07-02; DEFAULT-ON 16 since
+// 2026-07-03). The coherent mods (QPSK/8PSK/16QAM) historically ran the default window
+// (kWideOFDMWindowFrames=8) — the high-throughput window=16 predicate was
+// differential-only (isHighThroughputOFDMMode), a fossil of the retired
+// differential-OFDM wideband. With the tone-burst SACK frame_mask widened to 16 bits, a
+// coherent >=R2/3 burst carries up to 16 selectively-ackable frames per key-down (fewer
+// half-duplex turnarounds per delivered byte). A/B evidence (2026-07-03, 50KB faithful
+// gate, all CRC-clean): Good@20 s42 1940->2280, s43 1210->1900, s7 1310->1650
+// (mean +31%), AWGN@20 3370->3520 (record) — 4/4 cells up, so the override is now the
+// DEFAULT. Env: unset -> 16; 8 restores the legacy window; 0 disables (legacy 8 via
+// fall-through); clamp [0,16]. Read once (static). NOTE: the burst airtime budget
+// (connection.cpp burstAirtimeBudgetFrames) still mins the real burst size against the
+// PA-duty airtime ceiling; this widens the ARQ window, not the duty cycle.
+inline int coherentOFDMWindowOverride() {
+    static const int v = [] {
+        if (const char* e = std::getenv("ULTRA_COHERENT_WINDOW")) {
+            return std::clamp(std::atoi(e), 0,
+                              static_cast<int>(kToneBurstAckWindowCapFrames));
+        }
+        return 16;
+    }();
+    return v;
+}
+
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm) {
+    // Coherent wide-window override (A/B, default-off). Coherent mods only — the
+    // differential DQPSK/D8PSK path keeps its own high-throughput predicate below —
+    // and only at rate >= R2/3 (the rungs the ladder gates to clean channels; the
+    // robust low rates keep the conservative window). With the env unset this block
+    // is a no-op and the selection is byte-identical to the pre-knob behavior.
+    const int coherent_override = coherentOFDMWindowOverride();
+    if (coherent_override > 0 && ofdm_link_adaptation::isCoherentModulation(mod)) {
+        const auto* descriptor = ofdmCodeRateDescriptor(rate);
+        const auto* floor = ofdmCodeRateDescriptor(CodeRate::R2_3);
+        if (descriptor != nullptr && floor != nullptr &&
+            descriptor->code_rate >= floor->code_rate) {
+            return static_cast<size_t>(coherent_override);
+        }
+    }
+
     if (!isHighThroughputOFDMMode(mod, rate)) {
         return kWideOFDMWindowFrames;
     }

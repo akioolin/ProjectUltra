@@ -2,6 +2,7 @@
 #include "protocol/selective_repeat_arq_policy.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 using namespace ultra;
@@ -402,8 +403,8 @@ void test_ofdm_profile_selection() {
           "non-speculative DQPSK R1/2 should keep existing burst-interleave behavior");
     CHECK(!isBurstInterleavedOFDMMode(Modulation::QPSK, CodeRate::R2_3),
           "non-QAM16 coherent modes should not inherit the QAM16 burst-interleave gate");
-    // Burst interleave-ON group size stays 6 (<= the 8-bit SACK frame_mask ceiling; the
-    // interleave-ON group is a fade-diversity tradeoff, not re-swept at 8 — see connection_policy).
+    // Burst interleave-ON group size stays 6 (<= the 16-bit SACK frame_mask ceiling; the
+    // interleave-ON group is a fade-diversity tradeoff, not re-swept wider — see connection_policy).
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 1),
           "single high-rate fading frame should not be padded");
     CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 2),
@@ -835,9 +836,38 @@ void test_connect_selection_saturation_bound() {
           "AWGN selection is the raw reading (training)");
 }
 
+void test_coherent_window_override_disabled_keeps_default() {
+    // ULTRA_COHERENT_WINDOW is pinned to "0" in main() BEFORE any policy call — the
+    // knob is latched once (static). Baseline contract: with the override disabled,
+    // window selection is byte-identical to the pre-knob behavior — coherent rungs
+    // (QPSK/8PSK/16QAM, all rates) keep the default wide window (8).
+    CHECK(coherentOFDMWindowOverride() == 0,
+          "ULTRA_COHERENT_WINDOW=0 must read as disabled");
+    CHECK(ofdmWindowSizeForChannel(Modulation::QAM16, CodeRate::R2_3, 0.30f, 20.0f)
+              == kWideOFDMWindowFrames,
+          "QAM16 R2/3 keeps the default window 8 with the coherent override disabled");
+    CHECK(ofdmWindowSize(Modulation::QAM16, CodeRate::R2_3) == kWideOFDMWindowFrames,
+          "QAM16 R2/3 (legacy helper) keeps window 8 with the coherent override disabled");
+    CHECK(ofdmWindowSizeForChannel(Modulation::QPSK, CodeRate::R3_4, 0.30f, 20.0f)
+              == kWideOFDMWindowFrames,
+          "QPSK R3/4 keeps the default window 8 with the coherent override disabled");
+    CHECK(ofdmWindowSizeForChannel(Modulation::QAM8, CodeRate::R2_3, 0.30f, 20.0f)
+              == kWideOFDMWindowFrames,
+          "8PSK R2/3 keeps the default window 8 with the coherent override disabled");
+    // The differential high-throughput predicate is independent of the knob.
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2) == kHighThroughputOFDMWindowFrames,
+          "DQPSK R1/2 high-throughput window is unaffected by the coherent override knob");
+}
+
 }  // namespace
 
 int main() {
+    // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
+    // function-local static on the first policy call — pin it to the disabled
+    // baseline BEFORE any test runs so this binary deterministically tests the
+    // default (byte-identical) window-selection path.
+    setenv("ULTRA_COHERENT_WINDOW", "0", 1);
+
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
     test_wide_ofdm_timing_and_timeout();
@@ -851,6 +881,7 @@ int main() {
     test_warm_short_anchor_descriptor_gate();
     test_unified_burst_ack_timeout();
     test_connect_selection_saturation_bound();
+    test_coherent_window_override_disabled_keeps_default();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

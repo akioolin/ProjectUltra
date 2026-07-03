@@ -635,7 +635,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
             // §15.5 staircase: scale the ACK symbol duration to the latest in-band
             // SNR — a shorter ACK at high SNR cuts the per-turnaround airtime
-            // (675 ms -> 324 ms at >=18 dB); a longer ACK at low SNR adds
+            // (850 ms -> 408 ms at >=18 dB); a longer ACK at low SNR adds
             // matched-filter integration so it isn't missed (a missed ACK costs a
             // full retransmit). Read the LOCK-FREE cached SNR (written off the
             // modem RX path); NEVER call protocol_ here — this callback runs while

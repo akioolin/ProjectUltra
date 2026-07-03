@@ -27,11 +27,13 @@ struct ToneBurstAckPayload {
     // group_seq: 6-bit (mod-64) burst-group sequence number being ACK'd.
     uint8_t group_seq = 0;
 
-    // frame_mask: 8 bits (widened 6->8 2026-06-17), one per frame in the group.
+    // frame_mask: 16 bits (widened 6->8 2026-06-17, 8->16 2026-07-02 for the wide
+    // coherent ARQ window — WIRE-BREAKING, both stations must run the same build),
+    // one per frame in the group.
     //   bit i = 1 -> frame i delivered OK
     //   bit i = 0 -> frame i FAILED (sender should resend just this frame)
     // For a NACK, mask is the "still missing" mask (sender resends each 0 bit).
-    uint8_t frame_mask = 0;
+    uint16_t frame_mask = 0;
 
     // rate_hint: 3-bit RateController feedback (§14.43).
     // Encoding: 0=R1/4, 1=R1/3, 2=R1/2, 3=R2/3, 4=R3/4, 5=R5/6, 6=unused, 7=hold.
@@ -57,30 +59,33 @@ struct ToneBurstAckPayload {
 //
 // Layout (LSB first within each field, fields in ascending bit-order):
 //   bits  0..5   group_seq
-//   bits  6..13  frame_mask  (8 bits, widened from 6 on 2026-06-17)
-//   bits 14..16  rate_hint
-//   bit  17      type (0=ACK, 1=NACK)
-//   bits 18..29  crc12
-//   bits 30..31  drive_advisory (software-ALC; formerly reserved, 2026-07-02)
+//   bits  6..21  frame_mask  (16 bits; widened 6->8 2026-06-17, 8->16 2026-07-02)
+//   bits 22..24  rate_hint
+//   bit  25      type (0=ACK, 1=NACK)
+//   bits 26..37  crc12
+//   bits 38..39  drive_advisory (software-ALC; formerly reserved, 2026-07-02)
 //
-// The CRC is computed over a 20-bit message: the 18 "useful" bits (bits 0..17)
+// The CRC is computed over a 28-bit message: the 26 "useful" bits (bits 0..25)
 // with the 2 drive-advisory bits appended above them, using CRC-12-CCITT
-// (poly 0x80F, init 0xFFF). WIRE-BREAKING vs pre-2026-07-02 builds (the CRC
-// value changes even for advisory=0). All offsets/widths come from
-// tone_burst_constants.hpp (kBitOffset*/kPayload*Bits) — this comment is
-// descriptive; the code reads the constants.
+// (poly 0x80F, init 0xFFF). WIRE-BREAKING vs pre-2026-07-02 builds: (a) the
+// advisory joined the CRC coverage; (b) the frame_mask widen 8->16 shifted
+// every field above it and grew the payload 32->40 bits (now carried in a
+// uint64_t). All offsets/widths come from tone_burst_constants.hpp
+// (kBitOffset*/kPayload*Bits) — this comment is descriptive; the code reads
+// the constants.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on
-// air. CRC-12 still catches all 1-3 bit bursts and >99.97% of random errors
-// for our 18-bit message — overkill for ACK semantics.
+// air. CRC-12 still catches all 1-3 bit bursts and >99.9% of random errors
+// for our 26-bit message — overkill for ACK semantics.
 
-// Pack 32 raw payload bits (excluding Hamming) into a uint32_t (LSB-first).
-uint32_t packPayload(const ToneBurstAckPayload& p);
+// Pack the kPayloadBits (40) raw payload bits (excluding Hamming) into a
+// uint64_t (LSB-first).
+uint64_t packPayload(const ToneBurstAckPayload& p);
 
-// Unpack a raw 32-bit payload back to fields. Does NOT validate the CRC;
+// Unpack a raw 40-bit payload back to fields. Does NOT validate the CRC;
 // use verifyPayloadCRC() for that.
-ToneBurstAckPayload unpackPayload(uint32_t raw);
+ToneBurstAckPayload unpackPayload(uint64_t raw);
 
 // CRC-12-CCITT (poly 0x80F, init 0xFFF, refin/refout false, xorout 0).
 // Computed over `bits` lowest-order bits of `value` (MSB-first into the
@@ -89,7 +94,7 @@ uint16_t crc12(uint32_t value, uint32_t bits);
 
 // Verify the embedded CRC against the rest of the payload. Returns true if
 // the CRC matches.
-bool verifyPayloadCRC(uint32_t raw);
+bool verifyPayloadCRC(uint64_t raw);
 
 // ============================================================================
 // (15, 11) Hamming codec

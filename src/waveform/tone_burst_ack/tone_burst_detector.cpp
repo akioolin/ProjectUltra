@@ -103,7 +103,7 @@ DecodeAlignedResult ToneBurstDetector::decodeAligned(SampleSpan samples,
         return result;
     }
 
-    // Skip Costas; demap the 23 payload symbols.
+    // Skip Costas; demap the kPayloadSymbols (30) payload symbols.
     std::vector<uint8_t> dibits;
     dibits.reserve(kPayloadSymbols);
     result.per_symbol_confidence.reserve(kPayloadSymbols);

@@ -13,16 +13,19 @@ namespace tone_burst_ack {
 namespace {
 
 // Extract `bits` bits starting at position `offset` (LSB-first) from `value`.
-inline uint32_t getBits(uint32_t value, uint32_t offset, uint32_t bits) {
-    const uint32_t mask = (bits >= 32) ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+// 64-bit since the 2026-07-02 frame_mask widen grew the packed payload to
+// 40 bits (kPayloadBits) — a uint32_t container would silently drop the CRC
+// top bits and the drive advisory.
+inline uint64_t getBits(uint64_t value, uint32_t offset, uint32_t bits) {
+    const uint64_t mask = (bits >= 64) ? ~0ull : ((1ull << bits) - 1ull);
     return (value >> offset) & mask;
 }
 
 // Insert `bits` bits of `field` starting at position `offset` (LSB-first)
 // into `value` (sets, does not clear other bits — caller must ensure target
 // bits are 0).
-inline uint32_t putBits(uint32_t value, uint32_t offset, uint32_t bits, uint32_t field) {
-    const uint32_t mask = (bits >= 32) ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+inline uint64_t putBits(uint64_t value, uint32_t offset, uint32_t bits, uint64_t field) {
+    const uint64_t mask = (bits >= 64) ? ~0ull : ((1ull << bits) - 1ull);
     return value | ((field & mask) << offset);
 }
 
@@ -34,7 +37,11 @@ inline uint32_t putBits(uint32_t value, uint32_t offset, uint32_t bits, uint32_t
 
 bool ToneBurstAckPayload::clampToWireWidths() {
     const uint8_t group_seq_max = (1u << kPayloadGroupSeqBits) - 1u;
-    const uint8_t frame_mask_max = (1u << kPayloadFrameMaskBits) - 1u;
+    // frame_mask is 16 wire bits (2026-07-02) — the max must be computed in a
+    // 16-bit-capable type (a uint8_t here would truncate to 0xFF and clamp
+    // away the widened high byte).
+    const uint16_t frame_mask_max =
+        static_cast<uint16_t>((1u << kPayloadFrameMaskBits) - 1u);
     const uint8_t rate_hint_max = (1u << kPayloadRateHintBits) - 1u;
     const uint8_t drive_advisory_max = (1u << kPayloadDriveAdvisoryBits) - 1u;
 
@@ -51,13 +58,15 @@ bool ToneBurstAckPayload::clampToWireWidths() {
 
 namespace {
 
-// Assemble the 20-bit CRC message: 18 useful bits (0..17) + the 2 drive-advisory
-// bits appended as message bits 18..19. The advisory rides ABOVE the CRC field on
-// the wire (bits 30..31), so the message is built explicitly rather than masked.
-inline uint32_t crcMessage(uint32_t raw) {
-    const uint32_t useful = raw & ((1u << kPayloadUsefulBits) - 1u);
-    const uint32_t advisory =
-        getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits);
+// Assemble the 28-bit CRC message: 26 useful bits (0..25) + the 2 drive-advisory
+// bits appended as message bits 26..27. The advisory rides ABOVE the CRC field on
+// the wire (bits 38..39), so the message is built explicitly rather than masked.
+// Fits a uint32_t (kPayloadCrcMessageBits = 28), matching crc12()'s input width.
+inline uint32_t crcMessage(uint64_t raw) {
+    const uint32_t useful =
+        static_cast<uint32_t>(raw & ((1ull << kPayloadUsefulBits) - 1ull));
+    const uint32_t advisory = static_cast<uint32_t>(
+        getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits));
     return useful | (advisory << kPayloadUsefulBits);
 }
 
@@ -67,16 +76,16 @@ inline uint32_t crcMessage(uint32_t raw) {
 // Pack / unpack
 // ============================================================================
 
-uint32_t packPayload(const ToneBurstAckPayload& p) {
+uint64_t packPayload(const ToneBurstAckPayload& p) {
     ToneBurstAckPayload sanitized = p;
     sanitized.clampToWireWidths();
 
-    uint32_t raw = 0;
+    uint64_t raw = 0;
     raw = putBits(raw, kBitOffsetGroupSeq, kPayloadGroupSeqBits, sanitized.group_seq);
     raw = putBits(raw, kBitOffsetFrameMask, kPayloadFrameMaskBits, sanitized.frame_mask);
     raw = putBits(raw, kBitOffsetRateHint, kPayloadRateHintBits, sanitized.rate_hint);
     raw = putBits(raw, kBitOffsetType, kPayloadTypeBits,
-                  static_cast<uint32_t>(sanitized.type));
+                  static_cast<uint64_t>(sanitized.type));
     raw = putBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits,
                   sanitized.drive_advisory);
 
@@ -85,10 +94,10 @@ uint32_t packPayload(const ToneBurstAckPayload& p) {
     return raw;
 }
 
-ToneBurstAckPayload unpackPayload(uint32_t raw) {
+ToneBurstAckPayload unpackPayload(uint64_t raw) {
     ToneBurstAckPayload p;
     p.group_seq = static_cast<uint8_t>(getBits(raw, kBitOffsetGroupSeq, kPayloadGroupSeqBits));
-    p.frame_mask = static_cast<uint8_t>(getBits(raw, kBitOffsetFrameMask, kPayloadFrameMaskBits));
+    p.frame_mask = static_cast<uint16_t>(getBits(raw, kBitOffsetFrameMask, kPayloadFrameMaskBits));
     p.rate_hint = static_cast<uint8_t>(getBits(raw, kBitOffsetRateHint, kPayloadRateHintBits));
     p.type = static_cast<AckType>(getBits(raw, kBitOffsetType, kPayloadTypeBits));
     p.drive_advisory = static_cast<uint8_t>(
@@ -120,7 +129,7 @@ uint16_t crc12(uint32_t value, uint32_t bits) {
     return static_cast<uint16_t>(crc & kCrcMask);
 }
 
-bool verifyPayloadCRC(uint32_t raw) {
+bool verifyPayloadCRC(uint64_t raw) {
     const uint16_t expected = crc12(crcMessage(raw), kPayloadCrcMessageBits);
     const uint16_t observed = static_cast<uint16_t>(getBits(raw, kBitOffsetCRC, kPayloadCRCBits));
     return expected == observed;
@@ -219,36 +228,40 @@ uint16_t hammingDecode15_11(uint16_t coded_bits, int& corrected_errors) {
 
 namespace {
 
-// Split a 33-bit (one zero-pad) info stream into 3 blocks of 11 bits each.
-std::array<uint16_t, kHammingNumBlocks> splitToHammingBlocks(uint64_t info_33) {
+// Split a kHammingInfoBitsTotal-bit (zero-padded above kPayloadBits) info
+// stream into kHammingNumBlocks blocks of 11 bits each (4 blocks / 44 bits
+// since the 2026-07-02 40-bit payload; was 3 / 33).
+std::array<uint16_t, kHammingNumBlocks> splitToHammingBlocks(uint64_t info) {
     std::array<uint16_t, kHammingNumBlocks> blocks{};
     for (uint32_t b = 0; b < kHammingNumBlocks; ++b) {
         blocks[b] = static_cast<uint16_t>(
-            (info_33 >> (b * kHammingInfoBitsPerBlock)) &
+            (info >> (b * kHammingInfoBitsPerBlock)) &
             ((1u << kHammingInfoBitsPerBlock) - 1u));
     }
     return blocks;
 }
 
-// Merge 3 11-bit blocks back to a 33-bit value (drop the top pad bit).
+// Merge the 11-bit blocks back to a kHammingInfoBitsTotal-bit value (the top
+// pad bits above kPayloadBits are dropped by the caller's payload mask).
 uint64_t mergeFromHammingBlocks(const std::array<uint16_t, kHammingNumBlocks>& blocks) {
-    uint64_t info_33 = 0;
+    uint64_t info = 0;
     for (uint32_t b = 0; b < kHammingNumBlocks; ++b) {
-        info_33 |= (static_cast<uint64_t>(blocks[b] &
+        info |= (static_cast<uint64_t>(blocks[b] &
                     ((1u << kHammingInfoBitsPerBlock) - 1u))
                     << (b * kHammingInfoBitsPerBlock));
     }
-    return info_33;
+    return info;
 }
 
-// Convert a stream of 45 coded bits to 23 dibits (4-FSK symbols, 2 bits each).
-// Last dibit's high bit is zero-padded (45 bits -> 23 dibits = 46 bit-slots).
-std::vector<uint8_t> codedBitsToDibits(uint64_t coded_45) {
+// Convert the kHammingCodedBitsTotal (60) coded bits to kPayloadSymbols (30)
+// dibits (4-FSK symbols, 2 bits each). 60 bits fill 30 dibits exactly; if the
+// totals ever leave a remainder again, the last dibit's high bits are zero.
+std::vector<uint8_t> codedBitsToDibits(uint64_t coded) {
     std::vector<uint8_t> dibits;
     dibits.reserve(kPayloadSymbols);
     for (uint32_t s = 0; s < kPayloadSymbols; ++s) {
         const uint32_t shift = s * kBitsPerSymbol;
-        const uint8_t dibit = static_cast<uint8_t>((coded_45 >> shift) & 0x3u);
+        const uint8_t dibit = static_cast<uint8_t>((coded >> shift) & 0x3u);
         dibits.push_back(dibit);
     }
     return dibits;
@@ -266,19 +279,19 @@ uint64_t dibitsToCodedBits(const std::vector<uint8_t>& dibits) {
 }  // namespace
 
 std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p) {
-    const uint32_t raw_32 = packPayload(p);
-    // Pad to 33 bits (top bit = 0) for clean 3-block split.
-    const uint64_t info_33 = static_cast<uint64_t>(raw_32);
+    // 40-bit raw payload; the bits above kPayloadBits up to
+    // kHammingInfoBitsTotal (44) are the zero pad for the clean 4-block split.
+    const uint64_t info = packPayload(p);
 
-    auto blocks = splitToHammingBlocks(info_33);
-    uint64_t coded_45 = 0;
+    auto blocks = splitToHammingBlocks(info);
+    uint64_t coded = 0;
     for (uint32_t b = 0; b < kHammingNumBlocks; ++b) {
-        const uint16_t coded = hammingEncode15_11(blocks[b]);
-        coded_45 |= (static_cast<uint64_t>(coded &
+        const uint16_t block_coded = hammingEncode15_11(blocks[b]);
+        coded |= (static_cast<uint64_t>(block_coded &
                      ((1u << kHammingCodedBitsPerBlock) - 1u))
                      << (b * kHammingCodedBitsPerBlock));
     }
-    return codedBitsToDibits(coded_45);
+    return codedBitsToDibits(coded);
 }
 
 std::optional<ToneBurstAckPayload> decodePayloadDibits(
@@ -290,26 +303,27 @@ std::optional<ToneBurstAckPayload> decodePayloadDibits(
         return std::nullopt;
     }
 
-    const uint64_t coded_45 = dibitsToCodedBits(dibits);
+    const uint64_t coded = dibitsToCodedBits(dibits);
 
     std::array<uint16_t, kHammingNumBlocks> info_blocks{};
     for (uint32_t b = 0; b < kHammingNumBlocks; ++b) {
-        const uint16_t coded = static_cast<uint16_t>(
-            (coded_45 >> (b * kHammingCodedBitsPerBlock)) &
+        const uint16_t block_coded = static_cast<uint16_t>(
+            (coded >> (b * kHammingCodedBitsPerBlock)) &
             ((1u << kHammingCodedBitsPerBlock) - 1u));
         int corrected = 0;
-        info_blocks[b] = hammingDecode15_11(coded, corrected);
+        info_blocks[b] = hammingDecode15_11(block_coded, corrected);
         if (corrected > 0) ++stats.hamming_corrected_blocks;
     }
 
-    const uint64_t info_33 = mergeFromHammingBlocks(info_blocks);
-    const uint32_t raw_32 = static_cast<uint32_t>(info_33 & 0xFFFFFFFFu);
+    const uint64_t info = mergeFromHammingBlocks(info_blocks);
+    // Drop the Hamming zero-pad above the 40 payload bits.
+    const uint64_t raw = info & ((1ull << kPayloadBits) - 1ull);
 
-    if (!verifyPayloadCRC(raw_32)) {
+    if (!verifyPayloadCRC(raw)) {
         return std::nullopt;
     }
     stats.crc_ok = true;
-    return unpackPayload(raw_32);
+    return unpackPayload(raw);
 }
 
 std::vector<uint8_t> buildOnAirDibits(const ToneBurstAckPayload& p) {

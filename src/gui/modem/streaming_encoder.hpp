@@ -120,7 +120,7 @@ public:
 
     // §15 step 4c: encode a tone-burst ACK (narrowband 4-FSK in the
     // 2400-2700 Hz subband). Replaces the 1500 ms OFDM 1-CW ACK with
-    // a 675 ms-baseline tone burst (≥10 dB lower SNR floor, ~5× faster
+    // an 850 ms-baseline tone burst (≥10 dB lower SNR floor, ~5× faster
     // at high SNR). Per §15.5 the symbol_ms picks a duration on the
     // SNR-adaptive staircase: 12 ms (≥18 dB SNR) through 200 ms
     // (< -5 dB SNR). The payload carries group_seq, per-frame mask,

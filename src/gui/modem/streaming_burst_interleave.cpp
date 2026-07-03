@@ -761,8 +761,10 @@ void StreamingDecoder::finalizeBurstGroup() {
     // §SR-ARQ (2026-05-29): per-frame SACK. bit i set = logical frame i decoded OK.
     // Meaningful as a true per-frame mask only when the group was NOT byte-interleaved
     // (interleave-off path): then each physical frame is one independent logical frame.
-    // For an interleaved group only all_ok matters (mask collapses to all-set / 0x00).
-    uint8_t frame_mask = 0;
+    // For an interleaved group only all_ok matters (mask collapses to all-set / 0x0000).
+    // 16 bits (2026-07-02) — width matches the tone-burst wire mask
+    // (tone_burst_ack::kPayloadFrameMaskBits) end-to-end.
+    uint16_t frame_mask = 0;
     // §14.36 Phase 5c: track the worst codeword's LDPC iteration count across the
     // whole group — the group needs ALL frames, so its decode headroom = the weakest
     // frame's. Mapped to a quality in [0,1] for the receiver's rate feedback.
@@ -824,7 +826,13 @@ void StreamingDecoder::finalizeBurstGroup() {
         }
         if (result.success) {
             ++logical_ok;
-            if (i < 8) frame_mask |= static_cast<uint8_t>(1u << i);
+            // Mask width = the tone-burst wire mask width (16 as of 2026-07-02);
+            // frames past it can't be selectively acked (window/group sizing keeps
+            // groups within it — see kToneBurstAckWindowCapFrames).
+            if (i < static_cast<int>(
+                        ultra::waveform::tone_burst_ack::kPayloadFrameMaskBits)) {
+                frame_mask |= static_cast<uint16_t>(1u << i);
+            }
         } else {
             ++logical_fail;
         }

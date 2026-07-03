@@ -156,8 +156,8 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     //   - armed_only=true: production mode (unit tests with always-on
     //     polling use the default config).
     //   - detect_interval_samples_armed = 4800 (~100 ms @ 48 kHz). At a
-    //     100 ms cadence, average detection latency = burst airtime (675
-    //     ms) + cadence wait (~50 ms avg) + processing (~30 ms) = ~755 ms.
+    //     100 ms cadence, average detection latency = burst airtime (850
+    //     ms baseline) + cadence wait (~50 ms avg) + processing (~30 ms).
     //     Compare to 1592 ms measured under the previous 1.5 s polling
     //     config — ~830 ms faster per ACK round-trip.
     //   - detect_interval_samples = 0 (background polling disabled).
@@ -180,13 +180,20 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
         // detector tries each in order and stops at the first CRC-passing decode,
         // so the common 25 ms case still resolves quickly.
         tba_cfg.symbol_durations_ms = {
-            ultra::waveform::tone_burst_ack::kSymbolMsHighSNR,   // 12 ms (324 ms ACK)
-            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms (675 ms baseline)
+            ultra::waveform::tone_burst_ack::kSymbolMsHighSNR,   // 12 ms (408 ms ACK)
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms (850 ms baseline)
             ultra::waveform::tone_burst_ack::kSymbolMsLowSNR,    // 50 ms
             ultra::waveform::tone_burst_ack::kSymbolMsMargSNR,   // 100 ms
         };
         tba_cfg.sweep_step_samples = 32;
-        tba_cfg.buffer_capacity_samples = 90000;  // ~1.9 s
+        // Buffer must hold one full burst + the armed detection cadence (4800) so
+        // the burst start is still buffered at the first pass after burst end.
+        // 34 symbols since the 2026-07-02 frame_mask widen (was 27): the 50 ms rung
+        // is 34×50×48 = 81,600 samples — the old 90,000 left only 3,600 samples of
+        // worst-case margin. 120,000 (~2.5 s) restores headroom. (The 100 ms rung,
+        // 163,200, never fit this production buffer even at 27 symbols — at <5 dB
+        // in-band the ARQ timeout backstops a missed ACK; pre-existing gap.)
+        tba_cfg.buffer_capacity_samples = 120000;  // ~2.5 s
         tone_burst_monitor_ =
             ultra::waveform::tone_burst_ack::ToneBurstAckMonitor(tba_cfg);
         // Install default log-only callback. Step 4d replaces.
@@ -194,7 +201,7 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
             [this](const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
                 LOG_MODEM(INFO,
                           "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
-                          "frame_mask=0x%02X rate_hint=%u drive_advisory=%u peak=%.1f "
+                          "frame_mask=0x%04X rate_hint=%u drive_advisory=%u peak=%.1f "
                           "symbol_ms=%u hamming_corrected=%d stream_offset=%llu",
                           log_prefix_.c_str(),
                           static_cast<unsigned>(d.payload.group_seq),

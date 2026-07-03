@@ -10,6 +10,78 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(arq): wide coherent ARQ window **DEFAULT-ON (16)** via tone-burst SACK frame_mask 8→16 bits (**WIRE-BREAKING — both stations must run this build**) + ULTRA_STUCK_ESCAPE_RETX A/B knob (default unchanged)
+
+**VALIDATED 2026-07-03 (overnight campaign):** ctest green (UltraTncSimAudio red =
+pre-existing BUG-HANDSHAKE-PING-FLOOR sim window); tone-burst payload/monitor/adaptive
+tests updated + passing. **A/B on the 50 KB faithful gate, strictly sequential, all
+CRC-clean: Good@20 s42 1940→2280 (+18%), s43 1210→1900 (+57%), s7 1310→1650 (+26%) — mean
++31% — and AWGN@20 3370→3520, a NEW RECORD.** 4/4 cells up ⇒ `ULTRA_COHERENT_WINDOW`
+default flipped 0→16 (env `=8` restores the legacy window, `=0` disables). Default-config
+sanity re-run: g42 PASS 1970 (within gate noise of the A/B cell, above baseline). ACK
+airtime cost of the widen: 27→34 symbols (+26%/ACK, e.g. fast rung 324→408 ms) — the
+turnaround savings dominate it in every measured cell.
+**ULTRA_STUCK_ESCAPE_RETX (default 5, unchanged):** A/B at 3 was seed-dependent — churn seed
+g43 1210→1530 (+26%) but g42 1940→1390 (−28%, fled QPSK R3/4 early and never re-climbed to
+16QAM) — a hair-trigger escape flees rungs a lucky retx would salvage. Kept as a knob; the
+principled fix for collapse eras is retx PACING (no blind re-blast into the same trough while
+the ACK base is frozen) + collapse-conditioned escape (zero-delivered-frames, not
+any-single-frame) — filed as the campaign's next lever.
+
+### (original lever entry, as-implemented 2026-07-02, follows)
+
+**What/why (lever, not a bug):** the coherent wideband OFDM rungs (QPSK/8PSK/16QAM) were
+window-capped at 8 in-flight frames because the tone-burst ACK's per-frame SACK `frame_mask`
+was 8 bits — the mask must cover the window. Widening the mask to 16 removes the ceiling so a
+coherent ≥R2/3 burst can carry up to 16 selectively-ackable frames per key-down (fewer
+half-duplex turnarounds per delivered byte). The window change itself is env-gated for A/B.
+
+**What changed:**
+1. **Wire (WIRE-BREAKING — both stations must run the same build; precedents 2026-06-17
+   6→8 widen, 2026-07-02 drive-advisory CRC change):** `tone_burst_constants.hpp`
+   `kPayloadFrameMaskBits` 8→16 → payload 32→**40 bits** (now carried in `uint64_t`),
+   offsets shift (rate_hint 22, type 25, CRC 26, drive_advisory 38), CRC message 20→**28
+   bits**, Hamming blocks 3→**4** (now DERIVED from `kPayloadBits`), burst 27→**34 symbols**
+   (baseline ACK 675→**850 ms**, fast rung 324→408 ms). `tone_burst_payload.{hpp,cpp}`:
+   `frame_mask` → `uint16_t`; `packPayload`/`unpackPayload`/`verifyPayloadCRC` → `uint64_t`
+   raw; `clampToWireWidths` mask max computed in a 16-bit-capable type; pack/unpack/FEC
+   pipeline reads the constants (no hardcoded 8/0xFF survived — verified by grep).
+2. **Mask chase (uint8_t→uint16_t end-to-end):** `streaming_burst_interleave.cpp` (mask
+   builder, `i < 8` → `i < kPayloadFrameMaskBits`), `streaming_decoder.hpp` +
+   `modem_engine.{hpp,cpp}` + `modem_protocol_binding.hpp` (BurstGroupCallback),
+   `protocol_engine.{hpp,cpp}` + `connection.{hpp,cpp}` (`onBurstGroupReceived`, SACK-emit
+   cast, popcount/bit-length locals). Tone-mask→ARQ-bitmap reconstruction
+   (`arq_.onToneBurstAck`) already takes uint32_t — all 16 bits now pass. Log format
+   `0x%02X`→`0x%04X` (3 sites).
+3. **Window cap:** `connection_policy.hpp` `kToneBurstAckWindowCapFrames` 8→**16** (cap =
+   mask width by construction); the `connection.cpp` clamp site reads the constant (verified,
+   no hardcoded 8).
+4. **`ULTRA_COHERENT_WINDOW` (default 0 = off, clamp [0,16], read once/static):**
+   `connection_policy.hpp` `coherentOFDMWindowOverride()` + hook at the top of
+   `ofdmWindowSize()` — fires only for `isCoherentModulation` AND rate ≥ R2/3; the
+   differential DQPSK/D8PSK high-throughput predicate is untouched. Knob unset →
+   **byte-identical** window selection (coherent stays 8). Burst airtime budget
+   (`burstAirtimeBudgetFrames`) deliberately untouched — the PA-duty ceiling still mins
+   the real burst size.
+5. **Consumer found beyond the design list:** the production tone-burst monitor buffer
+   (`streaming_decoder.cpp`) was 90 000 samples; the widened 50 ms-rung burst is 81 600 →
+   worst-case margin 3 600 samples. Raised to 120 000 (~2.5 s). (The 100 ms rung, 163 200,
+   never fit this buffer even at 27 symbols — pre-existing; the ARQ timeout backstops.)
+6. **Tests (edited, NOT run):** `test_tone_burst_ack_payload.cpp` (uint64 raw, `1ull`
+   flips past bit 31, 16-bit mask 0xABCD/0xFFFF round-trips, clamp-test rewrite),
+   `test_connection_adaptive.cpp` (R1/4 window expectation cap→`kWideOFDMWindowFrames`;
+   R1/2 = high-throughput 16, cap no longer binds), `test_connection_policy.cpp` (new
+   `test_coherent_window_override_disabled_keeps_default`, env pinned "0" in `main()`
+   before the once-latched static).
+
+**Verification:** NONE RUN (live RF bench — edits only, per operator instruction). Gate
+before any claim: `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4`,
+then `tools/gui_qso_scenario.sh` A/B with/without `ULTRA_COHERENT_WINDOW` (both stations
+rebuilt — wire-breaking). Expected side effect to watch: every ACK is +7 symbols (~+26%
+airtime at a given rung) — the A/B must beat that overhead.
+
+---
+
 ## 2026-07-02 (late) — fix(file): requeue offset ledger + receiver overlap merge (closes BUG-FILE-REQUEUE-OFFSET) · fix(snr): Moderate saturation bound, data-aided-conditioned — the ladder's 5-cell gate goes 5/5
 
 **What broke (two independent gate failures on the live-ladder branch):**

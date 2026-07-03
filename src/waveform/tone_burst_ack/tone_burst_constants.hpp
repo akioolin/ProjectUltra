@@ -6,8 +6,8 @@
 // Design constraints (all four perspectives):
 //
 // PHY theorist
-//   - 4-FSK gives 2 bits/symbol; 27-bit payload + (15,11) Hamming + 5-symbol
-//     Costas sync = ~19 symbols total = ~475 ms at 40 baud (25 ms/sym).
+//   - 4-FSK gives 2 bits/symbol; 40-bit payload + (15,11) Hamming + 4-symbol
+//     Costas sync = 34 symbols total = 850 ms at 40 baud (25 ms/sym).
 //   - Tones spaced 75 Hz apart in a 300 Hz subband. 75 Hz > Δf for orthogonal
 //     FSK at this baud (orthogonality threshold = 1/T_sym = 40 Hz).
 //   - Costas pattern at start (5 tones across the 4 frequencies in a
@@ -35,9 +35,9 @@
 // First principles
 //   - Processing gain for matched-filter detection on a known tone in a
 //     narrow subband: 10·log₁₀(2·T·BW) = 10·log₁₀(2·0.025·40) = +3 dB per
-//     symbol. Over 19 symbols → +16 dB cumulative integration. With 4-FSK
+//     symbol. Over 34 symbols → +18 dB cumulative integration. With 4-FSK
 //     discrimination (~2 dB extra cost over 2-FSK), net detection floor
-//     ~-2 dB in-band SNR for the 475 ms baseline duration. Longer
+//     ~-2 dB in-band SNR for the 850 ms baseline duration. Longer
 //     integration extends the floor lower (§15.5 staircase).
 
 #pragma once
@@ -113,11 +113,11 @@ inline constexpr float kFastAckEdgeAwgnDb = 18.0f;
 inline constexpr float kFastAckEdgeFadingDb = 16.0f;
 inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
     const float fast_edge = fading_present ? kFastAckEdgeFadingDb : kFastAckEdgeAwgnDb;
-    if (snr_db >= fast_edge) return kSymbolMsHighSNR;  // 12 ms -> 324 ms airtime
-    if (snr_db >= 12.0f) return kSymbolMsMidSNR;    // 25 ms -> 675 ms (baseline)
-    if (snr_db >= 5.0f)  return kSymbolMsLowSNR;    // 50 ms -> 1350 ms
-    if (snr_db >= -5.0f) return kSymbolMsMargSNR;   // 100 ms -> 2700 ms
-    return kSymbolMsWeakSNR;                         // 200 ms -> 5400 ms
+    if (snr_db >= fast_edge) return kSymbolMsHighSNR;  // 12 ms -> 408 ms airtime
+    if (snr_db >= 12.0f) return kSymbolMsMidSNR;    // 25 ms -> 850 ms (baseline)
+    if (snr_db >= 5.0f)  return kSymbolMsLowSNR;    // 50 ms -> 1700 ms
+    if (snr_db >= -5.0f) return kSymbolMsMargSNR;   // 100 ms -> 3400 ms
+    return kSymbolMsWeakSNR;                         // 200 ms -> 6800 ms
 }
 
 // ============================================================================
@@ -149,35 +149,37 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // Payload + FEC layout
 // ============================================================================
 //
-// Payload (packed into 32 bits):
+// Payload (packed into 40 bits):
 //   bits  0..5   group_seq (6 bits, mod-64 sequence number)
-//   bits  6..13  frame_mask (8 bits, 1 = frame OK, 0 = frame FAIL)  [widened 6->8 2026-06-17
-//                so a thin-frame cw5 burst can carry 8 frames and fill the PA-duty budget
-//                instead of stalling window-bound at 6 — see connection_policy kToneBurstAckWindowCapFrames]
-//   bits 14..16  rate_hint (3 bits, RateController feedback per §14.43)
-//   bit  17      type (0 = ACK, 1 = NACK; receiver always emits a burst)
-//   bits 18..29  crc12 (CRC-12 over the 18 useful bits AND the 2 drive-advisory bits;
-//                coverage widened 18->20 bits 2026-07-02, see below)
-//   bits 30..31  drive_advisory (software-ALC TX-drive feedback, formerly reserved:
+//   bits  6..21  frame_mask (16 bits, 1 = frame OK, 0 = frame FAIL)  [widened 6->8 2026-06-17,
+//                8->16 2026-07-02 so a coherent high-throughput window (16 frames) is fully
+//                SACK-addressable — see connection_policy kToneBurstAckWindowCapFrames]
+//   bits 22..24  rate_hint (3 bits, RateController feedback per §14.43)
+//   bit  25      type (0 = ACK, 1 = NACK; receiver always emits a burst)
+//   bits 26..37  crc12 (CRC-12 over the 26 useful bits AND the 2 drive-advisory bits
+//                = 28 message bits; see kPayloadCrcMessageBits below)
+//   bits 38..39  drive_advisory (software-ALC TX-drive feedback, formerly reserved:
 //                0 = hold, 1 = up (+0.5 dB), 2 = down (-2 dB), 3 = reserved/treat-as-hold.
 //                Receiver-derived from the per-burst RX level verdict — see
 //                BUG-QAM16-RIG-LEVEL-BUDGET / ULTRA_SOFTWARE_ALC.)
 //
-// WIRE-BREAKING (2026-06-17, again 2026-07-02): no version field on the tone-burst
+// WIRE-BREAKING (2026-06-17, 2026-07-02 twice): no version field on the tone-burst
 // payload — both stations MUST run the same build. 2026-06-17: the frame_mask widen
-// moved the CRC field. 2026-07-02: the drive-advisory bits were pulled INTO the CRC
-// coverage (18 -> 20 message bits), so even an advisory=0 payload's CRC differs from
-// pre-change builds. A mixed-version pair mis-parses every ACK -> CRC fail -> retx storm.
+// (6->8) moved the CRC field. 2026-07-02 (a): the drive-advisory bits were pulled INTO
+// the CRC coverage, so even an advisory=0 payload's CRC differs from pre-change builds.
+// 2026-07-02 (b): frame_mask widened 8->16 (wide coherent ARQ window lever) — payload
+// grows 32->40 bits, every field above the mask shifts, and the burst is 34 symbols
+// (was 27). A mixed-version pair mis-parses every ACK -> CRC fail -> retx storm.
 //
-// FEC: (15,11) Hamming code applied per nibble-block. 32 payload bits ->
-// three 11-bit groups (padded), each encoded to 15 coded bits = 45 coded
-// bits = 23 symbols at 4-FSK (rounded up). Hamming corrects 1 bit error
-// per block, detects 2.
+// FEC: (15,11) Hamming code applied per nibble-block. 40 payload bits ->
+// four 11-bit groups (padded), each encoded to 15 coded bits = 60 coded
+// bits = 30 symbols at 4-FSK. Hamming corrects 1 bit error per block,
+// detects 2.
 
-inline constexpr uint32_t kPayloadBits = 32;       // raw payload incl. CRC
-inline constexpr uint32_t kPayloadUsefulBits = 18; // bits before CRC (6+8+3+1)
+inline constexpr uint32_t kPayloadBits = 40;       // raw payload incl. CRC
+inline constexpr uint32_t kPayloadUsefulBits = 26; // bits before CRC (6+16+3+1)
 inline constexpr uint32_t kPayloadGroupSeqBits = 6;
-inline constexpr uint32_t kPayloadFrameMaskBits = 8;  // widened 6->8 (2026-06-17): 8-frame SACK window
+inline constexpr uint32_t kPayloadFrameMaskBits = 16;  // widened 6->8 (2026-06-17), 8->16 (2026-07-02): 16-frame SACK window
 inline constexpr uint32_t kPayloadRateHintBits = 3;
 inline constexpr uint32_t kPayloadTypeBits = 1;
 inline constexpr uint32_t kPayloadCRCBits = 12;
@@ -187,20 +189,27 @@ static_assert(kPayloadUsefulBits == kPayloadGroupSeqBits + kPayloadFrameMaskBits
 static_assert(kPayloadBits == kPayloadUsefulBits + kPayloadCRCBits +
               kPayloadDriveAdvisoryBits, "payload total mismatch");
 
-// Bit-field offsets in the packed 32-bit payload.
+// Bit-field offsets in the packed 40-bit payload (carried in a uint64_t).
 inline constexpr uint32_t kBitOffsetGroupSeq = 0;
 inline constexpr uint32_t kBitOffsetFrameMask = 6;
-inline constexpr uint32_t kBitOffsetRateHint = 14;
-inline constexpr uint32_t kBitOffsetType = 17;
-inline constexpr uint32_t kBitOffsetCRC = 18;
-inline constexpr uint32_t kBitOffsetDriveAdvisory = 30;
+inline constexpr uint32_t kBitOffsetRateHint = 22;
+inline constexpr uint32_t kBitOffsetType = 25;
+inline constexpr uint32_t kBitOffsetCRC = 26;
+inline constexpr uint32_t kBitOffsetDriveAdvisory = 38;
+static_assert(kBitOffsetFrameMask == kBitOffsetGroupSeq + kPayloadGroupSeqBits &&
+              kBitOffsetRateHint == kBitOffsetFrameMask + kPayloadFrameMaskBits &&
+              kBitOffsetType == kBitOffsetRateHint + kPayloadRateHintBits &&
+              kBitOffsetCRC == kBitOffsetType + kPayloadTypeBits &&
+              kBitOffsetDriveAdvisory == kBitOffsetCRC + kPayloadCRCBits &&
+              kPayloadBits == kBitOffsetDriveAdvisory + kPayloadDriveAdvisoryBits,
+              "payload bit offsets must tile the packed payload exactly");
 
-// CRC message = the 18 useful bits with the 2 drive-advisory bits appended above
-// them (LSB-first: message bit 18 = advisory bit 0, bit 19 = advisory bit 1). The
+// CRC message = the 26 useful bits with the 2 drive-advisory bits appended above
+// them (LSB-first: message bit 26 = advisory bit 0, bit 27 = advisory bit 1). The
 // advisory sits ABOVE the CRC field on the wire, so it cannot occupy contiguous
-// message positions — pack/verify assemble this 20-bit message explicitly.
+// message positions — pack/verify assemble this 28-bit message explicitly.
 inline constexpr uint32_t kPayloadCrcMessageBits =
-    kPayloadUsefulBits + kPayloadDriveAdvisoryBits;  // 20
+    kPayloadUsefulBits + kPayloadDriveAdvisoryBits;  // 28
 
 // Drive-advisory wire values (software-ALC, 2026-07-02).
 inline constexpr uint8_t kDriveAdvisoryHold = 0;
@@ -209,36 +218,46 @@ inline constexpr uint8_t kDriveAdvisoryDown = 2;  // receiver sees clip signatur
 inline constexpr uint8_t kDriveAdvisoryReserved = 3;  // treat as hold
 
 // (15,11) Hamming: 11 info bits -> 15 coded bits per block.
-// 32 payload bits / 11 = 3 blocks (last block partially populated with 0s).
+// ceil(40 / 11) = 4 blocks (last block partially populated with 0s).
+// Block count is DERIVED from kPayloadBits so a future payload widen can
+// never silently truncate the top bits (the 2026-07-02 8->16 mask widen
+// grew 3 -> 4 blocks).
 inline constexpr uint32_t kHammingInfoBitsPerBlock = 11;
 inline constexpr uint32_t kHammingCodedBitsPerBlock = 15;
-inline constexpr uint32_t kHammingNumBlocks = 3;  // ceil(32 / 11)
+inline constexpr uint32_t kHammingNumBlocks =
+    (kPayloadBits + kHammingInfoBitsPerBlock - 1) / kHammingInfoBitsPerBlock;  // 4
 inline constexpr uint32_t kHammingInfoBitsTotal =
-    kHammingNumBlocks * kHammingInfoBitsPerBlock;  // 33 (pad payload by 1 zero)
+    kHammingNumBlocks * kHammingInfoBitsPerBlock;  // 44 (pad payload by 4 zeros)
+static_assert(kHammingInfoBitsTotal >= kPayloadBits,
+              "Hamming blocks must cover the whole payload");
+static_assert(kHammingInfoBitsTotal <= 64,
+              "payload FEC pipeline carries info/coded bits in uint64_t");
 inline constexpr uint32_t kHammingCodedBitsTotal =
-    kHammingNumBlocks * kHammingCodedBitsPerBlock;  // 45
+    kHammingNumBlocks * kHammingCodedBitsPerBlock;  // 60
+static_assert(kHammingCodedBitsTotal <= 64,
+              "payload FEC pipeline carries info/coded bits in uint64_t");
 inline constexpr uint32_t kPayloadSymbols =
-    (kHammingCodedBitsTotal + kBitsPerSymbol - 1) / kBitsPerSymbol;  // 23
+    (kHammingCodedBitsTotal + kBitsPerSymbol - 1) / kBitsPerSymbol;  // 30
 
 // ============================================================================
 // Total burst structure
 // ============================================================================
 //
-// On-air layout:  [COSTAS (4 sym)] [PAYLOAD (23 sym)]
-// Total symbols:  27
-// Baseline airtime (25 ms/sym): 675 ms
-// High-SNR airtime (12 ms/sym): 324 ms
-// Low-SNR airtime (50 ms/sym):  1350 ms
+// On-air layout:  [COSTAS (4 sym)] [PAYLOAD (30 sym)]
+// Total symbols:  34  (27 before the 2026-07-02 8->16 frame_mask widen)
+// Baseline airtime (25 ms/sym): 850 ms
+// High-SNR airtime (12 ms/sym): 408 ms
+// Low-SNR airtime (50 ms/sym):  1700 ms
 //
 // Sender's "ACK detection window" after burst end = baseline_duration ± 200 ms.
 // If no Costas pattern detected in window, sender treats as ACK-lost.
 
-inline constexpr uint32_t kTotalSymbols = kCostasSymbols + kPayloadSymbols;  // 27
-static_assert(kTotalSymbols == 27, "expected 27 total symbols");
+inline constexpr uint32_t kTotalSymbols = kCostasSymbols + kPayloadSymbols;  // 34
+static_assert(kTotalSymbols == 34, "expected 34 total symbols");
 
-inline constexpr uint32_t kBaselineTotalMs = kTotalSymbols * kBaselineSymbolMs;  // 675 ms
+inline constexpr uint32_t kBaselineTotalMs = kTotalSymbols * kBaselineSymbolMs;  // 850 ms
 inline constexpr uint32_t kBaselineTotalSamples =
-    kTotalSymbols * kBaselineSymbolSamples;  // 32400 samples
+    kTotalSymbols * kBaselineSymbolSamples;  // 40800 samples
 
 // Sender's no-ACK guard window around the expected ACK arrival.
 inline constexpr uint32_t kAckDetectionGuardMs = 200;

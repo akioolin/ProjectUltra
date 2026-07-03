@@ -71,22 +71,23 @@ public:
         bool armed_only = false;
         // Run detection every `detect_interval_samples` samples (cadence-
         // limiter). Default: every 240 samples = 5 ms at 48 kHz. Detection
-        // window is ~675 ms (kTotalSymbols × kBaselineSymbolMs), so we
+        // window is ~850 ms (kTotalSymbols × kBaselineSymbolMs), so we
         // overlap windows densely without re-scanning at sample granularity.
         size_t detect_interval_samples = 240;
         // §15 step 4d-late: cadence to use WHILE armed. Defaults to the
         // same value as detect_interval_samples so callers that only set
         // armed_only get sensible behavior. Production overrides this to
         // a tight value (~100 ms = 4800 samples) so detection latency is
-        // dominated by the burst airtime (~675 ms) not the cadence wait.
+        // dominated by the burst airtime (~850 ms) not the cadence wait.
         size_t detect_interval_samples_armed = 240;
         // Coarse sweep step inside the detector for each cadence-triggered
         // pass. 8 samples is the default; smaller = finer + slower.
         uint32_t sweep_step_samples = 8;
         // Maximum samples the internal sliding buffer holds. Needs to be at
         // least kTotalSymbols × max_symbol_ms × kSampleRate / 1000 + slack.
-        // For 100 ms max symbol: 27 × 100 × 48 = 129,600. Default = 180,000
-        // (~3.75 s) accommodates 100 ms + plenty of guard.
+        // For 100 ms max symbol: 34 × 100 × 48 = 163,200 (34 symbols since the
+        // 2026-07-02 frame_mask 8->16 widen; was 27). Default = 180,000
+        // (~3.75 s) still accommodates 100 ms + guard.
         size_t buffer_capacity_samples = 180000;
         // Suppress duplicate detections within this many samples of the
         // previous successful decode. Prevents re-firing on the same burst

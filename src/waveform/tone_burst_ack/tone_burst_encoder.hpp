@@ -35,7 +35,7 @@ class ToneBurstEncoder {
 public:
     ToneBurstEncoder() = default;
 
-    // Encode one full tone-burst ACK: [4 Costas symbols][23 payload symbols].
+    // Encode one full tone-burst ACK: [4 Costas symbols][kPayloadSymbols (30) payload symbols].
     // symbol_ms picks the duration per the §15.5 staircase (default = baseline
     // ~25 ms = mid-SNR regime). Each symbol is symbol_ms * Fs / 1000 samples.
     Samples encode(const ToneBurstAckPayload& payload,

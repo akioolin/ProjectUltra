@@ -194,7 +194,7 @@ public:
     //     the sender resends only the 0-bit frames + refills the burst.
     // Inert unless use_burst_transport_.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                              bool all_ok, float quality, uint8_t frame_mask = 0xFF,
+                              bool all_ok, float quality, uint16_t frame_mask = 0xFFFF,
                               bool interleaved = true, uint8_t group_size = 0);
 
     // §14.36 Phase 5c GUI observability: decode headroom of the most recent burst

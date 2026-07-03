@@ -72,7 +72,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // (deliver-once + single GROUP_ACK). THIS is the forwarding ultra_tnc was missing.
     modem.setBurstGroupCallback(
         [&modem, &protocol, hooks](uint16_t group_seq, const std::vector<Bytes>& frames,
-                                   bool all_ok, float quality, uint8_t frame_mask,
+                                   bool all_ok, float quality, uint16_t frame_mask,
                                    bool interleaved, uint8_t group_size) {
             // BUG-ACK-STAIRCASE-FADE-BIN layer 2 (2026-07-01): burst-as-unit delivery
             // bypasses setRawDataCallback, so the frontend's SNR observation STARVED

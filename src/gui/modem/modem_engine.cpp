@@ -135,7 +135,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // enabled on the decoder.
     streaming_decoder_->setBurstGroupCallback(
         [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality, uint8_t frame_mask, bool interleaved, uint8_t group_size) {
+               float quality, uint16_t frame_mask, bool interleaved, uint8_t group_size) {
             updateStats([&](LoopbackStats& s) { s.synced = all_ok; });
             if (burst_group_callback_) {
                 burst_group_callback_(group_seq, frames, all_ok, quality, frame_mask,
@@ -692,7 +692,7 @@ std::vector<float> ModemEngine::transmitToneBurstAck(
     }
     auto samples = streaming_encoder_->encodeToneBurstAck(payload, symbol_ms);
     LOG_MODEM(INFO,
-              "[%s] TX ToneBurstAck: group_seq=%u type=%s frame_mask=0x%02X "
+              "[%s] TX ToneBurstAck: group_seq=%u type=%s frame_mask=0x%04X "
               "samples=%zu",
               log_prefix_.c_str(),
               static_cast<unsigned>(payload.group_seq),

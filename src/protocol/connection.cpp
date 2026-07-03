@@ -174,7 +174,7 @@ Connection::Connection(const ConnectionConfig& config)
     // only valid file method now). `use_burst_transport_` stays initialized true; the
     // legacy windowed-file `!use_burst_transport_` branches are now dead code (R1
     // deletion follow-up). NOTE: burst is itself selective-repeat (GROUP_ACK carries
-    // the 8-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
+    // the 16-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
     // narrow/control; this is NOT "remove SR-ARQ".
     // §14.36 Phase 5c: per-block decode-headroom quality feedback. Default ON (drives the GUI
     // "Adapt:" bar + diagnostics on sim AND hardware); opt OUT with ULTRA_ADAPTIVE_RATE=0
@@ -236,9 +236,10 @@ Connection::Connection(const ConnectionConfig& config)
 
     // TRANSPORT MERGE (step 1, env ULTRA_TONE_ACK_INTERACTIVE): route the interactive
     // SACK through the same tone-burst transport the burst path uses. When enabled, the
-    // receiver emits the ack as a tone-burst (base_seq + low-6 RX bitmap) instead of a
-    // SACK control frame; the sender arms its monitor (above) and consumes it in
-    // onToneBurstAck(). Default off — the legacy SACK-frame path is unchanged.
+    // receiver emits the ack as a tone-burst (low-6 base_seq + the RX bitmap truncated
+    // to the 16-bit wire mask) instead of a SACK control frame; the sender arms its
+    // monitor (above) and consumes it in onToneBurstAck(). Default off — the legacy
+    // SACK-frame path is unchanged.
     if (kInteractiveToneAckEnabled()) {
         arq_.setEmitToneBurstSackCallback(
             [this](uint16_t base_seq, uint32_t bitmap, bool /*has_final*/) {
@@ -246,12 +247,12 @@ Connection::Connection(const ConnectionConfig& config)
                     return;
                 }
                 ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
-                // frame_mask width tracks the wire layout (8 bits as of 2026-06-17) so the
-                // SACK can address an 8-frame in-flight window — see kToneBurstAckWindowCapFrames.
+                // frame_mask width tracks the wire layout (16 bits as of 2026-07-02) so the
+                // SACK can address a 16-frame in-flight window — see kToneBurstAckWindowCapFrames.
                 constexpr uint32_t kFrameMaskWire =
                     (1u << ultra::waveform::tone_burst_ack::kPayloadFrameMaskBits) - 1u;
                 tba.group_seq = static_cast<uint8_t>(base_seq & 0x3F);
-                tba.frame_mask = static_cast<uint8_t>(bitmap & kFrameMaskWire);
+                tba.frame_mask = static_cast<uint16_t>(bitmap & kFrameMaskWire);
                 tba.type = ultra::waveform::tone_burst_ack::AckType::Ack;
                 // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
                 // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
@@ -1709,7 +1710,21 @@ bool Connection::onToneBurstAck(
 // above the 1-3 retx a frame needs at a SUSTAINABLE rate on a fading channel, and well below
 // max_retries (15) — so a frame the current (over-climbed) rate genuinely cannot push through
 // drops to a robust rung before it dies, but ordinary Moderate retx don't trip it.
-static constexpr int kStuckRetransmitEscape = 5;
+// ULTRA_STUCK_ESCAPE_RETX [2..10] (2026-07-02 campaign A/B knob): the Phase-0 forensics measured
+// the 5-retx trigger costing ~84 s of frozen-base blind re-blast per 16QAM collapse (sim g43 and
+// live rig MPG@20 both) — each retx round at 672 ms/frame x8 + RTO is a whole group-time spent
+// re-sending into the same trough. Lower = earlier demote at the cost of occasionally fleeing a
+// rung a lucky retx would have salvaged.
+static int stuckRetransmitEscape() {
+    static const int v = [] {
+        if (const char* e = std::getenv("ULTRA_STUCK_ESCAPE_RETX")) {
+            const int n = std::atoi(e);
+            if (n >= 2 && n <= 10) return n;
+        }
+        return 5;
+    }();
+    return v;
+}
 
 // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB). Climb to QAM16 only after this many
 // CONSECUTIVE clean groups (quality >= climb_above) while pinned at the QPSK R3/4 top rung — a
@@ -1779,7 +1794,7 @@ void Connection::maybeEscapeStuckFrame() {
     if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
     if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
     if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
-    if (arq_.maxInFlightRetryCount() < kStuckRetransmitEscape) return;
+    if (arq_.maxInFlightRetryCount() < stuckRetransmitEscape()) return;
 
     if (data_modulation_ == Modulation::QAM16) {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
@@ -1796,7 +1811,7 @@ void Connection::maybeEscapeStuckFrame() {
         return;
     }
 
-    // A frame has been retransmitted kStuckRetransmitEscape times at the current rate: the fade
+    // A frame has been retransmitted stuckRetransmitEscape() times at the current rate: the fade
     // troughs are killing it. It produces NO group ACK, so the ack-driven RateController never sees
     // it, and the clean-boundary gate defers any change because the stuck frame keeps the window
     // busy — so without this it grinds to max_retries and fails the whole transfer (Moderate@18:
@@ -1871,7 +1886,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         // not a smoothed one (the EMA is the right tool for a GRADUAL code-rate rung, not a dense
         // constellation that fails abruptly). NOTE: when QAM16 craters so hard it emits NO ack, this
         // ack-driven demote never runs and the bad_streak keeps resetting on partial-clean acks —
-        // maybeEscapeStuckFrame's QAM16->QPSK escape-drop (frame stuck kStuckRetransmitEscape retx)
+        // maybeEscapeStuckFrame's QAM16->QPSK escape-drop (frame stuck stuckRetransmitEscape() retx)
         // is the real backstop for that case; the 2-group demote here handles a softer degrade.
         const float drop_below = rate_controller_.config().drop_below;
         const bool nack = quality <= 0.0f;  // group fully lost — the cliff signature
@@ -2037,7 +2052,7 @@ void Connection::setRxLevelVerdict(int verdict, uint32_t seq) {
 }
 
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                                      bool all_ok, float quality, uint8_t frame_mask,
+                                      bool all_ok, float quality, uint16_t frame_mask,
                                       bool interleaved, uint8_t group_size) {
     if (!use_burst_transport_) {
         return;
@@ -2073,14 +2088,14 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // group X/Y" after the "File Received" toast (looked like an extra/late group).
         {
             unsigned decoded = 0;
-            for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;       // popcount = X
+            for (uint16_t m = frame_mask; m; m &= (m - 1)) ++decoded;      // popcount = X
             // Y = the REAL group size from the descriptor (modem passes burst_group_size).
             // The old bit-length-of-frame_mask trick UNDERCOUNTS when the group's TRAILING
             // frame(s) fail (a failed frame is a 0 bit, so it's invisible to bit-length) —
             // e.g. a 3-frame group with seq 2 faded showed "2/2" instead of "2/3". Fall
             // back to that heuristic only if group_size wasn't supplied (group_size==0).
             unsigned group_bits = 0;
-            for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;         // bit-length
+            for (uint16_t m = frame_mask; m; m >>= 1) ++group_bits;        // bit-length
             unsigned Y = group_size > 0
                              ? group_size
                              : (group_bits > decoded ? group_bits : decoded);
@@ -3193,15 +3208,15 @@ void Connection::configureArqForCurrentDataMode() {
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSizeForChannel(
             data_modulation_, data_code_rate_, fading_index_, measured_snr_db_));
-        // TRANSPORT MERGE (step 1): the tone-burst ack carries an 8-bit frame_mask (widened
-        // 6->8 2026-06-17), so cap the in-flight window to 8. An N-frame message then streams
-        // as ≤8-frame windows, each fully covered by one tone-burst snapshot — no mask
-        // truncation, no spurious resend of frames past the 8th. (MC-DPSK 1-5 and OFDM_NARROW
-        // 3 are already within 8.) The timing math below then sizes timeouts for the capped
-        // window. Lifting the cap 6->8 lets a thin-frame cw5 burst fill the 8.6s PA-duty budget.
+        // TRANSPORT MERGE (step 1): the tone-burst ack carries a 16-bit frame_mask (widened
+        // 6->8 2026-06-17, 8->16 2026-07-02), so cap the in-flight window to 16. An N-frame
+        // message then streams as ≤16-frame windows, each fully covered by one tone-burst
+        // snapshot — no mask truncation, no spurious resend of frames past the mask. (MC-DPSK
+        // 1-5 and OFDM_NARROW 3 are already within it.) The timing math below then sizes
+        // timeouts for the capped window.
         if (kInteractiveToneAckEnabled() &&
             arq_.getWindowSize() > connection_policy::kToneBurstAckWindowCapFrames) {
-            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> %zu (tone-burst 8-bit mask)",
+            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> %zu (tone-burst 16-bit mask)",
                       arq_.getWindowSize(),
                       connection_policy::kToneBurstAckWindowCapFrames);
             arq_.setWindowSize(connection_policy::kToneBurstAckWindowCapFrames);
@@ -3381,8 +3396,8 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // 6 TIE on goodput (~1400 bps, within run-to-run noise) and both deliver reliably with the
     // full-chirp-on-resend fix (maxretry=0; the two genuine failures recovered) — so the smaller
     // group wins on NON-speed grounds: shorter 8.6 s key-down (easier on a real PA than group 6's
-    // ~10 s), fewer frames lost per fade, and well below the 8-bit SACK frame_mask ceiling (raised
-    // from 6 on 2026-06-17, so thin-frame cw5 bursts can fill the budget — a cw8 burst stays
+    // ~10 s), fewer frames lost per fade, and well below the 16-bit SACK frame_mask ceiling (raised
+    // 6->8 on 2026-06-17, 8->16 on 2026-07-02, so thin-frame cw5 bursts can fill the budget — a cw8 burst stays
     // airtime-bound at 5 frames regardless). Replaces the 3-frame 7000 ms default that re-paid the 1.2 s anchor +
     // turnaround every 3 frames. Still env-overridable for sweeps (clamped [5000, 12000]).
     static const uint32_t kMaxBurstAirtimeMs = [] {

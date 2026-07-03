@@ -1643,7 +1643,9 @@ void SelectiveRepeatARQ::sendSack() {
 
     // TRANSPORT MERGE (step 1): emit the ack as a fast tone-burst instead of a SACK
     // control frame when the feature is wired. The tone-burst carries base_seq (low 6
-    // bits) + the low-6 RX bitmap, enough to selectively ack a small interactive window.
+    // bits) + the low bits of the RX bitmap up to the wire mask width (16 as of the
+    // 2026-07-02 widen; the Connection truncates to kPayloadFrameMaskBits) — enough to
+    // selectively ack the full capped in-flight window (kToneBurstAckWindowCapFrames).
     if (on_emit_tone_burst_sack_) {
         stats_.sacks_sent++;
         stats_.acks_sent++;

@@ -342,7 +342,7 @@ bool ProtocolEngine::onToneBurstAck(
 
 void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                           const std::vector<Bytes>& frames, bool all_ok,
-                                          float quality, uint8_t frame_mask,
+                                          float quality, uint16_t frame_mask,
                                           bool interleaved, uint8_t group_size) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,

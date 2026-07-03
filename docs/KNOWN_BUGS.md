@@ -14,9 +14,20 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - **Why the silent path exists (do NOT naively fall through):** the legacy control→data profile fall-through double-demod **poisoned the burst's shared coherent channel estimate** (§14.24/§14.25, comment at `streaming_ofdm_decode.cpp:1021-1029`); the gate was also narrowed for BUG-TNC-B2F-001. A fix must re-demodulate from the ring at the data profile (fresh estimate), not fall through.
 - **Fix path:** (1) FREE: add a counter/log for "sync-accepted data-profile frame consumed without decode attempt" (today it is invisible). (2) The descriptor already gives the receiver the group geometry — enter accumulation from ANY group-member sync with the head erasure-marked, converting the saga into a 1-frame nack. (3) Interim mitigation is the RX group-timeout fast-NACK, which requires the BURST_HEADER *and* ≥1 decoded data frame — the head-null case defeats it.
 
-### BUG-ACK-STAIRCASE-FADE-BIN: SNR-adaptive fast tone-ACK never engages on fading channels — bin edges are AWGN-calibrated but fed fade-effective SNR
-- Status: **OPEN — measured occupancy 2026-07-01 (sim + rig).** The §15.5 staircase (`tone_burst_constants.hpp:99-105`) picks 12 ms symbols (324 ms ACK) at ≥18 dB, but the receiver feeds it the cached fade-effective in-band SNR (`app.cpp:645-651`), which reads ~16-17 dB at Good@20 (fading/Jensen penalty). Measured: sim Good@20 16QAM 29/29 ACKs at 675 ms, stock 26/26 at 675 ms (only forced QPSK R3/4 reached 324 ms, 20/25); **rig MPG@20: 30/30 at 675 ms**. The hardware-proven fast rung is dormant at the operating point it was built for: ~350 ms/cycle ≈ 4-5% goodput, taxing the short-burst dense rung (16QAM) hardest.
-- **Fix:** express the staircase bin edges in fade-effective terms (~16 dB edge for the 12 ms rung) or feed the basis it was calibrated on; validate ACK FER at the new edge on Watterson before shipping (each lost ACK costs a full RTO — same trap class as the 12 ms design review of 2026-06-12). Same disease family as #74/#58: fade-aware measurements fed into AWGN-calibrated thresholds.
+### BUG-ACK-STAIRCASE-FADE-BIN: SNR-adaptive fast tone-ACK never engages on fading channels — **FIXED (b85c0e1, 2026-07-01) — this entry was STALE; occupancy verified 2026-07-03**
+- Status: **FIXED + GATE-VERIFIED.** The fix landed in b85c0e1 ("revive the SNR-adaptive ACK
+  staircase (feed + edge)"): per-group broadband SNR feed (the cache had been FROZEN at the
+  handshake MC-DPSK reading for whole transfers) + the fading-conditioned fast edge
+  (`kFastAckEdgeFadingDb=16.0` vs AWGN 18.0, `tone_burst_constants.hpp` `symbolMsForSNR`).
+  The staleness was found by the 2026-07-03 campaign Phase-0 audit. Occupancy measured on the
+  2026-07-02 5-cell gate: g42 = 28/30 fast (12 ms), g43 = 35/38, g7 = 24/33, AWGN = 17/17 —
+  the fast rung engages on fading. Residual: the 100 ms rung fires in trough sagas at RTO
+  cadence (g7: 5×2700 ms), which is detection-safety-correct behavior, not this bug.
+- History (kept for the record): the §15.5 staircase picked 12 ms at ≥18 dB but was fed
+  fade-effective SNR (~16-17 at Good@20) AND a frozen cache → 0% fast occupancy everywhere
+  incl. 30/30 rig ACKs at 675 ms. Same disease family as #74/#58 (fade-aware measurement vs
+  AWGN-calibrated threshold) plus a dead feed. NOTE 2026-07-03: the tone-burst payload widened
+  32→40 bits (16-bit SACK mask) — ACK airtimes are now 408/850/1700/3400/6800 ms per rung.
 
 ### BUG-CONNECT-SNR-VARIANCE (#58 completion): the connect-time SNR is a single 170 ms snapshot on a ~4 s-fade channel → ~10 dB pick-to-pick spread; the +2 dB basis correction fixes the BIAS, not the VARIANCE
 - Status: **FIX IMPLEMENTED (increment 2, 2026-07-02, default-ON) — pending rig

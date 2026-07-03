@@ -93,9 +93,24 @@ void test_pack_unpack_round_trip() {
         p.drive_advisory = kDriveAdvisoryDown;
         cases.push_back(p);
     }
+    {
+        // Full 16-bit mask (widened 8->16 2026-07-02): a value with bits set in
+        // BOTH bytes must round-trip intact — direct proof the high byte carries
+        // data on the wire.
+        ToneBurstAckPayload p;
+        p.group_seq = 31; p.frame_mask = 0xABCD; p.rate_hint = 5; p.type = AckType::Ack;
+        p.drive_advisory = kDriveAdvisoryHold;
+        cases.push_back(p);
+    }
+    {
+        ToneBurstAckPayload p;
+        p.group_seq = 1; p.frame_mask = 0xFFFF; p.rate_hint = 7; p.type = AckType::Nack;
+        p.drive_advisory = kDriveAdvisoryUp;
+        cases.push_back(p);
+    }
 
     for (const auto& orig : cases) {
-        const uint32_t raw = packPayload(orig);
+        const uint64_t raw = packPayload(orig);
         EXPECT(verifyPayloadCRC(raw));
         const auto rt = unpackPayload(raw);
         EXPECT_EQ(rt.group_seq, orig.group_seq);
@@ -114,10 +129,12 @@ void test_pack_unpack_round_trip() {
         a.drive_advisory = kDriveAdvisoryHold;
         ToneBurstAckPayload b = a;
         b.drive_advisory = kDriveAdvisoryUp;
-        const uint32_t raw_a = packPayload(a);
-        const uint32_t raw_b = packPayload(b);
-        const uint32_t crc_a = (raw_a >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u);
-        const uint32_t crc_b = (raw_b >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u);
+        const uint64_t raw_a = packPayload(a);
+        const uint64_t raw_b = packPayload(b);
+        const uint32_t crc_a = static_cast<uint32_t>(
+            (raw_a >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u));
+        const uint32_t crc_b = static_cast<uint32_t>(
+            (raw_b >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u));
         EXPECT(crc_a != crc_b);
     }
 }
@@ -126,17 +143,20 @@ void test_pack_clamps_out_of_range_fields() {
     std::printf("[test] pack_clamps_out_of_range_fields\n");
     ToneBurstAckPayload p;
     p.group_seq = 200;          // > 63 (6-bit) -> clamps
-    p.frame_mask = 200;         // 0b11001000: fits the WIDENED 8-bit frame_mask, incl. bits 6 & 7
+    p.frame_mask = 0xC5A3;      // bits set in both bytes: fits the WIDENED 16-bit frame_mask
+                                // (the uint16_t field can't exceed the 16-bit wire width, so
+                                // the frame_mask clamp is structurally a no-op since 2026-07-02)
     p.rate_hint = 15;           // > 7 (3-bit) -> clamps
     p.type = AckType::Ack;
     p.drive_advisory = 7;       // > 3 (2-bit) -> clamps
-    const uint32_t raw = packPayload(p);
+    const uint64_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
     const auto rt = unpackPayload(raw);
-    // group_seq (6-bit) and rate_hint (3-bit) still clamp; frame_mask is now 8-bit so 200
-    // round-trips intact — direct proof the high bits (6,7) carry data after the 6->8 widen.
+    // group_seq (6-bit) and rate_hint (3-bit) still clamp; frame_mask is now 16-bit so
+    // 0xC5A3 round-trips intact — direct proof the high byte carries data after the
+    // 8->16 widen.
     EXPECT_EQ(rt.group_seq, static_cast<uint8_t>(200 & 0x3F));
-    EXPECT_EQ(rt.frame_mask, static_cast<uint8_t>(200 & 0xFF));
+    EXPECT_EQ(rt.frame_mask, static_cast<uint16_t>(0xC5A3));
     EXPECT_EQ(rt.rate_hint, static_cast<uint8_t>(15 & 0x07));
     EXPECT_EQ(rt.drive_advisory, static_cast<uint8_t>(7 & 0x03));
 }
@@ -150,20 +170,22 @@ void test_crc12_detects_single_bit_flips() {
     ToneBurstAckPayload p;
     p.group_seq = 17; p.frame_mask = 0b110001; p.rate_hint = 3; p.type = AckType::Ack;
     p.drive_advisory = kDriveAdvisoryUp;
-    const uint32_t raw = packPayload(p);
+    const uint64_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
-    // Flip each of the 18 useful bits and confirm CRC catches it.
+    // Flip each of the useful bits (26 as of the 8->16 mask widen) and confirm
+    // CRC catches it.
     int caught = 0;
     for (uint32_t i = 0; i < kPayloadUsefulBits; ++i) {
-        const uint32_t flipped = raw ^ (1u << i);
+        const uint64_t flipped = raw ^ (1ull << i);
         if (!verifyPayloadCRC(flipped)) ++caught;
     }
     EXPECT_EQ(caught, static_cast<int>(kPayloadUsefulBits));
-    // The drive-advisory bits [30..31] are inside the CRC coverage (widened
-    // 2026-07-02): a flipped advisory bit must also fail the CRC.
+    // The drive-advisory bits [38..39] are inside the CRC coverage (widened
+    // 2026-07-02): a flipped advisory bit must also fail the CRC. 1ull — the
+    // advisory offset is past bit 31.
     int advisory_caught = 0;
     for (uint32_t i = 0; i < kPayloadDriveAdvisoryBits; ++i) {
-        const uint32_t flipped = raw ^ (1u << (kBitOffsetDriveAdvisory + i));
+        const uint64_t flipped = raw ^ (1ull << (kBitOffsetDriveAdvisory + i));
         if (!verifyPayloadCRC(flipped)) ++advisory_caught;
     }
     EXPECT_EQ(advisory_caught, static_cast<int>(kPayloadDriveAdvisoryBits));
@@ -173,18 +195,18 @@ void test_crc12_detects_two_bit_flips_in_useful_bits() {
     std::printf("[test] crc12_detects_two_bit_flips_in_useful_bits\n");
     ToneBurstAckPayload p;
     p.group_seq = 25; p.frame_mask = 0b011110; p.rate_hint = 5; p.type = AckType::Nack;
-    const uint32_t raw = packPayload(p);
+    const uint64_t raw = packPayload(p);
     int caught = 0;
     int total = 0;
     for (uint32_t i = 0; i < kPayloadUsefulBits; ++i) {
         for (uint32_t j = i + 1; j < kPayloadUsefulBits; ++j) {
-            const uint32_t flipped = raw ^ (1u << i) ^ (1u << j);
+            const uint64_t flipped = raw ^ (1ull << i) ^ (1ull << j);
             ++total;
             if (!verifyPayloadCRC(flipped)) ++caught;
         }
     }
-    // CRC-12 detects all 1-2 bit errors over <= 12-bit windows; over 16 bits
-    // it doesn't guarantee 100% but should be very close. Require >= 95%.
+    // CRC-12 detects all 1-2 bit errors over <= 12-bit windows; over the 26-bit
+    // useful span it doesn't guarantee 100% but should be very close. Require >= 95%.
     const double rate = static_cast<double>(caught) / static_cast<double>(total);
     std::printf("  2-bit detection: %d/%d (%.1f%%)\n", caught, total, rate * 100.0);
     EXPECT(rate >= 0.95);

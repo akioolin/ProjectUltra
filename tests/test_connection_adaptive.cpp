@@ -283,10 +283,13 @@ namespace {
 void test_local_mode_change_ack_reconfigures_arq() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.30f);
-    // R1/2 selects the high-throughput window (16), but the unified tone-burst ack carries
-    // an 8-bit SACK frame_mask (widened 6->8 2026-06-17), so the in-flight window is capped to 8.
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
-          "R1/2 high-throughput window is capped to the tone-burst SACK mask");
+    // R1/2 selects the high-throughput window (16). Since the 2026-07-02 8->16 mask widen
+    // the tone-burst SACK cap (kToneBurstAckWindowCapFrames=16) exactly covers it, so the
+    // window runs uncapped at 16 (pre-widen it was capped 16->8).
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kHighThroughputOFDMWindowFrames,
+          "R1/2 high-throughput window fits the 16-bit tone-burst SACK mask");
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) <= connection_policy::kToneBurstAckWindowCapFrames,
+          "in-flight window must never exceed the tone-burst SACK mask cap");
 
     c.requestModeChange(Modulation::DQPSK, CodeRate::R1_4, 12.0f,
                         v2::ModeChangeReason::CHANNEL_DEGRADED);
@@ -297,8 +300,10 @@ void test_local_mode_change_ack_reconfigures_arq() {
     CHECK(c.getDataCodeRate() == CodeRate::R1_4, "local MODE_CHANGE ACK should apply pending rate");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_4,
           "local MODE_CHANGE ACK should update ARQ code rate");
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
-          "local MODE_CHANGE ACK should recompute ARQ window (capped to tone-burst SACK mask)");
+    // DQPSK R1/4 is not a high-throughput rung -> the recomputed window is the default
+    // wide window (8), below the 16-frame SACK cap (which no longer binds here).
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
+          "local MODE_CHANGE ACK should recompute ARQ window (default wide window)");
 }
 
 void test_local_mode_change_timeout_keeps_current_arq_mode() {
@@ -339,8 +344,10 @@ void test_remote_mode_change_reconfigures_arq() {
     CHECK(c.getDataCodeRate() == CodeRate::R1_4, "remote MODE_CHANGE should apply requested rate");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_4,
           "remote MODE_CHANGE should update ARQ code rate");
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
-          "remote MODE_CHANGE should recompute ARQ window (capped to tone-burst SACK mask)");
+    // DQPSK R1/4 -> default wide window (8); the 16-frame SACK cap no longer binds
+    // (it equaled the recomputed window only while the mask was 8 bits).
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
+          "remote MODE_CHANGE should recompute ARQ window (default wide window)");
 }
 
 void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
