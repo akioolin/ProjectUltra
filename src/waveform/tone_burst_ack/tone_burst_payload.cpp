@@ -44,6 +44,7 @@ bool ToneBurstAckPayload::clampToWireWidths() {
         static_cast<uint16_t>((1u << kPayloadFrameMaskBits) - 1u);
     const uint8_t rate_hint_max = (1u << kPayloadRateHintBits) - 1u;
     const uint8_t drive_advisory_max = (1u << kPayloadDriveAdvisoryBits) - 1u;
+    const uint8_t move_epoch_max = (1u << kPayloadMoveEpochBits) - 1u;
 
     bool clean = true;
     if (group_seq > group_seq_max) { group_seq &= group_seq_max; clean = false; }
@@ -51,6 +52,10 @@ bool ToneBurstAckPayload::clampToWireWidths() {
     if (rate_hint > rate_hint_max) { rate_hint &= rate_hint_max; clean = false; }
     if (drive_advisory > drive_advisory_max) {
         drive_advisory &= drive_advisory_max;
+        clean = false;
+    }
+    if (move_epoch > move_epoch_max) {
+        move_epoch &= move_epoch_max;
         clean = false;
     }
     return clean;
@@ -88,6 +93,10 @@ uint64_t packPayload(const ToneBurstAckPayload& p) {
                   static_cast<uint64_t>(sanitized.type));
     raw = putBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits,
                   sanitized.drive_advisory);
+    // move_epoch (2026-07-03) rides the former zero-pad bits 40..41 and is NOT
+    // part of the CRC message (crcMessage() below) — knob-OFF byte-identity.
+    raw = putBits(raw, kBitOffsetMoveEpoch, kPayloadMoveEpochBits,
+                  sanitized.move_epoch);
 
     const uint16_t crc = crc12(crcMessage(raw), kPayloadCrcMessageBits);
     raw = putBits(raw, kBitOffsetCRC, kPayloadCRCBits, crc);
@@ -102,6 +111,8 @@ ToneBurstAckPayload unpackPayload(uint64_t raw) {
     p.type = static_cast<AckType>(getBits(raw, kBitOffsetType, kPayloadTypeBits));
     p.drive_advisory = static_cast<uint8_t>(
         getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits));
+    p.move_epoch = static_cast<uint8_t>(
+        getBits(raw, kBitOffsetMoveEpoch, kPayloadMoveEpochBits));
     return p;
 }
 
@@ -279,7 +290,7 @@ uint64_t dibitsToCodedBits(const std::vector<uint8_t>& dibits) {
 }  // namespace
 
 std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p) {
-    // 40-bit raw payload; the bits above kPayloadBits up to
+    // 42-bit raw payload; the bits above kPayloadBits up to
     // kHammingInfoBitsTotal (44) are the zero pad for the clean 4-block split.
     const uint64_t info = packPayload(p);
 
@@ -316,7 +327,8 @@ std::optional<ToneBurstAckPayload> decodePayloadDibits(
     }
 
     const uint64_t info = mergeFromHammingBlocks(info_blocks);
-    // Drop the Hamming zero-pad above the 40 payload bits.
+    // Drop the Hamming zero-pad above the 42 payload bits (2 pad bits remain
+    // at 42..43 since move_epoch took the former pad bits 40..41, 2026-07-03).
     const uint64_t raw = info & ((1ull << kPayloadBits) - 1ull);
 
     if (!verifyPayloadCRC(raw)) {

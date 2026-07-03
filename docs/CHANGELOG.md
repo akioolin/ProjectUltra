@@ -10,6 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(arq): BUG-ARQ-SEQ-COLLISION **STRUCTURAL fix** — move-epoch on the wire, knob-gated `ULTRA_ARQ_MOVE_EPOCH` (default-OFF byte-identical; **WIRE/SEMANTICS-BREAKING when ON**, lockstep) — **EDITS-ONLY / UNVALIDATED** (no build/ctest/gate run; rig-validation-pending)
+
+**What broke:** see the entry below (same date) — rate-change TX abort under one-way ACK
+loss re-uses seqs for DIFFERENT bytes; the receiver's seq-keyed dedup destroys the regridded
+resends (kill-arm 1) and its out-of-window SACK phantom-retires them at the sender
+(kill-arm 2) → permanent 648 B hole (rig W16). The interim salvage (below) cures arm 1 for
+FILE payloads only; this is the root cure the entry's "STRUCTURAL fix direction" describes.
+
+**What changed (all no-op/byte-identical with the knob unset):**
+- `selective_repeat_arq.{hpp,cpp}`: two per-direction 2-bit mod-4 epochs. `tx_epoch_`
+  bumps exactly on `setCodeRate`'s TX-abort rewind (the collision precondition;
+  `abortPendingTx` abandons seqs forward — no re-use, no bump). All three DATA send paths
+  stamp `stampMoveEpochFlags()`: epoch in flags bits 6-7 + `EPOCH_REBASE` on frames
+  created at the window base ("nothing un-retired below me in this era"; baked into the
+  serialized bytes so RTO resends re-carry it). `handleAckFrame` extracts+strips the ACK
+  epoch echo and IGNORES mismatches (`stale-epoch ACK ignored`, new stat
+  `stale_epoch_acks_ignored`, diag `reason=stale_epoch`) — before the seq-space guards,
+  the dedup signature, and the §RETX-PACING progress sentinel; side-effect: structurally
+  kills the below-base zombie-TX wart (stale ACK can't advance tx_base past the rewound
+  tx_next). Receiver (`handleMoveEpochOnData`, runs before window classification): adopt
+  any epoch change (serial channel ⇒ always newer), discard rx slots + pending ack state,
+  re-anchor `rx_base_seq_` ONLY to an `EPOCH_REBASE` frame; rebase-less adoption = an
+  ACK-SILENT unanchored interregnum (`sendSack`/`endGroupReceiveAndAck` suppressed, FILE
+  payloads salvage-delivered, TEXT dropped-for-later) until the sender's RTO delivers the
+  era base. **Deviation from the naive design (justified):** re-anchor-to-ANY-incoming-seq
+  fabricates cumulative ACKs for lost era-head frames (sender retires them → new permanent
+  hole — the disease itself); the rebase-anchor + interregnum has zero fabrication and no
+  new failure mode (an undecodable rebase frame fails a transfer exactly like any
+  max_retries frame today). Stale/foreign-era partials dropped; DATA_REPAIR partials
+  epoch-exempt (synthesized flags; cross-era merge is frame-CRC-rejected).
+- `frame_v2.hpp`: `Flags::EPOCH_MASK`(0xC0)/`EPOCH_SHIFT`/`EPOCH_REBASE`(=ENCRYPTED 0x08)
+  + `epochFromFlags`/`epochToFlags`. The RATE_1_4/1_2/2_3/3_4 flag constants were deleted:
+  never set or read by any code (rate travels in MODE_CHANGE/CONNECT_ACK/BURST_HEADER);
+  ENCRYPTED itself was also never implemented — both repurposings are wire-safe.
+- ACK echo wire: v2 SACK bitmap **bits 16-17** (window bitmap occupies 0-15, MAX_WINDOW=16;
+  bits 24-31 must stay clear of `decodeSackBitmap`'s legacy-8-bit shim — bits 30-31 would
+  alias it); tone-burst payload **bits 40-41** (`tone_burst_constants.hpp` kPayloadBits
+  40→42, `kBitOffsetMoveEpoch`; former Hamming zero-pad → ceil(42/11)=4 blocks, 34 symbols,
+  airtime UNCHANGED; deliberately NOT CRC-covered — covering it would change every knob-OFF
+  ACK's CRC and break byte-identity; Hamming-protected, mis-decode fails SAFE as ACK-lost).
+  `tone_burst_payload.{hpp,cpp}` pack/unpack/clamp the new field;
+  `SelectiveRepeatARQ::ToneBurstSackCallback` + `onToneBurstAck` gained an epoch argument
+  (sole installer/caller `connection.cpp` updated: emit lambda stamps
+  `ToneBurstAckPayload::move_epoch`; consume passes `detection.payload.move_epoch`).
+- `arq_interface.hpp`: `ARQStats::stale_epoch_acks_ignored`.
+- Docs: KNOWN_BUGS status → structural fix implemented (full state machine + residuals:
+  mod-4 wrap on 4 blind aborts; GROUP_ACK/NACK epoch-less — retransmit-only, never
+  retirement); infrastructure map §6 knob row + §7 register 9d.
+
+**Test verification (EDITED ONLY — NOT RUN, per the edits-only constraint; a rig run was
+live):** `test_selective_repeat` new `test_move_epoch_*`: bump+stamp on abort;
+below-window regrid resend adopted+delivered as TEXT (proving the epoch machinery, not the
+FILE salvage) with the SACK echoing the epoch; stale-epoch ACK ignored (no retirement) then
+fresh-epoch ACK retires; unanchored interregnum stays ack-silent, salvages FILE, anchors on
+the late rebase; knob-off byte-identical (flag bits zero, no epoch in SACK bitmaps, legacy
+below-window drop). `test_tone_burst_ack_payload`: move_epoch roundtrip + clamp + proof
+that payloads differing only in epoch differ ONLY in bits 40-41 (CRC field invariant).
+Gate: `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4`, then the
+faithful gate with BOTH stations `ULTRA_ARQ_MOVE_EPOCH=1` + a forced mid-transfer rate
+change, then rig A/B — all pending.
+
 ## 2026-07-03 — fix(arq): file BUG-ARQ-SEQ-COLLISION (rate-change abort under one-way ACK loss) + interim receiver-side salvage `ULTRA_BELOW_WINDOW_FILE_SALVAGE` — default-OFF/byte-identical, **rig-validation-pending**
 
 **What broke (rig W16, IONOS MPG@20, Pi5→Mac 50 KB — multi-agent forensics + adversarial

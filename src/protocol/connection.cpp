@@ -242,7 +242,8 @@ Connection::Connection(const ConnectionConfig& config)
     // SACK-frame path is unchanged.
     if (kInteractiveToneAckEnabled()) {
         arq_.setEmitToneBurstSackCallback(
-            [this](uint16_t base_seq, uint32_t bitmap, bool /*has_final*/) {
+            [this](uint16_t base_seq, uint32_t bitmap, bool /*has_final*/,
+                   uint8_t move_epoch) {
                 if (!on_transmit_tone_burst_ack_) {
                     return;
                 }
@@ -254,6 +255,9 @@ Connection::Connection(const ConnectionConfig& config)
                 tba.group_seq = static_cast<uint8_t>(base_seq & 0x3F);
                 tba.frame_mask = static_cast<uint16_t>(bitmap & kFrameMaskWire);
                 tba.type = ultra::waveform::tone_burst_ack::AckType::Ack;
+                // MOVE-EPOCH echo (ULTRA_ARQ_MOVE_EPOCH, BUG-ARQ-SEQ-COLLISION):
+                // payload bits 40-41; always 0 while the knob is OFF (byte-identical).
+                tba.move_epoch = move_epoch;
                 // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
                 // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
                 // in onToneBurstAck and feeds its RateController. -1 (no sample yet) -> 0.
@@ -1682,7 +1686,10 @@ bool Connection::onToneBurstAck(
         // (e.g. a control-frame SACK through processArqFrame) must not leak into round
         // accounting when this ack gets dedup/stale-dropped inside handleAckFrame.
         arq_.consumeAckProgress();
-        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
+        // MOVE-EPOCH: hand the payload's era echo (bits 40-41) to the ARQ, which
+        // folds it into the synthetic SACK and gates retirement on it (no-op OFF).
+        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask,
+                            detection.payload.move_epoch);
         // §14.43: feed the RateController the RECEIVER's GRADED decode headroom carried in
         // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
         // unification cut. A NACK (group lost) still feeds 0. (Replaces the legacy GROUP_ACK

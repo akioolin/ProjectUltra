@@ -9,10 +9,70 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### BUG-ARQ-SEQ-COLLISION: rate-change abort under ONE-WAY ACK loss re-chunks DIFFERENT file bytes under seq numbers the receiver already retired → receiver's seq-keyed dedup destroys them before the offset-idempotent file layer can see them → permanent byte hole + sender false-complete + receiver stranded
-- Status: **OPEN (structural fix needs wire design). Interim receiver-side salvage landed
-  2026-07-03 behind `ULTRA_BELOW_WINDOW_FILE_SALVAGE` (default OFF = byte-identical),
-  rig-validation-pending.** Root-caused from rig W16 (IONOS MPG@20, Pi5 sender → Mac
-  receiver, 50 KB) by multi-agent forensics + adversarial verify, 2026-07-03.
+- Status: **STRUCTURAL FIX IMPLEMENTED 2026-07-03 (knob-gated `ULTRA_ARQ_MOVE_EPOCH`,
+  default OFF = byte-identical; edits-only/UNVALIDATED — no build/ctest/gate run yet;
+  rig-validation-pending with BOTH stations knob-ON — WIRE/SEMANTICS-BREAKING when ON,
+  lockstep, no capability negotiation this increment).** Interim receiver-side salvage
+  (`ULTRA_BELOW_WINDOW_FILE_SALVAGE`, now DEFAULT-ON, 9/9 rig field engagements) stays as
+  belt-and-braces. Root-caused from rig W16 (IONOS MPG@20, Pi5 sender → Mac receiver,
+  50 KB) by multi-agent forensics + adversarial verify, 2026-07-03.
+- **Structural fix (move-epoch) — what landed (unit-test-edited, unvalidated):**
+  - **Epoch state:** two independent per-direction 2-bit (mod-4) counters in
+    `SelectiveRepeatARQ`. `tx_epoch_` bumps exactly when `setCodeRate`'s TX-abort branch
+    rewinds `tx_next_seq_` (the collision precondition; `setFixedFrameCodewords` →
+    `abortPendingTx` abandons seqs FORWARD — no re-use, no bump). `rx_epoch_` is adopted
+    from the wire (a receiver with nothing in flight never bumps locally).
+  - **Wire (all bits are 0 when OFF = byte-identical):** DATA flags bits 6-7 carry the
+    epoch (formerly the never-implemented rate-in-flags bits) and `EPOCH_REBASE` = the
+    formerly never-implemented ENCRYPTED bit 0x08, stamped on any DATA frame created
+    while its seq == the sender's window base ("nothing un-retired below me in this
+    era" — invariant holds for the frame's life; baked into the serialized bytes so RTO
+    resends re-carry it). ACK echo: v2 SACK bitmap bits 16-17 (window bitmap occupies
+    bits 0-15 with MAX_WINDOW=16; bits 24-31 must stay clear of the `decodeSackBitmap`
+    legacy-8-bit shim — that's why NOT bits 30-31); tone-burst ACK payload bits 40-41
+    (the former Hamming zero-pad — still transmitted, so airtime is unchanged at 34
+    symbols; deliberately NOT CRC-covered, else the knob-OFF CRC would change — a
+    Hamming-miscorrected epoch fails SAFE: the ACK is ignored = ACK-lost = RTO resend).
+  - **Sender gate:** `handleAckFrame` extracts+strips the echo and IGNORES any ACK whose
+    epoch != `tx_epoch_` (log `stale-epoch ACK ignored`, stat `stale_epoch_acks_ignored`,
+    phy-diag `reason=stale_epoch`; returns before the dedup signature and §RETX-PACING
+    progress sentinel). This kills W16 kill-arm 2 (the out-of-window SACK crediting
+    phantom chunks) AND structurally cures the review-flagged below-base zombie-TX wart
+    (a late stale ACK can no longer advance tx_base past the rewound tx_next).
+  - **Receiver adoption (the risky part — NOT naive re-anchor-to-incoming-seq):** on a
+    DATA frame with epoch != `rx_epoch_` (serial half-duplex channel ⇒ any change is a
+    newer era), adopt + discard all rx slots/pending-ack state, then anchor ONLY on an
+    `EPOCH_REBASE` frame (`rx_base_seq_` = its seq — cumulative claims below it name
+    only sender-retired seqs, zero fabrication). A rebase-less adoption (era head lost)
+    enters an ACK-SILENT unanchored interregnum: no window bookkeeping, ALL acks
+    suppressed (any cumulative claim from the old rx_base would fabricate delivery of
+    new-era seqs = the phantom-retire disease), FILE payloads salvage-delivered
+    (offset-idempotent), TEXT dropped (resent after anchor — in order, no dupes); the
+    sender's RTO resends base-first and the rebase frame anchors us. Naive
+    re-anchor-to-first-heard-seq was rejected: under head loss it makes the next
+    cumulative ACK claim the lost head frames → sender retires them → their bytes
+    permanently unresendable — recreating the hole. This kills W16 kill-arm 1 for ALL
+    payload types (the salvage only covered FILE).
+  - **Files:** `selective_repeat_arq.{hpp,cpp}` (state machine — full spec in the hpp
+    MOVE-EPOCH block comment), `frame_v2.hpp` (`Flags::EPOCH_MASK/EPOCH_SHIFT/
+    EPOCH_REBASE`, `epochFrom/ToFlags`), `arq_interface.hpp` (stat),
+    `tone_burst_constants.hpp`/`tone_burst_payload.{hpp,cpp}` (bits 40-41),
+    `connection.cpp` (tone-ACK emit/consume plumb). Unit tests:
+    `test_selective_repeat` (`test_move_epoch_*`: bump+stamp on abort; the W16
+    below-window regrid delivered as TEXT — proving epoch, not salvage; stale-epoch ACK
+    ignored + fresh retires; unanchored ack-silence → late-rebase anchor; knob-off
+    byte-identical) + `test_tone_burst_ack_payload` (epoch roundtrip/clamp + CRC-field
+    invariance proof).
+  - **Residuals (documented, accepted):** mod-4 wrap — 4 TX aborts with ZERO frames
+    decoded in between return to the same epoch (falls back to today's salvage
+    behavior); adoption only from COMPLETE DATA frames (stale/foreign-era partials and
+    unanchored partials are dropped; DATA_REPAIR-sourced partials are epoch-exempt —
+    synthesized flags — and cross-era merges are frame-CRC-rejected); GROUP_ACK/
+    GROUP_NACK/NACK frames carry no epoch (they trigger retransmits, never retirement —
+    a stale NACK costs at worst one duplicate resend); a rebase frame that exhausts
+    max_retries kills the transfer exactly as an undecodable frame does today (no new
+    failure mode); MODE_CHANGE ACKs are intercepted by the Connection before the ARQ
+    and carry no epoch.
 - **Mechanism (the full chain):**
   1. During a 16QAM R2/3 epoch the receiver DELIVERED seqs 69-77 (384 B/chunk grid),
      advancing its `rx_base_seq_` to 78 — but the sender heard NONE of the ACKs (one-way
@@ -72,11 +132,12 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
     reject group).
   - 2026-06-09 verdict vindicated: gate-less escape-drop (abort-coordinated requeue) is
     unsafe; this is the rig proof.
-- **STRUCTURAL fix direction (needs design — wire change):** a **move-epoch** counter
+- **STRUCTURAL fix direction (IMPLEMENTED 2026-07-03 as `ULTRA_ARQ_MOVE_EPOCH` — see the
+  Status block above; kept for the record):** a **move-epoch** counter
   carried on DATA frames and echoed in ACKs, bumped at every rate/mod-change abort, so a
   stale-epoch ACK can never retire new-content seqs (the sender ignores ACKs whose epoch
   predates its current grid; the receiver's out-of-window SACK for old-epoch frames is
-  then harmless). Complementary candidates from the forensics: carry the receiver's
+  then harmless). Complementary candidates from the forensics (still OPEN): carry the receiver's
   `rx_base_seq_` + contiguous byte offset in the MODE_CHANGE_ACK (which demonstrably DOES
   arrive — it triggers the abort) and resync the sender to the RECEIVER's state; and the
   receiver-confirmed completion handshake (DATA_END, CLAUDE.md Known Limitation 4) so a

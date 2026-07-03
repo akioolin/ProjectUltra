@@ -48,6 +48,15 @@ struct ToneBurstAckPayload {
     // crest-factor signature -> down immediately). CRC-covered on the wire.
     uint8_t drive_advisory = 0;
 
+    // move_epoch: 2-bit ARQ move-epoch echo (2026-07-03, BUG-ARQ-SEQ-COLLISION
+    // structural fix, knob ULTRA_ARQ_MOVE_EPOCH default-OFF): the receiver's
+    // last-adopted epoch for the data direction being acked. The sender IGNORES
+    // an ACK whose epoch != its current TX epoch (stale era — formed against a
+    // pre-abort seq grid). Rides the former Hamming zero-pad bits 40..41, so a
+    // knob-OFF build (always 0) is byte-identical on air. NOT CRC-covered (see
+    // tone_burst_constants.hpp kBitOffsetMoveEpoch rationale); Hamming-protected.
+    uint8_t move_epoch = 0;
+
     // Sanitize fields to their bit-widths. Returns true if all fields are
     // already within range (no truncation occurred).
     bool clampToWireWidths();
@@ -64,15 +73,18 @@ struct ToneBurstAckPayload {
 //   bit  25      type (0=ACK, 1=NACK)
 //   bits 26..37  crc12
 //   bits 38..39  drive_advisory (software-ALC; formerly reserved, 2026-07-02)
+//   bits 40..41  move_epoch (ARQ move-epoch echo; formerly zero-pad, 2026-07-03,
+//                NOT CRC-covered — knob-OFF byte-identity, see constants header)
 //
 // The CRC is computed over a 28-bit message: the 26 "useful" bits (bits 0..25)
 // with the 2 drive-advisory bits appended above them, using CRC-12-CCITT
 // (poly 0x80F, init 0xFFF). WIRE-BREAKING vs pre-2026-07-02 builds: (a) the
 // advisory joined the CRC coverage; (b) the frame_mask widen 8->16 shifted
 // every field above it and grew the payload 32->40 bits (now carried in a
-// uint64_t). All offsets/widths come from tone_burst_constants.hpp
-// (kBitOffset*/kPayload*Bits) — this comment is descriptive; the code reads
-// the constants.
+// uint64_t). The 2026-07-03 move_epoch bits are byte-identical while
+// ULTRA_ARQ_MOVE_EPOCH is OFF (default) and lockstep-only when ON. All
+// offsets/widths come from tone_burst_constants.hpp (kBitOffset*/
+// kPayload*Bits) — this comment is descriptive; the code reads the constants.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on

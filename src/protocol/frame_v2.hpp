@@ -270,16 +270,38 @@ namespace Flags {
     constexpr uint8_t URGENT     = 0x02;  // High priority
     constexpr uint8_t TURN_REQUEST = URGENT;  // ACK flag: IRS has queued DATA
     constexpr uint8_t COMPRESSED = 0x04;  // Payload is compressed
-    constexpr uint8_t ENCRYPTED  = 0x08;  // Payload is encrypted
+    constexpr uint8_t ENCRYPTED  = 0x08;  // (reserved) encryption was never implemented
     constexpr uint8_t MORE_FRAG  = 0x10;  // More fragments follow
     constexpr uint8_t FINAL      = 0x20;  // Final frame of transfer
 
-    // Code rate (bits 6-7)
-    constexpr uint8_t RATE_MASK  = 0xC0;
-    constexpr uint8_t RATE_1_4   = 0x00;  // R1/4 (default)
-    constexpr uint8_t RATE_1_2   = 0x40;  // R1/2
-    constexpr uint8_t RATE_2_3   = 0x80;  // R2/3
-    constexpr uint8_t RATE_3_4   = 0xC0;  // R3/4
+    // MOVE-EPOCH (2026-07-03, BUG-ARQ-SEQ-COLLISION structural fix, knob
+    // ULTRA_ARQ_MOVE_EPOCH default-OFF = all these bits stay 0 = byte-identical):
+    //
+    // EPOCH_REBASE (repurposes the never-implemented ENCRYPTED bit on DATA
+    // frames ONLY, and only while the knob is ON): stamped on a DATA frame
+    // created while its seq == the sender's TX window base — i.e. "no un-retired
+    // seq exists below this one in my current epoch". After a rate-change TX
+    // abort (which rewinds tx_next_seq_ and re-uses seqs for DIFFERENT content)
+    // this marks the exact era anchor the receiver may safely re-anchor
+    // rx_base_seq_ to; anchoring to any OTHER first-heard frame of a new epoch
+    // could fabricate cumulative ACKs for lost head frames (see
+    // SelectiveRepeatARQ move-epoch notes).
+    constexpr uint8_t EPOCH_REBASE = ENCRYPTED;
+    // 2-bit TX move-epoch counter, mod 4, in bits 6-7. These bits were reserved
+    // for a code-rate-in-flags scheme (RATE_1_4/1_2/2_3/3_4) that was NEVER
+    // implemented — no code ever set or read them (rate travels in
+    // MODE_CHANGE / CONNECT_ACK / BURST_HEADER instead), so they were free.
+    constexpr uint8_t EPOCH_MASK  = 0xC0;
+    constexpr uint8_t EPOCH_SHIFT = 6;
+}
+
+// MOVE-EPOCH helpers (DATA-frame flags bits 6-7). Pure bit accessors — the
+// knob gating lives in SelectiveRepeatARQ.
+inline constexpr uint8_t epochFromFlags(uint8_t flags) {
+    return static_cast<uint8_t>((flags & Flags::EPOCH_MASK) >> Flags::EPOCH_SHIFT);
+}
+inline constexpr uint8_t epochToFlags(uint8_t epoch) {
+    return static_cast<uint8_t>((epoch & 0x3u) << Flags::EPOCH_SHIFT);
 }
 
 // 24-bit callsign hash (DJB2 algorithm, truncated)

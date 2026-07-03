@@ -108,6 +108,16 @@ void test_pack_unpack_round_trip() {
         p.drive_advisory = kDriveAdvisoryUp;
         cases.push_back(p);
     }
+    {
+        // MOVE-EPOCH (2026-07-03, bits 40-41, ULTRA_ARQ_MOVE_EPOCH): non-zero epoch
+        // must round-trip intact. NOT CRC-covered by design (knob-OFF byte-identity)
+        // — see the dedicated check below.
+        ToneBurstAckPayload p;
+        p.group_seq = 9; p.frame_mask = 0x00FF; p.rate_hint = 1; p.type = AckType::Ack;
+        p.drive_advisory = kDriveAdvisoryHold;
+        p.move_epoch = 3;
+        cases.push_back(p);
+    }
 
     for (const auto& orig : cases) {
         const uint64_t raw = packPayload(orig);
@@ -118,6 +128,26 @@ void test_pack_unpack_round_trip() {
         EXPECT_EQ(rt.rate_hint, orig.rate_hint);
         EXPECT_EQ(static_cast<int>(rt.type), static_cast<int>(orig.type));
         EXPECT_EQ(rt.drive_advisory, orig.drive_advisory);
+        EXPECT_EQ(rt.move_epoch, orig.move_epoch);
+    }
+
+    // MOVE-EPOCH knob-OFF byte-identity: two payloads differing ONLY in move_epoch
+    // must differ ONLY in bits 40-41 — identical CRC field (the epoch is
+    // deliberately OUTSIDE the CRC message) and identical everything else, so an
+    // epoch-0 (knob-OFF) payload is bit-identical to a pre-2026-07-03 build's.
+    {
+        ToneBurstAckPayload a;
+        a.group_seq = 5; a.frame_mask = 0x0F0F; a.rate_hint = 2; a.type = AckType::Ack;
+        a.drive_advisory = kDriveAdvisoryHold;
+        a.move_epoch = 0;
+        ToneBurstAckPayload b = a;
+        b.move_epoch = 2;
+        const uint64_t raw_a = packPayload(a);
+        const uint64_t raw_b = packPayload(b);
+        EXPECT_EQ(raw_a ^ raw_b,
+                  static_cast<uint64_t>(2) << kBitOffsetMoveEpoch);
+        EXPECT(verifyPayloadCRC(raw_a));
+        EXPECT(verifyPayloadCRC(raw_b));
     }
 
     // Software-ALC advisory is CRC-covered: two payloads differing ONLY in the
@@ -149,6 +179,7 @@ void test_pack_clamps_out_of_range_fields() {
     p.rate_hint = 15;           // > 7 (3-bit) -> clamps
     p.type = AckType::Ack;
     p.drive_advisory = 7;       // > 3 (2-bit) -> clamps
+    p.move_epoch = 6;           // > 3 (2-bit) -> clamps
     const uint64_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
     const auto rt = unpackPayload(raw);
@@ -159,6 +190,7 @@ void test_pack_clamps_out_of_range_fields() {
     EXPECT_EQ(rt.frame_mask, static_cast<uint16_t>(0xC5A3));
     EXPECT_EQ(rt.rate_hint, static_cast<uint8_t>(15 & 0x07));
     EXPECT_EQ(rt.drive_advisory, static_cast<uint8_t>(7 & 0x03));
+    EXPECT_EQ(rt.move_epoch, static_cast<uint8_t>(6 & 0x03));
 }
 
 // ============================================================================

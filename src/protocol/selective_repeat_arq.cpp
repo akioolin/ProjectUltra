@@ -41,11 +41,141 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     if (const char* e = std::getenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE"); e && e[0] == '0') {
         below_window_file_salvage_ = false;
     }
+
+    // BUG-ARQ-SEQ-COLLISION structural fix (2026-07-03): move-epoch carried on the
+    // wire so a stale-era ACK can never retire re-gridded seqs and the receiver
+    // never destroys a re-gridded resend. Default OFF = byte-identical;
+    // SEMANTICS/WIRE-BREAKING when ON — BOTH stations must run it (lockstep, no
+    // capability negotiation this increment). Full state machine: the MOVE-EPOCH
+    // block comment in selective_repeat_arq.hpp. Rig-validation-pending.
+    if (const char* e = std::getenv("ULTRA_ARQ_MOVE_EPOCH"); e && e[0] == '1') {
+        move_epoch_enabled_ = true;
+    }
 }
 
 void SelectiveRepeatARQ::setCallsigns(const std::string& local, const std::string& remote) {
     local_call_ = sanitizeCallsign(local);
     remote_call_ = sanitizeCallsign(remote);
+}
+
+uint8_t SelectiveRepeatARQ::stampMoveEpochFlags(uint8_t flags, uint16_t seq) const {
+    if (!move_epoch_enabled_) {
+        return flags;  // knob OFF: bits 6-7 and EPOCH_REBASE stay 0 — byte-identical
+    }
+    flags = static_cast<uint8_t>(flags | v2::epochToFlags(tx_epoch_));
+    // EPOCH_REBASE iff created at the window base: "no un-retired seq below me in
+    // this era" — the safe rx_base re-anchor point. The invariant holds for the
+    // frame's whole life: seqs below it are retired (base only passes acked/failed
+    // frames) and only a setCodeRate rewind could re-use one, which clears this
+    // slot and bumps the epoch. Baked into the serialized bytes, so every
+    // retransmit re-carries it (RTO recovery of a lost era head).
+    if (seq == tx_base_seq_) {
+        flags = static_cast<uint8_t>(flags | v2::Flags::EPOCH_REBASE);
+    }
+    return flags;
+}
+
+void SelectiveRepeatARQ::discardRxStateForEpochAdoption(const char* reason) {
+    size_t discarded = 0;
+    for (auto& slot : rx_window_) {
+        if (slot.received || slot.partial) {
+            ++discarded;
+        }
+        slot.received = false;
+        clearPartialRXSlot(slot);
+        slot.payload.clear();
+        slot.flags = 0;
+        slot.type = v2::FrameType::DATA;
+    }
+    // Old-era ack state must not fire post-adoption (mirrors setCodeRate's
+    // receiver-side discard): queued repeats hold old-era serialized SACKs, and a
+    // pending delayed SACK would be rebuilt from the discarded window anyway.
+    sack_pending_ = false;
+    sack_timer_ms_ = 0;
+    frames_since_ack_ = 0;
+    ack_repeat_jobs_.clear();
+    last_sack_base_valid_ = false;
+    last_sack_base_ = 0;
+    LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH %s — discarded %zu buffered RX slot(s) at base %u",
+              reason, discarded, rx_base_seq_);
+}
+
+bool SelectiveRepeatARQ::handleMoveEpochOnData(const v2::DataFrame& frame) {
+    if (!move_epoch_enabled_) {
+        return false;
+    }
+
+    const uint8_t frame_epoch = v2::epochFromFlags(frame.flags);
+    const bool rebase = (frame.flags & v2::Flags::EPOCH_REBASE) != 0;
+
+    if (frame_epoch != rx_epoch_) {
+        // NEW ERA. The channel is a serial half-duplex audio stream: frames cannot
+        // reorder across the epoch bump, so ANY change is a newer era (mod-4
+        // distance comparison would add nothing and mis-handle multi-bump jumps).
+        rx_epoch_ = frame_epoch;
+        discardRxStateForEpochAdoption("adoption");
+        if (rebase) {
+            // Exact era base: everything below frame.seq in this era is already
+            // retired at the sender, so our next cumulative claim (frame.seq-1)
+            // cannot fabricate anything.
+            rx_base_seq_ = frame.seq;
+            rx_epoch_wait_rebase_ = false;
+            LOG_MODEM(WARN,
+                      "SR-ARQ: MOVE-EPOCH adopted epoch %u, re-anchored rx_base to %u (rebase frame)",
+                      rx_epoch_, rx_base_seq_);
+            if (on_rx_window_advanced_) {
+                // HARQ soft-combine hygiene: prune retained keys to the new window.
+                on_rx_window_advanced_(rx_base_seq_, config_.window_size);
+            }
+        } else {
+            // Era head lost: we cannot know the sender's rewound base, and anchoring
+            // to THIS seq would make our cumulative ACK claim the lost head frames
+            // (sender retires them -> permanent hole — the disease itself). Go
+            // ack-silent and harvest until the EPOCH_REBASE frame arrives via the
+            // sender's RTO resend (base-first).
+            rx_epoch_wait_rebase_ = true;
+            LOG_MODEM(WARN,
+                      "SR-ARQ: MOVE-EPOCH adopted epoch %u UNANCHORED (seq=%u lacks rebase) — ack-silent until era base arrives",
+                      rx_epoch_, frame.seq);
+        }
+    } else if (rx_epoch_wait_rebase_ && rebase) {
+        // The era base arrived (RTO resend): anchor now. Slots are empty by
+        // construction (nothing is stored while unanchored); discard defensively.
+        discardRxStateForEpochAdoption("late rebase anchor");
+        rx_base_seq_ = frame.seq;
+        rx_epoch_wait_rebase_ = false;
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH late rebase — re-anchored rx_base to %u",
+                  rx_base_seq_);
+        if (on_rx_window_advanced_) {
+            on_rx_window_advanced_(rx_base_seq_, config_.window_size);
+        }
+    }
+
+    if (!rx_epoch_wait_rebase_) {
+        return false;  // anchored: normal window processing handles the frame
+    }
+
+    // UNANCHORED interregnum: no window bookkeeping (slot keys are era-relative and
+    // rx_base is still an old-era number), no acks (a cumulative ack from the old
+    // rx_base would fabricate delivery of new-era seqs — the W16 phantom-retire).
+    // Salvage FILE payloads: provably fresh content (new era) and offset-idempotent
+    // at the file layer; TEXT stays un-acked so the sender resends it post-anchor —
+    // in-order delivery, no duplicates.
+    const bool file_payload =
+        frame.type == v2::FrameType::DATA && !frame.payload.empty() &&
+        (frame.payload[0] == static_cast<uint8_t>(PayloadType::FILE_START) ||
+         frame.payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA));
+    if (file_payload) {
+        last_rx_frame_type_ = frame.type;
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored SALVAGE of FILE frame seq=%u", frame.seq);
+        if (on_data_received_) {
+            on_data_received_(frame.payload);
+        }
+    } else {
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored — dropped %s seq=%u (awaiting rebase)",
+                  v2::frameTypeToString(frame.type), frame.seq);
+    }
+    return true;  // consumed: no window state touched, no SACK emitted
 }
 
 void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
@@ -92,6 +222,17 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         last_ack_seq_ = 0;
         last_ack_bitmap_ = 0;
         ack_dedup_timer_ms_ = 0;
+
+        // MOVE-EPOCH bump (ULTRA_ARQ_MOVE_EPOCH): this rewind re-uses seq numbers
+        // for DIFFERENT content — the BUG-ARQ-SEQ-COLLISION precondition. Enter a
+        // new era so (a) ACKs formed against the old grid are ignored and (b) the
+        // receiver recognizes the re-gridded resends as fresh content. The first
+        // frame sent after the rewind (seq == tx_base_seq_) carries EPOCH_REBASE.
+        if (move_epoch_enabled_) {
+            tx_epoch_ = static_cast<uint8_t>((tx_epoch_ + 1) & 0x3);
+            LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH bumped to %u on rate-change TX abort",
+                      tx_epoch_);
+        }
 
         LOG_MODEM(WARN,
                   "SR-ARQ: Code rate changed, aborted %zu unACKed in-flight TX slots "
@@ -169,7 +310,7 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
 
     auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
     frame.type = frame_type;
-    frame.flags = dataFrameFlags(flags);
+    frame.flags = stampMoveEpochFlags(dataFrameFlags(flags), seq);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
@@ -250,7 +391,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data,
                                         code_rate_, fixed_frame_codewords_);
     frame.type = frame_type;
-    frame.flags = dataFrameFlags(flags);
+    frame.flags = stampMoveEpochFlags(dataFrameFlags(flags), seq);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
@@ -320,7 +461,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
-    frame.flags = dataFrameFlags(flags);
+    frame.flags = stampMoveEpochFlags(dataFrameFlags(flags), seq);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
@@ -481,6 +622,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     const bool frame_final = (frame.flags & v2::Flags::FINAL) != 0;
 
     uint16_t seq = frame.seq;
+
+    // MOVE-EPOCH (ULTRA_ARQ_MOVE_EPOCH, no-op when OFF): adopt a newer era /
+    // re-anchor on its EPOCH_REBASE base / consume frames during the unanchored
+    // interregnum. Runs BEFORE window classification so a re-gridded below-window
+    // resend is re-based into the window instead of dying at the seq-keyed dedup.
+    if (handleMoveEpochOnData(frame)) {
+        return;
+    }
 
     if (isInRXWindow(seq)) {
         uint16_t expected_seq = rx_base_seq_;
@@ -724,6 +873,25 @@ void SelectiveRepeatARQ::handlePartialFrame(const v2::PartialFrameCodewords& par
     if (!partial.valid()) {
         return;
     }
+    // MOVE-EPOCH (no-op when OFF): never merge CWs across eras (a seq re-used on a
+    // different grid would mix old/new-era codewords) and stay silent while
+    // unanchored. DATA_REPAIR-sourced partials are EXEMPT from the epoch check: the
+    // repair header's flags are synthesized (epoch-blind, handleDataRepairFrame) and
+    // a cross-era merge is frame-CRC-rejected in tryCompletePartialRXSlot anyway;
+    // adoption itself only happens on COMPLETE DATA frames.
+    if (move_epoch_enabled_) {
+        if (rx_epoch_wait_rebase_) {
+            LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored — dropped partial seq=%d",
+                      partial.seq);
+            return;
+        }
+        if (!partial.from_repair && v2::epochFromFlags(partial.flags) != rx_epoch_) {
+            LOG_MODEM(WARN,
+                      "SR-ARQ: MOVE-EPOCH dropped stale/foreign-era partial seq=%d (epoch=%u rx_epoch=%u)",
+                      partial.seq, v2::epochFromFlags(partial.flags), rx_epoch_);
+            return;
+        }
+    }
     if (!isInRXWindow(partial.seq)) {
         LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d outside window [%d, %d)",
                   partial.seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
@@ -821,6 +989,16 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     uint16_t seq = frame.seq;
     uint32_t bitmap = arq_policy::decodeSackBitmap(frame.payload);
 
+    // MOVE-EPOCH (ULTRA_ARQ_MOVE_EPOCH, no-op when OFF): the ACK's era echo rides
+    // SACK bitmap bits 16-17 (the window bitmap occupies bits 0-15 — MAX_WINDOW=16;
+    // bits 24-31 must stay clear of the decodeSackBitmap legacy-8-bit shim). Strip
+    // it before ANY bitmap use.
+    uint8_t ack_epoch = 0;
+    if (move_epoch_enabled_) {
+        ack_epoch = static_cast<uint8_t>((bitmap >> 16) & 0x3u);
+        bitmap &= 0xFFFFu;
+    }
+
     LOG_MODEM(INFO, "SR-ARQ: ACK seq=%d bitmap=0x%08X (base=%d, in_flight=%zu)",
               seq, bitmap, tx_base_seq_, tx_in_flight_);
     if (ultra::phyDiagnosticsEnabled()) {
@@ -835,6 +1013,33 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
         ultra::phyDiagLine(oss.str());
     }
     stats_.sacks_received++;
+
+    // MOVE-EPOCH gate (before the seq-space guards: seq comparisons are meaningless
+    // across eras). An epoch-mismatched ACK was formed against a pre-abort seq grid —
+    // crediting it against the re-gridded frames is exactly the W16 phantom-retire
+    // (648 B permanently unresendable). IGNORING an ACK is always protocol-safe
+    // (identical to ACK loss: the RTO resends). Returns BEFORE the dedup-signature
+    // update and before last_ack_progress_frames_ is touched (§RETX-PACING: non-fresh
+    // acks never count as a round).
+    if (move_epoch_enabled_ && ack_epoch != tx_epoch_) {
+        stats_.stale_epoch_acks_ignored++;
+        LOG_MODEM(WARN,
+                  "SR-ARQ: stale-epoch ACK ignored (ack_epoch=%u tx_epoch=%u seq=%d bitmap=0x%08X)",
+                  ack_epoch, tx_epoch_, seq, bitmap);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_ignore"
+                << " local=" << local_call_
+                << " ack_seq=" << seq
+                << " reason=stale_epoch"
+                << " ack_epoch=" << static_cast<int>(ack_epoch)
+                << " tx_epoch=" << static_cast<int>(tx_epoch_)
+                << " tx_base=" << tx_base_seq_
+                << " bitmap=0x" << std::hex << bitmap << std::dec;
+            ultra::phyDiagLine(oss.str());
+        }
+        return;
+    }
 
     // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
     // seq == (tx_base_seq_ - 1) is valid — it's the common "no new cumulative progress"
@@ -1613,7 +1818,8 @@ void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bit
     slot.cw_nack_cooldown_ms = std::max<uint32_t>(config_.sack_delay_ms, 1000u);
 }
 
-void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap) {
+void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
+                                        uint8_t move_epoch) {
     // Reconstruct the full 16-bit ack base from the 6-bit group_seq, picking the value
     // whose low 6 bits match and that is nearest to (tx_base_seq_ - 1) — the seq a SACK
     // would carry. The interactive window is far smaller than 64, so this is unambiguous.
@@ -1624,6 +1830,14 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap) {
         base -= 64;
     } else if (diff < -32) {
         base += 64;
+    }
+
+    // MOVE-EPOCH: fold the tone-burst payload's epoch echo into bitmap bits 16-17
+    // (the tone frame_mask is 16 bits, so those bits are free) so handleAckFrame
+    // extracts/gates it uniformly with SACK control frames. No-op when OFF.
+    if (move_epoch_enabled_) {
+        bitmap = (bitmap & 0xFFFFu) |
+                 (static_cast<uint32_t>(move_epoch & 0x3u) << 16);
     }
 
     // Drive the standard ack path so selective-repeat (cumulative advance + hole
@@ -1637,6 +1851,12 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap) {
 
 void SelectiveRepeatARQ::endGroupReceiveAndAck() {
     group_ack_deferred_ = false;
+    // MOVE-EPOCH unanchored interregnum: total ack silence (see sendSack) — skip the
+    // trigger counter too so the "trigger counters sum to sacks_sent" invariant holds.
+    if (move_epoch_enabled_ && rx_epoch_wait_rebase_) {
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored — group ack suppressed");
+        return;
+    }
     // EXACTLY ONE tone-burst ack for the whole received burst: cumulative base + hole
     // bitmap (sendSack snapshots rx_base_seq_/buildRXBitmap). Emit UNCONDITIONALLY —
     // even an all-duplicate group re-confirms the receiver's window state so a sender
@@ -1718,6 +1938,17 @@ size_t SelectiveRepeatARQ::bufferedRxFrameCount() const {
 }
 
 void SelectiveRepeatARQ::sendSack() {
+    // MOVE-EPOCH: TOTAL ack silence while unanchored — rx_base_seq_ is still an
+    // old-era number, so ANY cumulative claim built from it would fabricate
+    // delivery of new-era seqs (the W16 phantom-retire). The sender's RTO brings
+    // the EPOCH_REBASE era base, which anchors us and lifts the silence. Single
+    // choke point: covers the tone-burst branch, the SACK-frame branch, delayed/
+    // out-of-window/partial-triggered sends and endGroupReceiveAndAck alike.
+    if (move_epoch_enabled_ && rx_epoch_wait_rebase_) {
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored — SACK suppressed (awaiting rebase)");
+        return;
+    }
+
     uint32_t bitmap = buildRXBitmap();
     uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;
     const bool sack_has_final = rx_final_delivered_since_sack_;
@@ -1744,16 +1975,29 @@ void SelectiveRepeatARQ::sendSack() {
                 << " final=" << boolDigit(sack_has_final) << " rx_base=" << rx_base_seq_;
             ultra::phyDiagLine(oss.str());
         }
-        on_emit_tone_burst_sack_(base_seq, bitmap, sack_has_final);
+        // MOVE-EPOCH echo rides a dedicated callback argument (the Connection
+        // truncates `bitmap` to the 16-bit wire frame_mask, so in-band bits would
+        // be lost); always 0 while the knob is OFF.
+        on_emit_tone_burst_sack_(base_seq, bitmap, sack_has_final,
+                                 move_epoch_enabled_ ? rx_epoch_ : 0);
         return;
     }
 
     const bool turn_requested = should_request_turn_ && should_request_turn_();
 
+    // MOVE-EPOCH echo on the SACK control frame: bits 16-17 of the bitmap word
+    // (window bitmap occupies bits 0-15; bits 24-31 must stay 0 for the
+    // decodeSackBitmap legacy-8-bit shim). Zero when the knob is OFF —
+    // byte-identical.
+    const uint32_t wire_bitmap =
+        move_epoch_enabled_
+            ? (bitmap | (static_cast<uint32_t>(rx_epoch_ & 0x3u) << 16))
+            : bitmap;
+
     // Use NACK with bitmap as SACK
     auto sack = v2::ControlFrame::makeNack(local_call_, remote_call_,
                                             base_seq,
-                                            bitmap);
+                                            wire_bitmap);
     // Override type to ACK for cumulative ack behavior
     sack.type = v2::FrameType::ACK;
     if (sack_has_final) {
@@ -2094,6 +2338,12 @@ void SelectiveRepeatARQ::reset() {
     srtt_ms_ = 0.0f;
     rttvar_ms_ = 0.0f;
     adaptive_ack_timeout_ms_ = config_.ack_timeout_ms;
+
+    // MOVE-EPOCH: a reset is a new session — both stations restart at era 0,
+    // anchored (matches seq counters restarting at 0).
+    tx_epoch_ = 0;
+    rx_epoch_ = 0;
+    rx_epoch_wait_rebase_ = false;
 
     LOG_MODEM(DEBUG, "SR-ARQ: Reset");
 }

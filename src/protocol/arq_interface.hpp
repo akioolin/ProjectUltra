@@ -70,6 +70,8 @@ struct ARQStats {
     int data_repairs_received = 0;      // Compact DATA_REPAIR frames received
     int data_repair_cws_sent = 0;       // Original info CWs carried in repairs
     int data_repair_cws_merged = 0;     // Repair CWs accepted into partial RX slots
+    int stale_epoch_acks_ignored = 0;   // ACK ignored: move-epoch != current TX epoch
+                                        // (ULTRA_ARQ_MOVE_EPOCH, BUG-ARQ-SEQ-COLLISION)
 };
 
 /**

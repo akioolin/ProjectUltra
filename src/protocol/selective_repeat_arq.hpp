@@ -101,16 +101,21 @@ public:
     // base_seq + the (low 6 bits of the) RX bitmap — via the callback instead of a
     // SACK control frame. Installed only when the feature is enabled; otherwise the
     // legacy SACK-frame path is used unchanged. has_final mirrors the FINAL flag the
-    // SACK would have carried.
+    // SACK would have carried. move_epoch (2026-07-03, ULTRA_ARQ_MOVE_EPOCH) is the
+    // receiver's adopted 2-bit move-epoch to echo in the tone-burst payload bits
+    // 40-41; always 0 while the knob is OFF.
     using ToneBurstSackCallback =
-        std::function<void(uint16_t base_seq, uint32_t bitmap, bool has_final)>;
+        std::function<void(uint16_t base_seq, uint32_t bitmap, bool has_final,
+                           uint8_t move_epoch)>;
     void setEmitToneBurstSackCallback(ToneBurstSackCallback cb) {
         on_emit_tone_burst_sack_ = std::move(cb);
     }
     // Sender side: consume an incoming tone-burst ACK. Reconstructs the full 16-bit
     // ack base from the 6-bit group_seq (nearest to tx_base-1) and drives the standard
     // ack path (handleAckFrame), so selective-repeat behaves identically to a SACK.
-    void onToneBurstAck(uint8_t group_seq6, uint32_t bitmap);
+    // move_epoch is the payload's epoch echo (bits 40-41); ignored while
+    // ULTRA_ARQ_MOVE_EPOCH is OFF.
+    void onToneBurstAck(uint8_t group_seq6, uint32_t bitmap, uint8_t move_epoch);
 
     // Receiver side, BURST-AWARE ACK (transport merge): the unified path delivers a
     // whole decoded burst (group) at once. The receiver knows the group boundary, so
@@ -375,6 +380,70 @@ private:
     // is offset-keyed and idempotent by construction (dedup + straddle-merge), so double
     // delivery is safe there; message payloads are seq-deduped ONLY and are never salvaged.
     bool below_window_file_salvage_ = false;
+
+    // ==================== MOVE-EPOCH (BUG-ARQ-SEQ-COLLISION structural fix) =========
+    // Env ULTRA_ARQ_MOVE_EPOCH (read once in the ctor, default OFF = byte-identical;
+    // SEMANTICS/WIRE-BREAKING when ON — both stations must run it in LOCKSTEP, no
+    // capability negotiation in this increment). Root cure for the W16 seq collision:
+    // a rate-change TX abort rewinds tx_next_seq_ to the sender's (possibly STALE,
+    // under one-way ACK loss) tx_base_seq_ and re-chunks DIFFERENT file bytes under
+    // seqs the receiver already retired. Two independent per-direction 2-bit (mod-4)
+    // counters:
+    //
+    //   tx_epoch_ — MY data direction. BUMP: in setCodeRate(), exactly when the
+    //     existing TX-abort branch fires (the branch that rewinds tx_next_seq_ — the
+    //     collision precondition). setFixedFrameCodewords()/abortPendingTx() do NOT
+    //     bump: they move tx_base FORWARD to tx_next (seq abandonment, no re-use, no
+    //     collision). STAMP: every DATA-frame send path ORs epochToFlags(tx_epoch_)
+    //     into flags; additionally EPOCH_REBASE is stamped iff the frame is created
+    //     while seq == tx_base_seq_ ("nothing un-retired below me in this era" — an
+    //     invariant that stays true for the frame's whole life, since only a
+    //     setCodeRate rewind could put an older seq back on air and that clears the
+    //     slot + bumps the epoch). Retransmits re-send the serialized bytes, so both
+    //     stamps ride along. GATE: handleAckFrame extracts the ACK's epoch echo
+    //     (SACK bitmap bits 16-17, or the tone-burst payload epoch folded in by
+    //     onToneBurstAck) and IGNORES any ACK whose epoch != tx_epoch_ (stale era —
+    //     formed against a pre-abort grid; retiring anything on it is the W16
+    //     phantom-retire). Ignoring an ACK is always protocol-safe (= ACK lost).
+    //     Side cure: the late stale ACK can no longer advance tx_base past the
+    //     rewound tx_next (the "below-base zombie transmissions" wart).
+    //
+    //   rx_epoch_ — the PEER's data direction, adopted from the wire. On a DATA frame
+    //     whose epoch != rx_epoch_ (serial half-duplex channel => any change is a
+    //     NEWER era; old-era frames cannot arrive after new-era ones): adopt the
+    //     epoch, discard ALL buffered rx slots + pending SACK/ack-repeat state
+    //     (old-era numbering is unusable; the sender's requeue re-covers those bytes
+    //     on the new grid), then anchor:
+    //       * frame has EPOCH_REBASE  -> rx_base_seq_ = frame.seq (exact era base —
+    //         cumulative claims below it only name seqs the sender already retired,
+    //         so no fabrication is possible);
+    //       * frame lacks EPOCH_REBASE (era head was lost) -> enter the UNANCHORED
+    //         interregnum (rx_epoch_wait_rebase_): window bookkeeping suspended, ALL
+    //         acks suppressed (any cumulative ack built from the old rx_base would
+    //         fabricate delivery of new-era seqs = the disease), FILE payloads are
+    //         salvage-delivered (offset-idempotent), everything else dropped. The
+    //         sender hears silence -> RTO -> resends its window base-first; the
+    //         EPOCH_REBASE frame re-arrives and anchors us. A rebase frame that
+    //         fails max_retries kills the transfer exactly as an undecodable frame
+    //         does today (no NEW failure mode).
+    //     NOT re-anchor-to-any-incoming-seq (the naive rule): if the first new-era
+    //     frame heard is NOT the sender's base (head loss), anchoring to it makes the
+    //     next cumulative ACK claim the lost head frames -> sender retires them ->
+    //     their bytes become permanently unresendable — recreating the hole this fix
+    //     cures. ECHO: sendSack stamps rx_epoch_ into SACK bitmap bits 16-17 (window
+    //     <= 16 occupies bits 0-15; bits 24-31 must stay 0 for the decodeSackBitmap
+    //     legacy-8-bit shim) / the tone-burst callback epoch argument.
+    //
+    // Residual (documented, accepted): mod-4 wrap — 4 TX aborts with ZERO frames
+    // decoded in between return to the same epoch value (below-window frames then
+    // fall back to today's salvage path); repairs/partials of a stale era are
+    // dropped or frame-CRC-rejected, never merged. GROUP_ACK/GROUP_NACK (legacy
+    // burst control) and NACK-type frames carry no epoch: they trigger retransmits,
+    // never retirement (a stale NACK causes at worst a duplicate resend).
+    bool move_epoch_enabled_ = false;
+    uint8_t tx_epoch_ = 0;             // stamps outgoing DATA; gates incoming ACKs
+    uint8_t rx_epoch_ = 0;             // adopted from incoming DATA; echoed in ACKs
+    bool rx_epoch_wait_rebase_ = false; // unanchored interregnum (see block comment)
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // ACK repeat config (time-diversity for fading channels)
@@ -431,6 +500,16 @@ private:
     size_t seqToSlot(uint16_t seq) const;
     bool isInTXWindow(uint16_t seq) const;
     bool isInRXWindow(uint16_t seq) const;
+
+    // MOVE-EPOCH helpers (no-ops / identity while ULTRA_ARQ_MOVE_EPOCH is OFF).
+    // Stamp epoch bits (+ EPOCH_REBASE when seq == tx_base_seq_) into DATA flags.
+    uint8_t stampMoveEpochFlags(uint8_t flags, uint16_t seq) const;
+    // Discard all rx-window slots + pending SACK/ack-repeat state on era adoption
+    // (mirrors setCodeRate's receiver-side discard).
+    void discardRxStateForEpochAdoption(const char* reason);
+    // Returns true when the frame was fully consumed by the move-epoch layer
+    // (unanchored interregnum: salvage/drop + ack silence).
+    bool handleMoveEpochOnData(const v2::DataFrame& frame);
 
     void transmitData(const Bytes& data);
     void transmitDataBatch(const std::vector<Bytes>& frames);

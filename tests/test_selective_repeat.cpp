@@ -702,6 +702,305 @@ bool test_below_window_file_salvage() {
     return true;
 }
 
+// ============================================================================
+// MOVE-EPOCH (BUG-ARQ-SEQ-COLLISION structural fix, ULTRA_ARQ_MOVE_EPOCH)
+// ============================================================================
+
+namespace {
+
+// Build a receiver-crafted DATA frame with explicit move-epoch flag bits.
+Bytes makeEpochData(uint16_t seq, const Bytes& payload, uint8_t epoch, bool rebase) {
+    auto f = v2::DataFrame::makeData("TX1", "RX1", seq, payload);
+    f.flags = static_cast<uint8_t>(f.flags | v2::epochToFlags(epoch) |
+                                   (rebase ? v2::Flags::EPOCH_REBASE : 0));
+    return f.serialize();
+}
+
+}  // namespace
+
+// TX side: the epoch counter bumps (mod 4) on the setCodeRate abort that rewinds
+// tx_next_seq_ (the collision precondition), every DATA frame carries the current
+// epoch in flags bits 6-7, and the frame created at the window base carries
+// EPOCH_REBASE.
+bool test_move_epoch_bump_on_abort_and_stamp() {
+    TEST("MOVE-EPOCH: bump on rate-change abort + flags stamp");
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ tx(config);  // latches the knob in the ctor
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    tx.sendData(Bytes{0x01});
+    tx.sendData(Bytes{0x02});
+    if (transmitted.size() != 2)
+        FAIL("Expected 2 initial transmissions");
+    {
+        auto f0 = v2::DataFrame::deserialize(transmitted[0]);
+        auto f1 = v2::DataFrame::deserialize(transmitted[1]);
+        if (!f0 || !f1) FAIL("Initial frames did not parse");
+        if (v2::epochFromFlags(f0->flags) != 0 || v2::epochFromFlags(f1->flags) != 0)
+            FAIL("Pre-abort frames must carry epoch 0");
+        if ((f0->flags & v2::Flags::EPOCH_REBASE) == 0)
+            FAIL("Frame created at the window base must carry EPOCH_REBASE");
+        if ((f1->flags & v2::Flags::EPOCH_REBASE) != 0)
+            FAIL("Mid-window frame must NOT carry EPOCH_REBASE");
+    }
+
+    // Rate-change TX abort (in-flight > 0) => rewind + epoch bump.
+    tx.setCodeRate(CodeRate::R1_2);
+    tx.sendData(Bytes{0x03});  // re-uses seq 0 on the new grid
+    if (transmitted.size() != 3)
+        FAIL("Expected the post-abort frame to transmit");
+    {
+        auto f = v2::DataFrame::deserialize(transmitted[2]);
+        if (!f) FAIL("Post-abort frame did not parse");
+        if (f->seq != 0)
+            FAIL("Post-abort frame should re-use the rewound base seq 0");
+        if (v2::epochFromFlags(f->flags) != 1)
+            FAIL("Post-abort frame must carry the bumped epoch 1");
+        if ((f->flags & v2::Flags::EPOCH_REBASE) == 0)
+            FAIL("Post-abort base frame must carry EPOCH_REBASE");
+    }
+
+    PASS();
+    return true;
+}
+
+// RX side: the W16 regrid case. A below-window seq with a NEWER epoch and the
+// EPOCH_REBASE anchor is NOT a duplicate — the receiver adopts the era,
+// re-anchors rx_base to the rebase seq, and DELIVERS the re-gridded content
+// (TEXT payload here, proving it is the epoch machinery — not the FILE salvage —
+// accepting it). Its ACKs then echo the new epoch in SACK bitmap bits 16-17.
+bool test_move_epoch_regrid_resend_accepted() {
+    TEST("MOVE-EPOCH: below-window regrid resend adopted + delivered");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 100;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ rx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    std::vector<Bytes> received;
+    rx.setDataReceivedCallback([&](const Bytes& data) { received.push_back(data); });
+
+    // Era 0: deliver seqs 0..2 (one-way ACK loss at the sender is invisible here —
+    // the receiver's base simply runs ahead, the W16 precondition).
+    for (uint16_t s = 0; s < 3; ++s) {
+        rx.onFrameReceived(makeEpochData(s, Bytes{static_cast<uint8_t>(s)}, 0, s == 0));
+    }
+    if (received.size() != 3)
+        FAIL("Era-0 frames should deliver in order");
+    channel.clear();
+
+    // Era 1 regrid: the sender rewound to ITS stale base 0 and re-chunked
+    // DIFFERENT bytes under the retired seqs (TEXT — the payload type the interim
+    // salvage must never touch).
+    rx.onFrameReceived(makeEpochData(0, Bytes{0x00, 0xAA}, 1, /*rebase=*/true));
+    if (received.size() != 4)
+        FAIL("Regridded rebase frame was not delivered (adoption failed)");
+    if (received[3] != Bytes({0x00, 0xAA}))
+        FAIL("Delivered payload is not the re-gridded content");
+
+    rx.onFrameReceived(makeEpochData(1, Bytes{0x01, 0xBB}, 1, /*rebase=*/false));
+    if (received.size() != 5)
+        FAIL("Post-anchor era-1 frame should deliver in order");
+    if (rx.getRxBaseSeq() != 2)
+        FAIL("rx_base should have re-anchored and advanced to 2");
+
+    // Flush the delayed SACK and verify the epoch echo (bitmap bits 16-17 == 1).
+    rx.tick(config.sack_delay_ms);
+    if (channel.size() < 1)
+        FAIL("Expected a SACK after the delayed timer");
+    {
+        auto ack = v2::ControlFrame::deserialize(channel.receive());
+        if (!ack || ack->type != v2::FrameType::ACK)
+            FAIL("Expected an ACK-type SACK");
+        const uint32_t bitmap = v2::NackPayload::decode(ack->payload).cw_bitmap;
+        if (((bitmap >> 16) & 0x3u) != 1u)
+            FAIL("SACK must echo the adopted epoch in bitmap bits 16-17");
+        if (ack->seq != 1)
+            FAIL("SACK cumulative base should be rx_base-1 = 1 in the new era");
+    }
+
+    PASS();
+    return true;
+}
+
+// TX side: an ACK whose epoch echo predates the current TX epoch is IGNORED for
+// retirement (the W16 phantom-retire arm), and a current-epoch ACK then retires.
+bool test_move_epoch_stale_ack_ignored() {
+    TEST("MOVE-EPOCH: stale-epoch ACK ignored, fresh-epoch ACK retires");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 4000;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ tx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    tx.sendData(Bytes{0x01});
+    tx.sendData(Bytes{0x02});
+    tx.sendData(Bytes{0x03});
+
+    // Rate-change abort => epoch 1, rewind, re-send new content under seqs 0..2.
+    tx.setCodeRate(CodeRate::R1_2);
+    tx.sendData(Bytes{0x11});
+    tx.sendData(Bytes{0x12});
+    tx.sendData(Bytes{0x13});
+    if (tx.getAvailableSlots() != 1)
+        FAIL("Expected 3 frames in flight after the post-abort refill");
+
+    // Stale-era ACK (epoch bits 0) cumulatively acking seqs 0..2 — the exact W16
+    // out-of-window SACK. Must NOT retire anything.
+    tx.onFrameReceived(makeSackAck(2, 0).serialize());
+    if (tx.getAvailableSlots() != 1)
+        FAIL("Stale-epoch ACK must not retire in-flight frames");
+    if (tx.getStats().stale_epoch_acks_ignored != 1)
+        FAIL("stale_epoch_acks_ignored counter should be 1");
+
+    // Fresh-era ACK (epoch bits = 1 at bitmap bits 16-17) retires normally.
+    tx.onFrameReceived(makeSackAck(2, 1u << 16).serialize());
+    if (tx.getAvailableSlots() != 4)
+        FAIL("Fresh-epoch ACK should retire all three frames");
+
+    PASS();
+    return true;
+}
+
+// RX side: adopting a new era from a NON-rebase frame (era head lost) enters the
+// unanchored interregnum — no window bookkeeping, TOTAL ack silence (a cumulative
+// claim from the old rx_base would fabricate delivery of new-era seqs), FILE
+// payloads salvaged. The late rebase frame anchors and normal operation resumes.
+bool test_move_epoch_unanchored_wait_for_rebase() {
+    TEST("MOVE-EPOCH: unanchored interregnum (ack-silent) until rebase anchor");
+
+    const Bytes file_chunk = {0x02, 0x00, 0x00, 0x00, 0x00, 0xAA};  // FILE_DATA
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 100;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ rx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    std::vector<Bytes> received;
+    rx.setDataReceivedCallback([&](const Bytes& data) { received.push_back(data); });
+
+    // Era 0 anchor point.
+    rx.onFrameReceived(makeEpochData(0, Bytes{0x00}, 0, true));
+    if (received.size() != 1) FAIL("Era-0 frame should deliver");
+    channel.clear();
+
+    // Era 1 arrives WITHOUT the rebase anchor (head lost): adopt, but stay silent.
+    rx.onFrameReceived(makeEpochData(5, Bytes{0x00, 0x55}, 1, /*rebase=*/false));
+    if (received.size() != 1)
+        FAIL("Unanchored TEXT frame must not be delivered");
+    if (channel.size() != 0)
+        FAIL("Unanchored receiver must not emit any SACK (fabrication hazard)");
+
+    // FILE payloads are salvaged during the interregnum (offset-idempotent layer).
+    rx.onFrameReceived(makeEpochData(6, file_chunk, 1, /*rebase=*/false));
+    if (received.size() != 2 || received[1] != file_chunk)
+        FAIL("Unanchored FILE frame should be salvage-delivered");
+    if (channel.size() != 0)
+        FAIL("FILE salvage while unanchored must stay ack-silent");
+
+    // Delayed timers must not leak an ack either.
+    rx.tick(config.sack_delay_ms * 2);
+    if (channel.size() != 0)
+        FAIL("No delayed SACK may fire while unanchored");
+
+    // The era base arrives on the sender's RTO resend: anchor + deliver in order.
+    rx.onFrameReceived(makeEpochData(4, Bytes{0x04, 0xCC}, 1, /*rebase=*/true));
+    if (received.size() != 3 || received[2] != Bytes({0x04, 0xCC}))
+        FAIL("Rebase frame should anchor and deliver");
+    if (rx.getRxBaseSeq() != 5)
+        FAIL("rx_base should be anchored at rebase seq + 1");
+    rx.onFrameReceived(makeEpochData(5, Bytes{0x05, 0xDD}, 1, false));
+    if (received.size() != 4)
+        FAIL("Post-anchor frame should deliver in order");
+    rx.tick(config.sack_delay_ms);
+    if (channel.size() < 1)
+        FAIL("Ack flow should resume after anchoring");
+
+    PASS();
+    return true;
+}
+
+// Knob OFF (default): flags bits 6-7 / EPOCH_REBASE stay zero, SACK bitmaps carry
+// no epoch bits, and a below-window TEXT re-send is dropped exactly as before —
+// byte-identical wire behavior.
+bool test_move_epoch_knob_off_byte_identical() {
+    TEST("MOVE-EPOCH: knob off is byte-identical");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 100;
+
+    SelectiveRepeatARQ tx(config);  // knob unset => OFF
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+    tx.sendData(Bytes{0x01});
+    tx.setCodeRate(CodeRate::R1_2);  // abort path runs, but no epoch machinery
+    tx.sendData(Bytes{0x02});
+    for (const auto& raw : transmitted) {
+        auto f = v2::DataFrame::deserialize(raw);
+        if (!f) FAIL("Frame did not parse");
+        if ((f->flags & (v2::Flags::EPOCH_MASK | v2::Flags::EPOCH_REBASE)) != 0)
+            FAIL("Knob off: epoch flag bits must stay zero");
+    }
+    if (tx.getStats().stale_epoch_acks_ignored != 0)
+        FAIL("Knob off: stale-epoch counter must stay zero");
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    std::vector<Bytes> received;
+    rx.setDataReceivedCallback([&](const Bytes& data) { received.push_back(data); });
+
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0x00, 0x01}).serialize());
+    if (received.size() != 1) FAIL("In-order frame should deliver");
+    // Below-window TEXT under a "new era" the OFF receiver cannot see: dropped
+    // (seq-keyed dedup), recovery SACK sent, no epoch echo in the bitmap.
+    rx.onFrameReceived(makeEpochData(0, Bytes{0x00, 0x02}, 1, true));
+    if (received.size() != 1)
+        FAIL("Knob off: below-window TEXT must be dropped (legacy dedup)");
+    if (channel.size() < 1)
+        FAIL("Knob off: out-of-window recovery SACK expected");
+    {
+        auto ack = v2::ControlFrame::deserialize(channel.receive());
+        if (!ack) FAIL("SACK did not parse");
+        const uint32_t bitmap = v2::NackPayload::decode(ack->payload).cw_bitmap;
+        if ((bitmap & 0xFFFF0000u) != 0)
+            FAIL("Knob off: SACK bitmap must carry no epoch bits");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_rx_out_of_order() {
     TEST("RX handles out-of-order frames");
 
@@ -2106,6 +2405,13 @@ int main() {
     test_rx_in_order();
     test_below_window_file_salvage();
     test_rx_out_of_order();
+
+    std::cout << "\nMOVE-EPOCH Tests (BUG-ARQ-SEQ-COLLISION structural fix):\n";
+    test_move_epoch_bump_on_abort_and_stamp();
+    test_move_epoch_regrid_resend_accepted();
+    test_move_epoch_stale_ack_ignored();
+    test_move_epoch_unanchored_wait_for_rebase();
+    test_move_epoch_knob_off_byte_identical();
 
     std::cout << "\nRetransmission Tests:\n";
     test_timeout_retransmit();
