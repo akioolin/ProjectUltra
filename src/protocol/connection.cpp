@@ -3364,11 +3364,22 @@ uint32_t Connection::modeChangeRetryMs() const {
         return env_pin;
     }
 
+    // Airtime-only RTT (2x anchor+ctl + coalesce) UNDER-budgets the real exchange:
+    // the peer cannot ACK until it drains its RX decode backlog (it may be
+    // mid-burst-decode when the MODE_CHANGE lands), and each too-early retry keys
+    // down half-duplex ON TOP of the ACK in flight — rig W5 (first run at the
+    // airtime-only ~5 s timer): 72 MODE_CHANGE receptions, moves never committed,
+    // livelock. Floor at HALF the unified burst ACK deadline: that deadline's
+    // non-airtime half models exactly the receiver decode/SACK-hold budget, and
+    // both terms stay ratiometric (scale with mod/rate/window). Empirically ~9 s
+    // wideband — above every clean rig ACK RTT (W1-W4: all ACKs < 18.5 s, most
+    // first-try), half the old full-deadline borrow.
     const uint64_t control_round_trip_ms =
         2ULL * static_cast<uint64_t>(dataTurnControlGuardMs()) +
         static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
-    return static_cast<uint32_t>(
-        std::min<uint64_t>(control_round_trip_ms, 0xFFFFFFFFull));
+    const uint64_t decode_backlog_floor_ms = arq_.getAckTimeout() / 2;
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        std::max(control_round_trip_ms, decode_backlog_floor_ms), 0xFFFFFFFFull));
 }
 
 void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ack_seq) {
