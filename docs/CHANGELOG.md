@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(ladder): 16QAM **R3/4 crest rung** behind `ULTRA_QAM16_R34` (default-OFF A/B, byte-identical when unset) — UNVALIDATED, edits-only, awaiting build + faithful-gate A/B
+
+**What/why (lever, not a bug):** `maxValidatedCoherentRate()` capped QAM16 at R2/3 citing a
+"~2850 bps AWGN@30" ceiling that is STALE — the same rung now delivers 3520 bps AWGN@20 with
+the wide window (2026-07-03 campaign). 16QAM R3/4 raw = 9/8 of R2/3 (+12.5%, projected
+ceiling ~3900). Risk: 16QAM R3/4 measured damage-bound PRE-interleave (55-70% frame loss —
+fable_analysis/07), hence knob-gated A/B with airtight demote paths.
+
+**What changed:**
+1. `src/protocol/waveform_selection.hpp` — new `qam16R34Enabled()` (read-once static env
+   `ULTRA_QAM16_R34`, mirrors `qam16LadderEnabled()`); `maxValidatedCoherentRate(QAM16)`
+   returns R3/4 when ON, R2/3 otherwise; stale 2850-ceiling comment corrected (3520 measured,
+   ~3900 projected). `{QAM16, R3/4}` stays `kRungDisabledDb` in BOTH ladders — the rung is
+   reachable ONLY via the adaptive walk, never at CONNECT.
+2. `src/protocol/connection.cpp` `applyAdaptiveRateFeedback` QAM16 branch — when ON: climb
+   QAM16 R2/3 → R3/4 after `qam16ClimbStreak()` (default 2) consecutive clean groups
+   (quality ≥ `climb_above`; parallel counter `qam16_r34_clean_streak_`; busy window → hold,
+   streak KEPT so the walk re-asserts at a clean boundary — mirrors the QPSK→QAM16 hop);
+   demote R3/4 → R2/3 IMMEDIATELY on one bad group / NACK (`kQam16DemoteBadStreak=1`
+   semantics; stays on QAM16 so the QPSK re-climb cooldown is NOT armed — that meters
+   QPSK→QAM16 re-entry). A further bad group at R2/3 takes the existing QPSK R3/4 demote.
+   `maybeEscapeStuckFrame` unchanged in policy: still drops STRAIGHT to QPSK R3/4 from
+   EITHER QAM16 rate (log now prints the actual rate). QPSK→QAM16 climb logic untouched.
+3. `src/protocol/connection.hpp` — `qam16_r34_clean_streak_` member (reset on bad group, on
+   every `noteQam16Demoted`, and in `enterConnected`).
+4. **Known caveat (flagged in the `applyDataMode` comment):** the stuck-frame escape from
+   QAM16 R3/4 → QPSK R3/4 is a mod-only SAME-rate transition (typically same CW=8) — the
+   `setCodeRate()` ARQ rewind early-returns there. Per-CW byte capacity is rate/CW-derived
+   (`getFixedFramePayloadCapacity`), not modulation-derived, so frame bytes stay
+   geometry-valid and the mod-change requeue + HARQ flush still fire — but this exact
+   transition must be exercised on the faithful gate before the knob graduates.
+5. Tests: `tests/test_connection_policy.cpp` pins the knob-off baseline (`ULTRA_QAM16_R34=0`
+   setenv in main before statics latch): QAM16 cap R2/3, QPSK cap R3/4, and the structural
+   connect-time gate ({QAM16,R3/4} disabled in both ladder tables).
+6. `docs/MODEM_INFRASTRUCTURE_MAP.md` — `ULTRA_QAM16_R34` row added (🟡 EXPERIMENTAL A/B,
+   default-OFF).
+
+**Verification:** edits-only session (no build run by policy). Gate: `ctest` +
+knob-off faithful-gate no-regression, then knob-on A/B AWGN@20/Good@20 multi-seed.
+
 ## 2026-07-03 — feat(arq): wide coherent ARQ window **DEFAULT-ON (16)** via tone-burst SACK frame_mask 8→16 bits (**WIRE-BREAKING — both stations must run this build**) + ULTRA_STUCK_ESCAPE_RETX A/B knob (default unchanged)
 
 **VALIDATED 2026-07-03 (overnight campaign):** ctest green (UltraTncSimAudio red =

@@ -152,6 +152,20 @@ inline bool qam16LadderEnabled() {
     return on;
 }
 
+// ── 16QAM R3/4 crest rung (2026-07-03): env-gated A/B knob ─────────────────────
+// ULTRA_QAM16_R34=1 lets the ADAPTIVE walk (applyAdaptiveRateFeedback, connection.cpp)
+// step QAM16 R2/3 -> R3/4 after a clean-group streak, and lifts the QAM16 cap in
+// maxValidatedCoherentRate() below to match. Default OFF -> byte-identical. The rung
+// is NEVER connect-time selectable: BOTH ladders keep {QAM16, R3/4} at kRungDisabledDb,
+// so the only way in is the mid-stream walk (which also owns the immediate demote).
+inline bool qam16R34Enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_QAM16_R34");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return on;
+}
+
 inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
     // mod              rate            AWGN             GOOD             MODERATE
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
@@ -201,17 +215,22 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
 // promotes the connect-time 16QAM R1/2 up into the measured DAMAGE-BOUND 16QAM R2/3/R3/4
 // (Phase 0a: 55-70% frame loss, 1-of-3 link-death — fable_analysis/07) BEFORE the reactive
 // ssthresh can cap it, taking a frame into a fade at the over-climbed rung. QAM16 is capped
-// at R1/2 (the only Good-clean QAM16 rung measured to date); RAISE this per rung as the
-// dense-rung margins work (fable_analysis Phase 2b) validates QAM16 R2/3+ on the GUI gate.
-// Non-QAM16 (QPSK) is capped at R3/4 — the top of the auto ladder since R5/6 was retired
-// (2026-06-17, a measured-losing rung; see rate_controller.hpp). R5_6 is no longer a cap value.
+// at R2/3 (validated on the GUI gate 2026-06-14 with cross-frame interleave); the R3/4
+// crest rung sits behind ULTRA_QAM16_R34 (A/B, default OFF). RAISE a cap per rung only as
+// the GUI gate validates it. Non-QAM16 (QPSK) is capped at R3/4 — the top of the auto
+// ladder since R5/6 was retired (2026-06-17, a measured-losing rung; see
+// rate_controller.hpp). R5_6 is no longer a cap value.
 inline CodeRate maxValidatedCoherentRate(Modulation mod) {
     switch (mod) {
         // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (auto-on for QAM16 via
         // burstCrossFrameInterleaveOn) makes 16QAM R2/3 Good@20 viable at ~1790 bps GUI-measured
-        // (6/6 seeds), now ABOVE the R1/2 clean rung (~1550). Capped at R2/3, NOT R3/4 — 16QAM
-        // R3/4 stays damage-bound even with interleave; AWGN@30 ceiling is ~2850.
-        case Modulation::QAM16: return CodeRate::R2_3;
+        // (6/6 seeds), now ABOVE the R1/2 clean rung (~1550). 2026-07-03: the R2/3 measured
+        // ceiling is 3520 bps AWGN@20 with the wide window (the old "~2850 AWGN@30" figure is
+        // stale); R3/4 raw = 9/8 of R2/3 -> projected ceiling ~3900. R3/4 measured damage-bound
+        // PRE-interleave (55-70% frame loss — fable_analysis/07), so it ships knob-gated
+        // (ULTRA_QAM16_R34): reachable ONLY via the adaptive walk, one-bad-group demote to R2/3.
+        case Modulation::QAM16:
+            return qam16R34Enabled() ? CodeRate::R3_4 : CodeRate::R2_3;
         default:                return CodeRate::R3_4;  // QPSK ceiling = top of the auto ladder
     }
 }

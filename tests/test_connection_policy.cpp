@@ -859,6 +859,37 @@ void test_coherent_window_override_disabled_keeps_default() {
           "DQPSK R1/2 high-throughput window is unaffected by the coherent override knob");
 }
 
+void test_qam16_r34_cap_knob_off_keeps_r23() {
+    // ULTRA_QAM16_R34 is pinned to "0" in main() BEFORE any policy call — the knob is
+    // latched once (static). Baseline contract: with the crest rung disabled, the
+    // per-modulation validated-rate cap is byte-identical to the pre-knob behavior —
+    // QAM16 caps at R2/3, QPSK at R3/4 (the auto-ladder top).
+    CHECK(!qam16R34Enabled(), "ULTRA_QAM16_R34=0 must read as disabled");
+    CHECK(maxValidatedCoherentRate(Modulation::QAM16) == CodeRate::R2_3,
+          "QAM16 validated-rate cap stays R2/3 with the crest-rung knob disabled");
+    CHECK(maxValidatedCoherentRate(Modulation::QPSK) == CodeRate::R3_4,
+          "QPSK validated-rate cap stays R3/4 (ladder top) regardless of the knob");
+    // Connect-time gate (knob-independent, structural): {QAM16, R3/4} is kRungDisabledDb
+    // in BOTH ladder tables, so the crest rung is reachable ONLY via the adaptive walk —
+    // even with the knob ON, selectCoherentOFDM can never pick it at CONNECT.
+    for (const auto& rung : kCoherentLadder) {
+        if (rung.mod == Modulation::QAM16 && rung.rate == CodeRate::R3_4) {
+            for (int cls = 0; cls < 3; ++cls) {
+                CHECK(rung.min_snr_db[cls] >= kRungDisabledDb,
+                      "kCoherentLadder {QAM16, R3/4} must stay disabled for connect-time selection");
+            }
+        }
+    }
+    for (const auto& rung : kCoherentLadderQAM16Exp) {
+        if (rung.mod == Modulation::QAM16 && rung.rate == CodeRate::R3_4) {
+            for (int cls = 0; cls < 3; ++cls) {
+                CHECK(rung.min_snr_db[cls] >= kRungDisabledDb,
+                      "kCoherentLadderQAM16Exp {QAM16, R3/4} must stay disabled for connect-time selection");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -867,6 +898,9 @@ int main() {
     // baseline BEFORE any test runs so this binary deterministically tests the
     // default (byte-identical) window-selection path.
     setenv("ULTRA_COHERENT_WINDOW", "0", 1);
+    // Same latch-once pattern: pin the 16QAM R3/4 crest-rung A/B knob to its disabled
+    // default so this binary deterministically tests the byte-identical baseline cap.
+    setenv("ULTRA_QAM16_R34", "0", 1);
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
@@ -882,6 +916,7 @@ int main() {
     test_unified_burst_ack_timeout();
     test_connect_selection_saturation_bound();
     test_coherent_window_override_disabled_keeps_default();
+    test_qam16_r34_cap_knob_off_keeps_r23();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

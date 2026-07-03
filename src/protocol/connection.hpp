@@ -691,6 +691,11 @@ private:
     // trigger).
     int qam16_clean_streak_ = 0;
     int qam16_bad_streak_ = 0;
+    // 16QAM R3/4 crest rung (ULTRA_QAM16_R34, default-OFF A/B knob). Consecutive clean groups
+    // at QAM16 R2/3 toward the within-QAM16 R2/3 -> R3/4 walk — a PARALLEL counter to
+    // qam16_clean_streak_ (which tracks the QPSK-pinned streak toward the modulation hop).
+    // Reset on any bad group, on every QAM16 demote (noteQam16Demoted), and in enterConnected.
+    int qam16_r34_clean_streak_ = 0;
     // Re-climb COOLDOWN (2026-07-02, replaces the 06-17 sticky no-reclimb). Under fade-riding
     // the QPSK<->QAM16 oscillation IS the mechanism — the rung SHOULD oscillate with the
     // ~10-20 s Good fade cycle (crest -> 16QAM R2/3, trough -> QPSK R3/4); the 06-17 sticky

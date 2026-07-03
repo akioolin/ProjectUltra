@@ -1736,6 +1736,8 @@ static int stuckRetransmitEscape() {
 // ULTRA_QAM16_CLIMB_STREAK [1..64]; lower = faster switch but a weaker Good-vs-Moderate proxy.
 // Demote off QAM16 IMMEDIATELY on a bad group (kQam16DemoteBadStreak=1, was 2 — fade-riding
 // needs the trough exit to be as prompt as the cliff NACK exit) or on a NACK.
+// The ULTRA_QAM16_R34 crest-rung walk (QAM16 R2/3 -> R3/4, default-OFF) reuses this same
+// streak length as its climb gate — one clean-evidence constant for both upward moves.
 static int qam16ClimbStreak() {
     static const int v = [] {
         if (const char* e = std::getenv("ULTRA_QAM16_CLIMB_STREAK")) {
@@ -1771,6 +1773,7 @@ void Connection::noteQam16Demoted(int weight) {
     const int scale = 1 << std::min(qam16_demote_count_ - 1, 2);
     qam16_reclimb_cooldown_ = qam16ReclimbCooldownBase() * scale;
     qam16_clean_streak_ = 0;
+    qam16_r34_clean_streak_ = 0;  // leaving QAM16 — any pending crest-rung walk dies with it
 }
 
 bool Connection::rateAdaptationActive() const {
@@ -1800,12 +1803,14 @@ void Connection::maybeEscapeStuckFrame() {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
         // NO tone-burst ack at all, so the ack-driven demote in applyAdaptiveRateFeedback never sees
         // it — this escape path is the only one that fires. Demote STRAIGHT to the robust QPSK R3/4
-        // home gear (not a QAM16 code-rate step) and arm a DOUBLE-weight re-climb cooldown (a frame
-        // nearly died — stronger evidence than a soft demote, but not a permanent forfeit of the
-        // next fade crest). requestModeChange re-anchors both stations at a clean boundary.
+        // home gear (not a QAM16 code-rate step — this applies from EITHER QAM16 rate, so the
+        // ULTRA_QAM16_R34 crest rung takes the same straight exit) and arm a DOUBLE-weight re-climb
+        // cooldown (a frame nearly died — stronger evidence than a soft demote, but not a permanent
+        // forfeit of the next fade crest). requestModeChange re-anchors both stations at a clean
+        // boundary.
         noteQam16Demoted(2);
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 R2/3 -> QPSK R3/4 (frame stuck, %d retx)",
-                  arq_.maxInFlightRetryCount());
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (frame stuck, %d retx)",
+                  codeRateToString(data_code_rate_), arq_.maxInFlightRetryCount());
         requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
                           v2::ModeChangeReason::CHANNEL_DEGRADED);
         return;
@@ -1879,27 +1884,46 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         // While on the QAM16 top-gear we do NOT walk the QPSK code-rate ladder (the RateController
         // is QPSK-blind — its R2/3 index is a QPSK rung, not QAM16 R2/3). QAM16 is fragile on
         // frequency-selective fading (the decodability cliff: 55-70% loss / link-death — fable_07),
-        // so the only transitions are HOLD or an asymmetric PROMPT demote straight back to the
+        // so the default transitions are HOLD or an asymmetric PROMPT demote straight back to the
         // robust QPSK R3/4 home gear; the re-climb cooldown (noteQam16Demoted) bounds how often a
         // fading channel can thrash QPSK<->QAM16 without forfeiting the next fade crest.
+        // ULTRA_QAM16_R34 (default OFF) adds the crest rung: a within-QAM16 R2/3 -> R3/4 walk
+        // gated on the same qam16ClimbStreak() clean-group streak as the modulation hop, with the
+        // asymmetric exit intact — ONE bad group / NACK at R3/4 steps back to R2/3 (the validated
+        // rung gets first refusal, not a straight QPSK drop), and maybeEscapeStuckFrame still
+        // drops STRAIGHT to QPSK R3/4 from EITHER QAM16 rate.
         // We use RAW quality here (not the RateController EMA): a cliff demands a prompt reaction,
         // not a smoothed one (the EMA is the right tool for a GRADUAL code-rate rung, not a dense
         // constellation that fails abruptly). NOTE: when QAM16 craters so hard it emits NO ack, this
         // ack-driven demote never runs and the bad_streak keeps resetting on partial-clean acks —
         // maybeEscapeStuckFrame's QAM16->QPSK escape-drop (frame stuck stuckRetransmitEscape() retx)
-        // is the real backstop for that case; the 2-group demote here handles a softer degrade.
+        // is the real backstop for that case; the prompt demote here handles a softer degrade.
         const float drop_below = rate_controller_.config().drop_below;
         const bool nack = quality <= 0.0f;  // group fully lost — the cliff signature
         if (quality < drop_below) ++qam16_bad_streak_; else qam16_bad_streak_ = 0;
         char buf[96];
         if (nack || qam16_bad_streak_ >= kQam16DemoteBadStreak) {
             qam16_bad_streak_ = 0;
+            qam16_r34_clean_streak_ = 0;  // a bad group also aborts any pending R3/4 walk
+            // Crest-rung exit is one step at a time: R3/4 demotes to the validated R2/3, and
+            // STAYS on QAM16 — noteQam16Demoted meters the QPSK->QAM16 re-entry cooldown, which
+            // this is not. A further bad group at R2/3 takes the existing QPSK demote below.
+            const bool r34_step_down =
+                qam16R34Enabled() && data_code_rate_ == CodeRate::R3_4;
             const bool busy =
                 file_transfer_.getState() == FileTransferState::SENDING &&
                 (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
             if (busy) {
                 std::snprintf(buf, sizeof(buf),
-                              "hold QAM16 R2/3 (demote->QPSK R3/4 at clean boundary, q=%.2f)", quality);
+                              "hold QAM16 %s (demote->%s at clean boundary, q=%.2f)",
+                              codeRateToString(data_code_rate_),
+                              r34_step_down ? "QAM16 R2/3" : "QPSK R3/4", quality);
+            } else if (r34_step_down) {
+                requestModeChange(Modulation::QAM16, CodeRate::R2_3, measured_snr_db_,
+                                  v2::ModeChangeReason::CHANNEL_DEGRADED);
+                std::snprintf(buf, sizeof(buf),
+                              "QAM16 R3/4 -> QAM16 R2/3 demote via MODE_CHANGE (q=%.2f)", quality);
+                LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             } else {
                 // Count the demote + arm the re-climb cooldown only when the MODE_CHANGE actually
                 // fires (a busy-held decision re-asserts on the next bad group; counting the hold
@@ -1908,11 +1932,42 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
                                   v2::ModeChangeReason::CHANNEL_DEGRADED);
                 std::snprintf(buf, sizeof(buf),
-                              "QAM16 R2/3 -> QPSK R3/4 demote via MODE_CHANGE (q=%.2f)", quality);
+                              "QAM16 %s -> QPSK R3/4 demote via MODE_CHANGE (q=%.2f)",
+                              codeRateToString(data_code_rate_), quality);
                 LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             }
+        } else if (qam16R34Enabled() && data_code_rate_ == CodeRate::R2_3) {
+            // Crest-rung walk: QAM16 R2/3 -> R3/4 after qam16ClimbStreak() CONSECUTIVE clean
+            // groups (quality >= climb_above; a sub-threshold group resets the streak — same
+            // gate as the QPSK->QAM16 hop). Fires only at a clean send boundary; when the
+            // window is busy the streak is KEPT so the walk re-asserts on a later
+            // clean-boundary ack, mirroring the modulation hop's deferred re-assert.
+            const float climb_above = rate_controller_.config().climb_above;
+            if (quality >= climb_above) ++qam16_r34_clean_streak_;
+            else qam16_r34_clean_streak_ = 0;
+            if (qam16_r34_clean_streak_ >= qam16ClimbStreak()) {
+                const bool busy =
+                    file_transfer_.getState() == FileTransferState::SENDING &&
+                    (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+                if (busy) {
+                    std::snprintf(buf, sizeof(buf),
+                                  "hold QAM16 R2/3 for clean boundary (want QAM16 R3/4, q=%.2f)",
+                                  quality);
+                } else {
+                    qam16_r34_clean_streak_ = 0;  // walk FIRED at a clean boundary -> reset
+                    requestModeChange(Modulation::QAM16, CodeRate::R3_4, measured_snr_db_,
+                                      v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    std::snprintf(buf, sizeof(buf),
+                                  "QAM16 R2/3 -> QAM16 R3/4 climb via MODE_CHANGE (q=%.2f)",
+                                  quality);
+                    LOG_MODEM(INFO, "Connection: adaptive %s", buf);
+                }
+            } else {
+                std::snprintf(buf, sizeof(buf), "hold QAM16 R2/3 (q=%.2f)", quality);
+            }
         } else {
-            std::snprintf(buf, sizeof(buf), "hold QAM16 R2/3 (q=%.2f)", quality);
+            std::snprintf(buf, sizeof(buf), "hold QAM16 %s (q=%.2f)",
+                          codeRateToString(data_code_rate_), quality);
         }
         last_adaptive_action_ = buf;
         return;
@@ -3619,16 +3674,21 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     const bool rate_changed = rate != data_code_rate_;
     const bool cw_changed = new_cw != data_frame_cw_count_;
     // A MODULATION change (e.g. the QPSK-R3/4 -> QAM16-R2/3 climb) changes the constellation
-    // geometry AND the per-CW byte capacity (bits/symbol), exactly like a rate/CW change — so it
-    // must trigger the same re-encode + HARQ flush. Computed BEFORE data_modulation_ is overwritten
+    // geometry (bits/symbol -> frame airtime; per-CW BYTE capacity is rate/CW-derived,
+    // getFixedFramePayloadCapacity, and does NOT change with modulation) — so like a rate/CW
+    // change it must trigger the re-encode + HARQ flush. Computed BEFORE data_modulation_ is overwritten
     // below. NOTE: this drives requeuePendingChunks() + the soft_combine_harq_.clear() below (the
     // load-bearing part — stale old-constellation LLRs would corrupt HARQ). The deeper ARQ-window
     // byte-capacity rewind lives in setCodeRate()/setFixedFrameCodewords() (via
     // configureArqForCurrentDataMode), which early-return on an unchanged rate/CW — so a PURE
     // modulation-only transition (same rate AND same CW) is NOT yet fully ARQ-safe. That case does
-    // not occur today: the QAM16 climb (R3/4->R2/3) and demote (R2/3->R3/4) ALWAYS co-change the
-    // rate, so setCodeRate fires and the window rewinds correctly. Adding a mod-only transition
-    // would require an explicit ARQ window rewind here.
+    // not occur on the DEFAULT path: the QAM16 climb (R3/4->R2/3) and demote (R2/3->R3/4) ALWAYS
+    // co-change the rate, so setCodeRate fires and the window rewinds correctly. EXCEPTION
+    // (ULTRA_QAM16_R34, default-OFF A/B): the stuck-frame escape QAM16 R3/4 -> QPSK R3/4 is
+    // mod-only at the SAME rate (and typically the same CW=8) — the setCodeRate rewind is skipped
+    // there. The per-CW BYTE capacity is rate/CW-derived (LDPC K x cw_count), not
+    // modulation-derived, so in-flight frame bytes stay geometry-valid and the requeue+HARQ flush
+    // above still fire; validate that transition on the faithful gate before the knob graduates.
     const bool mod_changed = mod != data_modulation_;
     // Pending chunks must be re-encoded if rate OR CW OR modulation changed: the ARQ payload
     // capacity depends on all three, and chunks queued under the old geometry will
@@ -3713,6 +3773,7 @@ void Connection::enterConnected() {
     // QAM16 climb state is per-connection (the re-climb cooldown/backoff resets here).
     qam16_clean_streak_ = 0;
     qam16_bad_streak_ = 0;
+    qam16_r34_clean_streak_ = 0;
     qam16_reclimb_cooldown_ = 0;
     qam16_demote_count_ = 0;
     // Doppler-coherence verdict is per-connection: setChannelCoherence holds the last VALID
