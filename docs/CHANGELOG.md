@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(rate): **promote EMA carry** — `ULTRA_PROMOTE_EMA_CARRY`, default-OFF/byte-identical — ctest green, **sim/rig A/B PENDING**
+
+**What was (arguably) broken:** after ANY rate move, `RateController::resetSmoothingAfterChange`
+reset the quality EMA to the neutral midpoint 0.475. With `ema_alpha=0.4` and
+`climb_above=0.70`, re-reaching climb eligibility costs ~2 clean groups, PLUS the
+`climb_streak` (2) ⇒ ~4 clean groups (~30-45 s) PER RUNG before the next promote. Rig
+evidence (W9-W11, 2026-07-03): ~90-120 s of every ~240 s transfer is spent below 16QAM in
+exactly this arithmetic — on moves that were already justified by clean groups. The
+asymmetry the flat reset ignores: after a DEMOTE the midpoint is RIGHT (the channel just
+proved worse than the EMA believed — the history is invalid evidence); after a PROMOTE the
+streak of clean groups that EARNED the move is real channel evidence — discarding it
+double-charges each rung.
+
+**What changed (default-OFF, knob unset/`=0` → byte-identical):**
+1. `src/protocol/rate_controller.hpp`: `Config::promote_ema_carry` (default `false`) +
+   ctor env read `ULTRA_PROMOTE_EMA_CARRY` (static-lambda, read ONCE, beside
+   `ULTRA_RATE_CLIMB_STREAK`; env can only ENABLE — ORs into the field — so an explicit
+   Config setting stays deterministic regardless of the latch).
+2. `resetSmoothingAfterChange()` → `resetSmoothingAfterChange(bool promoted)`; all three
+   call sites are inside `update()` and know direction: the drop branch passes `false`,
+   the normal-climb and ceiling-reprobe-climb branches pass `true` (the reprobe promote
+   was earned by `ceiling_reprobe_climbs × climb_streak` clean groups — its own credit
+   gate, untouched, is what guards the previously-failed rung).
+3. **Seeding rule (knob ON):** PROMOTE → `ema = climb_above` (0.70) — the new rung starts
+   climb-ELIGIBLE, only the streak (2 clean groups at the NEW rung) gates the next move;
+   DEMOTE → midpoint 0.475 unchanged. No runaway: one bad group pulls 0.70 → 0.42
+   (eligibility gone instantly), ~3 bad groups cross `drop_below` (0.25) exactly as before.
+
+**Untouched by design:** the ssthresh ceiling + `noteRungFailed` (sticky) machinery; the
+QAM16 mod-hop streak counters in `connection.cpp` (`qam16_clean_streak_` etc.) — this
+lever only changes WHERE the EMA restarts inside the code-rate ladder.
+
+**Test verification:** `tests/test_rate_controller.cpp` pins the knob OFF in `main()`
+(setenv before any ctor latches the static) and drives `Config::promote_ema_carry` for
+the ON cases: knob-OFF post-promote EMA = midpoint (byte-identical); knob-ON promote
+seeds EMA at `climb_above` and the very next clean group increments the streak (2 clean
+groups → next climb); knob-ON demote still resets to midpoint; one bad group after a
+carried promote kills eligibility with no demote and no instant re-climb. 59/59 checks.
+Full ctest green (UltraTncSimAudio red pre-existing). **Sim/rig A/B PENDING** — measure
+time-below-top-gear + goodput before flipping the default.
+
 ## 2026-07-03 — feat(connect): **data-aided R3/4 entry cap** — `ULTRA_ENTRY_CAP_R34`, default-OFF/byte-identical — ctest green, **sim/rig A/B PENDING**
 
 **What was (arguably) broken:** the connect-time entry rate is clamped to QPSK R2/3 by

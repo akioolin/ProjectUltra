@@ -28,7 +28,9 @@
 //   * DOWN:  ema_quality < drop_below            -> step down one rung
 //   * UP:    ema_quality >= climb_above for K     -> step up one rung
 //   * hysteresis gap (drop_below << climb_above) + the EMA inertia + the K-streak +
-//     reset-to-midpoint after any change kill thrash.
+//     reset-to-midpoint after any change kill thrash. (ULTRA_PROMOTE_EMA_CARRY,
+//     default OFF, seeds the post-PROMOTE reset at climb_above instead — see
+//     resetSmoothingAfterChange for the demote/promote asymmetry rationale.)
 //
 // No PHY/audio/protocol dependencies — unit-tested in tests/test_rate_controller.cpp.
 
@@ -54,7 +56,8 @@ public:
         // so reaction within ~2 ACKed groups is the requirement, and the 2026-06-09
         // EMA + reset-to-midpoint already supplies the sustained-evidence inertia the
         // old 3-streak existed for (post-change the EMA needs ~2 more groups to
-        // re-reach climb_above, so an effective climb still needs ~4 groups of clean
+        // re-reach climb_above — unless promote_ema_carry below carries the promote
+        // evidence — so an effective climb still needs ~4 groups of clean
         // evidence end-to-end; the ssthresh ceiling below still suppresses the
         // bounce-back-into-a-failed-rung oscillation). Env ULTRA_RATE_CLIMB_STREAK
         // [1..16] overrides for sweeps.
@@ -74,6 +77,23 @@ public:
         // this guard is mostly inert on the default ladder — it still protects the R2/3<->R3/4
         // boundary on a fading channel that can't hold R3/4.
         int ceiling_reprobe_climbs = 2;
+        // Promote EMA carry (2026-07-03, env ULTRA_PROMOTE_EMA_CARRY, default OFF —
+        // 🟡 A/B pending). When true, a PROMOTE seeds the post-move EMA at climb_above
+        // instead of the neutral midpoint, so the new rung starts climb-ELIGIBLE and
+        // only the climb_streak (clean groups AT the new rung) gates the next move.
+        // A DEMOTE still resets to the midpoint. Rationale: the costs of being wrong
+        // are asymmetric in the EVIDENCE, not just the outcome — after a demote the
+        // channel just proved WORSE than the EMA believed (the history is invalid,
+        // midpoint is right), but after a promote the streak of clean groups that
+        // EARNED the move is real channel evidence; discarding it double-charges each
+        // rung (~2 extra clean groups re-reaching climb_above before the streak even
+        // starts ≈ ~4 clean groups ≈ 30-45 s per rung; rig W9-W11 2026-07-03: ~90-120 s
+        // of every ~240 s transfer spent below the top gear in exactly this arithmetic,
+        // on moves already justified by clean groups). No runaway: one bad group pulls
+        // 0.70 -> 0.42 (alpha 0.4) — eligibility gone instantly — and ~3 bad groups
+        // cross drop_below just like before. The ssthresh ceiling / noteRungFailed /
+        // reprobe machinery is untouched (this only changes WHERE the EMA restarts).
+        bool promote_ema_carry = false;
         // Ordered ladder of SUPPORTED rates, lowest throughput first. If left empty
         // the controller fills it with the production OFDM ladder (skips the
         // unsupported R1_3/R7_8 enum holes, and R5_6 — retired 2026-06-17, see ctor).
@@ -88,6 +108,15 @@ public:
             const int n = std::atoi(e);
             if (n >= 1 && n <= 16) cfg_.climb_streak = n;
         }
+        // A/B knob for the promote EMA carry (see Config::promote_ema_carry).
+        // Static-lambda: the env is read ONCE per process. It can only ENABLE (OR
+        // into the field), so a caller/test that sets the Config field explicitly is
+        // deterministic regardless of the latch; unset/=0 -> byte-identical policy.
+        static const bool promote_carry_env = [] {
+            const char* e = std::getenv("ULTRA_PROMOTE_EMA_CARRY");
+            return e != nullptr && std::atoi(e) != 0;
+        }();
+        if (promote_carry_env) cfg_.promote_ema_carry = true;
         if (cfg_.ladder.empty()) {
             // R5/6 RETIRED from the auto ladder (2026-06-17). It was added (2026-05-28)
             // as a "toward-3000" climb target above R3/4, but multi-anchor measurement
@@ -140,7 +169,7 @@ public:
                 // groups instead of every climb_streak — the fix for the R3/4<->R5/6 oscillation.
                 ceiling_idx_ = std::max(0, idx - 1);
                 reprobe_credit_ = 0;
-                resetSmoothingAfterChange();
+                resetSmoothingAfterChange(/*promoted=*/false);
             }
             return cfg_.ladder[static_cast<size_t>(next)];
         }
@@ -151,7 +180,7 @@ public:
                     // headroom below the ssthresh ceiling — climb normally.
                     reprobe_credit_ = 0;
                     const int next = std::min(top, idx + 1);
-                    if (next != idx) resetSmoothingAfterChange();
+                    if (next != idx) resetSmoothingAfterChange(/*promoted=*/true);
                     return cfg_.ladder[static_cast<size_t>(next)];
                 }
                 // Pinned at the ceiling but the channel is comfortable — earn re-probe credit, and
@@ -163,7 +192,12 @@ public:
                     reprobe_credit_ = 0;
                     ceiling_idx_ = std::min(top, ceiling_idx_ + 1);
                     const int next = std::min(top, idx + 1);
-                    if (next != idx) resetSmoothingAfterChange();
+                    // The re-probe climb is a PROMOTE too: the carry (if enabled) applies —
+                    // it was earned by ceiling_reprobe_climbs x climb_streak clean groups.
+                    // The ceiling/credit machinery above is what guards a failed rung, and
+                    // it is untouched; if the retried rung fails, one bad group kills climb
+                    // eligibility and ~3 cross drop_below exactly as with the midpoint.
+                    if (next != idx) resetSmoothingAfterChange(/*promoted=*/true);
                     return cfg_.ladder[static_cast<size_t>(next)];
                 }
                 return current;  // capped at the ceiling
@@ -233,11 +267,20 @@ private:
         return -1;
     }
 
-    // After a rung actually changes, forget the old rung's quality history and start
-    // neutral (the threshold midpoint) so neither bound is immediately within reach —
-    // the new rung must earn fresh evidence before the next move (hysteresis).
-    void resetSmoothingAfterChange() {
-        ema_quality_ = 0.5f * (cfg_.drop_below + cfg_.climb_above);
+    // After a rung actually changes, restart the quality history — the new rung must
+    // earn fresh evidence before the next move (hysteresis). WHERE the EMA restarts is
+    // direction-dependent (the demote/promote asymmetry, see Config::promote_ema_carry):
+    //   * DEMOTE — neutral midpoint, always: the channel just proved WORSE than the EMA
+    //     believed, so the history that led here is invalid evidence.
+    //   * PROMOTE — midpoint by default (byte-identical legacy policy); with
+    //     promote_ema_carry seed at climb_above: the clean-group streak that EARNED the
+    //     move is real evidence, so the new rung starts climb-ELIGIBLE and only the
+    //     climb_streak (clean groups at the NEW rung) gates the next move. One bad
+    //     group still drops 0.70 -> 0.42 (alpha 0.4), killing eligibility instantly.
+    void resetSmoothingAfterChange(bool promoted) {
+        ema_quality_ = (promoted && cfg_.promote_ema_carry)
+                           ? cfg_.climb_above
+                           : 0.5f * (cfg_.drop_below + cfg_.climb_above);
         ema_initialized_ = true;
     }
 

@@ -9,6 +9,8 @@
 #include "protocol/rate_controller.hpp"
 #include "ultra/types.hpp"
 
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 using namespace ultra;
@@ -152,9 +154,87 @@ void test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung() {
     CHECK(r == CodeRate::R3_4, "after a sustained good run the ceiling re-probes back to the top rung");
 }
 
+// ---- Promote EMA carry (ULTRA_PROMOTE_EMA_CARRY, 2026-07-03) ------------------
+// The env read is a latch-once static (pinned OFF in main below), so the ON cases
+// drive Config::promote_ema_carry directly — the production ctor ORs the env into
+// the SAME field, so this exercises the identical policy path.
+
+RateController makeCarryOn() {
+    RateController::Config cfg;
+    cfg.promote_ema_carry = true;
+    return RateController(cfg);
+}
+
+float midpoint(const RateController& c) {
+    return 0.5f * (c.config().drop_below + c.config().climb_above);
+}
+
+void test_promote_carry_off_by_default_midpoint() {
+    // Knob OFF (env pinned "0" in main): post-promote EMA resets to the neutral
+    // midpoint — byte-identical to the pre-knob policy.
+    RateController c;
+    c.update(CodeRate::R1_2, 1.0f);
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "warm-up promote fires");
+    CHECK(std::fabs(c.emaQuality() - midpoint(c)) < 1e-6f,
+          "knob OFF: post-promote EMA = midpoint (byte-identical default)");
+}
+
+void test_promote_carry_seeds_climb_eligible() {
+    // Knob ON: a promote seeds the EMA at climb_above — the new rung starts
+    // climb-ELIGIBLE, so the very next clean group counts toward the streak and
+    // exactly climb_streak (2) clean groups gate the next promote.
+    RateController c = makeCarryOn();
+    c.update(CodeRate::R1_2, 1.0f);
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "promote R1/2 -> R2/3");
+    CHECK(std::fabs(c.emaQuality() - c.config().climb_above) < 1e-6f,
+          "knob ON: post-promote EMA seeded at climb_above");
+    CHECK(c.update(CodeRate::R2_3, 1.0f) == CodeRate::R2_3,
+          "1st clean group at the new rung: hold (streak 1 of 2)");
+    CHECK(c.climbStreak() == 1,
+          "the first post-promote clean group increments the streak IMMEDIATELY");
+    CHECK(c.update(CodeRate::R2_3, 1.0f) == CodeRate::R3_4,
+          "2nd clean group: climb — only the streak gates the next move");
+}
+
+void test_promote_carry_demote_still_resets_to_midpoint() {
+    // Knob ON must not touch the demote side: after a drop the channel proved worse
+    // than believed — the midpoint reset is correct and unchanged.
+    RateController c = makeCarryOn();
+    for (int i = 0; i < 4; ++i) c.update(CodeRate::R3_4, 1.0f);  // ema -> ~1.0
+    c.update(CodeRate::R3_4, 0.0f);
+    c.update(CodeRate::R3_4, 0.0f);
+    CHECK(c.update(CodeRate::R3_4, 0.0f) == CodeRate::R2_3,
+          "sustained fade still demotes (3 bad groups, unchanged)");
+    CHECK(std::fabs(c.emaQuality() - midpoint(c)) < 1e-6f,
+          "knob ON: post-DEMOTE EMA still resets to the midpoint");
+}
+
+void test_promote_carry_one_bad_group_kills_eligibility() {
+    // No runaway ratchet: ONE bad group right after a carried promote pulls the EMA
+    // 0.70 -> 0.42 (alpha 0.4) — climb eligibility gone instantly, but still above
+    // drop_below (no panic demote), and the next clean group must NOT climb.
+    RateController c = makeCarryOn();
+    c.update(CodeRate::R1_2, 1.0f);
+    CHECK(c.update(CodeRate::R1_2, 1.0f) == CodeRate::R2_3, "promote R1/2 -> R2/3");
+    CHECK(c.update(CodeRate::R2_3, 0.0f) == CodeRate::R2_3,
+          "one bad group after the promote: HOLD (no demote)");
+    CHECK(c.emaQuality() < c.config().climb_above,
+          "one bad group drops the EMA below climb_above (eligibility gone)");
+    CHECK(c.emaQuality() > c.config().drop_below,
+          "...but not below drop_below (no panic demote)");
+    CHECK(c.update(CodeRate::R2_3, 1.0f) == CodeRate::R2_3,
+          "next clean group does NOT climb (EMA 0.42 -> 0.652 < 0.70: no runaway)");
+    CHECK(c.climbStreak() == 0, "streak stays cleared until the EMA re-earns eligibility");
+}
+
 }  // namespace
 
 int main() {
+    // Pin the promote-carry knob OFF before ANY RateController is constructed — the
+    // env read inside the ctor is a latch-once static-lambda. The knob-ON cases above
+    // set Config::promote_ema_carry directly (the env can only OR into that field).
+    setenv("ULTRA_PROMOTE_EMA_CARRY", "0", 1);
+
     test_first_bad_group_acts_no_history();
     test_single_transient_fade_does_not_drop();
     test_periodic_fade_does_not_ratchet_to_floor();
@@ -164,6 +244,10 @@ int main() {
     test_quality_from_iterations();
     test_off_ladder_rate_passes_through();
     test_ssthresh_ceiling_blocks_bounce_back_into_failed_rung();
+    test_promote_carry_off_by_default_midpoint();
+    test_promote_carry_seeds_climb_eligible();
+    test_promote_carry_demote_still_resets_to_midpoint();
+    test_promote_carry_one_bad_group_kills_eligibility();
 
     if (tests_failed != 0) {
         std::cout << "RateController: " << (tests_run - tests_failed) << "/" << tests_run
