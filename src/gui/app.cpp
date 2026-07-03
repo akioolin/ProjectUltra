@@ -1010,19 +1010,28 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "protocol", "waveform.negotiated", diag_fields);
 
-        // Format display with waveform info and channel quality
+        // Format display with waveform info and channel quality. The wire SNR
+        // byte can carry the -10 dB stale sentinel (no reading fresher than
+        // 3*Tc at the sender) — render it as n/a, never as a number.
+        char link_snr_text[16];
+        if (snr_db <= protocol::connection_policy::kConnectSnrStaleSentinelDb + 0.5f) {
+            snprintf(link_snr_text, sizeof(link_snr_text), "n/a");
+        } else {
+            snprintf(link_snr_text, sizeof(link_snr_text), "%d dB",
+                     static_cast<int>(snr_db));
+        }
         char buf[260];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             snprintf(buf, sizeof(buf),
-                     "[MODE] MC-DPSK 8 carriers %s (link RX SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
-                     codeRateToString(rate), static_cast<int>(snr_db),
+                     "[MODE] MC-DPSK 8 carriers %s (link RX SNR=%s, peer fading=%s, local fading=%.2f %s)",
+                     codeRateToString(rate), link_snr_text,
                      peer_fading_text,
                      local_fading, local_quality);
         } else {
             snprintf(buf, sizeof(buf),
-                     "[MODE] %s %s %s (link RX SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] %s %s %s (link RX SNR=%s, peer fading=%s, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
-                     static_cast<int>(snr_db), peer_fading_text,
+                     link_snr_text, peer_fading_text,
                      local_fading, local_quality);
         }
         appendRxLogLine(buf);
@@ -2301,10 +2310,24 @@ void App::render() {
         protocol_.getState() == protocol::ConnectionState::CONNECTED;
     const auto status_snr = updateSnrBallistics(
         selectOperatorSNRDisplay(mstats, status_connected), status_connected);
-    char status_snr_text[64];
+    char status_snr_text[80];
     if (status_snr.valid) {
-        snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
-                 status_snr.snr_db, snrSourceToString(status_snr.source));
+        // The measured value is EFFECTIVE (fade-state) SNR — physically honest but
+        // it under-reads the operator's AWGN-equivalent dial on a fading channel
+        // (Watterson Good at dial 20 reads ~11-15 effective; the calibrated
+        // selection basis maps between the two). Show the dial-equivalent
+        // alongside so the meter matches the knob the operator actually set.
+        const float fading_now = modem_.getFadingIndex();
+        if (fading_now >= protocol::kFadingAwgnMax) {
+            snprintf(status_snr_text, sizeof(status_snr_text),
+                     "%.1f dB eff (~%.0f dial, %s)", status_snr.snr_db,
+                     status_snr.snr_db +
+                         protocol::connection_policy::connectSnrFadeBasisDb(),
+                     snrSourceToString(status_snr.source));
+        } else {
+            snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
+                     status_snr.snr_db, snrSourceToString(status_snr.source));
+        }
     } else if (connected_peer_snr_valid_) {
         snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (wire_peer)",
                  connected_peer_snr_db_);
