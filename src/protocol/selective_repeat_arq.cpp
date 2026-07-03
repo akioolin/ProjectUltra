@@ -31,9 +31,15 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
         config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     adaptive_ack_timeout_ms_ = config_.ack_timeout_ms;
 
-    // BUG-ARQ-SEQ-COLLISION interim salvage knob (default OFF = byte-identical).
-    if (const char* e = std::getenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE"); e && e[0] == '1') {
-        below_window_file_salvage_ = true;
+    // BUG-ARQ-SEQ-COLLISION interim salvage — DEFAULT-ON since 2026-07-03 evening:
+    // 9/9 rig field engagements positive (W20 x9, W23 x3, W27 x14, W29 x2, W31 x5,
+    // W32 x8, W35 x8, W36 x9, W37 x15 — ~60 frames rescued, every touched transfer
+    // delivered byte-exact, zero anomalies), unit-tested (test_selective_repeat
+    // 44/44). Salvage is receiver-side and idempotent by construction (offset-keyed
+    // FILE payloads only). ULTRA_BELOW_WINDOW_FILE_SALVAGE=0 opts out.
+    below_window_file_salvage_ = true;
+    if (const char* e = std::getenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE"); e && e[0] == '0') {
+        below_window_file_salvage_ = false;
     }
 }
 

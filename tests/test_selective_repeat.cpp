@@ -680,8 +680,11 @@ bool test_below_window_file_salvage() {
     if (received.size() != 3)
         FAIL("Far-future FILE_DATA must not be salvaged");
 
-    // --- Knob OFF (default): below-window FILE_DATA dropped as today ---
+    // --- Knob OFF (explicit =0 opt-out; DEFAULT is ON since 2026-07-03 evening,
+    // 9/9 rig field engagements): below-window FILE_DATA dropped as before ---
+    setenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE", "0", 1);
     SelectiveRepeatARQ rx_off(config);
+    unsetenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE");
     rx_off.setCallsigns("RX1", "TX1");
     ByteChannel channel_off;
     rx_off.setTransmitCallback([&](const Bytes& data) { channel_off.send(data); });
