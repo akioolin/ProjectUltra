@@ -418,11 +418,15 @@ void Connection::acceptCall() {
     CodeRate rec_rate;
 
     // Use centralized algorithm from waveform_selection.hpp. #58: the selection value
-    // is basis-corrected (fade-effective reading vs dial-calibrated anchors); the raw
-    // measured_snr_db_ stays untouched for the wire/logs.
+    // is basis-corrected (fade-effective reading vs dial-calibrated anchors). Increment
+    // 3: snr_db is the connect-SNR-pool aggregate when ULTRA_CONNECT_SNR_POOL is set
+    // (clustered dB-mean of the handshake's data-aided readings — same population the
+    // +5 basis was calibrated on, so the basis composes unchanged and is applied ONCE,
+    // downstream); knob-off it is exactly the raw measured_snr_db_ scalar.
+    const float snr_db = rateSelectionSnrDb();
     const float accept_selection_snr_db =
-        connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
-                                                 measured_snr_data_aided_);
+        connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
+                                                 rateSelectionSnrDataAided());
     recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
@@ -430,7 +434,7 @@ void Connection::acceptCall() {
         CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, fading_index_, rec_rate, rec_mod);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
-                      codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_,
+                      codeRateToString(rec_rate), codeRateToString(capped), snr_db,
                       snrSourceToString(measured_snr_source_), fading_index_);
             rec_rate = capped;
         }
@@ -475,7 +479,7 @@ void Connection::acceptCall() {
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
         : connection_policy::recommendCWCountForChannel(
-              rec_mod, rec_rate, negotiated_mode_, fading_index_, measured_snr_db_);
+              rec_mod, rec_rate, negotiated_mode_, fading_index_, snr_db);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
@@ -513,10 +517,13 @@ void Connection::acceptCall() {
               modulationToString(data_modulation_), codeRateToString(data_code_rate_),
               data_frame_cw_count_);
 
+    // CONNECT_ACK wire byte: the pool aggregate under ULTRA_CONNECT_SNR_POOL (always
+    // fresh at this instant by construction — never the stale sentinel), else the raw
+    // scalar exactly as before.
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
                                                  data_modulation_, data_code_rate_,
-                                                 measured_snr_db_, fading_index_,
+                                                 snr_db, fading_index_,
                                                  static_cast<uint8_t>(data_frame_cw_count_),
                                                  rung_id);
     Bytes ack_data = ack.serialize();
@@ -527,7 +534,7 @@ void Connection::acceptCall() {
     const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
-              ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
+              ack_data.size(), snr_db, snrSourceToString(measured_snr_source_));
     transmitFrame(ack_data);
 
     // We are the responder - we received CONNECT and are sending CONNECT_ACK
@@ -537,8 +544,8 @@ void Connection::acceptCall() {
 
     enterConnected();
 
-    // Notify application of initial data mode
-    notifyDataModeChanged(measured_snr_db_, fading_index_);
+    // Notify application of initial data mode (LOCAL reading — responder pick)
+    notifyDataModeChanged(snr_db, fading_index_, /*snr_is_wire=*/false);
 }
 
 void Connection::rejectCall() {
@@ -1468,7 +1475,10 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
     // TRANSPORT MERGE (2026-06-06): the unified arq_ path is the only OFDM file transport —
     // it bursts + interleaves via sendNextFileChunk() -> flushBurstBuffer() over ONE 16-bit
     // seq space, one tone-burst ack, one retransmit window (legacy burst_transport_ removed).
-    if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, measured_snr_db_, data_code_rate_)) {
+    // #58 increment 3: selection-flavored consumer — the pool aggregate (knob-gated)
+    // replaces the single-snapshot scalar so one trough reading can't flip the block
+    // strategy for the whole transfer. Knob-off: exactly measured_snr_db_.
+    if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, rateSelectionSnrDb(), data_code_rate_)) {
         Bytes block = file_transfer_.getSingleBlockPayload(kOFDMFileBlockPayloadLimit);
         if (!block.empty()) {
             LOG_MODEM(INFO, "Connection: Sending file as single OFDM block (%zu bytes payload)",
@@ -1866,7 +1876,9 @@ void Connection::executeEscapeDrop(const char* trigger) {
         noteQam16Demoted(2);
         LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (%s)",
                   codeRateToString(data_code_rate_), trigger);
-        requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
+        // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
+        // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
+        requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
                           v2::ModeChangeReason::CHANNEL_DEGRADED);
         return;
     }
@@ -1885,7 +1897,7 @@ void Connection::executeEscapeDrop(const char* trigger) {
     LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s)",
               codeRateToString(data_code_rate_), codeRateToString(robust), trigger);
     rate_controller_.noteRungFailed(data_code_rate_);
-    requestModeChange(data_modulation_, robust, measured_snr_db_,
+    requestModeChange(data_modulation_, robust, wireSnrDb(),
                       v2::ModeChangeReason::CHANNEL_DEGRADED);
 }
 
@@ -2150,7 +2162,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                               codeRateToString(data_code_rate_),
                               r34_step_down ? "QAM16 R2/3" : "QPSK R3/4", quality);
             } else if (r34_step_down) {
-                requestModeChange(Modulation::QAM16, CodeRate::R2_3, measured_snr_db_,
+                requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
                                   v2::ModeChangeReason::CHANNEL_DEGRADED);
                 std::snprintf(buf, sizeof(buf),
                               "QAM16 R3/4 -> QAM16 R2/3 demote via MODE_CHANGE (q=%.2f)", quality);
@@ -2160,7 +2172,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 // fires (a busy-held decision re-asserts on the next bad group; counting the hold
                 // would double-charge the backoff for one logical demote).
                 noteQam16Demoted(1);
-                requestModeChange(Modulation::QPSK, CodeRate::R3_4, measured_snr_db_,
+                requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
                                   v2::ModeChangeReason::CHANNEL_DEGRADED);
                 std::snprintf(buf, sizeof(buf),
                               "QAM16 %s -> QPSK R3/4 demote via MODE_CHANGE (q=%.2f)",
@@ -2186,7 +2198,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                                   quality);
                 } else {
                     qam16_r34_clean_streak_ = 0;  // walk FIRED at a clean boundary -> reset
-                    requestModeChange(Modulation::QAM16, CodeRate::R3_4, measured_snr_db_,
+                    requestModeChange(Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
                                       v2::ModeChangeReason::CHANNEL_IMPROVED);
                     std::snprintf(buf, sizeof(buf),
                                   "QAM16 R2/3 -> QAM16 R3/4 climb via MODE_CHANGE (q=%.2f)",
@@ -2302,7 +2314,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 isFasterMode(target_mod, target_rate, data_modulation_, prev)
                     ? v2::ModeChangeReason::CHANNEL_IMPROVED
                     : v2::ModeChangeReason::CHANNEL_DEGRADED;
-            requestModeChange(target_mod, target_rate, measured_snr_db_, reason);
+            requestModeChange(target_mod, target_rate, wireSnrDb(), reason);
             if (qam16_hop) qam16_clean_streak_ = 0;  // hop FIRED at a clean boundary -> reset
             std::snprintf(buf, sizeof(buf), "%s %s -> %s %s via MODE_CHANGE (q=%.2f)",
                           modulationToString(data_modulation_), codeRateToString(prev),
@@ -2812,6 +2824,10 @@ void Connection::runDeferredArqRefill() {
 
 void Connection::tick(uint32_t elapsed_ms) {
     soft_combine_harq_.tick(elapsed_ms);
+    // #58 increment 3: age the connect-SNR pool on the modem-time tick (elapsed_ms is
+    // the same clock every timer here runs on — never Date/wall-clock). Ticks in ALL
+    // states: handshake readings accumulate age while DISCONNECTED/CONNECTING too.
+    connect_snr_pool_.tick(elapsed_ms);
 
     switch (state_) {
         case ConnectionState::PROBING:
@@ -3523,10 +3539,13 @@ void Connection::configureArqForCurrentDataMode() {
                   data_frame_cw_count_,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
+        // #58 increment 3: selection-flavored consumers (knob-gated pool aggregate) —
+        // a lone trough snapshot could deny the window-16 gate for the whole session.
+        const float window_snr_db = rateSelectionSnrDb();
         const bool near_awgn_ofdm =
-            connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
+            connection_policy::isNearAwgnOFDM(fading_index_, window_snr_db);
         arq_.setWindowSize(connection_policy::ofdmWindowSizeForChannel(
-            data_modulation_, data_code_rate_, fading_index_, measured_snr_db_));
+            data_modulation_, data_code_rate_, fading_index_, window_snr_db));
         // TRANSPORT MERGE (step 1): the tone-burst ack carries a 16-bit frame_mask (widened
         // 6->8 2026-06-17, 8->16 2026-07-02), so cap the in-flight window to 16. An N-frame
         // message then streams as ≤16-frame windows, each fully covered by one tone-burst
@@ -3831,7 +3850,8 @@ LadderRungId Connection::currentLadderRungId() const {
     return LadderRungId::UNKNOWN;
 }
 
-void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index) {
+void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index,
+                                       bool snr_is_wire) {
     if (!on_data_mode_changed_) {
         return;
     }
@@ -3839,7 +3859,8 @@ void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index) {
     on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
                           snr_db, peer_fading_index,
                           mc_dpsk ? config_.mc_dpsk_num_carriers : 0,
-                          mc_dpsk ? config_.mc_dpsk_samples_per_symbol : 0);
+                          mc_dpsk ? config_.mc_dpsk_samples_per_symbol : 0,
+                          snr_is_wire);
 }
 
 // ─────────────────────── [LADDER] per-transfer telemetry ────────────────────────
@@ -4016,13 +4037,17 @@ void Connection::commitPendingModeChange(const char* outcome) {
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
 
-    notifyDataModeChanged(pending_snr_db_, pending_fading_index_);
+    // pending_snr_db_ is what WE embedded in our MODE_CHANGE request — a LOCAL value.
+    notifyDataModeChanged(pending_snr_db_, pending_fading_index_, /*snr_is_wire=*/false);
     runDeferredArqRefill();
 }
 
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    // #58 increment 3: the handshake spent (or never needed) its one pick-defer;
+    // re-arm for the next handshake. Consulted only pre-CONNECT, so this is safe here.
+    connect_pick_deferred_once_ = false;
     // Half-duplex INTERACTIVE (TNC/Winlink-B2F): the RESPONDER speaks first (the SID banner).
     // It does NOT need a pre-confirmed handshake to do so — the initiator proactively yields a
     // TURNOVER ~1.5 s after connect (see tick()), and receiving that TURNOVER is the responder's
@@ -4149,6 +4174,10 @@ void Connection::enterDisconnected(const std::string& reason) {
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
     clearOutboundMessageTracking();
+    // #58 increment 3: session boundary — nothing in the connect-SNR pool may leak
+    // into the next handshake's entry pick.
+    connect_snr_pool_.clear();
+    connect_pick_deferred_once_ = false;
 
     // Reset connect waveform to DPSK for next connection attempt
     connect_waveform_ = WaveformMode::MC_DPSK;
@@ -4468,6 +4497,10 @@ void Connection::reset() {
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
     ladder_telemetry_active_ = false;
+    // #58 increment 3: the connect-SNR pool is per-session (its entry horizon IS the
+    // handshake scope); the defer one-shot re-arms for the next handshake.
+    connect_snr_pool_.clear();
+    connect_pick_deferred_once_ = false;
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 

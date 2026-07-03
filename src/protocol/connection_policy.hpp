@@ -395,6 +395,217 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
     return {};
 }
 
+// ═══════════ #58 increment 3 — connect-SNR pool (BUG-CONNECT-SNR-VARIANCE) ═══════════
+// The entry pick and the MODE_CHANGE wire byte were fed by the last-write-wins scalar
+// measured_snr_db_ — a SINGLE fade realization (rig MPG@20: per-connect readings
+// 3.9-17.9 dB, sigma 3.15; W3's lone 3.9 trough reading bought a ~20x mis-pick into
+// 90 bps DBPSK on a dial-20 channel; W2 shipped a 3.2 dB reading ~31 s stale on the
+// wire). The pool keeps the last few QUALIFYING readings and aggregates them as a
+// decorrelation-clustered dB-domain MEAN:
+//   - dB-mean, NOT linear mean (Jensen: E_linear >= E_dB — a linear mean systematically
+//     exceeds the population the +5 connectSnrFadeBasisDb below was calibrated against,
+//     i.e. it would double-count optimism), and NOT max (order statistics: E[max of N]
+//     grows ~sigma*sqrt(2 ln N) above the mean — an N-dependent bias the fixed basis
+//     cannot absorb; the one legitimate lower-bound argument already lives in the
+//     Moderate saturation bound in connectSelectionSnrDb).
+//   - Readings closer than Tc apart are ONE fade sample (Clarke/Jakes: the channel has
+//     not decorrelated) — they merge into one cluster (dB-average) before the mean;
+//     N_eff = cluster count. Tc derives from the same no-magic-constants chain as the
+//     retx trough pacing: retxTroughDopplerHz -> coherenceTimeMsForDoppler (measured
+//     Doppler when the coherence verdict is valid, else the ITU-R design Doppler of the
+//     coherence-adjusted fading class). AWGN class => Tc = UINT32_MAX => everything
+//     clusters to one sample, whose dB-mean is exactly the right stationary estimate.
+// POPULATION CONTRACT (enforced HERE so it is unit-testable and cannot be bypassed):
+//   - MCDPSK_IN_BAND readings enter ONLY when data_aided (the whole-frame fade-AVERAGED
+//     estimate). The training snapshot is a single ~170 ms fade state with a documented
+//     fade-crest over-read on Moderate — a DIFFERENT calibration basis; it must never
+//     launder into the aggregate (or through it into the saturation bound).
+//   - OFDM_BROADBAND readings enter tagged, and serve ONLY the wire-freshness fix
+//     (handshake_only=false aggregations); the ENTRY pick filters them out.
+//   - Everything else (IDLE_IN_BAND, SYNC_QUALITY, ...) is rejected.
+// AGING: age_ms is advanced from Connection::tick(elapsed_ms) — modem-time, never
+// Date/wall-clock (CPU-paced sims and the rig then share one clock basis).
+struct ConnectSnrReading {
+    float snr_db = 0.0f;
+    uint64_t age_ms = 0;     // advanced from Connection::tick elapsed_ms (modem-time)
+    bool data_aided = false;
+    SNRSource source = SNRSource::NONE;
+};
+
+class ConnectSnrPool {
+public:
+    static constexpr size_t kCapacity = 8;
+
+    void clear() { count_ = 0; }
+    size_t size() const { return count_; }
+    bool empty() const { return count_ == 0; }
+
+    // Adds a reading iff it satisfies the population contract (see block comment).
+    // Returns whether the reading entered the pool. Oldest reading drops at capacity.
+    bool addReading(float snr_db, SNRSource source, bool data_aided) {
+        if (!std::isfinite(snr_db)) {
+            return false;
+        }
+        const bool handshake_reading =
+            (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
+        const bool wire_reading = (source == SNRSource::OFDM_BROADBAND);
+        if (!handshake_reading && !wire_reading) {
+            return false;
+        }
+        if (count_ == kCapacity) {
+            for (size_t i = 1; i < kCapacity; ++i) {
+                readings_[i - 1] = readings_[i];
+            }
+            --count_;
+        }
+        readings_[count_++] = ConnectSnrReading{snr_db, 0, data_aided, source};
+        return true;
+    }
+
+    // Ages every reading (call from Connection::tick with its elapsed_ms).
+    void tick(uint64_t elapsed_ms) {
+        for (size_t i = 0; i < count_; ++i) {
+            const uint64_t age = readings_[i].age_ms;
+            readings_[i].age_ms =
+                (age > UINT64_MAX - elapsed_ms) ? UINT64_MAX : age + elapsed_ms;
+        }
+    }
+
+    // Clustered dB-mean over qualifying readings; NAN when none qualify.
+    //   tc_ms          readings < tc_ms apart merge into one cluster (one fade sample)
+    //   handshake_only restrict to the entry-pick population (data-aided MCDPSK_IN_BAND)
+    //   max_age_ms     freshness gate (UINT64_MAX = no gate; entry pick uses no gate —
+    //                  the pool is cleared at connection boundaries so its horizon IS
+    //                  the handshake scope; the wire embed gates at 3*Tc)
+    float clusteredDbMeanDb(uint64_t tc_ms, bool handshake_only,
+                            uint64_t max_age_ms) const {
+        int clusters = 0;
+        return aggregate(tc_ms, handshake_only, max_age_ms, clusters);
+    }
+
+    // Number of decorrelated clusters among qualifying readings (N_eff).
+    int effectiveCount(uint64_t tc_ms, bool handshake_only,
+                       uint64_t max_age_ms) const {
+        int clusters = 0;
+        (void)aggregate(tc_ms, handshake_only, max_age_ms, clusters);
+        return clusters;
+    }
+
+    uint64_t freshestAgeMs() const {
+        return count_ > 0 ? readings_[count_ - 1].age_ms : UINT64_MAX;
+    }
+
+private:
+    float aggregate(uint64_t tc_ms, bool handshake_only, uint64_t max_age_ms,
+                    int& clusters_out) const {
+        double cluster_sum = 0.0;
+        int cluster_n = 0;
+        double cluster_mean_sum = 0.0;
+        int clusters = 0;
+        uint64_t prev_age = 0;
+        bool have_prev = false;
+        for (size_t i = 0; i < count_; ++i) {  // stored oldest -> newest
+            const ConnectSnrReading& r = readings_[i];
+            if (handshake_only &&
+                !((r.source == SNRSource::MCDPSK_IN_BAND) && r.data_aided)) {
+                continue;
+            }
+            if (r.age_ms > max_age_ms) {
+                continue;
+            }
+            // Ages are monotonically non-increasing oldest->newest, so the gap to the
+            // previous qualifying reading is prev_age - r.age_ms.
+            if (have_prev && (prev_age - r.age_ms) < tc_ms) {
+                cluster_sum += r.snr_db;
+                ++cluster_n;
+            } else {
+                if (cluster_n > 0) {
+                    cluster_mean_sum += cluster_sum / cluster_n;
+                    ++clusters;
+                }
+                cluster_sum = r.snr_db;
+                cluster_n = 1;
+            }
+            prev_age = r.age_ms;
+            have_prev = true;
+        }
+        if (cluster_n > 0) {
+            cluster_mean_sum += cluster_sum / cluster_n;
+            ++clusters;
+        }
+        clusters_out = clusters;
+        if (clusters == 0) {
+            return NAN;
+        }
+        return static_cast<float>(cluster_mean_sum / clusters);
+    }
+
+    ConnectSnrReading readings_[kCapacity] = {};
+    size_t count_ = 0;
+};
+
+// Wire stale sentinel: encodeSNR(-10) == wire byte 0, which the receiver ALREADY
+// renders as "peer SNR n/a" (app.cpp validity check snr_db >= 0) — zero receiver
+// change. Physically collision-free: no control frame decodes at a true -10 dB
+// effective SNR (all floors >= 5 dB), so byte 0 is unreachable as a measurement.
+inline constexpr float kConnectSnrStaleSentinelDb = -10.0f;
+// A fade-state estimate decorrelates in Tc (Clarke/Jakes A(Tc)=0.5); nothing newer
+// than 3*Tc means the pool no longer describes the CURRENT link -> send the sentinel
+// instead of a frozen number (W2 shipped 16.5 for 40 s / 22.0 for 40+ s).
+inline constexpr uint32_t kConnectWireSnrFreshTcMultiple = 3;
+
+// ULTRA_CONNECT_SNR_POOL (default OFF => byte-identical): entry pick + CONNECT_ACK
+// wire byte use the pool's clustered dB-mean instead of the last-write-wins scalar.
+// The pool still ACCUMULATES silently when OFF (output-identical). Read ONCE (static).
+inline bool connectSnrPoolEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_CONNECT_SNR_POOL");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+// ULTRA_CONNECT_PICK_DEFER (default OFF; requires ULTRA_CONNECT_SNR_POOL): auto-accept
+// only — when the pool has ONE effective (decorrelated) reading on a fading channel and
+// the pick would land sub-OFDM (the 15-40x cost-asymmetry zone), withhold CONNECT_ACK
+// once and let the initiator's EXISTING CONNECT retransmit deliver a decorrelated
+// second reading. Wire-compatible: a deferred CONNECT is indistinguishable from a
+// decode failure to the initiator. Read ONCE (static).
+inline bool connectPickDeferEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_CONNECT_PICK_DEFER");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+// ULTRA_WIRE_SNR_FRESH (default OFF => wire bytes unchanged): MODE_CHANGE embeds use
+// the pool mean over readings younger than 3*Tc, else the -10 dB stale sentinel
+// (wire byte 0 = the receiver's existing "n/a" rendering). Read ONCE (static).
+inline bool wireSnrFreshEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_WIRE_SNR_FRESH");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+// Pure defer predicate (knob- and env-free so it is unit-testable): defer exactly once,
+// only when the aggregate rests on a single fade sample (N_eff==1), only on a fading
+// channel (AWGN readings are stationary — one sample IS the mean), and only when the
+// pick would land sub-OFDM (MC-DPSK; wrongly entering OFDM low still delivers ~450 bps,
+// wrongly falling to MC-DPSK costs 15-40x — the asymmetry that justifies buying one
+// more sample). N_eff==0 means the pool has no qualifying reading at all: the pick is
+// already on the scalar fallback path — nothing to defer for.
+inline bool shouldDeferConnectPick(int effective_count, float fading_index,
+                                   WaveformMode selected_waveform,
+                                   bool already_deferred) {
+    return !already_deferred &&
+           effective_count == 1 &&
+           fading_index >= kFadingAwgnMax &&
+           selected_waveform == WaveformMode::MC_DPSK;
+}
+
 // #58 connect-time SNR basis correction (2026-07-01, fable_analysis/09 §4).
 // The OFDM entry floors and coherent-ladder anchors are DIAL-calibrated (forced-rung
 // sim sweeps at --snr-db = the AWGN-equivalent dial), but the connect-time reading

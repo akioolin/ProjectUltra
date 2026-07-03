@@ -3,6 +3,7 @@
 #include "frame_v2.hpp"
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
+#include "connection_policy.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
 #include "file_transfer.hpp"
@@ -10,6 +11,7 @@
 #include "fec/soft_combine.hpp"
 #include <cmath>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <optional>
@@ -408,6 +410,11 @@ public:
         measured_snr_source_ = source;
         measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
+        // #58 increment 3: qualifying readings ALSO enter the connect-SNR pool
+        // (population contract enforced inside addReading: data-aided MCDPSK_IN_BAND
+        // + OFDM_BROADBAND only). Fed exactly where the scalar is assigned so the
+        // trust/addressing surface is byte-identical to the scalar's.
+        connect_snr_pool_.addReading(snr_db, source, data_aided);
     }
     float getMeasuredSNR() const { return measured_snr_db_; }
     SNRSource getMeasuredSNRSource() const { return measured_snr_source_; }
@@ -424,6 +431,8 @@ public:
         measured_snr_source_ = source;
         measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
+        // #58 increment 3: see setMeasuredSNR — same feed, same contract.
+        connect_snr_pool_.addReading(snr_db, source, data_aided);
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
         }
@@ -488,11 +497,17 @@ public:
     // count for the new rate (1..8) — host updates encoder/decoder from this
     // value directly. Host MUST NOT call back into ProtocolEngine from this
     // callback (mutex held; re-entry will deadlock).
+    // snr_is_wire: true when snr_db arrived over the wire (peer's measurement:
+    // CONNECT_ACK on the initiator, MODE_CHANGE on the receiver); false when it is
+    // this station's OWN local reading (responder connect-time pick, sender-side
+    // MODE_CHANGE commit) — the GUI must label the source accordingly (the responder
+    // connect line used to mislabel a LOCAL reading as "(wire_peer)").
     using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate,
                                                         int cw_count,
                                                         float snr_db, float peer_fading_index,
                                                         int mc_dpsk_num_carriers,
-                                                        int mc_dpsk_samples_per_symbol)>;
+                                                        int mc_dpsk_samples_per_symbol,
+                                                        bool snr_is_wire)>;
     void setDataModeChangedCallback(DataModeChangedCallback cb) { on_data_mode_changed_ = cb; }
 
     // Request mode change to remote station
@@ -507,6 +522,56 @@ private:
                source == SNRSource::IDLE_IN_BAND ||
                source == SNRSource::OFDM_BROADBAND ||
                source == SNRSource::MCDPSK_IN_BAND;
+    }
+
+    // ── #58 increment 3: connect-SNR pool accessors (all knob-gated, default-OFF) ──
+    // Tc for decorrelation clustering / wire freshness — the SAME derivation chain as
+    // the retx trough pacing (measured Doppler when the coherence verdict is valid,
+    // else the ITU-R design Doppler of the coherence-adjusted fading class); no tuned
+    // ms constants. AWGN class => UINT32_MAX (all readings are one stationary cluster).
+    uint64_t connectSnrPoolTcMs() const {
+        const float doppler_hz = coherence_valid_ ? coherence_doppler_hz_ : 0.0f;
+        return connection_policy::coherenceTimeMsForDoppler(
+            connection_policy::retxTroughDopplerHz(doppler_hz, fading_index_,
+                                                   coherence_score_, coherence_valid_));
+    }
+    // Entry-pick value: clustered dB-mean of the handshake population (data-aided
+    // MCDPSK_IN_BAND readings; no age gate — the pool is cleared at connection
+    // boundaries, so its horizon IS the handshake scope). Falls back to the scalar
+    // when the knob is off or the pool has no qualifying reading (e.g. training-only
+    // decodes) — knob-OFF is byte-identical by construction.
+    float rateSelectionSnrDb() const {
+        if (!connection_policy::connectSnrPoolEnabled()) {
+            return measured_snr_db_;
+        }
+        const float agg = connect_snr_pool_.clusteredDbMeanDb(
+            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+        return std::isfinite(agg) ? agg : measured_snr_db_;
+    }
+    // data_aided flag matching rateSelectionSnrDb()'s VALUE: the pool aggregate is
+    // data-aided by construction (population contract); the scalar fallback keeps the
+    // scalar's flag. Keeps the connectSelectionSnrDb saturation-bound semantics exact.
+    bool rateSelectionSnrDataAided() const {
+        if (!connection_policy::connectSnrPoolEnabled()) {
+            return measured_snr_data_aided_;
+        }
+        const float agg = connect_snr_pool_.clusteredDbMeanDb(
+            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+        return std::isfinite(agg) ? true : measured_snr_data_aided_;
+    }
+    // MODE_CHANGE wire embed: pool mean over ALL qualifying readings younger than
+    // 3*Tc, else the -10 dB stale sentinel (wire byte 0 — the receiver's existing
+    // "peer SNR n/a" rendering; no receiver change). Knob-OFF => the raw scalar,
+    // byte-identical to main.
+    float wireSnrDb() const {
+        if (!connection_policy::wireSnrFreshEnabled()) {
+            return measured_snr_db_;
+        }
+        const uint64_t tc_ms = connectSnrPoolTcMs();  // <= UINT32_MAX: 3*Tc can't overflow
+        const float agg = connect_snr_pool_.clusteredDbMeanDb(
+            tc_ms, /*handshake_only=*/false,
+            /*max_age_ms=*/tc_ms * connection_policy::kConnectWireSnrFreshTcMultiple);
+        return std::isfinite(agg) ? agg : connection_policy::kConnectSnrStaleSentinelDb;
     }
 
     ConnectionConfig config_;
@@ -543,6 +608,15 @@ private:
     SNRSource measured_snr_source_ = SNRSource::NONE;
     bool measured_snr_data_aided_ = false;  // measured_snr_db_ is the data-aided MC-DPSK estimate
     bool measured_snr_valid_ = false;
+    // #58 increment 3 (BUG-CONNECT-SNR-VARIANCE): ring of the last qualifying SNR
+    // readings (see ConnectSnrPool contract in connection_policy.hpp). Aged from
+    // Connection::tick (modem-time); cleared in reset()/enterDisconnected() so
+    // nothing leaks across sessions. Consumed via rateSelectionSnrDb()/wireSnrDb().
+    connection_policy::ConnectSnrPool connect_snr_pool_;
+    // ULTRA_CONNECT_PICK_DEFER one-shot: this handshake already spent its single
+    // CONNECT_ACK withhold. Cleared at connection boundaries (reset/enterConnected/
+    // enterDisconnected) — one defer per handshake, never a defer loop.
+    bool connect_pick_deferred_once_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
     float coherence_score_ = 0.0f;   // Doppler coherence (|H|^2 autocorr); high=Good slow fading
     float coherence_doppler_hz_ = 0.0f;  // measured RMS Doppler (Hz) riding the coherence feed;
@@ -902,7 +976,7 @@ private:
     void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0,
                        LadderRungId rung_id = LadderRungId::UNKNOWN);
     void commitPendingModeChange(const char* outcome);
-    void notifyDataModeChanged(float snr_db, float peer_fading_index);
+    void notifyDataModeChanged(float snr_db, float peer_fading_index, bool snr_is_wire);
     LadderRungId currentLadderRungId() const;
 
     // Callbacks

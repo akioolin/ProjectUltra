@@ -522,8 +522,10 @@ private:
                                                   int cw_count,
                                                   float peer_snr_db, float peer_fading,
                                                   int mc_dpsk_num_carriers,
-                                                  int mc_dpsk_samples_per_symbol) {
+                                                  int mc_dpsk_samples_per_symbol,
+                                                  bool snr_is_wire) {
             (void)peer_snr_db;
+            (void)snr_is_wire;
             if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
                 ultra::MultiCarrierDPSKConfig cfg;
                 cfg.num_carriers = mc_dpsk_num_carriers;

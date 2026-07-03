@@ -934,6 +934,159 @@ void test_retx_trough_defer() {
           "zero_rounds is floored at 1 (a round just failed when this is called)");
 }
 
+// ═══ #58 increment 3 — ConnectSnrPool (BUG-CONNECT-SNR-VARIANCE) ═══
+// Pure pool math (param-driven; the ULTRA_CONNECT_SNR_POOL / _PICK_DEFER /
+// ULTRA_WIRE_SNR_FRESH knobs gate only the Connection wiring and are pinned OFF
+// in main() for latch determinism).
+
+void test_connect_snr_pool_population_and_identity() {
+    ConnectSnrPool pool;
+    // Population contract enforced in addReading: the training snapshot (MCDPSK
+    // non-data-aided) has a DIFFERENT calibration basis and must never enter; idle/
+    // sync-quality sources never enter either.
+    CHECK(!pool.addReading(12.0f, SNRSource::MCDPSK_IN_BAND, false),
+          "training (non-data-aided) MCDPSK reading never enters the pool");
+    CHECK(!pool.addReading(12.0f, SNRSource::IDLE_IN_BAND, false),
+          "idle reading never enters the pool");
+    CHECK(!pool.addReading(12.0f, SNRSource::SYNC_QUALITY, false),
+          "sync-quality proxy never enters the pool");
+    CHECK(!pool.addReading(NAN, SNRSource::MCDPSK_IN_BAND, true),
+          "non-finite reading never enters the pool");
+    CHECK(pool.empty(), "rejected readings leave the pool empty");
+    CHECK(std::isnan(pool.clusteredDbMeanDb(4230, true, UINT64_MAX)),
+          "empty pool aggregates to NAN (callers fall back to the scalar)");
+    CHECK(pool.effectiveCount(4230, true, UINT64_MAX) == 0, "empty pool N_eff=0");
+
+    // N=1 identity: a single reading's aggregate IS the reading — with the knob ON
+    // the pick is byte-identical to the scalar path by construction.
+    CHECK(pool.addReading(11.5f, SNRSource::MCDPSK_IN_BAND, true),
+          "data-aided MCDPSK reading enters the pool");
+    CHECK(std::fabs(pool.clusteredDbMeanDb(4230, true, UINT64_MAX) - 11.5f) < 1e-4f,
+          "N=1 identity: aggregate == the single reading");
+    CHECK(pool.effectiveCount(4230, true, UINT64_MAX) == 1, "single reading N_eff=1");
+
+    // Ring capacity: oldest drops, size caps at 8.
+    ConnectSnrPool ring;
+    for (int i = 0; i < 10; ++i) {
+        ring.addReading(static_cast<float>(i), SNRSource::MCDPSK_IN_BAND, true);
+    }
+    CHECK(ring.size() == ConnectSnrPool::kCapacity, "ring caps at 8 readings");
+    // All same-age (no ticks) -> one cluster; mean of the SURVIVING readings 2..9.
+    CHECK(std::fabs(ring.clusteredDbMeanDb(4230, true, UINT64_MAX) - 5.5f) < 1e-4f,
+          "ring keeps the newest 8 (oldest two dropped)");
+}
+
+void test_connect_snr_pool_tc_clustering() {
+    // Two readings < Tc apart are ONE fade sample (the channel has not decorrelated):
+    // they merge into one cluster (dB-average), N_eff stays 1.
+    ConnectSnrPool pool;
+    const uint64_t tc_ms = 4230;  // Good-class design Tc (0.423/0.1 Hz)
+    pool.addReading(11.0f, SNRSource::MCDPSK_IN_BAND, true);
+    pool.tick(1000);  // 1 s < Tc
+    pool.addReading(13.0f, SNRSource::MCDPSK_IN_BAND, true);
+    CHECK(pool.effectiveCount(tc_ms, true, UINT64_MAX) == 1,
+          "readings < Tc apart cluster to ONE effective sample");
+    CHECK(std::fabs(pool.clusteredDbMeanDb(tc_ms, true, UINT64_MAX) - 12.0f) < 1e-4f,
+          "clustered pair contributes its dB-average");
+
+    // A third reading > Tc later is a genuinely decorrelated second sample; the
+    // final statistic is the dB-mean of CLUSTER means (12 and 6), not of raw readings.
+    pool.tick(9000);  // 9 s > 2 Tc since the second reading
+    pool.addReading(6.0f, SNRSource::MCDPSK_IN_BAND, true);
+    CHECK(pool.effectiveCount(tc_ms, true, UINT64_MAX) == 2,
+          "a > Tc-separated reading is a second effective sample");
+    CHECK(std::fabs(pool.clusteredDbMeanDb(tc_ms, true, UINT64_MAX) - 9.0f) < 1e-4f,
+          "aggregate = dB-mean of cluster means ((12 + 6)/2), not of raw readings");
+
+    // AWGN-class Tc (UINT32_MAX from coherenceTimeMsForDoppler on fD<=0): everything
+    // clusters to one stationary sample whose dB-average is the right estimate.
+    CHECK(pool.effectiveCount(UINT32_MAX, true, UINT64_MAX) == 1,
+          "infinite Tc (AWGN class) clusters everything to one sample");
+}
+
+void test_connect_snr_pool_trough_suppression() {
+    // W3 counterfactual (rig MPG@20, Moderate-classed fading 0.73): the lone 3.9 dB
+    // trough reading bought a ~90 bps DBPSK session on a channel carrying ~2 kbps.
+    // Single reading, composed exactly as handleConnect does it:
+    const float sel_single = connectSelectionSnrDb(3.9f, 0.73f, true);
+    CHECK(sel_single < kOFDMEntryFloorModerateDb,
+          "single trough reading (3.9, below the saturation zone) stays sub-OFDM");
+    CHECK(selectLadderRung(sel_single, 0.73f).waveform == WaveformMode::MC_DPSK,
+          "W3 as-shipped: one trough reading lands MC-DPSK");
+
+    // Pool replay: {3.9, then a decorrelated healthy 12.8} -> dB-mean 8.35. The +5
+    // fade basis composes ONCE downstream, and the >=6.5 data-aided Moderate
+    // saturation rescue now clears the Moderate floor -> OFDM entry.
+    ConnectSnrPool pool;
+    const uint64_t tc_ms = 846;  // Moderate-class design Tc (0.423/0.5 Hz)
+    pool.addReading(3.9f, SNRSource::MCDPSK_IN_BAND, true);
+    pool.tick(10000);  // a CONNECT retry arrives >= ~10 s later (> 2 Tc even on Good)
+    pool.addReading(12.8f, SNRSource::MCDPSK_IN_BAND, true);
+    const float mean = pool.clusteredDbMeanDb(tc_ms, true, UINT64_MAX);
+    CHECK(std::fabs(mean - 8.35f) < 1e-3f,
+          "dB-mean of decorrelated trough+healthy readings = 8.35");
+    const float sel_pool = connectSelectionSnrDb(mean, 0.73f, true);
+    CHECK(sel_pool >= kOFDMEntryFloorModerateDb,
+          "pool mean + basis + saturation rescue clears the Moderate entry floor");
+    CHECK(selectLadderRung(sel_pool, 0.73f).waveform == WaveformMode::OFDM_CHIRP,
+          "W3 counterfactual: OFDM entry instead of the 90 bps DBPSK session");
+
+    // Composition guard: the aggregate is basis-free (a raw-population statistic);
+    // the +5 basis and the Moderate saturation bound compose exactly ONCE downstream:
+    // sel = max(mean + basis, kOFDMEntryFloorModerateDb + 0.5).
+    const float expected_sel = std::max(mean + connectSnrFadeBasisDb(),
+                                        kOFDMEntryFloorModerateDb + 0.5f);
+    CHECK(std::fabs(sel_pool - expected_sel) < 1e-4f,
+          "basis + saturation bound apply exactly once, downstream of the aggregation");
+}
+
+void test_connect_snr_pool_wire_freshness() {
+    ConnectSnrPool pool;
+    const uint64_t tc_ms = 4230;
+    const uint64_t fresh_ms = tc_ms * kConnectWireSnrFreshTcMultiple;
+
+    // OFDM_BROADBAND readings enter TAGGED and serve only the wire aggregation
+    // (handshake_only=false); the entry pick filters them out.
+    CHECK(pool.addReading(16.5f, SNRSource::OFDM_BROADBAND, false),
+          "broadband control-frame reading enters the pool (wire population)");
+    CHECK(std::isnan(pool.clusteredDbMeanDb(tc_ms, true, UINT64_MAX)),
+          "entry-pick aggregation excludes OFDM_BROADBAND readings");
+    CHECK(std::isfinite(pool.clusteredDbMeanDb(tc_ms, false, fresh_ms)),
+          "wire aggregation sees the fresh broadband reading");
+
+    // Aging past 3*Tc: the pool no longer describes the CURRENT link -> no wire value
+    // -> the caller embeds the -10 sentinel, which encodes to wire byte 0 (the
+    // receiver's existing 'peer SNR n/a' rendering; no receiver change).
+    pool.tick(fresh_ms + 1);
+    CHECK(std::isnan(pool.clusteredDbMeanDb(tc_ms, false, fresh_ms)),
+          "readings older than 3*Tc age out of the wire aggregate");
+    CHECK(v2::encodeSNR(kConnectSnrStaleSentinelDb) == 0,
+          "stale sentinel -10 dB encodes to wire byte 0");
+    CHECK(v2::decodeSNR(0) < 0.0f,
+          "wire byte 0 decodes below the receiver's >=0 validity gate (renders n/a)");
+
+    // A fresh reading revives the wire value.
+    pool.addReading(19.5f, SNRSource::OFDM_BROADBAND, false);
+    CHECK(std::fabs(pool.clusteredDbMeanDb(tc_ms, false, fresh_ms) - 19.5f) < 1e-4f,
+          "a fresh decode restores an honest wire value");
+}
+
+void test_connect_pick_defer_semantics() {
+    // Defer exactly once, only for N_eff==1, only on fading, only for a sub-OFDM pick.
+    CHECK(shouldDeferConnectPick(1, 0.50f, WaveformMode::MC_DPSK, false),
+          "N_eff=1 + fading + sub-OFDM pick defers");
+    CHECK(!shouldDeferConnectPick(1, 0.50f, WaveformMode::MC_DPSK, true),
+          "defer fires ONCE per handshake (already_deferred blocks)");
+    CHECK(!shouldDeferConnectPick(2, 0.50f, WaveformMode::MC_DPSK, false),
+          "N_eff=2: the aggregate already rests on decorrelated samples — pick");
+    CHECK(!shouldDeferConnectPick(0, 0.50f, WaveformMode::MC_DPSK, false),
+          "N_eff=0: scalar-fallback path (no qualifying reading) — nothing to defer for");
+    CHECK(!shouldDeferConnectPick(1, kFadingAwgnMax - 0.01f, WaveformMode::MC_DPSK, false),
+          "AWGN class never defers (one sample IS the stationary mean)");
+    CHECK(!shouldDeferConnectPick(1, 0.50f, WaveformMode::OFDM_CHIRP, false),
+          "an OFDM pick never defers (only the 15-40x sub-OFDM zone buys a sample)");
+}
+
 }  // namespace
 
 int main() {
@@ -945,6 +1098,12 @@ int main() {
     // Same latch-once pattern: pin the 16QAM R3/4 crest-rung A/B knob to its disabled
     // default so this binary deterministically tests the byte-identical baseline cap.
     setenv("ULTRA_QAM16_R34", "0", 1);
+    // #58 increment 3: pin the connect-SNR-pool knobs to their disabled defaults —
+    // the pool tests below drive ConnectSnrPool/shouldDeferConnectPick directly
+    // (param-driven, env-free); the knobs gate only the Connection wiring.
+    setenv("ULTRA_CONNECT_SNR_POOL", "0", 1);
+    setenv("ULTRA_CONNECT_PICK_DEFER", "0", 1);
+    setenv("ULTRA_WIRE_SNR_FRESH", "0", 1);
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
@@ -962,6 +1121,11 @@ int main() {
     test_coherent_window_override_disabled_keeps_default();
     test_qam16_r34_cap_knob_off_keeps_r23();
     test_retx_trough_defer();
+    test_connect_snr_pool_population_and_identity();
+    test_connect_snr_pool_tc_clustering();
+    test_connect_snr_pool_trough_suppression();
+    test_connect_snr_pool_wire_freshness();
+    test_connect_pick_defer_semantics();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

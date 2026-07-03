@@ -956,7 +956,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                                                  int cw_count,
                                                  float snr_db, float peer_fading,
                                                  int mc_dpsk_num_carriers,
-                                                 int mc_dpsk_samples_per_symbol) {
+                                                 int mc_dpsk_samples_per_symbol,
+                                                 bool snr_is_wire) {
         if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
             modem_.setMCDPSKProfile(mc_dpsk_num_carriers,
                                     mc_dpsk_samples_per_symbol,
@@ -992,9 +993,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             snprintf(peer_fading_text, sizeof(peer_fading_text), "n/a");
         }
         const char* wf_name = waveformDisplayName(waveform);
-        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB (wire_peer), peer_fading=%s, local_fading=%.2f %s)",
+        // Source label fix (2026-07-03): the responder's connect-time notify carries
+        // its OWN local reading (peer_fading==local_fading was the tell) — only the
+        // initiator's CONNECT_ACK and a received MODE_CHANGE are genuinely wire-
+        // carried. Keep the line prefix stable (gui_qso_scenario.sh greps
+        // "MODE_CHANGE: <waveform> <mod> "); only the parenthesized label varies.
+        const char* snr_source_label = snr_is_wire ? "wire_peer" : "local_measured";
+        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB (%s), peer_fading=%s, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
-               snr_db, peer_fading_text,
+               snr_db, snr_source_label, peer_fading_text,
                local_fading, local_quality);
         char diag_fields[224];
         snprintf(diag_fields, sizeof(diag_fields),

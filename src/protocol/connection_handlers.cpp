@@ -7,6 +7,7 @@
 #include "ultra/logging.hpp"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace ultra {
 namespace protocol {
@@ -192,16 +193,23 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         remote_hash_ = frame.src_hash;  // Store hash for routing
 
-        // Use measured SNR from modem (set via setMeasuredSNR)
-        snr_db = measured_snr_db_;
+        // Use measured SNR from modem (set via setMeasuredSNR). #58 increment 3:
+        // under ULTRA_CONNECT_SNR_POOL this is the connect-SNR-pool aggregate
+        // (clustered dB-mean of this handshake's data-aided readings — CONNECT +
+        // retry decodes), else exactly the raw last-write-wins scalar. The same
+        // value feeds the selection, the CW pick, the CONNECT_ACK wire byte and the
+        // logs below, so all views of the pick stay consistent.
+        snr_db = rateSelectionSnrDb();
         const SNRSource snr_source = measured_snr_source_;
         const bool rate_selection_snr_valid = measured_snr_valid_;
         // #58: SELECTION uses the basis-corrected value (fade-effective reading vs
         // dial-calibrated floors/anchors, connection_policy::connectSelectionSnrDb);
-        // snr_db stays raw for the wire byte and logs.
+        // the +5 fade basis is applied exactly ONCE, here, downstream of the pool
+        // aggregation (the pool population is the SAME one the basis was calibrated
+        // on, so it composes unchanged).
         const float selection_snr_db =
             connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
-                                                     measured_snr_data_aided_);
+                                                     rateSelectionSnrDataAided());
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -224,6 +232,34 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             !forced_profile && !forced_waveform &&
             commonSupportsWaveform(config_.mode_capabilities, remote_caps,
                                    selected_rung.waveform);
+
+        // #58 increment 3 (ULTRA_CONNECT_PICK_DEFER; requires ULTRA_CONNECT_SNR_POOL):
+        // when the pick rests on ONE effective fade sample AND would land sub-OFDM on a
+        // fading channel (the 15-40x cost-asymmetry zone — W3: one 3.9 dB trough
+        // reading bought a ~90 bps DBPSK session on a dial-20 channel), buy a second
+        // decorrelated sample instead of inflating the value: withhold CONNECT_ACK ONCE
+        // and let the initiator's EXISTING CONNECT retransmit (10-attempt budget,
+        // spacing >= ~2 Tc on Good) re-enter this handler with N_eff=2. Auto-accept
+        // only — a manual acceptCall is an operator override and never defers. Fully
+        // wire-compatible: to the initiator a deferred CONNECT is indistinguishable
+        // from a decode failure; worst case (no retry) equals today's lost-CONNECT.
+        if (connection_policy::connectSnrPoolEnabled() &&
+            connection_policy::connectPickDeferEnabled() &&
+            ladder_selected &&
+            connection_policy::shouldDeferConnectPick(
+                connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(),
+                                                 /*handshake_only=*/true,
+                                                 /*max_age_ms=*/UINT64_MAX),
+                fading_index_, selected_rung.waveform,
+                connect_pick_deferred_once_)) {
+            connect_pick_deferred_once_ = true;
+            LOG_MODEM(INFO,
+                      "Connection: CONNECT pick DEFERRED once (N_eff=1, fading=%.2f, "
+                      "pick would land %s at sel=%.1f) -> withholding CONNECT_ACK; the "
+                      "initiator's CONNECT retry supplies a decorrelated second reading",
+                      fading_index_, selected_rung.name, selection_snr_db);
+            return;
+        }
 
         if (ladder_selected) {
             negotiated_mode_ = selected_rung.waveform;
@@ -401,8 +437,10 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 
-        // Notify application of initial data mode
-        notifyDataModeChanged(snr_db, fading_index_);
+        // Notify application of initial data mode. snr_is_wire=false: this is the
+        // responder's OWN reading (the GUI used to mislabel it "(wire_peer)" — the
+        // tell was peer_fading==local_fading on every connect line).
+        notifyDataModeChanged(snr_db, fading_index_, /*snr_is_wire=*/false);
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         pending_remote_hash_ = frame.src_hash;  // Store hash for later
@@ -493,8 +531,9 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         on_handshake_confirmed_();
     }
 
-    // Notify application of initial data mode
-    notifyDataModeChanged(snr_db, peer_fading);
+    // Notify application of initial data mode (wire: the responder's reading,
+    // echoed in CONNECT_ACK)
+    notifyDataModeChanged(snr_db, peer_fading, /*snr_is_wire=*/true);
 }
 
 void Connection::handleConnectNak(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -611,8 +650,8 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     transmitFrame(ack_data);
     scheduleModeChangeAckRepeats(ack_data, frame.seq);
 
-    // Notify application of mode change
-    notifyDataModeChanged(info.snr_db, info.fading_index);
+    // Notify application of mode change (wire: the requester's embedded reading)
+    notifyDataModeChanged(info.snr_db, info.fading_index, /*snr_is_wire=*/true);
 
     runDeferredArqRefill();
 }
@@ -880,10 +919,13 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     uint8_t common = config_.mode_capabilities & remote_caps;
     const bool rate_selection_snr_valid = measured_snr_valid_;
     // #58: selection compares against dial-calibrated thresholds — use the
-    // basis-corrected value (fade-effective reading + fading penalty).
+    // basis-corrected value (fade-effective reading + fading penalty). Increment 3:
+    // the input is the pool aggregate under ULTRA_CONNECT_SNR_POOL (same accessor as
+    // handleConnect/acceptCall, so the forced/legacy negotiation path can't disagree
+    // with the ladder path within one handshake); knob-off = the raw scalar.
     float snr = rate_selection_snr_valid
-        ? connection_policy::connectSelectionSnrDb(measured_snr_db_, fading_index_,
-                                                   measured_snr_data_aided_)
+        ? connection_policy::connectSelectionSnrDb(rateSelectionSnrDb(), fading_index_,
+                                                   rateSelectionSnrDataAided())
         : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
         config_.mode_capabilities,

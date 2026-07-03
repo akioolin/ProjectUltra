@@ -665,6 +665,12 @@ int main() {
     // setenv-in-main pattern used by test_connection_policy.
     setenv("ULTRA_RETX_TROUGH_PACING", "0", 1);
     setenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS", "0", 1);
+    // #58 increment 3: pin the connect-SNR-pool knobs to their disabled defaults so
+    // every Connection built here deterministically runs the byte-identical scalar
+    // path (rateSelectionSnrDb/wireSnrDb == measured_snr_db_, no pick defer).
+    setenv("ULTRA_CONNECT_SNR_POOL", "0", 1);
+    setenv("ULTRA_CONNECT_PICK_DEFER", "0", 1);
+    setenv("ULTRA_WIRE_SNR_FRESH", "0", 1);
 
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();

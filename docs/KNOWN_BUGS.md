@@ -54,10 +54,27 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   preamble = one fade state (Tc ≈ 4.2 s at Good); the CONNECT frame's 4 CWs span ~7.1 s ≈
   1.7 Tc and are fully decoded before the pick → the whole-frame estimate is fade-AVERAGED
   by construction at zero handshake latency.
-- **Remaining (do NOT close yet):** (1) rig connect-spread re-measure (expect the ~10 dB
-  spread to collapse to ~±1-2 dB); (2) re-evaluate shrinking the +2 `connectSelectionSnrDb`
-  basis correction (the Jensen penalty of a fade-AVERAGED effective SNR is smaller) —
-  deliberately untouched in increment 2.
+- **Increment 3 IMPLEMENTED (2026-07-03, UNVALIDATED — edits-only session, all three knobs
+  default-OFF/byte-identical):** the VARIANCE fix proper. Rig campaign data (12 connects at
+  dial MPG@20) showed the increment-2 estimator still yields per-connect readings 3.9-17.9
+  (σ 3.15) — one fade sample per pick; W3's lone 3.9 trough reading bought a ~90 bps DBPSK
+  session (~20× mis-pick). Landed: `ConnectSnrPool` (pure-header ring, cap 8, population =
+  data-aided MCDPSK + tagged OFDM_BROADBAND; decorrelation-clustered dB-mean, Tc from the
+  trough-pacing derivation chain) behind `ULTRA_CONNECT_SNR_POOL` (entry pick + CONNECT_ACK
+  byte + window-16/file-block gates); `ULTRA_CONNECT_PICK_DEFER` (N_eff==1 fading sub-OFDM
+  pick withholds CONNECT_ACK once → the initiator's CONNECT retry supplies a decorrelated
+  second reading); `ULTRA_WIRE_SNR_FRESH` (MODE_CHANGE embeds gate at 3·Tc, else the −10
+  sentinel = wire byte 0 = the receiver's existing "n/a" rendering — fixes the W2 stale-wire
+  signature: 3.2 dB shipped 31 s stale, 16.5/22.0 frozen 40-300 s). Companion knob-free GUI
+  fix: `MODE_CHANGE:` line labels `wire_peer` vs `local_measured` (responder connect line was
+  a mislabeled LOCAL reading). Composition unchanged: +5 basis and the Moderate saturation
+  bound apply ONCE, downstream of the aggregation (`test_connect_snr_pool_*` gates this).
+- **Remaining (do NOT close yet):** (1) build + ctest + knob-off byte-identical gui_qso gate,
+  then the knobs-ON 5-cell sim gate and low-SNR safety cells (good@8, MPM@8); (2) the rig
+  MPG@20 ≥10-connect bench — pass criteria: 0 sub-OFDM entries, effective spread ≤ ~6 dB,
+  per-connect σ ≤ 2.2 (√2 tightening), W2 staleness signature absent, ≤1 extra CONNECT cycle
+  on deferred picks; (3) re-evaluate shrinking the +5 `connectSelectionSnrDb` basis after the
+  rig re-measure (deliberately untouched in increments 2 AND 3).
 
 ### BUG-QAM16-RIG-LEVEL-BUDGET — CLOSED 2026-07-02 (final): there is NO hidden level deficit anywhere on the bench; the IONOS dial is the only SNR lever. 16QAM at MPG@20 is trough-limited physics; it opens at dial ~22+ (matches the sim crossover)
 - **Every gain lever measured, all dead:** (1) TX drive walk +4.6 dB digital (software-ALC, live)

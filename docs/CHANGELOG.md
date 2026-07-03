@@ -10,6 +10,80 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(connect): **connect-SNR pool** (#58 increment 3, BUG-CONNECT-SNR-VARIANCE) — `ULTRA_CONNECT_SNR_POOL` / `ULTRA_CONNECT_PICK_DEFER` / `ULTRA_WIRE_SNR_FRESH`, all default-OFF/byte-identical — UNVALIDATED, edits-only, awaiting build + gates
+
+**What was broken (rig campaign forensics, 12 connects at dial MPG@20):** the entry pick and
+every wire-SNR embed consumed the last-write-wins scalar `measured_snr_db_` = ONE fade
+realization. (a) VARIANCE: per-connect readings 3.9-17.9 dB (σ 3.15) at a constant dial —
+W3's lone 3.9 trough reading landed MC-DPSK DBPSK ~90 bps on a channel carrying ~2 kbps
+(~20× mis-pick, killed at 600 s). (b) STALENESS: mid-transfer the sender decodes almost
+nothing (tone-burst ACKs feed NO SNR), so the scalar freezes at sparse control-frame
+snapshots — W2 shipped a 3.2 dB handshake-era trough reading ~31 s stale on the first
+MODE_CHANGE, then 16.5/22.0 re-sent verbatim across 40-300 s; peer_fading frozen 0.73 for
+~300 s. (c) LABEL: the GUI stamped "(wire_peer)" on the responder's connect-time notify,
+which is a LOCAL reading (tell: peer_fading==local_fading on every connect line).
+
+**What changed (sender-side only, no wire-format change, receiver untouched):**
+1. **`ConnectSnrPool`** (pure-header, `connection_policy.hpp` above `connectSnrFadeBasisDb`):
+   ring (cap 8) of `{snr_db, age_ms, data_aided, source}`; population contract enforced in
+   `addReading` — data-aided `MCDPSK_IN_BAND` (the fade-averaged whole-frame estimate) +
+   `OFDM_BROADBAND` (tagged, wire-fix only); the training snapshot NEVER enters (different
+   calibration basis). Statistic = decorrelation-clustered **dB-mean**: readings < Tc apart
+   merge to one fade sample (N_eff = cluster count); Tc via `retxTroughDopplerHz` →
+   `coherenceTimeMsForDoppler` (the trough-pacing chain; zero tuned ms constants). dB-mean,
+   not linear mean (Jensen double-count vs the +5 basis population) and not max (order-
+   statistics bias; the crest argument already lives in the Moderate saturation bound). The
+   +5 basis and the bound compose ONCE, downstream, unchanged.
+2. **Feed/lifetime:** fed inside `setMeasuredSNR`/`setChannelQuality` exactly where the
+   scalar is assigned (trust surface identical to main); aged from `Connection::tick`
+   (modem-time, never wall-clock); cleared in `reset()`/`enterDisconnected()`; accumulates
+   silently when knobs are OFF (output-identical).
+3. **`ULTRA_CONNECT_SNR_POOL`** — `rateSelectionSnrDb()`/`rateSelectionSnrDataAided()`
+   (fallback = the scalar when OFF or no qualifying reading) now feed: handleConnect's pick
+   (selection + CW + CONNECT_ACK byte + logs, one consistent value), `acceptCall`,
+   `negotiateMode` (parallel responder path — kept consistent), the `isNearAwgnOFDM`
+   window-16 gate + `ofdmWindowSizeForChannel` (`configureArqForCurrentDataMode`), and
+   `shouldUseSingleOFDMFileBlock` (`sendFile`).
+4. **`ULTRA_CONNECT_PICK_DEFER`** (requires pool knob; auto-accept only): N_eff==1 on a
+   fading channel AND the pick lands sub-OFDM (MC-DPSK) → withhold CONNECT_ACK ONCE
+   (`shouldDeferConnectPick`, pure predicate; one-shot flag cleared at reset/enterConnected/
+   enterDisconnected) and let the initiator's EXISTING CONNECT retransmit deliver a
+   decorrelated second reading. Wire-compatible (= a decode failure to the initiator);
+   worst case = today's lost-CONNECT. Two Tc-separated troughs P≈0.6-0.8% vs ~8% single —
+   ~13× fewer catastrophic sub-OFDM entries; genuinely weak channels confirm low twice and
+   keep the MC-DPSK fallback (MPM@8 safety intact).
+5. **`ULTRA_WIRE_SNR_FRESH`** — the six `requestModeChange` embeds pass `wireSnrDb()` =
+   pool mean over readings younger than **3·Tc** (Good ~12.7 s / Moderate ~2.5 s), else the
+   explicit stale sentinel **−10 dB** = wire byte 0 (`encodeSNR`), which the receiver
+   already renders as "peer SNR n/a" (`app.cpp` ≥0 validity gate) — zero receiver change,
+   sentinel physically collision-free (no control frame decodes at true −10). CONNECT_ACK
+   embeds are never the sentinel (fresh by construction). Verified the wire value feeds NO
+   receiver decision (display/diagnostics only) — the heavier tone-ACK SNR piggyback stays
+   a separate lever (explicit non-goal here).
+6. **Label fix (knob-free):** `DataModeChangedCallback` gains `snr_is_wire`; the GUI
+   `MODE_CHANGE:` line prints `wire_peer` vs `local_measured` (responder connect-time +
+   sender MODE_CHANGE-commit notifies are local; initiator CONNECT_ACK + received
+   MODE_CHANGE are wire). Line prefix stable (`gui_qso_scenario.sh` greps
+   "MODE_CHANGE: <waveform> <mod> " only); `ultra_tnc.cpp` signature updated.
+
+**Tests (edit-only, `test_connection_policy.cpp`):** `test_connect_snr_pool_*` +
+`test_connect_pick_defer_semantics` — N=1 identity (aggregate == the single reading ⇒
+knob-ON pick byte-identical at N=1), Tc clustering (pair < Tc apart ⇒ N_eff=1, dB-average;
+mean of cluster means), W3 trough-suppression counterfactual ({3.9, 12.8} ⇒ mean 8.35 ⇒
++5 basis + ≥6.5 saturation rescue ⇒ OFDM entry, while 3.9 alone stays MC-DPSK), wire
+freshness (3·Tc age-out ⇒ NAN ⇒ sentinel; `encodeSNR(−10)==0`), defer-once semantics,
+composition guard (basis applied exactly once; training/idle/sync readings never enter).
+Knobs pinned OFF in the `test_connection_policy` and `test_connection_adaptive` mains
+(setenv-in-main latch pattern).
+
+**Verification (deferred — bench serialized elsewhere; NOT done until run):**
+`cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4`; knob-OFF
+byte-identical `gui_qso` good@20 s42; knobs-ON 5-cell gate (good@20 s42/43/7 + moderate@20 +
+awgn@20) vs campaign baselines; low-SNR safety cells (good@8, MPM@8-equivalent: MC-DPSK
+fallback preserved); then the rig MPG@20 ≥10-connect bench (pass: 0 sub-OFDM entries,
+spread ≤ ~6 dB, per-connect σ ≤ 2.2, W2 staleness signature absent, ≤1 extra CONNECT cycle
+on deferred picks). Map + KNOWN_BUGS updated in the same change.
+
 ## 2026-07-03 — feat(arq): retx **trough pacing** (`ULTRA_RETX_TROUGH_PACING`) + **collapse-conditioned escape** (`ULTRA_COLLAPSE_ESCAPE_ROUNDS`) — both default-OFF A/B, byte-identical unset — UNVALIDATED, edits-only, awaiting build + the §5.2 A/B matrix
 
 **Design implemented exactly per `docs/RETX_PACING_DESIGN_2026_07_03.md`** (the campaign's
