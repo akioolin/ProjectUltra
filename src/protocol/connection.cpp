@@ -3377,7 +3377,14 @@ uint32_t Connection::modeChangeRetryMs() const {
     const uint64_t control_round_trip_ms =
         2ULL * static_cast<uint64_t>(dataTurnControlGuardMs()) +
         static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
-    const uint64_t decode_backlog_floor_ms = arq_.getAckTimeout() / 2;
+    // 2026-07-03 rig bisect W5/W5b/W6: HALF the deadline (~9 s) still stalled
+    // transfers (retries keyed onto ACKs still being produced while the peer
+    // drained its decode backlog); the FULL deadline ran clean (W6: 1.88 kbps,
+    // 5 MC receptions). The full burst deadline IS the ratiometric bound the
+    // user asked for — it scales with mod/rate/window — and the peer may
+    // legitimately not ACK until the whole outstanding burst is processed.
+    // What survives of the fast-timer work: the 4-retry budget and the env pin.
+    const uint64_t decode_backlog_floor_ms = arq_.getAckTimeout();
     return static_cast<uint32_t>(std::min<uint64_t>(
         std::max(control_round_trip_ms, decode_backlog_floor_ms), 0xFFFFFFFFull));
 }

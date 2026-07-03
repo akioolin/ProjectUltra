@@ -335,12 +335,13 @@ void test_local_mode_change_timeout_keeps_current_arq_mode() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "test setup should leave MODE_CHANGE pending");
-    // 2026-07-03 ratiometric timer: the retry is a CONTROL-exchange round trip
-    // (2x control guard + SACK coalesce), NOT the multi-frame burst ACK deadline
-    // it used to borrow (rig W4: 18.5 s retries for a ~5 s exchange). It must be
-    // strictly shorter than the burst deadline and scale with control airtime.
-    CHECK(retry_ms < ConnectionAdaptiveTestAccess::arqAckTimeout(c),
-          "MODE_CHANGE retry must be shorter than the data-burst ACK deadline");
+    // 2026-07-03 (post rig-bisect W5/W5b/W6): the retry floors at the FULL burst
+    // ACK deadline — the peer may not ACK until its whole outstanding burst is
+    // decoded, and faster retries key onto the ACK in flight (W5 livelock, W5b
+    // stall; W6 at the full deadline ran clean). The deadline is ratiometric
+    // (scales with mod/rate/window); ULTRA_MODE_CHANGE_RETRY_MS pins for A/B.
+    CHECK(retry_ms >= ConnectionAdaptiveTestAccess::arqAckTimeout(c),
+          "MODE_CHANGE retry must cover the full data-burst ACK deadline");
     CHECK(retry_ms >= 1000,
           "MODE_CHANGE retry must cover a control round trip (anchor+ctl x2)");
 
