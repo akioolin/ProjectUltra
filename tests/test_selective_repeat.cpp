@@ -14,6 +14,7 @@
 #include "protocol/frame_v2.hpp"
 #include <iostream>
 #include <cassert>
+#include <cstdlib>
 #include <queue>
 #include <string>
 #include <vector>
@@ -609,6 +610,90 @@ bool test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack() {
         FAIL("Duplicate DATA should not increment frames_received twice");
     if (stats.sack_trigger_out_of_window != 1)
         FAIL("Expected duplicate delivered DATA to use out-of-window SACK trigger");
+
+    PASS();
+    return true;
+}
+
+// BUG-ARQ-SEQ-COLLISION interim salvage: below-window FILE_START/FILE_DATA payloads are
+// handed up the normal delivery callback (the file layer is offset-idempotent) instead of
+// dying at the seq-keyed dedup — but ONLY with ULTRA_BELOW_WINDOW_FILE_SALVAGE=1, ONLY for
+// FILE payload types, and ONLY strictly below the window (never far-future).
+bool test_below_window_file_salvage() {
+    TEST("Below-window FILE frames salvaged only with knob on");
+
+    const Bytes file_chunk_a = {0x02, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB};  // FILE_DATA off=0
+    const Bytes file_chunk_b = {0x02, 0x00, 0x00, 0x00, 0x04, 0xCC};        // FILE_DATA off=4 (regrid)
+    const Bytes file_start   = {0x01, 0x00, 0x00, 0x00, 0x00, 0x10,
+                                0x12, 0x34, 0x56, 0x78, 'f'};               // FILE_START
+    const Bytes text_msg     = {0x00, 'h', 'i'};                            // TEXT_MESSAGE
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    // --- Knob ON ---
+    setenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE", "1", 1);
+    SelectiveRepeatARQ rx(config);       // latches the knob in the ctor
+    unsetenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE");
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    std::vector<Bytes> received;
+    rx.setDataReceivedCallback([&](const Bytes& data) { received.push_back(data); });
+
+    // In-order seq=0 delivers normally and advances rx_base to 1.
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, file_chunk_a).serialize());
+    if (received.size() != 1)
+        FAIL("In-order FILE_DATA seq=0 should deliver once");
+    if (channel.size() != 0)
+        FAIL("In-order frame below batch threshold should not SACK yet");
+
+    // Below-window FILE_DATA (seq=0 again, DIFFERENT bytes — the W16 regrid case):
+    // must be salvaged up the delivery callback AND still emit the recovery SACK.
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, file_chunk_b).serialize());
+    if (received.size() != 2)
+        FAIL("Below-window FILE_DATA was not salvaged with knob on");
+    if (received[1] != file_chunk_b)
+        FAIL("Salvaged payload does not match the below-window frame");
+    if (channel.size() != 1)
+        FAIL("Salvage must not suppress the out-of-window recovery SACK");
+    {
+        auto ack = v2::ControlFrame::deserialize(channel.receive());
+        if (!ack || ack->type != v2::FrameType::ACK)
+            FAIL("Out-of-window recovery frame should still be a SACK");
+    }
+
+    // Below-window FILE_START is salvaged too (idempotent at the file layer).
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, file_start).serialize());
+    if (received.size() != 3)
+        FAIL("Below-window FILE_START was not salvaged with knob on");
+
+    // Below-window TEXT_MESSAGE must NEVER be salvaged (would duplicate the message).
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, text_msg).serialize());
+    if (received.size() != 3)
+        FAIL("Below-window TEXT_MESSAGE must not be salvaged");
+
+    // Far-FUTURE out-of-window FILE_DATA (beyond the window, not behind it) must NOT
+    // be salvaged — the salvage is strictly below-window.
+    rx.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 100, file_chunk_b).serialize());
+    if (received.size() != 3)
+        FAIL("Far-future FILE_DATA must not be salvaged");
+
+    // --- Knob OFF (default): below-window FILE_DATA dropped as today ---
+    SelectiveRepeatARQ rx_off(config);
+    rx_off.setCallsigns("RX1", "TX1");
+    ByteChannel channel_off;
+    rx_off.setTransmitCallback([&](const Bytes& data) { channel_off.send(data); });
+    std::vector<Bytes> received_off;
+    rx_off.setDataReceivedCallback([&](const Bytes& data) { received_off.push_back(data); });
+
+    rx_off.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, file_chunk_a).serialize());
+    rx_off.onFrameReceived(v2::DataFrame::makeData("TX1", "RX1", 0, file_chunk_b).serialize());
+    if (received_off.size() != 1)
+        FAIL("Knob off: below-window FILE_DATA must be dropped (default unchanged)");
+    if (channel_off.size() != 1)
+        FAIL("Knob off: out-of-window recovery SACK should still be sent");
 
     PASS();
     return true;
@@ -2016,6 +2101,7 @@ int main() {
 
     std::cout << "\nReceiver Tests:\n";
     test_rx_in_order();
+    test_below_window_file_salvage();
     test_rx_out_of_order();
 
     std::cout << "\nRetransmission Tests:\n";

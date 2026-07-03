@@ -368,6 +368,13 @@ private:
     bool sack_delay_slides_on_data_ = false;
     bool ack_batch_through_more_frag_ = false;
     bool immediate_out_of_order_sack_enabled_ = true;
+    // BUG-ARQ-SEQ-COLLISION interim salvage (env ULTRA_BELOW_WINDOW_FILE_SALVAGE, read
+    // once in the ctor, default OFF = byte-identical): when ON, a BELOW-window DATA frame
+    // whose payload is FILE_START/FILE_DATA is handed up the normal delivery callback
+    // before the (unchanged) out-of-window SACK, instead of being dropped. The file layer
+    // is offset-keyed and idempotent by construction (dedup + straddle-merge), so double
+    // delivery is safe there; message payloads are seq-deduped ONLY and are never salvaged.
+    bool below_window_file_salvage_ = false;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // ACK repeat config (time-diversity for fading channels)

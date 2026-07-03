@@ -10,6 +10,56 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — fix(arq): file BUG-ARQ-SEQ-COLLISION (rate-change abort under one-way ACK loss) + interim receiver-side salvage `ULTRA_BELOW_WINDOW_FILE_SALVAGE` — default-OFF/byte-identical, **rig-validation-pending**
+
+**What broke (rig W16, IONOS MPG@20, Pi5→Mac 50 KB — multi-agent forensics + adversarial
+verify):** a collapse-escape rate-change abort fired while the ACK direction was dead but the
+DATA direction alive (`rx_base`=78 ahead of `tx_base`=69). `SelectiveRepeatARQ::setCodeRate`
+rewound to the sender's STALE base (`tx_next_seq_ = tx_base_seq_`) and
+`requeuePendingChunks` re-chunked bytes 30576+ on the NEW 456 B grid under the SAME seqs
+69-77 that had covered only 9×384 B on the old grid. The receiver's ARQ destroyed the
+resends as below-window dupes (seq-keyed dedup, `handleDataFrame` out-of-window branch)
+BEFORE the offset-idempotent file layer — whose straddle-merge was built exactly for
+regrid resends — could see them; the out-of-window SACK's cumulative base 78 then retired
+the phantom chunks at the sender. Result: exactly 9×(456−384)=648 bytes permanently
+unresendable, ~16.5 KB ghost-delivered+ACKed behind the hole, sender false-complete
+("Transfer complete 362.8s" — identity-blind counter equality, no receiver confirmation),
+receiver stranded 237 s then cancelled. Full mechanism, evidence lines, precondition, and
+the STRUCTURAL fix direction (move-epoch carried on DATA frames + echoed in ACKs — wire
+change, needs design) filed in `docs/KNOWN_BUGS.md` **BUG-ARQ-SEQ-COLLISION**. Relation:
+BUG-FILE-REQUEUE-OFFSET (fixed 07-02) made the requeue offset exact w.r.t. the SENDER's
+knowledge; W16 shows that knowledge is stale by construction under one-way ACK loss — the
+live confirmation of the review-flagged stale-ACK epoch hazard.
+
+**What changed (interim salvage, receiver-side only, knob-gated):**
+- `selective_repeat_arq.{hpp,cpp}`: new `below_window_file_salvage_` (env
+  `ULTRA_BELOW_WINDOW_FILE_SALVAGE`, read once in the ctor, default OFF = byte-identical).
+  In `handleDataFrame`'s out-of-window branch, BEFORE the (unchanged) out-of-window SACK:
+  if the frame is strictly BELOW-window (half-space test — never far-future) AND
+  `frame.type == DATA` AND `payload[0]` is `PayloadType::FILE_START`/`FILE_DATA`
+  (`file_transfer.hpp`), latch `last_rx_frame_type_` (flags/more_data already latched from
+  this frame) and invoke `on_data_received_(frame.payload)` — the SAME delivery callback
+  `advanceRXWindow` uses, so the payload reaches
+  `Connection::handleDataPayload` → `FileTransferController::processPayload`, where offset
+  dedup + straddle-merge make double delivery safe BY CONSTRUCTION. Other payload types are
+  NEVER salvaged (messages are seq-deduped only — re-delivery would duplicate them). WARN
+  log: `SR-ARQ: SALVAGE below-window FILE frame seq=%u`. SACK behavior unchanged.
+
+**Why it works:** the FILE payload is offset-keyed and idempotent at the file layer, so the
+seq/grid identity mismatch is harmless there regardless of how the bases desynced — the
+salvage converts W16's destroyed frames into straddle-merge deliveries (the 648 B hole
+fills, the contiguous edge advances, the buffered ghost drains, the receiver finalizes).
+It does NOT fix the sender-side false-complete in general (that needs the structural fix /
+DATA_END handshake) but removes the byte hole that strands the receiver.
+
+**Test verification:** new `test_below_window_file_salvage` in `test_selective_repeat`
+(44/44 PASS): knob-on below-window FILE_DATA and FILE_START are delivered up the callback
+with the recovery SACK still emitted; below-window TEXT_MESSAGE never salvaged; far-future
+FILE_DATA never salvaged; knob-off (default) drops exactly as before. Full ctest suite
+green (UltraTncSimAudio red = pre-existing BUG-HANDSHAKE-PING-FLOOR sim window). Faithful
+gate cannot exercise the one-way-ACK-loss precondition (sim channels are symmetric) — the
+rig is the proving ground: **rig-validation-pending** before any default flip.
+
 ## 2026-07-03 — feat(rate): **promote EMA carry** — `ULTRA_PROMOTE_EMA_CARRY`, default-OFF/byte-identical — ctest green, **sim/rig A/B PENDING**
 
 **What was (arguably) broken:** after ANY rate move, `RateController::resetSmoothingAfterChange`

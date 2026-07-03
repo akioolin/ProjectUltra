@@ -1,12 +1,100 @@
 # Known Bugs
 
-Last updated: 2026-07-01
+Last updated: 2026-07-03
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-ARQ-SEQ-COLLISION: rate-change abort under ONE-WAY ACK loss re-chunks DIFFERENT file bytes under seq numbers the receiver already retired → receiver's seq-keyed dedup destroys them before the offset-idempotent file layer can see them → permanent byte hole + sender false-complete + receiver stranded
+- Status: **OPEN (structural fix needs wire design). Interim receiver-side salvage landed
+  2026-07-03 behind `ULTRA_BELOW_WINDOW_FILE_SALVAGE` (default OFF = byte-identical),
+  rig-validation-pending.** Root-caused from rig W16 (IONOS MPG@20, Pi5 sender → Mac
+  receiver, 50 KB) by multi-agent forensics + adversarial verify, 2026-07-03.
+- **Mechanism (the full chain):**
+  1. During a 16QAM R2/3 epoch the receiver DELIVERED seqs 69-77 (384 B/chunk grid),
+     advancing its `rx_base_seq_` to 78 — but the sender heard NONE of the ACKs (one-way
+     ACK loss: data direction alive, ACK direction dead). Sender base stayed 69.
+  2. The collapse-escape's rate-change abort rewound the sender to its OWN stale base:
+     `SelectiveRepeatARQ::setCodeRate` does `tx_next_seq_ = tx_base_seq_`
+     (`selective_repeat_arq.cpp:~76`), and `FileTransferController::requeuePendingChunks`
+     resumed at the (now exact, post-BUG-FILE-REQUEUE-OFFSET) sender-ledger offset 30576 —
+     re-chunking bytes 30576+ on the NEW QPSK R3/4 grid (456 B/chunk) under the SAME
+     seqs 69-77.
+  3. New-69..77 covered bytes [30576, 34680) but the receiver's ARQ dedups BY SEQ, not by
+     byte: the frames died at the below-window drop (`selective_repeat_arq.cpp` `handleDataFrame`
+     out-of-window branch, ~:645-675) BEFORE reaching the offset-idempotent file layer —
+     whose straddle-merge (`file_transfer.cpp` `processFileData`, ~:612-621) was built
+     exactly for regrid resends and never ran. Old-69..77 covered only [30576, 34032)
+     (9×384), so bytes [34032, 34680) — exactly 9×(456−384) = **648 B** — existed ONLY in
+     the destroyed frames.
+  4. Each below-window frame triggered an out-of-window SACK carrying cumulative base 78;
+     the sender (hearing ACKs again by then) interpreted it as delivery of new-69..77 →
+     the phantom chunks retired forever (`onChunkAcked`), never resendable.
+  5. Ghost transfer: everything from seq 78 (offset 34680+) was received AND ACKed but
+     buffered out-of-order behind the 648 B hole (~16.5 KB); contiguous edge frozen at
+     34032 (66.5%). Sender declared "Transfer complete" (identity-blind counter equality,
+     `file_transfer.cpp` `onChunkAcked` — no receiver confirmation; sibling:
+     BUG-FILE-ACK-IDENTITY), idled out the 600 s grace, disconnected; receiver stranded
+     237 s then "Transfer cancelled".
+- **Precondition:** `rx_base > tx_base` at a rate-change abort — i.e. the data direction
+  working while the ACK direction is dead, exactly the asymmetric failure the rig exhibits
+  (W15 shows the same one-way signature without a rate change → RTO grind instead of a hole).
+- **W16 evidence** (`/tmp/campaign_3000/pi5_W16_gui.log` (P) /
+  `rig_W16_failed_mac_gui.log` (M), Pi5 clock = Mac − ~6 s; full forensics in the
+  2026-07-03 W16 workflow output): P304.097 "Re-queued 9 pending chunks after ARQ abort
+  (acked=69, resume_offset=30576)" + "SR-ARQ: Code rate changed, aborted 9 unACKed
+  in-flight TX slots (cleared 0 SACKed); rewound TX seq to 69"; M320.205 "SR-ARQ: DATA
+  seq=69..73 outside window [78, 94)" and M332.767 "seq=74..77 outside window [78, 94)";
+  P397.334 "[FILE] Transfer complete (362.8s, 1.13 kbps)" (false complete); M648.694
+  "[FILE] Transfer cancelled". Chunk-grid arithmetic exact: 22×456 + 6×384 = 12336 and
+  (30576−12336)/40 = 456.
+- **Why the earlier W16 escape (t=132) was benign:** that 16QAM epoch had failed BOTH
+  directions (Mac logged 0/8-CW decode failures at 116-162), so `tx_base == rx_base == 29`
+  at the abort (P161.263 "acked=29, resume_offset=12336") — same seqs re-covered the same
+  bytes, no collision. The bug arms ONLY on one-way ACK loss.
+- **Relation to prior work:**
+  - BUG-FILE-REQUEUE-OFFSET (FIXED 2026-07-02): fixed the SENDER-side resume arithmetic
+    (offset ledger). W16 proves the requeue is still destructive when the RECEIVER's base
+    is ahead — the ledger resume is exact w.r.t. the sender's knowledge, but the sender's
+    knowledge is stale by construction under one-way ACK loss. Same gate-bypassing
+    escape-drop path (the clean-boundary gate cannot help: the escape fires with frames in
+    flight BY DESIGN).
+  - The review-flagged **stale-ACK epoch hazard** (2026-07-02-late adversarial review of
+    the requeue fix): ACKs are epoch-blind — an ACK formed against the OLD chunk grid (or
+    an out-of-window SACK carrying an advanced base) is credited by the post-abort sender
+    against NEW-grid chunks carrying different bytes. W16 is the live confirmation of that
+    hazard. The verify also found the abort leaves `tx_next_seq_` below an ack-advanced
+    `tx_base_seq_` (`handleAckFrame`'s cumulative advance, `selective_repeat_arq.cpp:~863-885`,
+    never re-clamps it) → 4 below-base zombie transmissions observed on air (the M332
+    reject group).
+  - 2026-06-09 verdict vindicated: gate-less escape-drop (abort-coordinated requeue) is
+    unsafe; this is the rig proof.
+- **STRUCTURAL fix direction (needs design — wire change):** a **move-epoch** counter
+  carried on DATA frames and echoed in ACKs, bumped at every rate/mod-change abort, so a
+  stale-epoch ACK can never retire new-content seqs (the sender ignores ACKs whose epoch
+  predates its current grid; the receiver's out-of-window SACK for old-epoch frames is
+  then harmless). Complementary candidates from the forensics: carry the receiver's
+  `rx_base_seq_` + contiguous byte offset in the MODE_CHANGE_ACK (which demonstrably DOES
+  arrive — it triggers the abort) and resync the sender to the RECEIVER's state; and the
+  receiver-confirmed completion handshake (DATA_END, CLAUDE.md Known Limitation 4) so a
+  false sender-complete is detected and hole-repaired by byte offset while airtime remains
+  (W16 had 244 s of idle grace and needed ~120-150 s).
+- **Interim salvage (landed 2026-07-03, default OFF, rig-validation-pending):**
+  `ULTRA_BELOW_WINDOW_FILE_SALVAGE=1` — receiver-side only: in the ARQ's below-window drop
+  path, a frame whose payload decodes to FILE_START/FILE_DATA (`PayloadType`,
+  `file_transfer.hpp`) is handed up the SAME delivery callback in-order frames use
+  (Connection `handleDataPayload` → `file_transfer_.processPayload`) BEFORE the (unchanged)
+  out-of-window SACK; the file layer's offset dedup + straddle-merge make double delivery
+  safe by construction. NEVER salvages other payload types (messages are seq-deduped only —
+  re-delivery would duplicate them) and never far-future seqs (strict half-space
+  below-window test). Converts W16's 648 B hole into a delivered straddle-merge chunk: the
+  contiguous edge advances, the ghost 16.5 KB drains, the receiver finalizes. Log grep:
+  `SALVAGE below-window FILE frame`. Unit-tested in `test_selective_repeat`
+  (`test_below_window_file_salvage`: knob-on FILE_DATA/FILE_START salvaged + SACK
+  unchanged, TEXT never, far-future never, knob-off byte-identical drop).
 
 ### BUG-BURST-HEADNULL-DROP: group-head fade null → clean mid-group frames silently dropped (no decode attempt, no counter, no ACK credit) → whole-group RTO saga
 - Status: **OPEN — root-caused in code + reproduced in logs (2026-07-01 audit, adversarially verified).** Found via `fable_analysis/09_WHY_STUCK_AT_2000_2026_07_01.md` §3.2.

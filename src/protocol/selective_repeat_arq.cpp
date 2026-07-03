@@ -1,7 +1,9 @@
 #include "selective_repeat_arq.hpp"
 #include "selective_repeat_arq_policy.hpp"
+#include "file_transfer.hpp"  // PayloadType — below-window FILE salvage gate only
 #include "ultra/logging.hpp"
 #include "ultra/phy_diagnostics.hpp"
+#include <cstdlib>
 #include <sstream>
 
 namespace ultra {
@@ -28,6 +30,11 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     config_.ack_batch_size = arq_policy::clampAckBatchSize(
         config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     adaptive_ack_timeout_ms_ = config_.ack_timeout_ms;
+
+    // BUG-ARQ-SEQ-COLLISION interim salvage knob (default OFF = byte-identical).
+    if (const char* e = std::getenv("ULTRA_BELOW_WINDOW_FILE_SALVAGE"); e && e[0] == '1') {
+        below_window_file_salvage_ = true;
+    }
 }
 
 void SelectiveRepeatARQ::setCallsigns(const std::string& local, const std::string& remote) {
@@ -643,6 +650,38 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         }
 
     } else {
+        // BUG-ARQ-SEQ-COLLISION interim salvage (ULTRA_BELOW_WINDOW_FILE_SALVAGE=1,
+        // default OFF): a rate-change abort under ONE-WAY ack loss rewinds the sender to
+        // its STALE tx_base and re-chunks DIFFERENT file bytes on the new grid under seq
+        // numbers this receiver already retired (rx_base ran ahead). Those frames arrive
+        // here as below-window "dupes" and die at the seq-keyed dedup BEFORE the
+        // offset-idempotent file layer — whose straddle-merge (file_transfer.cpp,
+        // processFileData) was built exactly for the regrid-resend case — can see them
+        // (rig W16: 9×(456−384)=648 bytes permanently unresendable, receiver stranded).
+        // With the knob ON, hand FILE_START/FILE_DATA payloads up the SAME delivery
+        // callback advanceRXWindow uses, then fall through to the UNCHANGED out-of-window
+        // SACK. NEVER salvage other payload types: messages are seq-deduped only, so
+        // re-delivery would duplicate them. Half-space test = strictly-behind-base only
+        // (below-window), never far-future.
+        if (below_window_file_salvage_) {
+            const uint16_t behind = static_cast<uint16_t>(rx_base_seq_ - seq);
+            const bool below_window = behind != 0 && behind < 0x8000;
+            const bool file_payload =
+                frame.type == v2::FrameType::DATA && !frame.payload.empty() &&
+                (frame.payload[0] == static_cast<uint8_t>(PayloadType::FILE_START) ||
+                 frame.payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA));
+            if (below_window && file_payload) {
+                LOG_MODEM(WARN, "SR-ARQ: SALVAGE below-window FILE frame seq=%u", seq);
+                // Mirror advanceRXWindow's delivery contract: the Connection reads
+                // lastRxFlags()/lastRxHadMoreData()/lastRxFrameType() from the callback.
+                // Flags/more_data were already latched from THIS frame at function entry;
+                // latch the type too (it is otherwise only set on in-order delivery).
+                last_rx_frame_type_ = frame.type;
+                if (on_data_received_) {
+                    on_data_received_(frame.payload);
+                }
+            }
+        }
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",
                   seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
         if (ultra::phyDiagnosticsEnabled()) {
