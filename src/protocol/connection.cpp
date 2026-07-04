@@ -304,7 +304,17 @@ Connection::Connection(const ConnectionConfig& config)
                         tba.drive_advisory =
                             ultra::waveform::tone_burst_ack::kDriveAdvisoryDown;
                     } else if (rx_level_low_streak_ >=
-                               connection_policy::kAlcLowStreakForUp) {
+                                   connection_policy::kAlcLowStreakForUp &&
+                               last_group_quality_ > 0.0f) {
+                        // ALC RUNAWAY GUARD (2026-07-04, F18 forensics): a LOW level
+                        // reading is drive evidence ONLY while frames are DECODING at
+                        // that level (genuinely level-starved but workable chain). A
+                        // LOW reading on a zero-delivery group is a FADE TROUGH — the
+                        // ladder owns fades; drive must not chase them. Without this
+                        // gate every trough ratcheted the peer's tx_drive up (0.63 ->
+                        // the 0.85 cap by t=171), TX compression on the cheap card
+                        // then cratered the thin-margin rungs at 30+ dB readings, and
+                        // no RX clip signature ever brought the drive back down.
                         tba.drive_advisory =
                             ultra::waveform::tone_burst_ack::kDriveAdvisoryUp;
                     }
@@ -2770,6 +2780,12 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // evidence. Hard no-op while the knob is OFF.
         if (rx_rate_cmd_enabled_) {
             updateRxRateCommandFromGroup(all_ok, frame_mask);
+        }
+        // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
+        // accumulated LOW-level streak — those readings were fade-trough artifacts,
+        // not drive-starvation evidence (see the SACK-emit advisory gate).
+        if (!all_ok && frame_mask == 0) {
+            rx_level_low_streak_ = 0;
         }
         // BURST-AWARE ACK: this callback IS the group boundary the operator pointed to —
         // "whatever ALPHA sends as a burst, BRAVO must ack, it knows the group ended."
