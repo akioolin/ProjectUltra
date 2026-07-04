@@ -8,6 +8,13 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-SELF-ECHO-REANCHOR-STALL: sender decodes its own burst echo during ACK-listen, re-anchors, and MISSES the receiver's crater-demote tone-ACK -> 2x-RTO collapse (~36s) instead of a ~3.5s demote
+- Status: **FIXED 2026-07-04 (knob ULTRA_ECHO_REANCHOR_GATE, default-ON; streaming_ofdm_decode.cpp self-echo guard).** Root-caused by forensic wrp84o66o (high confidence, clocks aligned Mac=Pi5+22.48s).
+- **THE 2.50->1.44 GAP.** F3 (morning 2.50) and afternoon runs deliver the SAME clean groups/craters/signal-level; the only difference is per-group cadence (10.2 vs 15.8 s/group). Steady state is 9.4s (fine); the gap is occasional 30-36s STALLS. Mechanism: a 16QAM R2/3 group genuinely craters on a deep fade (thin-margin payload dies, QPSK R1/4 header survives corr 0.99). The receiver immediately sends the crater-demote command (kRungCmdDownHard) on its tone-ACK — the fast path that resolves craters in ~3.5s (F4/F6/F7/F10/F11). BUT the sender never hears it: its RX path is decoding its OWN transmitted burst echoing back (self-echo, corr 0.96-0.98 at sample positions inside its just-transmitted span), each 0-CW fail re-arms expect_full_ofdm_anchor_ -> a 120000-sample blind search that consumes the RX path -> the tone-ACK is missed -> 2x18s RTO + collapse-escape = 36s.
+- **Fix:** while tone_burst_monitor_.isArmed() (= we are the data-sender in post-burst ACK-listen; the peer emits ONLY a tone-ACK then), suppress the destructive full-chirp re-anchor on a 0-CW OFDM "decode". A genuine receiver decoding real peer OFDM never arms the monitor, so its legitimate crater re-anchoring is untouched. Sender-local, no wire change. Expected: 36s -> ~4-10s; most afternoon runs jump from ~1.4 toward the 16QAM ceiling.
+- Not to be confused with BUG-BURST-HEADNULL-DROP (a fade nulls the group HEAD -> clean frames 2..N dropped; separate, still open).
+
+
 ### BUG-RESPONDER-HANDSHAKE-NEVER-CONFIRMS: responder handshake_confirmed_ only flipped in the CLASSIC frame path — a descriptor-era burst-only session never confirms, so the modem TX-routes every classic control frame via the handshake last-RX-waveform mirror = 3.1 s MC-DPSK DBPSK (operator saw "MC-DPSK at the end of the run")
 - Status: **FIXED 2026-07-04** — confirm extracted to maybeConfirmResponderHandshake, now also fired on the first delivered burst group (equally hard evidence the initiator heard our CONNECT_ACK). Legacy runs confirmed via the initiator first MODE_CHANGE side effect (OFF-arm log: confirm@77s); full-descriptor runs confirmed only at DISCONNECT (@294s). Exposed by Phase 1/2 eliminating classic control frames by design.
 

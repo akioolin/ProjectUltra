@@ -2064,13 +2064,39 @@ void StreamingDecoder::decodeCurrentFrame() {
             noteFrameArrivalSyncMissLocked();
             sync_from_warm_timed_window_ = false;
         }
-        if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        // SELF-ECHO GUARD (2026-07-04, re-anchor-stall forensic wrp84o66o — the
+        // measured 2.50->1.44 gap; knob ULTRA_ECHO_REANCHOR_GATE, default-ON):
+        // while the tone-burst ACK monitor is ARMED we are the DATA-SENDER in our
+        // post-burst ACK-listen turnaround — the peer emits ONLY a tone-burst ACK,
+        // never OFDM data. A 0-CW OFDM "decode" here is our OWN transmitted burst
+        // echoing back through the medium (self-echo; corr 0.96-0.98 at sample
+        // positions inside our just-transmitted span). Forcing a full chirp+LTS
+        // re-anchor on it re-arms a 120000-sample blind search that consumes the RX
+        // path so we MISS the receiver's crater-demote tone-ACK (the fast path that
+        // resolves a 16QAM crater in ~3.5 s: F4/F6/F7/F10/F11), dropping us to a
+        // 2x-RTO collapse (~36 s: the F59/F21b outliers). Suppress the destructive
+        // re-anchor during the ACK window; the tone monitor keeps running and hears
+        // the ACK, so the existing fast demote fires. A genuine receiver decoding
+        // real peer OFDM data does NOT arm the monitor -> isArmed()==false ->
+        // legitimate crater re-anchoring is untouched. Sender-local, no wire change.
+        static const bool kEchoReanchorGate = [] {
+            const char* e = std::getenv("ULTRA_ECHO_REANCHOR_GATE");
+            return !(e && e[0] == '0');  // default-ON; =0 restores legacy for A/B
+        }();
+        const bool ack_listen_self_echo =
+            kEchoReanchorGate && tone_burst_monitor_.isArmed();
+        if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo) {
             resetFrameArrivalTrackingLocked();
             sync_controller_.expect_full_ofdm_anchor_ = true;
             sync_controller_.clearRejectStreak();
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);
+        } else if (ack_listen_self_echo) {
+            LOG_MODEM(INFO,
+                      "[%s] SELF-ECHO 0-CW during ACK-listen (monitor armed) — "
+                      "skipping re-anchor so the crater-demote tone-ACK is heard",
+                      log_prefix_.c_str());
         }
     }
 
