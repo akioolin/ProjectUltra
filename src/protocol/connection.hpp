@@ -947,6 +947,10 @@ private:
     // progress reset still runs on EVERY voice copy (cheap, idempotent, and the
     // point); only the resend expiry is deduped. Reset with the pair above.
     int rx_rebase_voice_seq_seen_ = -1;
+    // PARTIAL-CRATER latency fix (2026-07-04, F27): consecutive all_ok=false groups
+    // at QAM16 (receiver side). 2+ -> DownOne command (a total crater still commands
+    // immediately). Reset on any clean group, non-QAM16, and session boundaries.
+    int qam16_rx_bad_streak_ = 0;
     // Receiver emit-side decision (called from onBurstGroupReceived before the
     // group's tone-burst ACK is emitted) and sender consume-side action (called
     // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE

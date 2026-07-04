@@ -2099,17 +2099,32 @@ void Connection::executeEscapeDrop(const char* trigger) {
 //                      the 2026-06-09 single-NACK ratchet-to-R1/4.
 void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) {
     using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
+    using ultra::waveform::tone_burst_ack::kRungCmdDownOne;
     using ultra::waveform::tone_burst_ack::kRungCmdNone;
-    if (all_ok || frame_mask != 0) {
-        // The group delivered frames — the crater state (if any) ended. A standing
-        // demote command must not keep riding a healthy channel's ACKs: with the
-        // base advancing again, each ACK carries a FRESH group_seq and the sender's
-        // dedup would no longer swallow the stale command.
+    if (all_ok) {
+        // Clean group — the bad stretch (if any) ended; nothing may keep riding.
+        qam16_rx_bad_streak_ = 0;
         rx_rate_cmd_pending_ = kRungCmdNone;
         return;
     }
     if (data_modulation_ != Modulation::QAM16) {
+        qam16_rx_bad_streak_ = 0;
         return;  // deep null at a robust rung: irreducible fading, not a rate signal
+    }
+    ++qam16_rx_bad_streak_;
+    if (frame_mask != 0) {
+        // PARTIAL failure (frames delivered, group not clean). A single partial is a
+        // fade brush — clear any standing command (the base advances, fresh seqs, the
+        // dedup would no longer swallow it). But TWO consecutive failed groups at
+        // 16QAM = the rung is under water even without a total crater — and the
+        // sender's own detection of that state costs ~40 s of zero-progress rounds
+        // (F27 paid it twice; partials never froze the base so no crater command
+        // fired). Command DOWN-ONE once per bad pair; the next group event either
+        // clears it (delivered) or re-arms it (still failing — a new seq, and the
+        // sender's per-ACK mode-snapshot guard keeps it to one rung per ACK).
+        rx_rate_cmd_pending_ =
+            (qam16_rx_bad_streak_ >= 2) ? kRungCmdDownOne : kRungCmdNone;
+        return;
     }
     // Total crater at the high-order mode → command a demote. Idempotent across
     // consecutive craters: the SAME command keeps riding every re-emitted ACK until
@@ -4738,6 +4753,7 @@ void Connection::enterConnected() {
     rx_rate_cmd_pending_ = 0;
     rx_rate_cmd_seq_seen_ = -1;
     rx_rebase_voice_seq_seen_ = -1;
+    qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
@@ -4792,6 +4808,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
     rx_rate_cmd_seq_seen_ = -1;
     rx_rebase_voice_seq_seen_ = -1;
+    qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();
     disconnect_frame_.clear();

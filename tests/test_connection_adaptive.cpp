@@ -1008,10 +1008,16 @@ void test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move() {
     r2.onBurstGroupReceived(9, {}, false, 0.0f, 0, true, 8);
     CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == kRungCmdDownHard,
           "crater must latch the command");
+    // PARTIAL-CRATER policy (2026-07-04, F27): a failed-but-partial group after a
+    // crater is the SECOND consecutive bad group — the rung is under water; the
+    // command steps to DOWN-ONE (one rung per evidence quantum) instead of clearing.
+    // Only a CLEAN group ends the bad stretch.
     r2.onBurstGroupReceived(10, {}, false, 0.0f, /*frame_mask=*/0x3, true, 8);
+    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == ultra::waveform::tone_burst_ack::kRungCmdDownOne,
+          "second consecutive failed group (partial) must command DOWN-ONE");
+    r2.onBurstGroupReceived(11, {}, true, 0.95f, /*frame_mask=*/0xFF, true, 8);
     CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == 0,
-          "any delivered frame ends the crater — a stale demote command must not "
-          "ride a recovering channel's ACKs");
+          "a CLEAN group ends the bad stretch — no stale command may ride");
 }
 
 // Knob-ON sender consume, MID-WINDOW (the Phase-2 case): a DOWN-hard command with
