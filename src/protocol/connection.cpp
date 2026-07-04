@@ -2506,7 +2506,21 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             const float climb_above = rate_controller_.config().climb_above;
             if (quality >= climb_above) ++qam16_r34_clean_streak_;
             else qam16_r34_clean_streak_ = 0;
-            if (qam16_r34_clean_streak_ >= qam16ClimbStreak()) {
+            // FAST-CREST (2026-07-04, F9 finding, knob ULTRA_R34_FAST_CREST default-OFF):
+            // the 2-group streak TRAILS the crest — F9's hop confirmed at fading 0.17
+            // but fired at 0.51 (the window had closed; the excursion caught the tail,
+            // 4/9 + 0/9, ~40 s lost). With descriptor commits + the ~4 s receiver-command
+            // demote, a wrong hop is now cheap — so when the receiver's quality hint
+            // SATURATES (>= 0.99 = the 3-bit quantizer's top bin: decode headroom far
+            // beyond the R2/3 requirement), ONE such group arms the walk. Exit speed
+            // funds entry speed.
+            static const bool kFastCrest = [] {
+                const char* e = std::getenv("ULTRA_R34_FAST_CREST");
+                return e && e[0] == '1';
+            }();
+            const int walk_streak_needed =
+                (kFastCrest && quality >= 0.99f) ? 1 : qam16ClimbStreak();
+            if (qam16_r34_clean_streak_ >= walk_streak_needed) {
                 const bool busy =
                     file_transfer_.getState() == FileTransferState::SENDING &&
                     (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
