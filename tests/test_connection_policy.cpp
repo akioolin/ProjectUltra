@@ -836,6 +836,119 @@ void test_connect_selection_saturation_bound() {
           "AWGN selection is the raw reading (training)");
 }
 
+// Calibrated affine entry-SNR basis (2026-07-03, ULTRA_CONNECT_AFFINE_BASIS,
+// docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md §7). Golden-constant derivation:
+// 48 rig entries, EVERY one at known dial 20 (MPG@20 Watterson Good), data-aided
+// readings 6.2-19.4 (mean 12.38, sample sigma 3.14). Least squares of dial on
+// reading with a constant target is EXACT and DEGENERATE: slope a = 0, intercept
+// b = 20, in-sample residual sigma = 0 (offset := 20 - reading is an exact affine
+// function of the reading, slope -1) — within the calibrated population the
+// reading carries NO dial information; the spread is fade-phase noise around one
+// dial. Deployed intercept = b - sigma/sqrt(N) = 20 - 3.14/sqrt(48) = 19.55 (one
+// standard error of the calibrated mean, the same one-sided-cost shrink as
+// entryClassificationFadingIndex — and it keeps mid readings off the zero-margin
+// Good QPSK R3/4 anchor at exactly 20.0). Correction clamped [+2, +11] dB = the
+// extrapolation guard for readings outside the calibrated [6.2, 19.4] range.
+void test_connect_affine_basis() {
+    // ── Golden fit constants ──
+    CHECK(std::fabs(kConnectAffineFitSlope) < 1e-6f,
+          "LS slope on one-dial data is exactly 0 (degenerate by design)");
+    CHECK(std::fabs(kConnectAffineFitInterceptDb - 20.0f) < 1e-6f,
+          "LS intercept is exactly the calibration dial (20.0)");
+    CHECK(kConnectEntryCalibCount == 48, "calibration N = 48 ledger entries");
+    CHECK(std::fabs(kConnectEntryReadingSigmaDb - 3.14f) < 1e-4f,
+          "pinned sample sigma of the 48 readings (3.14 dB)");
+    CHECK(std::fabs(kConnectAffineDialEquivDb -
+                    (kConnectAffineFitInterceptDb -
+                     kConnectEntryReadingSigmaDb /
+                         std::sqrt(static_cast<float>(kConnectEntryCalibCount)))) <
+              0.01f,
+          "deployed intercept = 20 - sigma/sqrt(48) = 19.547 -> pinned 19.55");
+
+    // ── Boundary cases: the ledger's own min/max readings both CLAMP ──
+    CHECK(std::fabs(connectAffineCorrectionDb(6.2f) - kConnectAffineCorrMaxDb) <
+              1e-4f,
+          "reading 6.2 (ledger min): unclamped corr 13.35 -> clamped +11");
+    CHECK(std::fabs(connectAffineCorrectionDb(19.4f) - kConnectAffineCorrMinDb) <
+              1e-4f,
+          "reading 19.4 (ledger max): unclamped corr 0.15 -> clamped +2");
+    CHECK(std::fabs(dialEquivalentSnrDb(6.2f, 0.47f, true) - 17.2f) < 1e-3f,
+          "reading 6.2 -> dial-equivalent 17.2 (clamp edge)");
+    CHECK(std::fabs(dialEquivalentSnrDb(19.4f, 0.38f, true) - 21.4f) < 1e-3f,
+          "reading 19.4 -> dial-equivalent 21.4 (clamp edge)");
+
+    // ── Plateau: mid-range readings map to the (shrunk) calibration dial ──
+    CHECK(std::fabs(dialEquivalentSnrDb(9.5f, 0.50f, true) -
+                    kConnectAffineDialEquivDb) < 1e-3f,
+          "reading 9.5 -> dial-equivalent 19.55 (plateau)");
+    CHECK(std::fabs(dialEquivalentSnrDb(12.4f, 0.50f, true) -
+                    kConnectAffineDialEquivDb) < 1e-3f,
+          "mean reading 12.4 -> dial-equivalent 19.55 (plateau)");
+
+    // ── Entry-rate table check: the user-critical dial-20 case ──
+    // Reading 9.5 at Good-class fading: flat +5 gave sel 14.5 -> QPSK R1/2;
+    // affine gives sel 19.55 -> QPSK R2/3 (Good anchors: R2/3=15, R3/4=20).
+    const float sel_95 = connectSelectionSnrDb(9.5f, 0.50f, true, /*affine=*/true);
+    CHECK(std::fabs(sel_95 - kConnectAffineDialEquivDb) < 1e-3f,
+          "reading 9.5 data-aided Good -> sel 19.55");
+    CHECK(selectOFDMCodeRate(sel_95, 0.50f) == CodeRate::R2_3,
+          "dial-20-equivalent selection enters QPSK R2/3 on Good (was R1/2)");
+    CHECK(selectOFDMCodeRate(9.5f + connectSnrFadeBasisDb(), 0.50f) ==
+              CodeRate::R1_2,
+          "flat-basis counterfactual: the same reading entered QPSK R1/2");
+    CHECK(selectLadderRung(sel_95, 0.50f).waveform == WaveformMode::OFDM_CHIRP,
+          "dial-20-equivalent selection stays an OFDM entry");
+    // 19.55 sits BELOW the zero-margin Good R3/4 anchor (20.0) by the one-SE
+    // shrink — the plateau must not buy the top rung.
+    CHECK(selectOFDMCodeRate(sel_95, 0.50f) != CodeRate::R3_4,
+          "the plateau does not land ON the zero-margin Good R3/4 anchor");
+
+    // ── Knob-off identity: byte-identical flat path ──
+    CHECK(std::fabs(connectSelectionSnrDb(9.5f, 0.50f, true, false) -
+                    (9.5f + connectSnrFadeBasisDb())) < 1e-4f,
+          "knob off: selection is exactly the flat basis");
+    CHECK(std::fabs(dialEquivalentSnrDb(9.5f, 0.50f, false) -
+                    (9.5f + connectSnrFadeBasisDb())) < 1e-4f,
+          "knob off: dial-equivalent display is exactly the flat basis");
+    CHECK(std::fabs(connectSelectionSnrDb(9.5f, 0.50f, true) -
+                    connectSelectionSnrDb(9.5f, 0.50f, true, false)) < 1e-6f,
+          "3-arg production wrapper == 4-arg with the pinned-OFF env knob");
+
+    // ── AWGN passthrough regardless of the knob ──
+    CHECK(std::fabs(dialEquivalentSnrDb(12.0f, 0.05f, true) - 12.0f) < 1e-6f,
+          "AWGN: dial-equivalent is the raw reading (affine on)");
+    CHECK(std::fabs(connectSelectionSnrDb(12.0f, 0.05f, true, true) - 12.0f) <
+              1e-6f,
+          "AWGN: selection is the raw reading (affine on)");
+
+    // ── Calibration scope: affine is DATA-AIDED-only (the 48-entry population) ──
+    // Training snapshot fade-crest OVER-reads (7.8 measured at true Moderate@8);
+    // +11 on that crest would push a true-8dB channel deep into OFDM. Training
+    // readings keep the flat basis even with the knob ON (MPM@8 safety case).
+    CHECK(std::fabs(connectSelectionSnrDb(7.8f, 0.70f, false, true) -
+                    (7.8f + connectSnrFadeBasisDb())) < 1e-4f,
+          "training-routed reading keeps the flat basis under the affine knob");
+    CHECK(connectSelectionSnrDb(7.8f, 0.70f, false, true) <
+              kOFDMEntryFloorModerateDb,
+          "MPM@8 training-crest safety unchanged: stays below the Moderate floor");
+
+    // ── Saturation-bound composition unchanged, and RAW-keyed ──
+    // Data-aided 7.7 on Moderate: the bound applies; the affine sel (18.7) already
+    // exceeds floor+0.5 so max() keeps it — composition is exactly one max().
+    const float sel_mod = connectSelectionSnrDb(7.7f, 0.70f, true, true);
+    CHECK(std::fabs(sel_mod -
+                    std::max(7.7f + connectAffineCorrectionDb(7.7f),
+                             kOFDMEntryFloorModerateDb + 0.5f)) < 1e-4f,
+          "affine sel composes with the saturation bound via exactly one max()");
+    CHECK(sel_mod >= kOFDMEntryFloorModerateDb,
+          "saturated Moderate data-aided reading still clears the OFDM floor");
+    // RAW-keying proof: raw 3.0 (< 6.5 zone) maps to affine sel 14.0; were the 6.5
+    // zone test keyed on the CORRECTED value (14.0 >= 6.5) the bound would lift it
+    // to 14.5. It must stay 14.0.
+    CHECK(std::fabs(connectSelectionSnrDb(3.0f, 0.70f, true, true) - 14.0f) < 1e-4f,
+          "the 6.5 saturation-zone test stays keyed to the RAW reading");
+}
+
 void test_coherent_window_override_disabled_keeps_default() {
     // ULTRA_COHERENT_WINDOW is pinned to "0" in main() BEFORE any policy call — the
     // knob is latched once (static). Baseline contract: with the override disabled,
@@ -1164,6 +1277,10 @@ int main() {
     // Same latch-once pattern: pin the data-aided R3/4 entry-cap A/B knob to its
     // disabled default (boundary tests live in test_waveform_policy).
     setenv("ULTRA_ENTRY_CAP_R34", "0", 1);
+    // Calibrated affine entry-SNR basis: pin the knob OFF — the affine tests drive
+    // the pure 4-arg connectSelectionSnrDb/dialEquivalentSnrDb overloads directly;
+    // the pinned-OFF env lets the wrapper-identity check be deterministic.
+    setenv("ULTRA_CONNECT_AFFINE_BASIS", "0", 1);
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
@@ -1178,6 +1295,7 @@ int main() {
     test_warm_short_anchor_descriptor_gate();
     test_unified_burst_ack_timeout();
     test_connect_selection_saturation_bound();
+    test_connect_affine_basis();
     test_coherent_window_override_disabled_keeps_default();
     test_qam16_r34_cap_knob_off_keeps_r23();
     test_retx_trough_defer();

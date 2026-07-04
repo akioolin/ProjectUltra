@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(snr): calibrated AFFINE entry-SNR basis (`ULTRA_CONNECT_AFFINE_BASIS`, default-OFF byte-identical) + one-source-of-truth dial-equivalent helper
+
+**What broke:** the flat `connectSnrFadeBasisDb()=+5` selection basis is the wrong
+MODEL at the tails of the connect-reading distribution. Rig ledger (48 entries at a
+KNOWN dial, MPG@20 Watterson Good, docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md):
+data-aided readings 6.2–19.4 (mean 12.38, σ 3.14), offset to dial mean −7.62 dB and
+reading-dependent (−10.2 below the median reading, −5.1 above). The +5 constant
+under-corrects troughs — dial-20 connects reading 9–11 entered **QPSK R1/2** on a
+channel that carries **R2/3** (user-critical: the entry rung sets the transfer's
+opening minutes).
+
+**What changed (`src/protocol/connection_policy.hpp`, knob-gated, default OFF ⇒
+byte-identical):**
+- **The fit** (least squares, dial on reading, 48 points, all targets 20.0) is
+  EXACT and DEGENERATE: slope a=0, intercept b=20, in-sample residual σ=0 —
+  offset ≡ 20−reading, so within the calibrated population the reading carries NO
+  dial information (the §2 "SNR-dependent offset" is regression to the mean at a
+  single dial, not a measured dial-slope). Golden constants pinned
+  (`kConnectAffineFitSlope`/`kConnectAffineFitInterceptDb`/`kConnectEntryReadingSigmaDb`).
+- **Deployed map:** correction = `clamp(19.55 − reading, +2, +11)` dB where
+  19.55 = b − σ/√N (one standard error of the calibrated mean — same one-sided
+  shrink as `entryClassificationFadingIndex`; keeps mid readings off the
+  zero-margin Good QPSK R3/4 anchor 20.0). The clamp is the extrapolation guard
+  outside the calibrated [6.2, 19.4] reading range.
+- `connectSelectionSnrDb` gains a pure 4-arg overload (knob explicit, testable);
+  the affine map applies ONLY to **data-aided** readings (the calibration
+  population) — training-snapshot readings keep the flat basis (fade-crest
+  over-read, MPM@8 safety case preserved). The Moderate saturation bound is
+  UNCHANGED and stays keyed to the RAW reading (≥6.5 zone test).
+- New `dialEquivalentSnrDb(reading, fading, knob)` = ONE source of truth for
+  reading→dial-equivalent: used by selection and BOTH GUI display sites
+  (status-bar + sidebar "dB eff", `src/gui/app.cpp`), replacing their inline
+  `+connectSnrFadeBasisDb()`.
+
+**Effect at Good-class fading, knob ON:** reading 9.5 → sel 19.55 → QPSK R2/3
+(was R1/2); readings 4–18 → R2/3; ≥18 → ladder R3/4 (entry-capped R2/3 by
+`ULTRA_R23_BASIS`); the `ULTRA_ENTRY_CAP_R34` R3/4 entry now needs reading ≥21.15
+(was 18.15) — crest entries slightly de-rated, consistent with the calibration.
+Full mapping table + risks: calibration doc §7. **Default OFF because** the map is
+extrapolated below the calibrated range (a genuine low-dial channel reading 2–6
+gets +11 → aggressive OFDM entry); rig A/B incl. a low-dial leg gates default-ON.
+
+**Verification:** `test_connection_policy` 331/331 (new `test_connect_affine_basis`:
+golden fit constants + derivation, clamp boundaries 6.2/19.4, knob-off identity,
+3-arg wrapper == pinned-OFF env, AWGN passthrough, data-aided-only scope,
+saturation-bound raw-key composition); full ctest (UltraTncSimAudio pre-existing
+red).
+
 ## 2026-07-03 — fix(connect): entry FADING pooled like the SNR (#58 increment 4, BUG-CONNECT-FADING-VARIANCE) — rides `ULTRA_CONNECT_SNR_POOL` (default-OFF byte-identical) + sidebar SNR meter dial-equivalent + rig calibration doc
 
 **What broke:** the connect-time entry pick classified the channel from a SINGLE

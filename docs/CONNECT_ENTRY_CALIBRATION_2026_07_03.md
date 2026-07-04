@@ -166,3 +166,97 @@ sigma = 0.129 (normal approximation), P(pooled mean > 0.65):
   honest but the residual inter-cluster correlation makes real pooling slightly
   worse than the table's ideal (and the empirical cross-run column slightly
   better than reachable).
+
+## 7. Calibrated AFFINE entry-SNR basis (2026-07-03, `ULTRA_CONNECT_AFFINE_BASIS`, default OFF)
+
+Implementation of the §2 finding — the flat `+5` basis under-corrects troughs
+(dial-20 connects reading 9–11 entered QPSK R1/2 on a channel that carries R2/3)
+and over-corrects nothing it should. Landed knob-gated in
+`connection_policy.hpp` (`connectAffineCorrectionDb` / `dialEquivalentSnrDb` /
+the 4-arg `connectSelectionSnrDb`), default OFF ⇒ byte-identical flat path.
+
+### The fit (least squares on the 48 ledger points, dial target 20.0 for all)
+
+`dial_equiv(reading) = a·reading + b`:
+
+| quantity | value | note |
+|---|---|---|
+| slope `a` | **0.000** (exact) | one-dial design: cov(dial, reading) ≡ 0 |
+| intercept `b` | **20.000** (exact) | = the calibration dial |
+| in-sample residual sigma (dial space) | **0.00** | tautology — constant target |
+| reading scatter (the REAL uncertainty) | mean 12.38, **sigma 3.14** (sample, N=48) | fade-phase noise around one dial |
+
+**The fit is exactly degenerate, and that is the finding, not a failure:** offset
+:= 20 − reading is an exact affine function of the reading, so the offset-on-
+reading regression has slope −1 / intercept 20 with zero residual. Within the
+calibrated population the reading carries **no** dial information — and §2's
+"SNR-dependent offset" (−10.2 below the median vs −5.1 above) is, at a single
+dial, pure regression to the mean, NOT evidence that the offset varies with the
+dial. A one-dial design cannot identify the dial-vs-reading slope; that needs a
+multi-dial sweep (open follow-up below).
+
+### Deployed constants (pinned + unit-tested, `test_connect_affine_basis`)
+
+- Deployed intercept `kConnectAffineDialEquivDb` = `b − sigma/√N` =
+  20 − 3.14/√48 = 19.547 → **19.55 dB** — one standard error of the calibrated
+  mean, the same one-sided-cost shrink as `entryClassificationFadingIndex`
+  (commit 2996e37). Without it every mid reading lands **exactly on** the
+  zero-margin Good QPSK R3/4 anchor (20.0, `kCoherentLadder`) — a boundary a
+  point estimate should not sit on.
+- Correction = `clamp(19.55 − reading, +2, +11)` dB
+  (`kConnectAffineCorrMinDb`/`MaxDb`). The clamp **is** the extrapolation guard:
+  outside roughly [8.5, 17.5] the map degrades to a slope-1 flat basis at the
+  nearer clamp edge. Both ledger extremes clamp: reading 6.2 → +11 (sel 17.2),
+  reading 19.4 → +2 (sel 21.4).
+- **Data-aided-only:** the population is `local_measured` (data-aided) lines, so
+  the selection applies the affine map only when `snr_is_data_aided`; a
+  training-snapshot reading (fade-crest OVER-reads, 7.8 measured at true
+  Moderate@8) keeps the flat basis — +11 on an over-read crest would put a
+  true-8 dB channel deep into OFDM territory.
+- **Composition:** the Moderate saturation bound in `connectSelectionSnrDb` is
+  unchanged and stays keyed to the **raw** reading (≥ 6.5 zone test); only the
+  `sel` it maxes against changes. One `max()`, applied once.
+- **One source of truth for displays:** both GUI dial-equivalent sites (status
+  bar + sidebar "dB eff", `app.cpp`) call the same `dialEquivalentSnrDb` helper
+  as the selection.
+
+### Reading → entry mapping at Good-class fading (knob ON, default entry knobs)
+
+`sel = reading + clamp(19.55 − reading, 2, 11)`; Good anchors R1/4=10 (entry
+floor), R1/2=10, R2/3=15, R3/4=20; `ULTRA_R23_BASIS` (default ON) caps any
+fading entry at R2/3 for sel ≥ 18:
+
+| reading (dB) | sel (dB) | ladder rate | entry after R2/3 cap | flat-+5 counterfactual |
+|---|---|---|---|---|
+| < −1.05 | r+11 < 10 | below Good OFDM floor → MC-DPSK | MC-DPSK | MC-DPSK (r < 5) |
+| −1.05 – 4.0 | r+11 ∈ [10, 15) | QPSK R1/2 | R1/2 | MC-DPSK / R1/2 |
+| 4.0 – 8.55 | r+11 ∈ [15, 19.55) | QPSK R2/3 | R2/3 | MC-DPSK → R1/2 |
+| 8.55 – 17.55 | **19.55** (plateau) | QPSK R2/3 | **R2/3** | R1/2 (r<10) / R2/3 |
+| 17.55 – 18.0 | r+2 ∈ [19.55, 20) | QPSK R2/3 | R2/3 | R3/4→capped R2/3 |
+| ≥ 18.0 | r+2 ≥ 20 | QPSK R3/4 | R2/3 (cap) | R3/4→capped R2/3 |
+
+- The user-critical case: **reading 9.5 → sel 19.55 → QPSK R2/3** (flat +5 gave
+  14.5 → R1/2). All 48 ledger entries re-map to R2/3 except 19.3/19.4 → sel
+  21.3/21.4 (ladder R3/4, entry-capped R2/3).
+- `ULTRA_ENTRY_CAP_R34` interplay: R3/4 entry needs sel ≥ 20 + 3.15 = 23.15 ⇒
+  reading ≥ **21.15** under the affine (+2 crest correction) vs ≥ 18.15 under
+  flat +5 — the affine slightly de-rates crest entries, consistent with the
+  calibration (a 19.4 reading at dial 20 means true dial ≈ 20, where Good R3/4
+  is zero-margin).
+- Moderate-class fading (affine applies, calibration extrapolated across class):
+  plateau 19.55 → QPSK R1/2 (Moderate anchors R1/2=18, R2/3=20); the raw-keyed
+  saturation bound still gates sub-6.5 readings.
+
+### Risks / follow-ups (why the knob is default OFF)
+
+1. **Extrapolation below the calibrated range is the big one:** a genuinely weak
+   Good channel (e.g. true dial 10, readings ~2–6) gets +11 → sel 13–17 → R1/2
+   or R2/3 entry where the flat basis kept MC-DPSK/R1/2. The clamp bounds, not
+   eliminates, this. Rig A/B must include a low-dial leg (e.g. MPG@10/12) before
+   default-ON.
+2. Single channel condition (Watterson Good, one rig, one dial) — Moderate and
+   other dials are extrapolated.
+3. The slope is UNIDENTIFIED, not measured-zero. A 2–3-dial calibration sweep
+   (e.g. MPG@12/16/20, ~15 entries each) would identify the true
+   dial-vs-reading slope and replace the shrunk-intercept plateau with a real
+   affine law. That is the principled successor to this pass.

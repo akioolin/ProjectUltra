@@ -2319,10 +2319,14 @@ void App::render() {
         // alongside so the meter matches the knob the operator actually set.
         const float fading_now = modem_.getFadingIndex();
         if (fading_now >= protocol::kFadingAwgnMax) {
+            // dialEquivalentSnrDb = the SAME helper the entry selection uses (flat
+            // basis by default; the calibrated affine map under
+            // ULTRA_CONNECT_AFFINE_BASIS) — one source of truth for reading->dial.
             snprintf(status_snr_text, sizeof(status_snr_text),
                      "%.1f dB eff (~%.0f dial, %s)", status_snr.snr_db,
-                     status_snr.snr_db +
-                         protocol::connection_policy::connectSnrFadeBasisDb(),
+                     protocol::connection_policy::dialEquivalentSnrDb(
+                         status_snr.snr_db, fading_now,
+                         protocol::connection_policy::connectAffineBasisEnabled()),
                      snrSourceToString(status_snr.source));
         } else {
             snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
@@ -3804,10 +3808,14 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
             // selection applies) so the meter matches the knob the operator set.
             const float sidebar_fading = modem_.getFadingIndex();
             if (sidebar_fading >= protocol::kFadingAwgnMax) {
+                // Same one-source-of-truth helper as the bottom status bar and the
+                // entry selection (flat basis by default, calibrated affine map
+                // under ULTRA_CONNECT_AFFINE_BASIS).
                 snprintf(snr_text, sizeof(snr_text), "%.1f eff (~%.0f dial)",
                          connected_snr_db,
-                         connected_snr_db +
-                             protocol::connection_policy::connectSnrFadeBasisDb());
+                         protocol::connection_policy::dialEquivalentSnrDb(
+                             connected_snr_db, sidebar_fading,
+                             protocol::connection_policy::connectAffineBasisEnabled()));
             } else {
                 snprintf(snr_text, sizeof(snr_text), "%.1f dB", connected_snr_db);
             }

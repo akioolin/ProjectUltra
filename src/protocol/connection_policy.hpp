@@ -718,10 +718,92 @@ inline float connectSnrFadeBasisDb() {
     }();
     return v;
 }
+// ═══════════ Calibrated AFFINE entry-SNR basis (ULTRA_CONNECT_AFFINE_BASIS) ═══════════
+// 2026-07-03, docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md §7. The flat +5 basis is the
+// wrong MODEL at the tails: 48 rig entries at a KNOWN dial (MPG@20 Watterson Good) read
+// 6.2-19.4 dB data-aided (mean 12.38, sigma 3.14), offset to dial mean -7.62 dB and
+// reading-dependent (below-median readings -10.2, above-median -5.1) — a constant either
+// under-corrects troughs (dial-20 connects with 9-11 readings entered QPSK R1/2 on a
+// channel that carries R2/3) or over-corrects crests.
+// THE FIT (least squares, dial on reading, all 48 targets = 20.0): EXACT and DEGENERATE —
+//   a = 0, b = 20, in-sample residual sigma = 0 (equivalently offset-on-reading slope
+//   -1, intercept 20: offset := 20 - reading is an exact affine function of the reading).
+// What that degeneracy MEANS physically: within the calibrated population the reading
+// carries NO dial information — the 6.2-19.4 spread is fade-phase sampling noise around
+// ONE dial. The doc §2 "SNR-dependent offset" is, at a single dial, pure regression to
+// the mean; a one-dial design cannot identify the dial-vs-reading slope (that needs a
+// multi-dial sweep — see the extrapolation caveat below).
+// DEPLOYED CONSTANTS:
+//   - intercept: b shrunk by ONE standard error of the calibrated mean,
+//     20 - sigma/sqrt(N) = 20 - 3.14/sqrt(48) = 19.55 dB (same one-sided-cost shrink as
+//     entryClassificationFadingIndex above, and it keeps mid readings from landing
+//     exactly ON the zero-margin Good QPSK R3/4 anchor at 20.0);
+//   - correction = clamp(19.55 - reading, +2, +11) dB. The clamp IS the extrapolation
+//     guard: outside the calibrated reading range the affine map degrades to a flat
+//     basis (slope-1 in dial_equiv) at the nearer clamp edge, so an uncalibrated-low
+//     reading (true low dial — e.g. genuine dial-10 readings ~2-6) gets at most +11,
+//     and a crest reading gets at least the +2 the #58 Jensen argument supports.
+// CALIBRATION SCOPE (both are A/B risks the default-OFF knob exists to measure):
+//   - single channel condition (dial-20 Watterson Good, IONOS rig) — the map is
+//     EXTRAPOLATED at any other dial: below ~reading 8.5 it asserts "a trough at the
+//     calibration dial" where the truth could be a genuinely weak channel;
+//   - DATA-AIDED estimator only ('local_measured' ledger lines). The selection path
+//     applies it ONLY to data-aided readings (connectSelectionSnrDb below): the
+//     training snapshot fade-crest OVER-reads (7.8 measured at true Moderate@8) and
+//     +11 on an over-read crest would put a true-8dB channel deep into OFDM territory
+//     — training readings keep the flat basis.
+inline bool connectAffineBasisEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_CONNECT_AFFINE_BASIS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+// Golden fit constants (pinned; derivation above + test_connection_policy.cpp).
+inline constexpr float kConnectAffineFitSlope = 0.0f;    // LS slope a (exact, degenerate)
+inline constexpr float kConnectAffineFitInterceptDb = 20.0f;  // LS intercept b = the dial
+inline constexpr float kConnectEntryReadingSigmaDb = 3.14f;   // sample sigma, 48 readings
+inline constexpr int kConnectEntryCalibCount = 48;
+// Deployed intercept: b - sigma/sqrt(N) = 20 - 3.14/sqrt(48) = 19.547 -> 19.55.
+inline constexpr float kConnectAffineDialEquivDb = 19.55f;
+inline constexpr float kConnectAffineCorrMinDb = 2.0f;
+inline constexpr float kConnectAffineCorrMaxDb = 11.0f;
+
+inline float connectAffineCorrectionDb(float reading_db) {
+    // Slope-0 fit => correction = (deployed intercept) - reading, clamped [+2, +11].
+    const float corr = kConnectAffineDialEquivDb - reading_db;
+    return std::min(kConnectAffineCorrMaxDb, std::max(kConnectAffineCorrMinDb, corr));
+}
+
+// ONE source of truth for reading -> dial-equivalent SNR: the entry SELECTION
+// (connectSelectionSnrDb below) and BOTH GUI dial-equivalent displays (status bar +
+// sidebar "dB eff" sites, app.cpp) call this, so the dial number the operator sees is
+// the number the entry pick compares against the dial-calibrated floors/anchors.
+// affine_enabled is passed explicitly (pure/unit-testable — the env read is latch-once);
+// production callers pass connectAffineBasisEnabled() (displays) or compose it with
+// data-aidedness (selection).
+inline float dialEquivalentSnrDb(float reading_db, float fading_index,
+                                 bool affine_enabled) {
+    if (fading_index < kFadingAwgnMax) {
+        return reading_db;  // AWGN: reading and dial thresholds share the basis already
+    }
+    if (affine_enabled) {
+        return reading_db + connectAffineCorrectionDb(reading_db);
+    }
+    return reading_db + connectSnrFadeBasisDb();
+}
+
+// Pure 4-arg form (knob passed explicitly for tests); the 3-arg production wrapper
+// below reads ULTRA_CONNECT_AFFINE_BASIS. The affine basis composes with data-
+// aidedness here: it is calibrated on the data-aided estimator ONLY (see the block
+// comment above), so a training-routed reading keeps the flat basis even when the
+// knob is ON.
 inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
-                                   bool snr_is_data_aided) {
+                                   bool snr_is_data_aided,
+                                   bool affine_basis_enabled) {
     if (fading_index >= kFadingAwgnMax) {
-        float sel = measured_snr_db + connectSnrFadeBasisDb();
+        float sel = dialEquivalentSnrDb(measured_snr_db, fading_index,
+                                        affine_basis_enabled && snr_is_data_aided);
         // SATURATION BOUND (2026-07-02, Moderate-class fading): the data-aided
         // differential-EVM estimator saturates at the Doppler-EVM floor (~7-9 dB
         // at 0.5 Hz Doppler — the fade itself injects differential error), so on
@@ -737,6 +819,9 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
         // The lower-bound argument holds ONLY for the data-aided estimator: the
         // training snapshot fade-crest OVER-reads (measured up to 7.8 at true
         // Moderate@8), so a training-routed reading must never trip this.
+        // The 6.5 zone test stays keyed to the RAW reading under the affine basis
+        // too (the saturation physics is about what the ESTIMATOR emitted, not the
+        // corrected value); only the sel it maxes against changes.
         if (snr_is_data_aided &&
             fading_index >= kFadingGoodMax && measured_snr_db >= 6.5f) {
             sel = std::max(sel, kOFDMEntryFloorModerateDb + 0.5f);
@@ -744,6 +829,11 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
         return sel;
     }
     return measured_snr_db;  // AWGN: reading and thresholds share the basis already
+}
+inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
+                                   bool snr_is_data_aided) {
+    return connectSelectionSnrDb(measured_snr_db, fading_index, snr_is_data_aided,
+                                 connectAffineBasisEnabled());
 }
 
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
