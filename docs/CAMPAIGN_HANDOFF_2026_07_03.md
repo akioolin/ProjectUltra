@@ -123,3 +123,12 @@ that set D2's 2.43). This measures the clean 16QAM-R2/3 ceiling. QUEUED REDESIGN
 extremum-seeking ALC (quality-derived DOWN, perturb-and-observe) — until then the ALC
 stays OFF on this hardware. R3/4 on this rig is an EQUIPMENT question (cleaner USB card)
 — re-arm both crest knobs after any card swap or at fixed drive <=0.65 for an A/B.
+
+### §7.2 ENV AMENDMENT-2 (2026-07-04 ~12:25, F24 verdict — SUPERSEDES §7.1): capped ALC
+F24 CONFIRMED the knee theory: with `ULTRA_ALC_MAX_DRIVE=0.70` (new knob, 5b55c5a) the
+R3/4 hop at fading 0.09 ran SIX groups (four consecutive 9/9) vs ~1-in-4 survival at
+walked-up drive — the card is fine below ~0.70; the 0.85 code ceiling was the R3/4
+killer. **STANDING CONFIG (F24+): the §7 12-knob set (crest knobs INCLUDED again) PLUS
+ULTRA_ALC_MAX_DRIVE=0.70. Drop the §7.1 ULTRA_SOFTWARE_ALC=0.** F24: 1.89 through a deep
+trough, 5th best. Extremum-seeking ALC redesign remains queued (the cap is the
+per-hardware pragmatic form).
