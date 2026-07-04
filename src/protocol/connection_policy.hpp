@@ -676,6 +676,25 @@ inline bool shouldDeferConnectPick(int effective_count, float fading_index,
 // and whose comment anticipated pending #58. Cost asymmetry backs the sign: wrongly
 // entering OFDM at true-effective ~10 still delivers ~450 bps (Good@10 R1/2 5/5,
 // RATE_LADDER_ANCHORS), while wrongly falling to MC-DPSK costs 15-40x.
+// Entry-time CLASSIFICATION shrinkage (2026-07-03, docs/CONNECT_ENTRY_CALIBRATION
+// _2026_07_03.md): a single CONNECT frame's fading index at TRUE Watterson Good
+// measures sigma = 0.129 (N=48 rig entries at a known dial), so a raw reading in
+// (0.65, 0.78] is within 1 sigma of the Good/Moderate boundary — 18.8% of Good
+// entries false-classified Moderate and 8/9 of those entered QPSK R1/4
+// (~100-200 s of climb-back each). The misclassification costs are ASYMMETRIC:
+// false-Moderate = minutes of low-rung crawl (climbs need clean-group streaks);
+// false-Good = one bad group (~16 s) before the prompt demote. So shrink the
+// CLASSIFICATION input toward Good by the standard error of the estimate:
+// sigma/sqrt(N_eff). Pooled estimates shrink less (they've earned confidence);
+// callers apply this ONLY to class-keyed decisions at ENTRY and only when the
+// pool knob is on — numeric consumers and the scalar path keep the raw value.
+inline constexpr float kConnectFadingSigmaGood = 0.129f;
+inline float entryClassificationFadingIndex(float pooled_fading, int n_eff) {
+    const float shrink =
+        kConnectFadingSigmaGood / std::sqrt(static_cast<float>(std::max(n_eff, 1)));
+    return std::max(0.0f, pooled_fading - shrink);
+}
+
 // ULTRA_CONNECT_SNR_FADE_BASIS=0 disables; a value in (0,6] overrides the 2.0 default.
 inline float connectSnrFadeBasisDb() {
     static const float v = [] {

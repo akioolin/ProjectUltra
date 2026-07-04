@@ -205,7 +205,19 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // 0.65 Good/Moderate boundary — one 0.66 CONNECT reading mis-classed a
         // dial-20 Good channel Moderate -> QPSK R1/4 entry). Knob-off (or a pool
         // with no fading-carrying reading) this IS fading_index_, byte-identical.
-        const float entry_fading = rateSelectionFadingIndex();
+        // The pool can only average what it has: a clean first-try handshake gives
+        // N_eff=1, so ALSO shrink the classification input by the standard error
+        // (entryClassificationFadingIndex — see the sigma provenance there). Only
+        // when the pool knob is on; raw kept in fading_index_ for logs/wire.
+        const float entry_fading_raw = rateSelectionFadingIndex();
+        const float entry_fading =
+            connection_policy::connectSnrPoolEnabled()
+                ? connection_policy::entryClassificationFadingIndex(
+                      entry_fading_raw,
+                      connect_snr_pool_.effectiveCount(
+                          connectSnrPoolTcMs(), /*handshake_only=*/true,
+                          /*max_age_ms=*/UINT64_MAX))
+                : entry_fading_raw;
         const SNRSource snr_source = measured_snr_source_;
         const bool rate_selection_snr_valid = measured_snr_valid_;
         // #58: SELECTION uses the basis-corrected value (fade-effective reading vs
@@ -942,7 +954,17 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // handleConnect/acceptCall, so the forced/legacy negotiation path can't disagree
     // with the ladder path within one handshake); knob-off = the raw scalar.
     // Increment 4: the fading input is pooled the same way (rateSelectionFadingIndex).
-    const float entry_fading = rateSelectionFadingIndex();
+    const float entry_fading_raw = rateSelectionFadingIndex();
+    // Entry classification shrinkage — same rationale as handleConnect (see the
+    // helper's provenance comment); knob-off keeps the raw scalar path.
+    const float entry_fading =
+        connection_policy::connectSnrPoolEnabled()
+            ? connection_policy::entryClassificationFadingIndex(
+                  entry_fading_raw,
+                  connect_snr_pool_.effectiveCount(
+                      connectSnrPoolTcMs(), /*handshake_only=*/true,
+                      /*max_age_ms=*/UINT64_MAX))
+            : entry_fading_raw;
     float snr = rate_selection_snr_valid
         ? connection_policy::connectSelectionSnrDb(rateSelectionSnrDb(), entry_fading,
                                                    rateSelectionSnrDataAided())

@@ -431,7 +431,17 @@ void Connection::acceptCall() {
     // Increment 4: entry-pick fading is pooled like the SNR (single-frame fading
     // scatters 0.24-0.74 across the 0.65 boundary at Watterson Good); knob-off
     // this IS fading_index_, byte-identical.
-    const float entry_fading = rateSelectionFadingIndex();
+    const float entry_fading_raw = rateSelectionFadingIndex();
+    // Entry classification shrinkage — same rationale as handleConnect (see the
+    // helper's provenance comment); knob-off keeps the raw scalar path.
+    const float entry_fading =
+        connection_policy::connectSnrPoolEnabled()
+            ? connection_policy::entryClassificationFadingIndex(
+                  entry_fading_raw,
+                  connect_snr_pool_.effectiveCount(
+                      connectSnrPoolTcMs(), /*handshake_only=*/true,
+                      /*max_age_ms=*/UINT64_MAX))
+            : entry_fading_raw;
     const bool accept_snr_data_aided = rateSelectionSnrDataAided();
     const float accept_selection_snr_db =
         connection_policy::connectSelectionSnrDb(snr_db, entry_fading,
