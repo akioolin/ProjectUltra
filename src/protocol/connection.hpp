@@ -891,6 +891,13 @@ private:
     // Consecutive zero-progress resend rounds at the current rung (§1.1); reset on ANY
     // progress, on mode change (applyDataMode — a new era), enterConnected and reset().
     int zero_progress_rounds_ = 0;
+    // PHASE-3 (2026-07-04): consecutive escape drops with NO intervening ACK progress.
+    // Escape #1 commits via descriptor (fast, self-describing wire + epoch era-safety +
+    // the waiting-rebase voice covers unanchored silence); a SECOND escape while still
+    // silent means the peer may be genuinely deaf -> fall back to the legacy
+    // synchronized MODE_CHANGE exchange (the deaf-peer escalation ladder). Reset on
+    // any ACK progress (noteArqRoundOutcome).
+    int consecutive_escape_drops_ = 0;
     // Active trough-pacing hold (sender-local, ticks down in the CONNECTED tick BEFORE
     // runDeferredArqRefill; gates the turn refill — trigger #1. The slot-RTO trigger #2 is
     // gated by SelectiveRepeatARQ::deferPendingRetransmits armed alongside this).

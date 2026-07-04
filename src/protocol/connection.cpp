@@ -1982,12 +1982,33 @@ void Connection::executeEscapeDrop(const char* trigger) {
         // forfeit of the next fade crest). requestModeChange re-anchors both stations at a clean
         // boundary.
         noteQam16Demoted(2);
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (%s)",
-                  codeRateToString(data_code_rate_), trigger);
-        // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
-        // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
-        requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
-                          v2::ModeChangeReason::CHANNEL_DEGRADED);
+        // PHASE-3 (2026-07-04): the FIRST escape of a silent stretch commits via the
+        // descriptor (mid-window era-safe under move-epoch; the wire self-describes,
+        // so a briefly-deaf peer re-syncs on the first descriptor it decodes, and the
+        // waiting-rebase voice covers by-design unanchored silence). A SECOND escape
+        // with still-zero ACK progress falls back to the legacy synchronized
+        // exchange — the deaf-peer escalation ladder stays reachable. F1 measured
+        // 20-30 s per legacy escape exchange in troughs; the descriptor commit is
+        // ~free airtime.
+        const bool desc_escape_ok = descriptor_mode_switch_enabled_ &&
+                                    arq_.moveEpochEnabled() &&
+                                    consecutive_escape_drops_ == 0;
+        ++consecutive_escape_drops_;
+        bool desc_committed = false;
+        if (desc_escape_ok) {
+            desc_committed = tryDescriptorModeSwitch(
+                Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+                v2::ModeChangeReason::CHANNEL_DEGRADED);
+        }
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (%s) via %s",
+                  codeRateToString(data_code_rate_), trigger,
+                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
+        if (!desc_committed) {
+            // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
+            // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
+            requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+                              v2::ModeChangeReason::CHANNEL_DEGRADED);
+        }
         return;
     }
 
@@ -2002,11 +2023,26 @@ void Connection::executeEscapeDrop(const char* trigger) {
     // the controller from immediately climbing back into the rung that just failed.
     const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
     if (robust == data_code_rate_) return;
-    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s)",
-              codeRateToString(data_code_rate_), codeRateToString(robust), trigger);
     rate_controller_.noteRungFailed(data_code_rate_);
-    requestModeChange(data_modulation_, robust, wireSnrDb(),
-                      v2::ModeChangeReason::CHANNEL_DEGRADED);
+    // PHASE-3 (2026-07-04): same first-escape-via-descriptor policy as the QAM16
+    // branch above (see that comment); second consecutive silent escape -> legacy.
+    const bool desc_escape_ok = descriptor_mode_switch_enabled_ &&
+                                arq_.moveEpochEnabled() &&
+                                consecutive_escape_drops_ == 0;
+    ++consecutive_escape_drops_;
+    bool desc_committed = false;
+    if (desc_escape_ok) {
+        desc_committed = tryDescriptorModeSwitch(
+            data_modulation_, robust, wireSnrDb(),
+            v2::ModeChangeReason::CHANNEL_DEGRADED);
+    }
+    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s) via %s",
+              codeRateToString(data_code_rate_), codeRateToString(robust), trigger,
+              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
+    if (!desc_committed) {
+        requestModeChange(data_modulation_, robust, wireSnrDb(),
+                          v2::ModeChangeReason::CHANNEL_DEGRADED);
+    }
 }
 
 // ═══════ RX-RATE-CMD Phase 2 — receiver rung command in the tone-burst ACK ═══════
@@ -2293,6 +2329,7 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
         }
         zero_progress_rounds_ = 0;
         retx_pace_hold_ms_ = 0;
+        consecutive_escape_drops_ = 0;  // PHASE-3: channel proved alive — descriptor escapes re-enabled
         return;
     }
     if (progress_frames < 0) {
@@ -4459,10 +4496,11 @@ void Connection::commitPendingModeChange(const char* outcome) {
 // (RX-RATE-CMD, maybeApplyRxRateCommand) adds the ONE sanctioned mid-window caller: a
 // receiver-commanded demote, pre-gated on arq_.moveEpochEnabled() so the resulting
 // commitLocalModeSwitch regrid is era-safe (the ARQ abort bumps the move-epoch).
+// PHASE-3 (2026-07-04) added the second mid-window caller class: the sender's OWN
+// ESCAPE/collapse drops — the FIRST of a silent stretch commits via descriptor (same
+// move-epoch pre-gate); a second consecutive silent escape reverts to the legacy
+// exchange so the deaf-peer escalation stays reachable (see executeEscapeDrop).
 // Excluded BY DESIGN (all keep the legacy MODE_CHANGE exchange, in every knob state):
-//   - the sender's OWN ESCAPE/collapse drops (zero-ACK evidence = the reverse control
-//     channel is silent, so the synchronized exchange doubles as the deaf-peer
-//     escalation; see the executeEscapeDrop comment),
 //   - connect-time INITIAL_SETUP and USER_REQUEST moves,
 //   - MC-DPSK rung moves (carriers/sps need ladder_rung_id on the wire) and OFDM_NARROW,
 //   - the deaf-peer escalation fallback (§6.5).
