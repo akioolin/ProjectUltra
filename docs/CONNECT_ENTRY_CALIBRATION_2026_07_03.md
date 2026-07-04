@@ -260,3 +260,25 @@ fading entry at R2/3 for sel ≥ 18:
    (e.g. MPG@12/16/20, ~15 entries each) would identify the true
    dial-vs-reading slope and replace the shrunk-intercept plateau with a real
    affine law. That is the principled successor to this pass.
+
+## 8. Cross-environment checks (2026-07-02 late evening)
+
+- **OTASim good@20 (faithful gate, seed 42, affine ON):** connect reading 13.7
+  (data-aided, mid-calibrated-range) → sel 19.55 → **QPSK R2/3 Good entry** —
+  identical behavior to the rig batch (readings 7.3-13.6 → R2/3, 4/4). The affine
+  basis is NOT IONOS-specific at dial-20-equivalent conditions: the estimator's
+  Doppler-EVM compression is a property of the waveform+channel class, and the
+  sim's Watterson Good at 20 dB lands in the same reading band.
+- **OTASim good@14 (affine ON): UNMEASURABLE — blocked by the pre-existing sim
+  handshake floor** (BUG-HANDSHAKE-PING-FLOOR + 4-CW CONNECT decode: the gate
+  never connects at good@8-12, marginal 15). The run died in CONNECT retries
+  (repeated 4-CW CW-FAILs t=14.6/34.6/54.6, occupancy 0%) before any entry
+  selection could run. No affine data. The low-dial portability leg therefore
+  falls to the IONOS multi-dial sweep (§Risks item 1/3), which was already the
+  gating requirement for default-ON.
+- **Real-radio caveat (user question, answered 07-02):** on an arbitrary real
+  channel the dial-20 intercept is uncalibrated — that is WHY the knob is
+  default-OFF and per-environment. The portable successor is the measured
+  multi-dial affine law + Phase-2 provisional-entry refinement (re-select from
+  the first OFDM pilot SNR ~1-2 groups in), which removes most of the entry
+  stakes entirely.
