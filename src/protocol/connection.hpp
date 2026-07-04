@@ -80,6 +80,9 @@ struct ConnectionStats {
     int connects_failed = 0;
     int disconnects = 0;
     uint32_t connected_time_ms = 0;
+    // DESC-SWITCH (ULTRA_DESCRIPTOR_MODE_SWITCH Phase 1) telemetry: descriptor-committed
+    // rate/mod moves — sender commits + receiver adopts. 0 while the knob is OFF.
+    int descriptor_mode_switches = 0;
 };
 
 /**
@@ -517,6 +520,16 @@ public:
     // Request mode change to remote station
     void requestModeChange(Modulation new_mod, CodeRate new_rate, float measured_snr, uint8_t reason);
 
+    // DESC-SWITCH RX notification (ULTRA_DESCRIPTOR_MODE_SWITCH Phase 1,
+    // docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1 step 4b): the decoder
+    // consumed a BURST_HEADER descriptor whose mod/rate differs from the current data
+    // mode — follow it at the protocol layer (RX-side applyDataMode + ARQ reconfig +
+    // GUI notify). Fires NO MODE_CHANGE ACK machinery — confirmation is the group's
+    // tone-burst ACK, implicit and free. No-op while the knob is OFF (byte-identical).
+    // Wired decoder → ModemEngine → frontend binding → ProtocolEngine, mirroring
+    // onBurstGroupReceived (same thread/locking class).
+    void onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame);
+
     void reset();
 
 private:
@@ -676,6 +689,15 @@ private:
     float pending_snr_db_ = 15.0f;
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
+    // DESC-SWITCH (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1, knob
+    // ULTRA_DESCRIPTOR_MODE_SWITCH, read ONCE in the ctor like ULTRA_ARQ_MOVE_EPOCH;
+    // default OFF = byte-identical; SEMANTICS-BREAKING lockstep when ON — both ends).
+    bool descriptor_mode_switch_enabled_ = false;
+    // One-shot §2.6-arm-3 mitigation: the first burst after a descriptor-committed
+    // switch MUST carry a full chirp+LTS anchor (fresh |H| under the new pilot/carrier
+    // geometry). Armed by commitLocalModeSwitch, consumed by flushBurstBuffer's
+    // on_transmit_burst_ force_full_preamble argument; cleared at session boundaries.
+    bool desc_switch_full_anchor_pending_ = false;
     // 4 retries at the ratiometric ~5 s control-exchange timer (2026-07-03) has the
     // same worst-case dead time as ONE retry at the old borrowed ~18.5 s burst
     // deadline, while surviving 4x the ACK losses (rig W-runs lose 1-3 control ACKs
@@ -1019,6 +1041,14 @@ private:
     void commitPendingModeChange(const char* outcome);
     void notifyDataModeChanged(float snr_db, float peer_fading_index, bool snr_is_wire);
     LadderRungId currentLadderRungId() const;
+    // DESC-SWITCH sender side (Phase 1 §5.1): scope gate + commit for a CLEAN-BOUNDARY
+    // wideband-OFDM ladder move. tryDescriptorModeSwitch returns true iff it committed
+    // (the caller then SKIPS requestModeChange); false = fall back to the legacy
+    // MODE_CHANGE exchange (knob OFF / out of scope — see the .cpp block comment).
+    bool tryDescriptorModeSwitch(Modulation mod, CodeRate rate, float measured_snr,
+                                 uint8_t reason);
+    void commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_count,
+                               float measured_snr, uint8_t reason);
 
     // Callbacks
     TransmitCallback on_transmit_;

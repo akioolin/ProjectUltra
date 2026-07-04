@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <stdexcept>
@@ -145,6 +146,14 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     frame_decoder_.codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", sync_controller_.ring_.buffer_capacity_samples_);
+
+    // DESC-SWITCH Phase 1 (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1, knob
+    // ULTRA_DESCRIPTOR_MODE_SWITCH, read once here — lockstep with the Connection-side
+    // ctor read; default OFF = byte-identical). Gates the RX mode-hop warm-handoff
+    // demotion + the decoder→protocol descriptor notification.
+    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); ds && ds[0] == '1') {
+        descriptor_mode_switch_enabled_ = true;
+    }
 
     // §15 step 4d-late: event-driven tone-burst ACK monitor. Detection
     // runs ONLY when the protocol layer arms the monitor (via

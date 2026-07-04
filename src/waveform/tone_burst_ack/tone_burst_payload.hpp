@@ -36,7 +36,14 @@ struct ToneBurstAckPayload {
     uint16_t frame_mask = 0;
 
     // rate_hint: 3-bit RateController feedback (§14.43).
-    // Encoding: 0=R1/4, 1=R1/3, 2=R1/2, 3=R2/3, 4=R3/4, 5=R5/6, 6=unused, 7=hold.
+    // SEMANTICS (comment corrected 2026-07-03 — the old text here was a stale
+    // rate-index table, never what the code shipped): this is NOT a rate encoding.
+    // The ACK emitter quantizes the group's decode-headroom QUALITY q∈[0,1] to 3
+    // bits (round(q*7), the SACK-emit lambda in Connection's ctor) and the data
+    // sender de-quantizes it (hint/7.0) in onToneBurstAck as the quality feed for
+    // its EMA RateController. Phase 2 of docs/MODE_SWITCH_PIGGYBACK_DESIGN_
+    // 2026_07_03.md (ULTRA_RX_RATE_CMD) keeps this field's quality semantics and
+    // adds a separate 2-bit relative rung command in the pad bits 42-43.
     uint8_t rate_hint = 0;
 
     AckType type = AckType::Ack;

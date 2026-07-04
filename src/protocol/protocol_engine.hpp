@@ -128,6 +128,13 @@ public:
                               bool all_ok, float quality, uint16_t frame_mask = 0xFFFF,
                               bool interleaved = true, uint8_t group_size = 0);
 
+    // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH): the receiver's decoder
+    // consumed a BURST_HEADER descriptor announcing a different mod/rate — the
+    // protocol layer follows it (RX-side applyDataMode; no MODE_CHANGE ACK
+    // machinery). Delegates to Connection::onDescriptorModeChange; no-op while
+    // the knob is OFF.
+    void onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame);
+
     // §15 step 4d-ii: hand a tone-burst ACK detection from the receiver's
     // always-on ToneBurstAckMonitor (installed in StreamingDecoder) to the
     // protocol layer. Delegates to Connection::onToneBurstAck. Returns

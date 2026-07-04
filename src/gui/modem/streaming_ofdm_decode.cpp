@@ -733,6 +733,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                         // user frame. This is the fix for the cross-station 0/8: the
                         // receiver stops guessing the structure from local config.
                         if (hdr.type == v2::FrameType::BURST_HEADER) {
+                            // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH,
+                            // docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1 step 4):
+                            // a descriptor whose mod/rate differs from the current data
+                            // mode is a MODE-HOP announcement. Captured here, consumed
+                            // below at (a) the warm-handoff decision (demote: the pilot/
+                            // carrier geometry changed, stale |H| would be garbage — expect
+                            // the full anchor the sender is guaranteed to have sent) and
+                            // (b) the decoder→protocol notification, fired after all
+                            // decoder-local locks are released.
+                            bool descriptor_mode_hop = false;
+                            Modulation descriptor_hop_mod = current_modulation_;
+                            CodeRate descriptor_hop_rate = code_rate_;
+                            int descriptor_hop_cw = 0;
                             if (auto cf = v2::ControlFrame::deserialize(data_r14)) {
                                 const auto bi = cf->getBurstHeaderInfo();
                                 if (bi.group_size >= 2) {
@@ -769,6 +782,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     pending_descriptor_mod_ = bi.modulation;
                                     pending_descriptor_rate_ = bi.code_rate;
                                     pending_descriptor_rate_change_ = true;
+                                    // DESC-SWITCH: same differ-condition = the hop.
+                                    descriptor_mode_hop = true;
+                                    descriptor_hop_mod = bi.modulation;
+                                    descriptor_hop_rate = bi.code_rate;
+                                    descriptor_hop_cw =
+                                        (bi.cw_per_frame >= 1) ? bi.cw_per_frame : 0;
                                 }
                                 // Declare the data size so the immediately-following
                                 // group-start frame is sized as a full data frame
@@ -912,10 +931,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // Warm-handoff BURST_HEADER-consume keeper — now unconditional
                             // (promoted past ULTRA_S16_WARM_HANDOFF). Still gated on actually
                             // being WARM with positive confidence (else fall to the reset path).
+                            //
+                            // DESC-SWITCH §5.1 step 4a (knob-gated, byte-identical OFF): a
+                            // MODE-HOP descriptor DEMOTES warm-handoff for the group that
+                            // follows — the mod/rate change moves the pilot/carrier geometry,
+                            // so the warm |H| estimate is stale-by-construction (the 06-09
+                            // unilateral-flip 0/8-forever arm). The reset path below arms
+                            // expect_full_ofdm_anchor_, matching the full chirp+LTS the
+                            // sender's commit one-shot guarantees on a mode-hop group.
                             const bool warm_handoff_eligible =
                                 sync_controller_.derivePhase() ==
                                     arrival_policy::WarmSyncPhase::WARM &&
-                                sync_controller_.frameArrivalConfidence() > 0.0f;
+                                sync_controller_.frameArrivalConfidence() > 0.0f &&
+                                !(descriptor_mode_switch_enabled_ && descriptor_mode_hop);
                             {
                                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                                 if (warm_handoff_eligible) {
@@ -960,6 +988,20 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 sync_controller_.frameArrivalConfidence(),
                                 cfo_tracker_.tracked(),
                                 sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0);
+                            // DESC-SWITCH §5.1 step 4b (knob-gated): a mode-hop descriptor
+                            // drives the PROTOCOL layer too (RX applyDataMode: window/
+                            // timers/chunk capacity follow the announced mode). Fired here
+                            // — after every decoder-local lock scope above has closed —
+                            // into the same decoder-thread → ProtocolEngine-mutex path
+                            // burst_group_callback_ uses (§6 row 11: no new concurrency
+                            // class; the demod config itself applies at the top of the
+                            // next processBuffer via the pending_descriptor_* channel).
+                            if (descriptor_mode_switch_enabled_ && descriptor_mode_hop &&
+                                descriptor_mode_change_callback_) {
+                                descriptor_mode_change_callback_(
+                                    descriptor_hop_mod, descriptor_hop_rate,
+                                    descriptor_hop_cw);
+                            }
                             state_ = DecoderState::SEARCHING;
                             return;  // consumed; the data group follows next
                         }

@@ -116,6 +116,17 @@ inline void wireModemToProtocol(ModemEngine& modem,
                                           interleaved, group_size);
         });
 
+    // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH): a mode-hop BURST_HEADER
+    // descriptor -> protocol follow-through (RX-side applyDataMode: window/timers/
+    // chunk capacity track the sender's announced mode; NO MODE_CHANGE ACK fires).
+    // The decoder only emits this when the knob is ON, and Connection re-gates it —
+    // byte-identical while OFF. Same decoder-thread -> engine-mutex class as the
+    // burst-group forwarding above.
+    modem.setDescriptorModeChangeCallback(
+        [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
+            protocol.onDescriptorModeChange(mod, rate, cw_per_frame);
+        });
+
     // Accepted OFDM data-sync -> protocol (warm-sync / burst-cadence bookkeeping).
     modem.setDataSyncAcceptedCallback(
         [&protocol](float sync_correlation) {

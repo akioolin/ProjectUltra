@@ -181,6 +181,15 @@ public:
     void setBurstGroupCallback(BurstGroupCallback callback) {
         burst_group_callback_ = std::move(callback);
     }
+    // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH): delegate the decoder's
+    // mode-hop BURST_HEADER notification (streaming_decoder.hpp typedef) to the
+    // protocol layer — wired by wireModemToProtocol like the tone-burst ACK path.
+    // Only fires when the knob is ON (decoder-gated); byte-identical OFF.
+    void setDescriptorModeChangeCallback(DescriptorModeChangeCallback callback) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setDescriptorModeChangeCallback(std::move(callback));
+        }
+    }
     void setBurstTransportRxEnabled(bool enabled) {
         burst_transport_rx_enabled_ = enabled;
         if (streaming_decoder_) streaming_decoder_->setBurstTransportRxEnabled(enabled);

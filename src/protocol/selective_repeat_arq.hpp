@@ -153,6 +153,12 @@ public:
     void setCodeRate(CodeRate rate);
     CodeRate getCodeRate() const { return code_rate_; }
 
+    // DESC-SWITCH telemetry (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1):
+    // read-only view of the TX move-epoch for the sender's commit log. Always 0 while
+    // ULTRA_ARQ_MOVE_EPOCH is OFF; a CLEAN-boundary commit never bumps it (an empty
+    // window has nothing to abort — see setCodeRate's bump condition).
+    uint8_t txMoveEpoch() const { return tx_epoch_; }
+
     // Set codewords per fixed OFDM data frame (default 4).
     void setFixedFrameCodewords(int cw_count);
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }

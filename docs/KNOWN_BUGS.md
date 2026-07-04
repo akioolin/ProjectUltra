@@ -16,6 +16,12 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   (`ULTRA_BELOW_WINDOW_FILE_SALVAGE`, now DEFAULT-ON, 9/9 rig field engagements) stays as
   belt-and-braces. Root-caused from rig W16 (IONOS MPG@20, Pi5 sender → Mac receiver,
   50 KB) by multi-agent forensics + adversarial verify, 2026-07-03.
+- **Downstream dependency (2026-07-03):** the descriptor-committed mode switch
+  (`ULTRA_DESCRIPTOR_MODE_SWITCH` Phase 1, docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md)
+  HARD-DEPENDS on this epoch machinery for its Phase-2 ESCAPE (mid-window) commit path —
+  until `ULTRA_ARQ_MOVE_EPOCH` rig-validates, escape drops stay on the legacy MODE_CHANGE
+  exchange even with the descriptor-switch knob ON (Phase 1 = clean-boundary commits only,
+  which need no epoch: an empty window has nothing to abort).
 - **Structural fix (move-epoch) — what landed (unit-test-edited, unvalidated):**
   - **Epoch state:** two independent per-direction 2-bit (mod-4) counters in
     `SelectiveRepeatARQ`. `tx_epoch_` bumps exactly when `setCodeRate`'s TX-abort branch

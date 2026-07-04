@@ -189,6 +189,14 @@ using BurstGroupCallback =
     std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
                        float quality, uint16_t frame_mask, bool interleaved,
                        uint8_t group_size)>;
+// DESC-SWITCH (ULTRA_DESCRIPTOR_MODE_SWITCH Phase 1, docs/MODE_SWITCH_PIGGYBACK_
+// DESIGN_2026_07_03.md §5.1 step 4b): fired when a consumed BURST_HEADER descriptor
+// declares a mod/rate that DIFFERS from the decoder's current data mode (the demod
+// itself already self-reconfigures via the deferred pending_descriptor_* channel).
+// Lets the protocol layer follow the announced mode (window/timers/chunk capacity)
+// without a MODE_CHANGE exchange. Only fired when the knob is ON (byte-identical OFF).
+using DescriptorModeChangeCallback =
+    std::function<void(Modulation mod, CodeRate rate, int cw_per_frame)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
@@ -342,6 +350,10 @@ public:
 
     void setFrameCallback(FrameDecodedCallback callback) { frame_callback_ = callback; }
     void setBurstGroupCallback(BurstGroupCallback callback) { burst_group_callback_ = callback; }
+    // DESC-SWITCH Phase 1: mode-hop descriptor notification (see the typedef above).
+    void setDescriptorModeChangeCallback(DescriptorModeChangeCallback callback) {
+        descriptor_mode_change_callback_ = std::move(callback);
+    }
     // Enable §14.27 burst-transport RX: finalizeBurstGroup emits the group as a
     // unit via the burst-group callback and suppresses per-frame queue delivery
     // (so the file group does not also double-process through the SR-ARQ path).
@@ -556,6 +568,12 @@ private:
     Modulation pending_descriptor_mod_ = Modulation::DQPSK;
     CodeRate pending_descriptor_rate_ = CodeRate::R1_4;
     void applyPendingDescriptorDataMode();  // called at top of processBuffer
+
+    // DESC-SWITCH Phase 1 knob (ULTRA_DESCRIPTOR_MODE_SWITCH, read once in the ctor —
+    // lockstep with the Connection-side read; default OFF = byte-identical). Gates the
+    // mode-hop warm-handoff demotion + the descriptor_mode_change_callback_ emit in the
+    // BURST_HEADER intercept (streaming_ofdm_decode.cpp).
+    bool descriptor_mode_switch_enabled_ = false;
 
     // §14.36 crash fix v3 (2026-05-28): setConnectedOFDMMode also replaces
     // waveform_ (constructs a new OFDMChirpWaveform). Same race as v2 — if
@@ -780,6 +798,7 @@ private:
     // Callbacks
     FrameDecodedCallback frame_callback_;
     BurstGroupCallback burst_group_callback_;
+    DescriptorModeChangeCallback descriptor_mode_change_callback_;  // DESC-SWITCH Phase 1
     StreamingPingCallback ping_callback_;
     DataSyncAcceptedCallback data_sync_accepted_callback_;
 

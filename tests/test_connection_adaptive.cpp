@@ -291,6 +291,23 @@ struct ConnectionAdaptiveTestAccess {
     static void pollCollapseEscape(Connection& c) {
         c.maybeCollapseEscape();
     }
+
+    // DESC-SWITCH (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md Phase 1) hooks.
+    static void applyFeedback(Connection& c, float quality) {
+        c.applyAdaptiveRateFeedback(quality);
+    }
+
+    static bool descSwitchFullAnchorArmed(const Connection& c) {
+        return c.desc_switch_full_anchor_pending_;
+    }
+
+    static uint8_t arqTxMoveEpoch(const Connection& c) {
+        return c.arq_.txMoveEpoch();
+    }
+
+    static int dataFrameCWCount(const Connection& c) {
+        return c.data_frame_cw_count_;
+    }
 };
 
 } // namespace protocol
@@ -582,6 +599,172 @@ void test_zero_progress_round_counter_knob_off_and_g42_protective() {
           "a duplicate/stale ack (progress -1) must not create or reset a round");
 }
 
+// ─────────── DESC-SWITCH (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md Phase 1) ───────────
+
+int countModeChangeFrames(const std::vector<Bytes>& frames) {
+    int n = 0;
+    for (const auto& f : frames) {
+        auto hdr = v2::parseHeader(f);
+        if (hdr.valid && hdr.type == v2::FrameType::MODE_CHANGE) ++n;
+    }
+    return n;
+}
+
+// Knob-OFF identity pin: ULTRA_DESCRIPTOR_MODE_SWITCH=0 (the baseline pinned in main)
+// must route a clean-boundary ladder move through the legacy synchronized MODE_CHANGE
+// exchange — pending state armed, mode held until ACK, exactly one MODE_CHANGE frame on
+// the wire, zero descriptor commits — and the RX-side notification must be a no-op.
+void test_descriptor_switch_knob_off_is_byte_identical() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    TempPayloadFile payload("desc_switch_off", 60 * 1024);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+
+    // QAM16 NACK (quality 0) at a clean send boundary -> prompt demote decision.
+    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
+
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "knob-off: the demote must arm the MODE_CHANGE stop-and-wait");
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R2_3,
+          "knob-off: the local mode must be HELD until the peer ACKs");
+    CHECK(countModeChangeFrames(tx_frames) == 1,
+          "knob-off: exactly one MODE_CHANGE control frame goes on the wire");
+    CHECK(c.getStats().descriptor_mode_switches == 0,
+          "knob-off: no descriptor commit may be counted");
+    CHECK(!ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c),
+          "knob-off: the descriptor-switch full-anchor one-shot must stay unarmed");
+
+    // RX-side notification is a hard no-op with the knob off.
+    Connection r;
+    std::vector<Bytes> r_tx;
+    r.setTransmitCallback([&](const Bytes& d) { r_tx.push_back(d); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        r, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    r.onDescriptorModeChange(Modulation::QAM16, CodeRate::R2_3, 8);
+    CHECK(r.getDataModulation() == Modulation::QPSK,
+          "knob-off: onDescriptorModeChange must not touch the data mode");
+    CHECK(r_tx.empty(), "knob-off: onDescriptorModeChange must transmit nothing");
+    CHECK(r.getStats().descriptor_mode_switches == 0,
+          "knob-off: no adopt may be counted");
+}
+
+// Knob-ON sender commit: a clean-boundary ladder move commits LOCALLY — mode applied
+// immediately (ARQ included), NO mode_change_pending_, NO MODE_CHANGE frame on the
+// wire, the full-anchor one-shot armed for the next burst group, and no epoch bump
+// (an EMPTY window has nothing to abort — the descriptor + EPOCH_REBASE flag suffice).
+void test_descriptor_switch_commits_locally_at_clean_boundary() {
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection c;  // ctor latches knob ON for this instance
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);  // restore the pinned baseline
+
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    std::vector<bool> burst_full_anchor;
+    std::vector<size_t> burst_sizes;
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t /*seq*/,
+                                   bool force_full_preamble) {
+        burst_sizes.push_back(frames.size());
+        burst_full_anchor.push_back(force_full_preamble);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    TempPayloadFile payload("desc_switch_on", 60 * 1024);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    const uint8_t epoch_before = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
+
+    // QAM16 NACK at a clean boundary -> demote decision -> descriptor commit.
+    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
+
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "commit must not arm the MODE_CHANGE stop-and-wait (no TX freeze)");
+    CHECK(c.getDataModulation() == Modulation::QPSK &&
+              c.getDataCodeRate() == CodeRate::R3_4,
+          "commit applies the new mode immediately (sender-local)");
+    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R3_4,
+          "commit must reconfigure the ARQ to the new rate");
+    CHECK(countModeChangeFrames(tx_frames) == 0,
+          "knob-on: NO MODE_CHANGE control frame may go on the wire");
+    CHECK(c.getStats().descriptor_mode_switches == 1,
+          "commit must count in descriptor_mode_switches");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == epoch_before,
+          "clean-boundary commit: EMPTY window -> no ARQ abort -> no epoch bump");
+    // The §2.6-arm-3 full-anchor one-shot: either still armed, or already consumed by
+    // the refill's burst flush (which must then have carried force_full_preamble).
+    bool full_anchor_armed_or_consumed =
+        ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
+    for (size_t i = 0; i < burst_full_anchor.size(); ++i) {
+        if (burst_sizes[i] >= 2 && burst_full_anchor[i]) {
+            full_anchor_armed_or_consumed = true;
+        }
+    }
+    CHECK(full_anchor_armed_or_consumed,
+          "the first post-switch burst group must carry the full chirp+LTS anchor");
+}
+
+// Knob-ON receiver adopt: a mode-hop descriptor notification runs the RX-relevant
+// subset of applyDataMode (mode + CW + ARQ reconfig + GUI notify) and must NOT send
+// any ACK (no MODE_CHANGE ACK machinery); a re-announced descriptor is idempotent,
+// and a receiver with its OWN data in flight skips the adopt (ISS asymmetry guard).
+void test_descriptor_adopt_reconfigures_receiver_without_ack() {
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection c;  // ctor latches knob ON for this instance
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);  // restore the pinned baseline
+
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    int notify_count = 0;
+    Modulation notified_mod = Modulation::AUTO;
+    CodeRate notified_rate = CodeRate::AUTO;
+    c.setDataModeChangedCallback([&](Modulation mod, CodeRate rate, int /*cw*/,
+                                     float /*snr*/, float /*fading*/, int /*carriers*/,
+                                     int /*sps*/, bool /*wire*/) {
+        ++notify_count;
+        notified_mod = mod;
+        notified_rate = rate;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    c.onDescriptorModeChange(Modulation::QAM16, CodeRate::R2_3, 8);
+
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R2_3,
+          "adopt must apply the descriptor's announced mode at the protocol layer");
+    CHECK(ConnectionAdaptiveTestAccess::dataFrameCWCount(c) == 8,
+          "adopt must apply the descriptor's announced CW count");
+    CHECK(tx_frames.empty(),
+          "adopt must transmit NOTHING (no MODE_CHANGE ACK machinery)");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "adopt must not arm any pending mode-change state");
+    CHECK(c.getStats().descriptor_mode_switches == 1, "adopt must count once");
+    CHECK(notify_count == 1 && notified_mod == Modulation::QAM16 &&
+              notified_rate == CodeRate::R2_3,
+          "adopt must fire the data-mode-changed notify (GUI/modem follow-through)");
+
+    // Idempotent: the resend's re-announced descriptor must be a no-op.
+    c.onDescriptorModeChange(Modulation::QAM16, CodeRate::R2_3, 8);
+    CHECK(c.getStats().descriptor_mode_switches == 1,
+          "re-announced descriptor must not double-adopt");
+    CHECK(notify_count == 1, "re-announced descriptor must not re-notify");
+
+    // ISS asymmetry guard: with our OWN data in flight the adopt is skipped.
+    ConnectionAdaptiveTestAccess::fillArqWindow(c, 1);
+    c.onDescriptorModeChange(Modulation::QPSK, CodeRate::R3_4, 8);
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R2_3,
+          "adopt with local DATA in flight must be skipped (per-direction rungs)");
+    CHECK(c.getStats().descriptor_mode_switches == 1,
+          "skipped adopt must not count");
+}
+
 void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
     Connection c;
     std::vector<Bytes> tx_frames;
@@ -675,6 +858,11 @@ int main() {
     setenv("ULTRA_CONNECT_SNR_POOL", "0", 1);
     setenv("ULTRA_CONNECT_PICK_DEFER", "0", 1);
     setenv("ULTRA_WIRE_SNR_FRESH", "0", 1);
+    // DESC-SWITCH (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md Phase 1): pin the
+    // knob to its byte-identical default. Unlike the function-local-static knobs above,
+    // this one is latched PER Connection in its ctor — the knob-ON tests flip the env
+    // around a single construction and restore it, so ordering here is baseline-only.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
 
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();
@@ -687,6 +875,9 @@ int main() {
     test_connect_retry_interval_is_control_airtime_derived();
     test_responder_handshake_timer_does_not_false_confirm();
     test_zero_progress_round_counter_knob_off_and_g42_protective();
+    test_descriptor_switch_knob_off_is_byte_identical();
+    test_descriptor_switch_commits_locally_at_clean_boundary();
+    test_descriptor_adopt_reconfigures_receiver_without_ack();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
 

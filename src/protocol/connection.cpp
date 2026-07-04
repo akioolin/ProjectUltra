@@ -185,6 +185,16 @@ Connection::Connection(const ConnectionConfig& config)
         adaptive_rate_enabled_ = false;
     }
 
+    // DESC-SWITCH Phase 1 (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1, knob
+    // ULTRA_DESCRIPTOR_MODE_SWITCH, read once per Connection like ULTRA_ARQ_MOVE_EPOCH;
+    // default OFF = byte-identical): clean-boundary wideband-OFDM ladder moves commit
+    // LOCALLY and ride the next BURST_HEADER descriptor instead of the MODE_CHANGE
+    // stop-and-wait exchange. SEMANTICS-BREAKING lockstep when ON (both ends must be
+    // built + enabled; same increment policy as move-epoch/tone-payload).
+    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); ds && ds[0] == '1') {
+        descriptor_mode_switch_enabled_ = true;
+    }
+
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
@@ -646,6 +656,7 @@ void Connection::abortTxNow() {
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
+    desc_switch_full_anchor_pending_ = false;
     disconnect_pending_ = false;
     disconnect_pending_ms_ = 0;
     disconnect_ack_retransmit_ms_ = 0;
@@ -1539,6 +1550,7 @@ void Connection::clearFileTransferArqState() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    desc_switch_full_anchor_pending_ = false;
 }
 
 void Connection::cancelFileTransfer() {
@@ -1891,6 +1903,14 @@ bool Connection::rateAdaptationActive() const {
 // maybeEscapeStuckFrame so the collapse-conditioned round escape REUSES it, not forks it).
 // All guards (rateAdaptationActive, CONNECTED, mode_change_pending_, floor, in-flight)
 // stay with the CALLERS — they keep first refusal exactly as before.
+//
+// DESC-SWITCH Phase-1 scope gate (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §7):
+// the escape drops fire MID-WINDOW (frames in flight, bypassing the clean-boundary gate
+// BY DESIGN) — a descriptor-committed regrid here is only era-safe under the move-epoch
+// machinery (ULTRA_ARQ_MOVE_EPOCH), which is still rig-validation-pending. Until it
+// graduates, escape commits stay on the legacy requestModeChange exchange even with
+// ULTRA_DESCRIPTOR_MODE_SWITCH on. Phase 2 routes them through commitLocalModeSwitch
+// (the ARQ abort then bumps the epoch, selective_repeat_arq.cpp:226-235).
 void Connection::executeEscapeDrop(const char* trigger) {
     if (data_modulation_ == Modulation::QAM16) {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
@@ -2190,21 +2210,37 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                               codeRateToString(data_code_rate_),
                               r34_step_down ? "QAM16 R2/3" : "QPSK R3/4", quality);
             } else if (r34_step_down) {
-                requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
-                                  v2::ModeChangeReason::CHANNEL_DEGRADED);
+                const bool desc_committed = tryDescriptorModeSwitch(
+                    Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                    v2::ModeChangeReason::CHANNEL_DEGRADED);
+                if (!desc_committed) {
+                    requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                                      v2::ModeChangeReason::CHANNEL_DEGRADED);
+                }
                 std::snprintf(buf, sizeof(buf),
-                              "QAM16 R3/4 -> QAM16 R2/3 demote via MODE_CHANGE (q=%.2f)", quality);
+                              "QAM16 R3/4 -> QAM16 R2/3 demote via %s (q=%.2f)",
+                              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
                 LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             } else {
                 // Count the demote + arm the re-climb cooldown only when the MODE_CHANGE actually
                 // fires (a busy-held decision re-asserts on the next bad group; counting the hold
                 // would double-charge the backoff for one logical demote).
                 noteQam16Demoted(1);
-                requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
-                                  v2::ModeChangeReason::CHANNEL_DEGRADED);
+                // Old-rate string captured BEFORE the commit: a descriptor commit applies
+                // the new mode immediately (data_code_rate_ mutates), unlike the pending
+                // MODE_CHANGE path which holds it until the ACK.
+                const char* old_rate_str = codeRateToString(data_code_rate_);
+                const bool desc_committed = tryDescriptorModeSwitch(
+                    Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+                    v2::ModeChangeReason::CHANNEL_DEGRADED);
+                if (!desc_committed) {
+                    requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+                                      v2::ModeChangeReason::CHANNEL_DEGRADED);
+                }
                 std::snprintf(buf, sizeof(buf),
-                              "QAM16 %s -> QPSK R3/4 demote via MODE_CHANGE (q=%.2f)",
-                              codeRateToString(data_code_rate_), quality);
+                              "QAM16 %s -> QPSK R3/4 demote via %s (q=%.2f)",
+                              old_rate_str,
+                              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
                 LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             }
         } else if (qam16R34Enabled() && data_code_rate_ == CodeRate::R2_3) {
@@ -2226,11 +2262,16 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                                   quality);
                 } else {
                     qam16_r34_clean_streak_ = 0;  // walk FIRED at a clean boundary -> reset
-                    requestModeChange(Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
-                                      v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    const bool desc_committed = tryDescriptorModeSwitch(
+                        Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
+                        v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    if (!desc_committed) {
+                        requestModeChange(Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
+                                          v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    }
                     std::snprintf(buf, sizeof(buf),
-                                  "QAM16 R2/3 -> QAM16 R3/4 climb via MODE_CHANGE (q=%.2f)",
-                                  quality);
+                                  "QAM16 R2/3 -> QAM16 R3/4 climb via %s (q=%.2f)",
+                                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
                     LOG_MODEM(INFO, "Connection: adaptive %s", buf);
                 }
             } else {
@@ -2342,11 +2383,25 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 isFasterMode(target_mod, target_rate, data_modulation_, prev)
                     ? v2::ModeChangeReason::CHANNEL_IMPROVED
                     : v2::ModeChangeReason::CHANNEL_DEGRADED;
-            requestModeChange(target_mod, target_rate, wireSnrDb(), reason);
+            // Old-mod string captured BEFORE the commit: a descriptor commit applies the
+            // new mode immediately (data_modulation_ mutates), unlike the pending
+            // MODE_CHANGE path which holds it until the ACK.
+            const char* old_mod_str = modulationToString(data_modulation_);
+            // DESC-SWITCH Phase 1 (knob-ON): skip the MODE_CHANGE round-trip — commit
+            // locally and let the next burst's BURST_HEADER descriptor announce the move
+            // (§5.1; the pilot/carrier-geometry desync arm of the 2026-06-09 failure is
+            // closed by the mandatory full-anchor one-shot + RX warm-handoff demotion).
+            // Falls back to the synchronized exchange when out of scope.
+            const bool desc_committed =
+                tryDescriptorModeSwitch(target_mod, target_rate, wireSnrDb(), reason);
+            if (!desc_committed) {
+                requestModeChange(target_mod, target_rate, wireSnrDb(), reason);
+            }
             if (qam16_hop) qam16_clean_streak_ = 0;  // hop FIRED at a clean boundary -> reset
-            std::snprintf(buf, sizeof(buf), "%s %s -> %s %s via MODE_CHANGE (q=%.2f)",
-                          modulationToString(data_modulation_), codeRateToString(prev),
-                          modulationToString(target_mod), codeRateToString(target_rate), quality);
+            std::snprintf(buf, sizeof(buf), "%s %s -> %s %s via %s (q=%.2f)",
+                          old_mod_str, codeRateToString(prev),
+                          modulationToString(target_mod), codeRateToString(target_rate),
+                          desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
             LOG_MODEM(INFO, "Connection: adaptive %s", buf);
         }
     } else {
@@ -4110,6 +4165,155 @@ void Connection::commitPendingModeChange(const char* outcome) {
     runDeferredArqRefill();
 }
 
+// ═══════════════ DESC-SWITCH — descriptor-committed rate/mod move ═══════════════
+// docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.1, knob ULTRA_DESCRIPTOR_MODE_SWITCH
+// (default OFF = byte-identical). The DECISION machinery (RateController EMA + ssthresh +
+// QAM16 climb/demote + clean-boundary gate + escape drops) is UNTOUCHED — only the COMMIT
+// changes: instead of the MODE_CHANGE stop-and-wait round-trip (2.4-4 s clean, 18.5 s per
+// retry × 2-9 receptions in troughs, TX frozen throughout), the sender applies the mode
+// locally and the next burst's BURST_HEADER descriptor — control-profile QPSK R1/4,
+// already trusted by the RX demod for exactly this reconfiguration — IS the announcement.
+//
+// Phase-1 scope gate: CLEAN-BOUNDARY wideband-OFDM ladder moves only. Excluded BY DESIGN
+// (all keep the legacy MODE_CHANGE exchange, in every knob state):
+//   - ESCAPE/collapse drops (mid-window; era-safety needs rig-validated
+//     ULTRA_ARQ_MOVE_EPOCH — §7 hard dependency; see executeEscapeDrop),
+//   - connect-time INITIAL_SETUP and USER_REQUEST moves,
+//   - MC-DPSK rung moves (carriers/sps need ladder_rung_id on the wire) and OFDM_NARROW,
+//   - the deaf-peer escalation fallback (§6.5).
+bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
+                                         float measured_snr, uint8_t reason) {
+    if (!descriptor_mode_switch_enabled_) return false;
+    if (state_ != ConnectionState::CONNECTED) return false;
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return false;  // wideband ladder only
+    if (mode_change_pending_) return false;  // a legacy exchange is already in flight
+
+    // CW pick: IDENTICAL to requestModeChange (operator --cw-count override preserved,
+    // else the Doppler-coherence-refined channel recommendation) so the descriptor
+    // announces the same frame geometry the old exchange would have negotiated.
+    const int cw = (config_.forced_cw_count != 0)
+        ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
+        : connection_policy::recommendCWCountForChannel(
+              mod, rate, negotiated_mode_,
+              connection_policy::coherenceAdjustedFadingIndex(
+                  fading_index_, coherence_score_, coherence_valid_),
+              measured_snr);
+
+    // Descriptor-bearing-burst guard: encodeBurstLight emits NO BURST_HEADER for a
+    // single-frame burst (streaming_encoder.cpp:476-489) — the announcement could not
+    // ride, and the lone post-switch frame would be undecodable at the peer's old
+    // geometry (an RTO grind at the file tail, NOT the §6 row-1 one-lost-group case).
+    // Commit via descriptor only when the remaining file payload guarantees a >=2-frame
+    // (descriptor-bearing) group at the NEW geometry; the file tail and the non-file
+    // (message) path fall back to the legacy exchange, which handles them correctly
+    // today. This is also where the mid-transfer dead-air lives, so the fallback costs
+    // nothing the design targets.
+    if (file_transfer_.getState() != FileTransferState::SENDING) return false;
+    const auto progress = file_transfer_.getProgress();
+    if (progress.total_bytes <= progress.transferred_bytes) return false;
+    const size_t remaining_bytes = progress.total_bytes - progress.transferred_bytes;
+    const size_t frame_payload = (selectBurstLiftingZ() == 81)
+        ? v2::getFixedFramePayloadCapacityZ(rate, cw, 81)
+        : v2::getFixedFramePayloadCapacity(rate, cw);
+    const size_t chunk_bytes =
+        (frame_payload > FileTransferController::FILE_DATA_OVERHEAD)
+            ? frame_payload - FileTransferController::FILE_DATA_OVERHEAD
+            : 0;
+    if (chunk_bytes == 0 || remaining_bytes <= chunk_bytes) return false;
+
+    commitLocalModeSwitch(mod, rate, cw, measured_snr, reason);
+    return true;
+}
+
+// The COMMIT half (§5.1 steps 1-3): applyDataMode NOW — no mode_change_pending_, no
+// retry timer, no TX freeze; the next burst's descriptor (stamped with the new
+// mod/rate/cw/z by transmitBurst → setDataMode) announces the move. Clean-boundary
+// invariant: callers commit only with the send window drained, so requeuePendingChunks()
+// and arq_.setCodeRate's abort/rewind are no-ops — an EMPTY-window regrid is
+// collision-free by construction and needs NO epoch bump (when ULTRA_ARQ_MOVE_EPOCH is
+// ON the existing machinery still stamps EPOCH_REBASE on the first frame at the window
+// base and echoes the epoch on the tone-ACK — belt-and-braces, zero extra work here).
+void Connection::commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_count,
+                                       float measured_snr, uint8_t reason) {
+    (void)reason;  // decision telemetry only — nothing rides a control frame on this path
+    applyDataMode(mod, rate, cw_count, currentLadderRungId());
+
+    // §2.6-arm-3 mitigation (MANDATORY, §5.1 step 2): the next burst group must carry a
+    // full chirp+LTS anchor so the receiver re-derives |H| under the NEW pilot/carrier
+    // geometry instead of equalizing with a stale warm-sync estimate (the 2026-06-09
+    // unilateral flip's 0/8-forever arm). One-shot; consumed by flushBurstBuffer →
+    // on_transmit_burst_(force_full_preamble=true). Same ~1.2 s the MODE_CHANGE ladder
+    // already paid per move (kWideOFDMFullAnchorExtraMs).
+    desc_switch_full_anchor_pending_ = true;
+
+    ++stats_.descriptor_mode_switches;
+    // A/B grep line (§7.2 metric): the epoch is the ARQ TX move-epoch — 0 while
+    // ULTRA_ARQ_MOVE_EPOCH is OFF, and a clean-boundary commit never bumps it.
+    LOG_MODEM(INFO, "Connection: DESC-SWITCH commit %s %s (epoch %u)",
+              modulationToString(mod), codeRateToString(rate),
+              static_cast<unsigned>(arq_.txMoveEpoch()));
+
+    // GUI/modem follow-through — the encoder picks up the new mode before the next
+    // transmitBurst. Same notify commitPendingModeChange fires; LOCAL reading.
+    notifyDataModeChanged(measured_snr, wireFadingIndex(), /*snr_is_wire=*/false);
+    // applyDataMode deferred the file refill (rate/CW/mod changed while SENDING);
+    // release it now — the next burst goes out at the new rung with NO idle round-trip
+    // (the whole point: the mode_change_pending_ TX freeze is gone).
+    runDeferredArqRefill();
+}
+
+// RX side (§5.1 step 4b): the decoder consumed a mode-hop BURST_HEADER descriptor
+// (wired decoder → ModemEngine → frontend binding → ProtocolEngine::onDescriptorModeChange,
+// mirroring onBurstGroupReceived — same thread/locking class, §6 row 11). Run the
+// RX-relevant subset of a mode change: applyDataMode sets data_modulation_/
+// data_code_rate_/data_frame_cw_count_ and configureArqForCurrentDataMode refreshes
+// window/timers/chunk capacity — ofdmWindowSize is mod/rate-dependent, so without this a
+// receiver holding the old window would below-window-drop the tail of a wider post-hop
+// burst. NO MODE_CHANGE ACK machinery fires: confirmation is the switched group's
+// tone-burst ACK (implicit and free).
+void Connection::onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame) {
+    if (!descriptor_mode_switch_enabled_) return;  // knob-OFF: byte-identical no-op
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // wideband-OFDM scope
+    if (mod == data_modulation_ && rate == data_code_rate_ &&
+        (cw_per_frame <= 0 || cw_per_frame == data_frame_cw_count_)) {
+        return;  // already adopted (re-announced descriptor on a resend) — idempotent
+    }
+    if (arq_.getTxInFlightBytes() > 0) {
+        // Receiver-ISS asymmetry (§6 row 12): WE have our own DATA in flight
+        // (half-duplex interactive role overlap). Adopting the peer's TX geometry now
+        // would abort OUR send window; per-direction rungs are independent and the
+        // peer's next descriptor re-announces. Skip.
+        LOG_MODEM(WARN,
+                  "Connection: DESC-SWITCH adopt skipped (%s %s) — local DATA in flight",
+                  modulationToString(mod), codeRateToString(rate));
+        return;
+    }
+    // §8 checklist 4: clean-boundary invariant — at a boundary switch the RX slots are
+    // provably empty (the sender's drained window ⟹ we delivered in-order), so
+    // arq_.setCodeRate's RX discard below is a no-op. Non-empty slots here mean the
+    // sender committed mid-window without an epoch adoption (Phase-2 escape territory) —
+    // log loudly; the discard still runs (existing setCodeRate semantics) and the
+    // sender's ARQ resends cover the loss.
+    if (arq_.bufferedRxFrameCount() > 0) {
+        LOG_MODEM(WARN,
+                  "Connection: DESC-SWITCH adopt with %zu buffered RX frames — "
+                  "clean-boundary invariant violated (mid-window regrids belong to the "
+                  "move-epoch machinery)",
+                  arq_.bufferedRxFrameCount());
+    }
+    // A/B grep line (§7.2 metric).
+    LOG_MODEM(INFO, "Connection: DESC-SWITCH adopt %s %s",
+              modulationToString(mod), codeRateToString(rate));
+    applyDataMode(mod, rate, cw_per_frame, LadderRungId::UNKNOWN);
+    ++stats_.descriptor_mode_switches;
+    // GUI/modem follow-through: LOCAL snr reading (no SNR rides a descriptor); peer
+    // fading unknown on this path → -1.0 = the existing "n/a" render.
+    notifyDataModeChanged(measured_snr_db_, /*peer_fading_index=*/-1.0f,
+                          /*snr_is_wire=*/false);
+    runDeferredArqRefill();
+}
+
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
@@ -4199,6 +4403,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     remote_call_.clear();
     pending_remote_call_.clear();
     mode_change_pending_ = false;
+    desc_switch_full_anchor_pending_ = false;
     mode_change_ack_repeat_jobs_.clear();
     disconnect_frame_.clear();
     disconnect_pending_ = false;
@@ -4334,12 +4539,22 @@ void Connection::flushBurstBuffer() {
     }
 
     if (burst_tx_buffer_.size() == 1 && on_transmit_) {
-        // Single frame, no burst needed
+        // Single frame, no burst needed. NOTE: desc_switch_full_anchor_pending_ is
+        // deliberately NOT consumed here — a single-frame send carries no BURST_HEADER
+        // descriptor (encodeBurstLight:476-489), so the one-shot stays armed for the
+        // next descriptor-bearing (multi-frame) burst.
         on_transmit_(burst_tx_buffer_[0]);
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", burst_tx_buffer_.size());
+        // DESC-SWITCH §5.1 step 2: the first burst group after a descriptor-committed
+        // mode switch carries the full chirp+LTS anchor (one-shot; the §2.6-arm-3
+        // geometry-change mitigation). force_full_preamble routes through the frontend
+        // to StreamingEncoder::forceNextBurstGroupStartFullPreamble AND resets the
+        // encoder's anchor-skip clean streak (warm_descriptor=false path).
+        const bool desc_switch_anchor = desc_switch_full_anchor_pending_;
+        desc_switch_full_anchor_pending_ = false;
         on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0,
-                           /*force_full_preamble=*/false);  // legacy arq_ burst path
+                           /*force_full_preamble=*/desc_switch_anchor);  // legacy arq_ burst path
     } else if (on_transmit_) {
         // Fallback: send individually
         for (const auto& frame : burst_tx_buffer_) {
@@ -4516,6 +4731,7 @@ void Connection::reset() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    desc_switch_full_anchor_pending_ = false;
     mode_change_ack_repeat_jobs_.clear();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;

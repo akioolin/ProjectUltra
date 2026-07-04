@@ -10,6 +10,96 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(arq/ladder): descriptor-committed mode switch Phase 1 (`ULTRA_DESCRIPTOR_MODE_SWITCH`, default-OFF byte-identical) — **sim-validated; rig batch pending**
+
+**Validation (2026-07-02 late evening):** build clean first-shot; ctest 80/81 (the one red =
+pre-existing UltraTncSimAudio PING-floor, documented) including the 3 new unit tests.
+Faithful-gate A/B good@20 s42 (full standing knob set): knob-ON PASS — 3 ladder moves
+committed via DESC-SWITCH (`commit` t=80.2/116.3/205.7, `adopt` ~1.9 s later each = the
+next burst's descriptor; ZERO MODE_CHANGE frames for them; first climb fired 33 s earlier
+than the OFF arm's), 2 collapse-escapes correctly stayed on legacy ESCAPE-drop (epoch
+0→1) and the next descriptor commit rode epoch 1 cleanly — mixed-mode interop proven; no
+adopt-skips, no clean-boundary WARNs, CRC ok. Knob-OFF control PASS, zero DESC-SWITCH
+lines (silence check). Goodput ON 1520 / OFF 1770 = within single-cell noise (±25-30%);
+the mechanism gate (§7.2: move dead-air ~0, no adopt failures) is what this cell proves.
+
+**What it replaces (the problem):** every wideband-OFDM fade-riding-ladder rate/mod move
+runs the MODE_CHANGE stop-and-wait exchange — 1-CW OFDM control frame + ACK on the most
+fragile waveform in the system, `mode_change_pending_` freezing TX for the whole
+round-trip: 2.4-4 s per clean move, 18.5 s per retry × 2-9 receptions per switch in fade
+troughs (~60-90 s dead-air per rough transfer; rig W4: ~22% of one transfer). Design +
+full failure-mode table: `docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md` (Option C —
+"the anchor IS the announcement").
+
+**What changed (all knob-gated `ULTRA_DESCRIPTOR_MODE_SWITCH`, read once per
+Connection/StreamingDecoder ctor like `ULTRA_ARQ_MOVE_EPOCH`; unset/`=0` = byte-identical;
+SEMANTICS-BREAKING lockstep when ON):**
+- **Sender commit** (`src/protocol/connection.cpp`): the 4 CLEAN-BOUNDARY ladder call
+  sites in `applyAdaptiveRateFeedback` (QPSK-ladder/QAM16-hop move, QAM16→QPSK demote,
+  QAM16 R3/4→R2/3 demote, QAM16 R2/3→R3/4 climb) route through new
+  `tryDescriptorModeSwitch` → `commitLocalModeSwitch`: same CW pick as
+  `requestModeChange`, `applyDataMode` NOW (no pending state, no retry timer, no TX
+  freeze), `notifyDataModeChanged` + immediate deferred-refill release — the next burst's
+  `BURST_HEADER` descriptor (already stamped with the new mod/rate/cw/z) IS the
+  announcement. DECISION machinery (RateController EMA/ssthresh/QAM16 climb-demote/
+  clean-boundary gate/escape drops) untouched. Log: `DESC-SWITCH commit <mod> <rate>
+  (epoch N)`; `stats_.descriptor_mode_switches`; adaptive-action text `via DESC-SWITCH`.
+- **Full-anchor one-shot (mandatory §2.6-arm-3 mitigation):** commit arms
+  `desc_switch_full_anchor_pending_`, consumed by `flushBurstBuffer` →
+  `on_transmit_burst_(force_full_preamble=true)` → the existing frontend latch
+  (`ModemEngine::forceNextBurstFullPreamble` → encoder group-start latch) — the first
+  post-switch group carries full chirp+LTS AND resets the encoder anchor-skip clean
+  streak (`warm_descriptor=false` path, `streaming_encoder.cpp:640`). Same ~1.2 s the
+  ladder already paid per move.
+- **Receiver adopt** (`src/gui/modem/streaming_ofdm_decode.cpp` BURST_HEADER intercept):
+  a descriptor whose mod/rate differs (the existing deferred demod-reconfig condition)
+  now ALSO (a) demotes warm-handoff for the following group (geometry change ⇒ stale |H|
+  is garbage; the reset path arms `expect_full_ofdm_anchor_`, matching the sender's
+  guaranteed full anchor — closes the 2026-06-09 unilateral-flip 0/8-forever arm) and
+  (b) fires a new decoder→protocol notification (`DescriptorModeChangeCallback` →
+  `ModemEngine` → `wireModemToProtocol` → `ProtocolEngine::onDescriptorModeChange` →
+  `Connection::onDescriptorModeChange`, same thread/mutex class as the burst-group
+  forwarding): RX-side `applyDataMode` (mode/CW/ARQ window/timers/chunk capacity —
+  `ofdmWindowSize` is mod/rate-dependent) + GUI notify. **NO MODE_CHANGE ACK machinery
+  fires** — confirmation is the switched group's tone-burst ACK. Idempotent on
+  re-announced descriptors; skipped (WARN) with local DATA in flight (ISS asymmetry,
+  design §6 row 12); WARNs if RX slots are non-empty (clean-boundary invariant check,
+  design §8 item 4). Log: `DESC-SWITCH adopt <mod> <rate>`.
+- **Epoch interaction:** a clean-boundary commit has an EMPTY window — `setCodeRate` has
+  nothing to abort, so NO epoch bump occurs or is needed (the descriptor + EPOCH_REBASE
+  stamping suffice; the tone-ACK epoch echo stays live when `ULTRA_ARQ_MOVE_EPOCH` is
+  ON — belt-and-braces). New read-only `SelectiveRepeatARQ::txMoveEpoch()` for the log.
+- **Phase-1 scope gates (incl. one deviation from the design doc):** ESCAPE/collapse
+  (mid-window) drops stay on the legacy `requestModeChange` until `ULTRA_ARQ_MOVE_EPOCH`
+  rig-validates (design §7 hard dependency; scope comment at `executeEscapeDrop`). NEW
+  guard the doc didn't enumerate: a single-frame burst carries NO descriptor
+  (`encodeBurstLight:476-489`), so the commit additionally requires an in-progress file
+  SEND with >1 frame of payload remaining at the NEW geometry — the file tail and
+  non-file (message) moves fall back to MODE_CHANGE (otherwise the lone post-switch
+  frame is undecodable at the peer's old geometry = an RTO grind, worse than the design
+  §6 row-1 lost-group case). MODE_CHANGE machinery fully retained for
+  connect-time/USER_REQUEST/MC-DPSK/OFDM_NARROW/deaf-peer escalation (all knob states).
+- **Stale-doc fix while touching the wire docs** (design §8 item 6):
+  `tone_burst_payload.hpp` `rate_hint` comment corrected — it documented a rate-index
+  encoding, but the code transmits/consumes a quantized decode-headroom QUALITY.
+
+**Tests (edited, NOT run — a rig validation batch was running; build after it clears):**
+`tests/test_connection_adaptive.cpp`: knob pinned `0` in `main` (baseline) +
+`test_descriptor_switch_knob_off_is_byte_identical` (legacy exchange intact: pending
+armed, mode held until ACK, exactly 1 MODE_CHANGE frame, RX notify no-op),
+`test_descriptor_switch_commits_locally_at_clean_boundary` (no pending, immediate
+apply + ARQ reconfig, ZERO MODE_CHANGE frames, full-anchor one-shot, no epoch bump),
+`test_descriptor_adopt_reconfigures_receiver_without_ack` (protocol follows the
+descriptor, nothing transmitted, notify fired once, idempotent re-announce, in-flight
+skip).
+
+**Verification owed before any knob-ON claim:** `cmake --build build -j4 && ctest
+--test-dir build --output-on-failure -j4`, then the design §7.2 paired faithful-gate
+sweep and §7.3 rig campaign. Cross-refs: KNOWN_BUGS BUG-ARQ-SEQ-COLLISION (escape-path
+hard dependency), MODEM_INFRASTRUCTURE_MAP §6 knob row + §7 register items 9d/9e.
+
+---
+
 ## 2026-07-03 — feat(snr): calibrated AFFINE entry-SNR basis (`ULTRA_CONNECT_AFFINE_BASIS`, default-OFF byte-identical) + one-source-of-truth dial-equivalent helper
 
 **What broke:** the flat `connectSnrFadeBasisDb()=+5` selection basis is the wrong
