@@ -3795,9 +3795,22 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
             snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);  // Orange-red
         }
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
-        char snr_text[24];
+        char snr_text[40];
         if (connected_snr_valid) {
-            snprintf(snr_text, sizeof(snr_text), "%.1f dB", connected_snr_db);
+            // Same dial-equivalent presentation as the bottom status bar: the
+            // measured value is EFFECTIVE (fade-state) SNR, which under-reads the
+            // operator's AWGN-equivalent dial on a fading channel — show the
+            // calibrated dial-equivalent alongside (the same +basis the rate
+            // selection applies) so the meter matches the knob the operator set.
+            const float sidebar_fading = modem_.getFadingIndex();
+            if (sidebar_fading >= protocol::kFadingAwgnMax) {
+                snprintf(snr_text, sizeof(snr_text), "%.1f eff (~%.0f dial)",
+                         connected_snr_db,
+                         connected_snr_db +
+                             protocol::connection_policy::connectSnrFadeBasisDb());
+            } else {
+                snprintf(snr_text, sizeof(snr_text), "%.1f dB", connected_snr_db);
+            }
         } else {
             snprintf(snr_text, sizeof(snr_text), "-- dB");
         }

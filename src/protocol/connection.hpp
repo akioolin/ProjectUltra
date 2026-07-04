@@ -431,8 +431,11 @@ public:
         measured_snr_source_ = source;
         measured_snr_data_aided_ = (source == SNRSource::MCDPSK_IN_BAND) && data_aided;
         measured_snr_valid_ = true;
-        // #58 increment 3: see setMeasuredSNR — same feed, same contract.
-        connect_snr_pool_.addReading(snr_db, source, data_aided);
+        // #58 increment 3: see setMeasuredSNR — same feed, same contract. This feed
+        // has the fading observed with the reading, so it rides along (increment 4:
+        // the entry pick pools FADING like it pools SNR — single-frame fading at
+        // Watterson Good scatters 0.24-0.74 around the 0.65 class boundary).
+        connect_snr_pool_.addReading(snr_db, source, data_aided, fading_index);
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
             ms_since_fading_update_ = 0;
@@ -548,6 +551,25 @@ private:
         const float agg = connect_snr_pool_.clusteredDbMeanDb(
             connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
         return std::isfinite(agg) ? agg : measured_snr_db_;
+    }
+    // Entry-pick FADING, parallel to rateSelectionSnrDb() (#58 increment 4,
+    // BUG-CONNECT-FADING-VARIANCE): the fading pooled from the same handshake
+    // readings, clustered by the same Tc. A SINGLE CONNECT frame's fading at
+    // Watterson Good scatters 0.24-0.74 (48-entry rig MPG@20 ledger, 18.8%
+    // false-Moderate) around the Good/Moderate boundary 0.65 — one 0.66 reading
+    // mis-classed a true-Good channel Moderate and entered at QPSK R1/4 (see
+    // docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md). Falls back to the scalar
+    // fading_index_ when the knob is off or no qualifying reading carries fading
+    // — knob-OFF is byte-identical by construction. Entry-pick consumers ONLY;
+    // non-entry uses of fading_index_ (window sizing, file-block sizing, wire
+    // freshness, Tc derivation) intentionally keep the live scalar.
+    float rateSelectionFadingIndex() const {
+        if (!connection_policy::connectSnrPoolEnabled()) {
+            return fading_index_;
+        }
+        const float agg = connect_snr_pool_.clusteredFadingIndex(
+            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+        return std::isfinite(agg) ? agg : fading_index_;
     }
     // data_aided flag matching rateSelectionSnrDb()'s VALUE: the pool aggregate is
     // data-aided by construction (population contract); the scalar fallback keeps the

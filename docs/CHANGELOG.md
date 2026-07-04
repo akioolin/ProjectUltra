@@ -10,7 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-07-03 — feat(arq): BUG-ARQ-SEQ-COLLISION **STRUCTURAL fix** — move-epoch on the wire, knob-gated `ULTRA_ARQ_MOVE_EPOCH` (default-OFF byte-identical; **WIRE/SEMANTICS-BREAKING when ON**, lockstep) — **EDITS-ONLY / UNVALIDATED** (no build/ctest/gate run; rig-validation-pending)
+## 2026-07-03 — fix(connect): entry FADING pooled like the SNR (#58 increment 4, BUG-CONNECT-FADING-VARIANCE) — rides `ULTRA_CONNECT_SNR_POOL` (default-OFF byte-identical) + sidebar SNR meter dial-equivalent + rig calibration doc
+
+**What broke:** the connect-time entry pick classified the channel from a SINGLE
+CONNECT frame's `fading_index` while the SNR beside it was already pooled (#58
+increment 3). Screenshot bug (rig dial-20 Watterson Good): one frame read fading
+**0.66** → Moderate (`kFadingGoodMax`=0.65) → QPSK R1/4 entry on a channel that
+carries R2/3. Rig ledger (48 dial-MPG@20 entries, all true Good): single-frame
+fading scatters **0.24–0.74** (σ 0.129), **false-Moderate rate 18.8% (9/48)** — 8
+of those 9 entered at QPSK R1/4 (~3× throughput loss until the ladder climbs out).
+Root cause: variance of a single fade realization straddling the class boundary,
+same disease the SNR pool already cured; the fading input was never pooled.
+
+**What changed (all knob-gated by the EXISTING `ULTRA_CONNECT_SNR_POOL`; knob-off
+byte-identical by construction):**
+- `connection_policy.hpp`: `ConnectSnrReading` gains `fading_index` (NAN =
+  absent); `addReading(..., fading_index = NAN)` — fading never gates admission
+  (the SNR population contract decides). New `ConnectSnrPool::clusteredFadingIndex
+  (tc_ms, handshake_only, max_age_ms)`: SAME Tc-cluster partition as the SNR
+  dB-mean (one shared `aggregate()` pass), per-cluster mean of finite fading
+  values, then MEAN of cluster means — mean not median because fading_index is a
+  bounded [0,2] statistic (no heavy tail; at N_eff=2 the median IS the mean; the
+  mean uses all samples). Fading-less readings still delimit clusters
+  (decorrelation is a channel-timeline property) but contribute nothing.
+- `connection.hpp`: `setChannelQuality` passes its fading into the pool feed
+  (`setMeasuredSNR`-only feeds carry NAN). New `rateSelectionFadingIndex()`
+  accessor parallel to `rateSelectionSnrDb()`: pool aggregate when the knob is ON
+  and ≥1 qualifying reading carries fading, else the scalar `fading_index_`.
+- Entry-pick sites now consume `entry_fading = rateSelectionFadingIndex()`
+  through the full call chains: `handleConnect` (`connectSelectionSnrDb` fading
+  arg, `coherenceAdjustedFadingIndex`→`selectLadderRung`/
+  `recommendDataModeForWaveform`/`recommendWaveformAndRate`/`capInitialOFDMRate`,
+  `shouldDeferConnectPick`, `recommendCWCountForChannel`, CONNECT_ACK fading wire
+  byte, entry notify), `acceptCall` (same set on its path), `negotiateMode`
+  (`connectSelectionSnrDb`, `selectNegotiatedMode`, `recommendWaveformAndRate`).
+  The wire byte + notify get the SAME treatment as the pooled SNR byte (the
+  initiator/GUI sees the value that drove the pick). NON-entry uses of
+  `fading_index_` (ARQ window sizing, `shouldUseSingleOFDMFileBlock`,
+  `wireFadingIndex` freshness, Tc derivation) intentionally keep the live scalar.
+- `app.cpp` sidebar channel-status SNR bar (CONNECTED row): same dial-equivalent
+  presentation as the bottom status bar — on fading (`fading >= kFadingAwgnMax`)
+  the bar reads `X.X eff (~Y dial)` (+`connectSnrFadeBasisDb()`), else `X.X dB`.
+
+**Evidence/calibration (new doc `docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md`,
+extracted from every `local_measured` MODE_CHANGE line in /tmp/campaign_3000):**
+N=48 @ dial MPG@20 Good. SNR readings mean 12.38 σ 3.14 (offset vs dial mean
+**−7.6 dB**, SNR-dependent: −10.2 below-median vs −5.1 above — the +5 basis
+under-corrects on average but an additive constant is the wrong model at the
+tails; basis NOT changed this pass). Fading mean 0.521 σ 0.129, false-Moderate
+18.8% → projected at N_eff=2/3 (σ/√N): **7.8% / 4.1%** (empirical cross-run
+pooling: 5.3% / 2.3%). corr(SNR, fading) = −0.60 (trough entries fail both
+inputs together — hence the R1/4 pile-up).
+
+**Test verification:** new `test_connect_fading_pool_aggregate` in
+`tests/test_connection_policy.cpp` (N=1 identity, absent-fading NAN fallback +
+no-poisoning, cluster-mean semantics, the 0.66→Moderate / pooled-0.55→Good
+counterfactual). `cmake --build build -j4` clean;
+`ctest --test-dir build --output-on-failure -j4` — suite green except the
+pre-existing UltraTncSimAudio red. Knob-off byte-identity is by construction
+(accessor returns the scalar; pool merely accumulates). UNVALIDATED on the rig:
+needs the ≥10-connect Good entry-distribution bench with
+`ULTRA_CONNECT_SNR_POOL=1` (pass: 0 false-Moderate entries). (default-OFF byte-identical; **WIRE/SEMANTICS-BREAKING when ON**, lockstep) — **EDITS-ONLY / UNVALIDATED** (no build/ctest/gate run; rig-validation-pending)
 
 **What broke:** see the entry below (same date) — rate-change TX abort under one-way ACK
 loss re-uses seqs for DIFFERENT bytes; the receiver's seq-keyed dedup destroys the regridded

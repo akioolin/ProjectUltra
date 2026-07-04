@@ -1071,6 +1071,63 @@ void test_connect_snr_pool_wire_freshness() {
           "a fresh decode restores an honest wire value");
 }
 
+void test_connect_fading_pool_aggregate() {
+    // #58 increment 4 (BUG-CONNECT-FADING-VARIANCE): the fading index rides each
+    // pooled reading and aggregates over the SAME Tc clusters as the SNR mean.
+    const uint64_t tc_ms = 4230;  // Good-class design Tc
+
+    // Single-reading identity: with one fading-carrying reading the aggregate IS
+    // that reading — knob-ON with N=1 is byte-identical to the scalar path.
+    ConnectSnrPool pool;
+    pool.addReading(11.5f, SNRSource::MCDPSK_IN_BAND, true, 0.66f);
+    CHECK(std::fabs(pool.clusteredFadingIndex(tc_ms, true, UINT64_MAX) - 0.66f) < 1e-4f,
+          "N=1 identity: fading aggregate == the single reading");
+
+    // Absent fading (setMeasuredSNR-only feed): the reading still counts for the
+    // SNR aggregate but contributes nothing to (and does not poison) the fading
+    // aggregate; an all-absent pool aggregates fading to NAN (scalar fallback).
+    ConnectSnrPool absent;
+    absent.addReading(12.0f, SNRSource::MCDPSK_IN_BAND, true);
+    CHECK(std::isfinite(absent.clusteredDbMeanDb(tc_ms, true, UINT64_MAX)),
+          "fading-less reading still feeds the SNR aggregate");
+    CHECK(std::isnan(absent.clusteredFadingIndex(tc_ms, true, UINT64_MAX)),
+          "all-absent fading aggregates to NAN (callers fall back to the scalar)");
+    absent.addReading(12.0f, SNRSource::MCDPSK_IN_BAND, true, 0.50f);
+    CHECK(std::fabs(absent.clusteredFadingIndex(tc_ms, true, UINT64_MAX) - 0.50f) < 1e-4f,
+          "NAN-fading readings are skipped, not averaged as zero");
+
+    // Cluster semantics match the SNR aggregate: readings < Tc apart are ONE fade
+    // sample (their fading values average within the cluster); a > Tc-separated
+    // reading is a second effective sample and the statistic is the MEAN of
+    // cluster means (bounded [0,2] statistic — no heavy tail for a median to
+    // guard against, and at N_eff=2 the median IS the mean).
+    pool.tick(1000);  // 1 s < Tc: same fade sample
+    pool.addReading(12.5f, SNRSource::MCDPSK_IN_BAND, true, 0.74f);
+    CHECK(std::fabs(pool.clusteredFadingIndex(tc_ms, true, UINT64_MAX) - 0.70f) < 1e-4f,
+          "readings < Tc apart cluster: fading is the within-cluster mean");
+    pool.tick(9000);  // > 2 Tc: decorrelated second sample
+    pool.addReading(13.0f, SNRSource::MCDPSK_IN_BAND, true, 0.30f);
+    CHECK(std::fabs(pool.clusteredFadingIndex(tc_ms, true, UINT64_MAX) - 0.50f) < 1e-4f,
+          "aggregate = mean of cluster means ((0.70 + 0.30)/2), not of raw readings");
+
+    // The screenshot bug counterfactual (rig dial-20 Watterson Good): a SINGLE
+    // CONNECT frame read fading 0.66 -> classified Moderate (boundary 0.65) ->
+    // QPSK R1/4 entry on a true-Good channel. Pooled with one decorrelated
+    // second reading at the ledger mean (~0.5), the aggregate falls back inside
+    // the Good class.
+    CHECK(classifyChannel(0.66f) == ChannelClassification::MODERATE,
+          "single 0.66 frame reads Moderate (the mis-class)");
+    ConnectSnrPool bug;
+    bug.addReading(12.0f, SNRSource::MCDPSK_IN_BAND, true, 0.66f);
+    bug.tick(10000);  // CONNECT retry > 2 Tc later
+    bug.addReading(14.0f, SNRSource::MCDPSK_IN_BAND, true, 0.44f);
+    const float pooled_fading = bug.clusteredFadingIndex(tc_ms, true, UINT64_MAX);
+    CHECK(std::fabs(pooled_fading - 0.55f) < 1e-4f,
+          "pooled fading = (0.66 + 0.44)/2 = 0.55");
+    CHECK(classifyChannel(pooled_fading) == ChannelClassification::GOOD,
+          "pooled fading re-classes the true-Good channel Good");
+}
+
 void test_connect_pick_defer_semantics() {
     // Defer exactly once, only for N_eff==1, only on fading, only for a sub-OFDM pick.
     CHECK(shouldDeferConnectPick(1, 0.50f, WaveformMode::MC_DPSK, false),
@@ -1128,6 +1185,7 @@ int main() {
     test_connect_snr_pool_tc_clustering();
     test_connect_snr_pool_trough_suppression();
     test_connect_snr_pool_wire_freshness();
+    test_connect_fading_pool_aggregate();
     test_connect_pick_defer_semantics();
 
     if (tests_failed != 0) {

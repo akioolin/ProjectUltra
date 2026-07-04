@@ -200,6 +200,12 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // value feeds the selection, the CW pick, the CONNECT_ACK wire byte and the
         // logs below, so all views of the pick stay consistent.
         snr_db = rateSelectionSnrDb();
+        // #58 increment 4: the entry-pick FADING is pooled exactly like the SNR
+        // (single-frame fading at Watterson Good scatters 0.24-0.74 around the
+        // 0.65 Good/Moderate boundary — one 0.66 CONNECT reading mis-classed a
+        // dial-20 Good channel Moderate -> QPSK R1/4 entry). Knob-off (or a pool
+        // with no fading-carrying reading) this IS fading_index_, byte-identical.
+        const float entry_fading = rateSelectionFadingIndex();
         const SNRSource snr_source = measured_snr_source_;
         const bool rate_selection_snr_valid = measured_snr_valid_;
         // #58: SELECTION uses the basis-corrected value (fade-effective reading vs
@@ -209,7 +215,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // on, so it composes unchanged).
         const bool selection_snr_data_aided = rateSelectionSnrDataAided();
         const float selection_snr_db =
-            connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
+            connection_policy::connectSelectionSnrDb(snr_db, entry_fading,
                                                      selection_snr_data_aided);
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
@@ -221,10 +227,10 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             config_.preferred_mode != WaveformMode::AUTO ||
             narrowband_override_ != WaveformMode::AUTO;
         // Rate/channel decisions use the Doppler-coherence-refined fading index: equals the
-        // raw fading_index until enough OFDM data has pooled (so this CONNECT-time pick, with
-        // no prior OFDM data, is unchanged), then honors the Good/Moderate coherence verdict.
+        // pooled entry fading until enough OFDM data has pooled (so this CONNECT-time pick,
+        // with no prior OFDM data, honors the pool), then the Good/Moderate coherence verdict.
         const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
-            fading_index_, coherence_score_, coherence_valid_);
+            entry_fading, coherence_score_, coherence_valid_);
         const auto selected_rung = rate_selection_snr_valid
             ? connection_policy::selectLadderRung(selection_snr_db, rate_fading)
             : connection_policy::ladderRungForId(LadderRungId::ROBUST);
@@ -251,24 +257,24 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                 connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(),
                                                  /*handshake_only=*/true,
                                                  /*max_age_ms=*/UINT64_MAX),
-                fading_index_, selected_rung.waveform,
+                entry_fading, selected_rung.waveform,
                 connect_pick_deferred_once_)) {
             connect_pick_deferred_once_ = true;
             LOG_MODEM(INFO,
                       "Connection: CONNECT pick DEFERRED once (N_eff=1, fading=%.2f, "
                       "pick would land %s at sel=%.1f) -> withholding CONNECT_ACK; the "
                       "initiator's CONNECT retry supplies a decorrelated second reading",
-                      fading_index_, selected_rung.name, selection_snr_db);
+                      entry_fading, selected_rung.name, selection_snr_db);
             return;
         }
 
         if (ladder_selected) {
             negotiated_mode_ = selected_rung.waveform;
             LOG_MODEM(INFO,
-                      "Connection: Adaptive ladder selected %s (SNR=%.1f sel=%.1f (%s), fading=%.2f %s)",
+                      "Connection: Adaptive ladder selected %s (SNR=%.1f sel=%.1f (%s), fading=%.2f %s (raw %.2f))",
                       selected_rung.name, snr_db, selection_snr_db,
-                      snrSourceToString(snr_source), fading_index_,
-                      connection_policy::fadingLabel(fading_index_));
+                      snrSourceToString(snr_source), entry_fading,
+                      connection_policy::fadingLabel(entry_fading), fading_index_);
         } else {
             // Forced presets and explicit waveform preferences keep legacy
             // negotiation semantics.
@@ -292,7 +298,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             negotiated_mode_ = rec.waveform;
             LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on SNR=%.1f (%s), fading=%.2f",
                       waveformModeToString(negotiated_mode_), snr_db,
-                      snrSourceToString(snr_source), fading_index_);
+                      snrSourceToString(snr_source), entry_fading);
         }
 
         // Get recommended mode based on SNR, fading AND the negotiated waveform
@@ -320,7 +326,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                           codeRateToString(rec_rate), codeRateToString(capped), snr_db,
-                          snrSourceToString(snr_source), fading_index_);
+                          snrSourceToString(snr_source), entry_fading);
                 rec_rate = capped;
             }
         }
@@ -372,7 +378,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             : (ladder_selected && selected_rung.waveform == WaveformMode::MC_DPSK
                 ? selected_rung.cw_count
                 : connection_policy::recommendCWCountForChannel(
-                      rec_mod, rec_rate, negotiated_mode_, fading_index_, snr_db));
+                      rec_mod, rec_rate, negotiated_mode_, entry_fading, snr_db));
 
         if (rung_id == LadderRungId::UNKNOWN) {
             if (negotiated_mode_ == WaveformMode::MC_DPSK) {
@@ -400,12 +406,15 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Prefer full-callsign CONNECT_ACK when the initiator callsign is known,
         // fallback to hash-only ACK when we only have src_hash.
+        // Wire fading byte: entry_fading — the SAME treatment as the SNR byte (the
+        // pool aggregate under ULTRA_CONNECT_SNR_POOL, the raw scalar knob-off), so
+        // the initiator's display shows the value that actually drove this pick.
         Bytes ack_data;
         if (!src_call.empty()) {
             auto ack = v2::ConnectFrame::makeConnectAck(local_call_, src_call,
                                                         static_cast<uint8_t>(negotiated_mode_),
                                                         data_modulation_, data_code_rate_,
-                                                        snr_db, fading_index_,
+                                                        snr_db, entry_fading,
                                                         cw_byte, rung_id);
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
@@ -415,7 +424,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
                                                                static_cast<uint8_t>(negotiated_mode_),
                                                                data_modulation_, data_code_rate_,
-                                                               snr_db, fading_index_,
+                                                               snr_db, entry_fading,
                                                                cw_byte, rung_id);
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
@@ -444,8 +453,10 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Notify application of initial data mode. snr_is_wire=false: this is the
         // responder's OWN reading (the GUI used to mislabel it "(wire_peer)" — the
-        // tell was peer_fading==local_fading on every connect line).
-        notifyDataModeChanged(snr_db, fading_index_, /*snr_is_wire=*/false);
+        // tell was peer_fading==local_fading on every connect line). entry_fading:
+        // the GUI connect line shows the fading that drove the pick (== raw scalar
+        // knob-off), matching the pooled snr_db it already shows.
+        notifyDataModeChanged(snr_db, entry_fading, /*snr_is_wire=*/false);
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         pending_remote_hash_ = frame.src_hash;  // Store hash for later
@@ -930,8 +941,10 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // the input is the pool aggregate under ULTRA_CONNECT_SNR_POOL (same accessor as
     // handleConnect/acceptCall, so the forced/legacy negotiation path can't disagree
     // with the ladder path within one handshake); knob-off = the raw scalar.
+    // Increment 4: the fading input is pooled the same way (rateSelectionFadingIndex).
+    const float entry_fading = rateSelectionFadingIndex();
     float snr = rate_selection_snr_valid
-        ? connection_policy::connectSelectionSnrDb(rateSelectionSnrDb(), fading_index_,
+        ? connection_policy::connectSelectionSnrDb(rateSelectionSnrDb(), entry_fading,
                                                    rateSelectionSnrDataAided())
         : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
@@ -941,7 +954,7 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         narrowband_override_,
         config_.preferred_mode,
         snr,
-        fading_index_);
+        entry_fading);
 
     if (common == 0) {
         LOG_MODEM(WARN, "Connection: No common waveform modes! Falling back to OFDM");
@@ -981,11 +994,11 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // AUTO mode: Use shared algorithm from waveform_selection.hpp
     // This ensures negotiateMode and recommendDataModeWithFading use same logic
     LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR_sel=%.1f dB (%s), fading_index=%.2f (%s)",
-              snr, snrSourceToString(measured_snr_source_), fading_index_,
-              connection_policy::fadingLabel(fading_index_));
+              snr, snrSourceToString(measured_snr_source_), entry_fading,
+              connection_policy::fadingLabel(entry_fading));
 
     auto rec = recommendWaveformAndRate(
-        snr, connection_policy::coherenceAdjustedFadingIndex(fading_index_, coherence_score_,
+        snr, connection_policy::coherenceAdjustedFadingIndex(entry_fading, coherence_score_,
                                                              coherence_valid_));
 
     // Check if selected mode is supported by both sides
@@ -995,8 +1008,8 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
                   waveformModeToString(selected),
                   snr,
                   snrSourceToString(measured_snr_source_),
-                  fading_index_,
-                  connection_policy::fadingLabel(fading_index_));
+                  entry_fading,
+                  connection_policy::fadingLabel(entry_fading));
         return selected;
     }
 

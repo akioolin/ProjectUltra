@@ -218,12 +218,26 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   fix: `MODE_CHANGE:` line labels `wire_peer` vs `local_measured` (responder connect line was
   a mislabeled LOCAL reading). Composition unchanged: +5 basis and the Moderate saturation
   bound apply ONCE, downstream of the aggregation (`test_connect_snr_pool_*` gates this).
-- **Remaining (do NOT close yet):** (1) build + ctest + knob-off byte-identical gui_qso gate,
+- **Increment 4 IMPLEMENTED (2026-07-03, BUG-CONNECT-FADING-VARIANCE — the FADING side of
+  the same disease; rides `ULTRA_CONNECT_SNR_POOL`, no new knob):** the entry pick classified
+  the channel from a SINGLE CONNECT frame's `fading_index` while the SNR beside it was pooled.
+  Screenshot bug (dial-20 Good): one 0.66 reading → Moderate (boundary 0.65) → QPSK R1/4 on an
+  R2/3 channel. Rig ledger (48 dial-MPG@20 entries, docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md):
+  single-frame fading 0.24-0.74 (σ 0.129), **false-Moderate 18.8%** (8/9 of those entered R1/4)
+  → projected 7.8%/4.1% at N_eff=2/3. Landed: fading rides each pooled reading
+  (`ConnectSnrReading.fading_index`, fed from `setChannelQuality`), `clusteredFadingIndex`
+  (same Tc clusters, mean of cluster means — bounded statistic, mean not median),
+  `rateSelectionFadingIndex()` feeds all entry-pick fading consumers at
+  handleConnect/acceptCall/negotiateMode incl. the defer predicate and the CONNECT_ACK
+  fading byte; non-entry `fading_index_` uses untouched. ctest green
+  (`test_connect_fading_pool_aggregate`), build clean; same rig validation gate as inc 3.
+- **Remaining (do NOT close yet):** (1) knob-off byte-identical gui_qso gate,
   then the knobs-ON 5-cell sim gate and low-SNR safety cells (good@8, MPM@8); (2) the rig
   MPG@20 ≥10-connect bench — pass criteria: 0 sub-OFDM entries, effective spread ≤ ~6 dB,
-  per-connect σ ≤ 2.2 (√2 tightening), W2 staleness signature absent, ≤1 extra CONNECT cycle
-  on deferred picks; (3) re-evaluate shrinking the +5 `connectSelectionSnrDb` basis after the
-  rig re-measure (deliberately untouched in increments 2 AND 3).
+  per-connect σ ≤ 2.2 (√2 tightening), **0 false-Moderate entries at Good**, W2 staleness
+  signature absent, ≤1 extra CONNECT cycle on deferred picks; (3) re-evaluate the +5
+  `connectSelectionSnrDb` basis after the rig re-measure (the 48-entry ledger says mean
+  offset −7.6 dB, SNR-dependent — deliberately untouched in increments 2, 3 AND 4).
 
 ### BUG-QAM16-RIG-LEVEL-BUDGET — CLOSED 2026-07-02 (final): there is NO hidden level deficit anywhere on the bench; the IONOS dial is the only SNR lever. 16QAM at MPG@20 is trough-limited physics; it opens at dial ~22+ (matches the sim crossover)
 - **Every gain lever measured, all dead:** (1) TX drive walk +4.6 dB digital (software-ALC, live)

@@ -427,6 +427,13 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 // Date/wall-clock (CPU-paced sims and the rig then share one clock basis).
 struct ConnectSnrReading {
     float snr_db = 0.0f;
+    // Fading index observed WITH this SNR reading (setChannelQuality feeds both from
+    // the same decoded frame); NAN = absent (setMeasuredSNR-only feeds carry no fading).
+    // Same single-realization scatter problem as the SNR (rig MPG@20 dial-Good,
+    // 48-entry ledger docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md: single-frame
+    // fading 0.24-0.74, sigma 0.129, straddling kFadingGoodMax=0.65 — one 0.66
+    // reading classified a true-Good channel Moderate and bought a QPSK R1/4 entry).
+    float fading_index = NAN;
     uint64_t age_ms = 0;     // advanced from Connection::tick elapsed_ms (modem-time)
     bool data_aided = false;
     SNRSource source = SNRSource::NONE;
@@ -442,7 +449,11 @@ public:
 
     // Adds a reading iff it satisfies the population contract (see block comment).
     // Returns whether the reading entered the pool. Oldest reading drops at capacity.
-    bool addReading(float snr_db, SNRSource source, bool data_aided) {
+    // fading_index: the fading observed with this reading (NAN/absent for
+    // setMeasuredSNR-only feeds); it NEVER gates admission — the SNR population
+    // contract decides, and the fading aggregate simply skips absent values.
+    bool addReading(float snr_db, SNRSource source, bool data_aided,
+                    float fading_index = NAN) {
         if (!std::isfinite(snr_db)) {
             return false;
         }
@@ -458,7 +469,8 @@ public:
             }
             --count_;
         }
-        readings_[count_++] = ConnectSnrReading{snr_db, 0, data_aided, source};
+        readings_[count_++] =
+            ConnectSnrReading{snr_db, fading_index, 0, data_aided, source};
         return true;
     }
 
@@ -480,14 +492,34 @@ public:
     float clusteredDbMeanDb(uint64_t tc_ms, bool handshake_only,
                             uint64_t max_age_ms) const {
         int clusters = 0;
-        return aggregate(tc_ms, handshake_only, max_age_ms, clusters);
+        float fading = NAN;
+        return aggregate(tc_ms, handshake_only, max_age_ms, clusters, fading);
+    }
+
+    // Clustered fading aggregate over the SAME qualifying readings / Tc clusters as
+    // the SNR mean: per-cluster MEAN of the finite fading values, then the MEAN of
+    // cluster means; NAN when no qualifying reading carries a fading value. MEAN,
+    // not median: fading_index is a bounded [0,2] dispersion statistic — no heavy
+    // tail for a median to guard against (unlike an unbounded linear-power SNR),
+    // at N_eff=2 the median IS the mean, and at the N_eff=2-3 the handshake yields,
+    // the mean uses all samples (lowest-variance unbiased estimate) while a median
+    // discards all but the middle one. Readings without fading (setMeasuredSNR-only
+    // feeds) still delimit clusters (decorrelation is a property of the CHANNEL
+    // timeline, not of which fields a feed recorded) but contribute nothing here.
+    float clusteredFadingIndex(uint64_t tc_ms, bool handshake_only,
+                               uint64_t max_age_ms) const {
+        int clusters = 0;
+        float fading = NAN;
+        (void)aggregate(tc_ms, handshake_only, max_age_ms, clusters, fading);
+        return fading;
     }
 
     // Number of decorrelated clusters among qualifying readings (N_eff).
     int effectiveCount(uint64_t tc_ms, bool handshake_only,
                        uint64_t max_age_ms) const {
         int clusters = 0;
-        (void)aggregate(tc_ms, handshake_only, max_age_ms, clusters);
+        float fading = NAN;
+        (void)aggregate(tc_ms, handshake_only, max_age_ms, clusters, fading);
         return clusters;
     }
 
@@ -496,14 +528,31 @@ public:
     }
 
 private:
+    // One pass computes both aggregates over the SAME cluster partition: the SNR
+    // clustered dB-mean (returned) and the clustered fading mean (fading_out; NAN
+    // when no qualifying reading in any cluster carries a finite fading value).
     float aggregate(uint64_t tc_ms, bool handshake_only, uint64_t max_age_ms,
-                    int& clusters_out) const {
+                    int& clusters_out, float& fading_out) const {
         double cluster_sum = 0.0;
         int cluster_n = 0;
+        double cluster_fading_sum = 0.0;
+        int cluster_fading_n = 0;
         double cluster_mean_sum = 0.0;
         int clusters = 0;
+        double fading_cluster_mean_sum = 0.0;
+        int fading_clusters = 0;
         uint64_t prev_age = 0;
         bool have_prev = false;
+        const auto close_cluster = [&]() {
+            if (cluster_n > 0) {
+                cluster_mean_sum += cluster_sum / cluster_n;
+                ++clusters;
+            }
+            if (cluster_fading_n > 0) {
+                fading_cluster_mean_sum += cluster_fading_sum / cluster_fading_n;
+                ++fading_clusters;
+            }
+        };
         for (size_t i = 0; i < count_; ++i) {  // stored oldest -> newest
             const ConnectSnrReading& r = readings_[i];
             if (handshake_only &&
@@ -519,21 +568,24 @@ private:
                 cluster_sum += r.snr_db;
                 ++cluster_n;
             } else {
-                if (cluster_n > 0) {
-                    cluster_mean_sum += cluster_sum / cluster_n;
-                    ++clusters;
-                }
+                close_cluster();
                 cluster_sum = r.snr_db;
                 cluster_n = 1;
+                cluster_fading_sum = 0.0;
+                cluster_fading_n = 0;
+            }
+            if (std::isfinite(r.fading_index)) {
+                cluster_fading_sum += r.fading_index;
+                ++cluster_fading_n;
             }
             prev_age = r.age_ms;
             have_prev = true;
         }
-        if (cluster_n > 0) {
-            cluster_mean_sum += cluster_sum / cluster_n;
-            ++clusters;
-        }
+        close_cluster();
         clusters_out = clusters;
+        fading_out = (fading_clusters > 0)
+            ? static_cast<float>(fading_cluster_mean_sum / fading_clusters)
+            : NAN;
         if (clusters == 0) {
             return NAN;
         }

@@ -428,23 +428,27 @@ void Connection::acceptCall() {
     // +5 basis was calibrated on, so the basis composes unchanged and is applied ONCE,
     // downstream); knob-off it is exactly the raw measured_snr_db_ scalar.
     const float snr_db = rateSelectionSnrDb();
+    // Increment 4: entry-pick fading is pooled like the SNR (single-frame fading
+    // scatters 0.24-0.74 across the 0.65 boundary at Watterson Good); knob-off
+    // this IS fading_index_, byte-identical.
+    const float entry_fading = rateSelectionFadingIndex();
     const bool accept_snr_data_aided = rateSelectionSnrDataAided();
     const float accept_selection_snr_db =
-        connection_policy::connectSelectionSnrDb(snr_db, fading_index_,
+        connection_policy::connectSelectionSnrDb(snr_db, entry_fading,
                                                  accept_snr_data_aided);
-    recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, fading_index_);
+    recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, entry_fading);
 
     // Bootstrap safety: the connect-time reading can overestimate first OFDM frame
     // quality (historically the chirp snapshot; since #58 it is the data-aided
     // fade-averaged estimate). ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided
     // reading clearing the R3/4 anchor by >= 1 sigma enter at R3/4.
     if (isOFDMMode(negotiated_mode_)) {
-        CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, fading_index_, rec_rate, rec_mod,
+        CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, entry_fading, rec_rate, rec_mod,
                                              accept_snr_data_aided);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                       codeRateToString(rec_rate), codeRateToString(capped), snr_db,
-                      snrSourceToString(measured_snr_source_), fading_index_);
+                      snrSourceToString(measured_snr_source_), entry_fading);
             rec_rate = capped;
         }
     }
@@ -488,7 +492,7 @@ void Connection::acceptCall() {
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
         : connection_policy::recommendCWCountForChannel(
-              rec_mod, rec_rate, negotiated_mode_, fading_index_, snr_db);
+              rec_mod, rec_rate, negotiated_mode_, entry_fading, snr_db);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
@@ -526,13 +530,14 @@ void Connection::acceptCall() {
               modulationToString(data_modulation_), codeRateToString(data_code_rate_),
               data_frame_cw_count_);
 
-    // CONNECT_ACK wire byte: the pool aggregate under ULTRA_CONNECT_SNR_POOL (always
+    // CONNECT_ACK wire bytes: the pool aggregates under ULTRA_CONNECT_SNR_POOL (always
     // fresh at this instant by construction — never the stale sentinel), else the raw
-    // scalar exactly as before.
+    // scalars exactly as before. SNR and fading get the SAME treatment so the
+    // initiator's display shows the values that actually drove this pick.
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
                                                  data_modulation_, data_code_rate_,
-                                                 snr_db, fading_index_,
+                                                 snr_db, entry_fading,
                                                  static_cast<uint8_t>(data_frame_cw_count_),
                                                  rung_id);
     Bytes ack_data = ack.serialize();
@@ -553,8 +558,9 @@ void Connection::acceptCall() {
 
     enterConnected();
 
-    // Notify application of initial data mode (LOCAL reading — responder pick)
-    notifyDataModeChanged(snr_db, fading_index_, /*snr_is_wire=*/false);
+    // Notify application of initial data mode (LOCAL reading — responder pick;
+    // entry_fading = the pooled value that drove the pick, raw scalar knob-off)
+    notifyDataModeChanged(snr_db, entry_fading, /*snr_is_wire=*/false);
 }
 
 void Connection::rejectCall() {
