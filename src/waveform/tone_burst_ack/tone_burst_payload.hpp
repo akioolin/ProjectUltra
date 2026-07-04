@@ -42,8 +42,9 @@ struct ToneBurstAckPayload {
     // bits (round(q*7), the SACK-emit lambda in Connection's ctor) and the data
     // sender de-quantizes it (hint/7.0) in onToneBurstAck as the quality feed for
     // its EMA RateController. Phase 2 of docs/MODE_SWITCH_PIGGYBACK_DESIGN_
-    // 2026_07_03.md (ULTRA_RX_RATE_CMD) keeps this field's quality semantics and
-    // adds a separate 2-bit relative rung command in the pad bits 42-43.
+    // 2026_07_03.md (ULTRA_RX_RATE_CMD, IMPLEMENTED 2026-07-03) keeps this field's
+    // quality semantics and adds the separate 2-bit rung_cmd field (bits 42-43,
+    // below) for the receiver's demote command.
     uint8_t rate_hint = 0;
 
     AckType type = AckType::Ack;
@@ -64,6 +65,16 @@ struct ToneBurstAckPayload {
     // tone_burst_constants.hpp kBitOffsetMoveEpoch rationale); Hamming-protected.
     uint8_t move_epoch = 0;
 
+    // rung_cmd: 2-bit receiver rung command (2026-07-03, MODE_SWITCH_PIGGYBACK
+    // Phase 2, knob ULTRA_RX_RATE_CMD default-OFF): kRungCmdNone / kRungCmdDownOne /
+    // kRungCmdDownHard / kRungCmdReserved. Demote-only by design (no UP — climbs
+    // stay with the sender's EMA). Rides the LAST former Hamming zero-pad bits
+    // 42..43, so a knob-OFF build (always 0) is byte-identical on air. CRC-covered
+    // ONLY when the knob is ON (message widens 28 -> 30 bits — a corrupted command
+    // fires a wrong demote, i.e. fails ACTIVE, so unlike move_epoch it must be
+    // integrity-checked; the widened span is part of the knob's lockstep semantics).
+    uint8_t rung_cmd = 0;
+
     // Sanitize fields to their bit-widths. Returns true if all fields are
     // already within range (no truncation occurred).
     bool clampToWireWidths();
@@ -82,27 +93,45 @@ struct ToneBurstAckPayload {
 //   bits 38..39  drive_advisory (software-ALC; formerly reserved, 2026-07-02)
 //   bits 40..41  move_epoch (ARQ move-epoch echo; formerly zero-pad, 2026-07-03,
 //                NOT CRC-covered — knob-OFF byte-identity, see constants header)
+//   bits 42..43  rung_cmd (receiver rung command; formerly the last zero-pad,
+//                2026-07-03 Phase 2; CRC-covered ONLY when ULTRA_RX_RATE_CMD is ON)
 //
 // The CRC is computed over a 28-bit message: the 26 "useful" bits (bits 0..25)
 // with the 2 drive-advisory bits appended above them, using CRC-12-CCITT
-// (poly 0x80F, init 0xFFF). WIRE-BREAKING vs pre-2026-07-02 builds: (a) the
+// (poly 0x80F, init 0xFFF); with ULTRA_RX_RATE_CMD ON the message is 30 bits
+// (rung_cmd appended as message bits 28..29 — kPayloadCrcMessageBitsCmd).
+// WIRE-BREAKING vs pre-2026-07-02 builds: (a) the
 // advisory joined the CRC coverage; (b) the frame_mask widen 8->16 shifted
 // every field above it and grew the payload 32->40 bits (now carried in a
 // uint64_t). The 2026-07-03 move_epoch bits are byte-identical while
-// ULTRA_ARQ_MOVE_EPOCH is OFF (default) and lockstep-only when ON. All
+// ULTRA_ARQ_MOVE_EPOCH is OFF (default) and lockstep-only when ON; the
+// 2026-07-03 Phase-2 rung_cmd bits are byte-identical while ULTRA_RX_RATE_CMD
+// is OFF and DOUBLY lockstep when ON (live bits + widened CRC span). All
 // offsets/widths come from tone_burst_constants.hpp (kBitOffset*/
 // kPayload*Bits) — this comment is descriptive; the code reads the constants.
+//
+// STATELESSNESS: the CRC span is a PARAMETER of every pack/verify/codec entry
+// point (`cover_rung_cmd`). The parameter-less overloads bind it once from the
+// ULTRA_RX_RATE_CMD env (read a single time, process-wide — the production
+// encoder/detector path); tests pass it explicitly, so no env ordering can
+// change a test's meaning.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on
 // air. CRC-12 still catches all 1-3 bit bursts and >99.9% of random errors
 // for our 26-bit message — overkill for ACK semantics.
 
-// Pack the kPayloadBits (40) raw payload bits (excluding Hamming) into a
-// uint64_t (LSB-first).
+// Process-wide CRC-span binding for the parameter-less overloads below:
+// true iff ULTRA_RX_RATE_CMD=1 (read once on first use).
+bool rungCmdCrcSpanEnabled();
+
+// Pack the kPayloadBits (44) raw payload bits (excluding Hamming) into a
+// uint64_t (LSB-first). cover_rung_cmd selects the CRC message span
+// (28 vs 30 bits); the parameter-less overload binds it from the env knob.
+uint64_t packPayload(const ToneBurstAckPayload& p, bool cover_rung_cmd);
 uint64_t packPayload(const ToneBurstAckPayload& p);
 
-// Unpack a raw 40-bit payload back to fields. Does NOT validate the CRC;
+// Unpack a raw 44-bit payload back to fields. Does NOT validate the CRC;
 // use verifyPayloadCRC() for that.
 ToneBurstAckPayload unpackPayload(uint64_t raw);
 
@@ -112,7 +141,8 @@ ToneBurstAckPayload unpackPayload(uint64_t raw);
 uint16_t crc12(uint32_t value, uint32_t bits);
 
 // Verify the embedded CRC against the rest of the payload. Returns true if
-// the CRC matches.
+// the CRC matches. cover_rung_cmd must match the packer's span (lockstep).
+bool verifyPayloadCRC(uint64_t raw, bool cover_rung_cmd);
 bool verifyPayloadCRC(uint64_t raw);
 
 // ============================================================================
@@ -154,7 +184,10 @@ uint16_t hammingDecode15_11(uint16_t coded_bits, int& corrected_errors);
 // Encode a full ToneBurstAckPayload to a sequence of dibits (2-bit values
 // 0..3) representing 4-FSK tone indices for the PAYLOAD portion of the
 // burst. Length = kPayloadSymbols. Does NOT include the Costas prefix
-// (the encoder prepends that).
+// (the encoder prepends that). The explicit-span overload exists for tests;
+// production uses the env-bound one.
+std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p,
+                                         bool cover_rung_cmd);
 std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p);
 
 // Decode payload dibits back to a ToneBurstAckPayload. Returns std::nullopt
@@ -163,6 +196,9 @@ struct PayloadDecodeStats {
     int hamming_corrected_blocks = 0;   // count of blocks where Hamming corrected 1 bit
     bool crc_ok = false;
 };
+std::optional<ToneBurstAckPayload> decodePayloadDibits(
+    const std::vector<uint8_t>& dibits, PayloadDecodeStats& stats,
+    bool cover_rung_cmd);
 std::optional<ToneBurstAckPayload> decodePayloadDibits(
     const std::vector<uint8_t>& dibits, PayloadDecodeStats& stats);
 

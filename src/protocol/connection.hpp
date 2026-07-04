@@ -698,6 +698,14 @@ private:
     // geometry). Armed by commitLocalModeSwitch, consumed by flushBurstBuffer's
     // on_transmit_burst_ force_full_preamble argument; cleared at session boundaries.
     bool desc_switch_full_anchor_pending_ = false;
+    // RX-RATE-CMD Phase 2 (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.2, knob
+    // ULTRA_RX_RATE_CMD, read ONCE in the ctor like ULTRA_DESCRIPTOR_MODE_SWITCH;
+    // default OFF = byte-identical — the tone-ACK rung_cmd bits stay 0 and the CRC
+    // span stays 28 bits). SEMANTICS-BREAKING lockstep when ON (live command bits +
+    // widened CRC span in tone_burst_payload — both ends must run it; requires
+    // Phase 1 for the descriptor-committed consume path, falls back to the legacy
+    // MODE_CHANGE exchange otherwise).
+    bool rx_rate_cmd_enabled_ = false;
     // 4 retries at the ratiometric ~5 s control-exchange timer (2026-07-03) has the
     // same worst-case dead time as ONE retry at the old borrowed ~18.5 s burst
     // deadline, while surviving 4x the ACK losses (rig W-runs lose 1-3 control ACKs
@@ -878,6 +886,35 @@ private:
     int rx_level_low_streak_ = 0;
     bool rx_level_clipped_ = false;
     uint32_t rx_level_verdict_seq_seen_ = 0;
+    // ── RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD) state ────────────────────────────
+    // RECEIVER side: standing rung command stamped on every outgoing tone-burst ACK
+    // (bits 42-43). Recomputed per burst-group event in updateRxRateCommandFromGroup:
+    //   - set to kRungCmdDownHard on a TOTAL crater (frame_mask == 0: zero frames
+    //     delivered — the same zero-progress evidence class the collapse escape
+    //     counts) at QAM16 (the modulation whose demote-on-one-bad-group policy is
+    //     already codified sender-side, kQam16DemoteBadStreak = 1);
+    //   - cleared the moment any group delivers frames (the crater state ended —
+    //     a stale demote command must not ride a healthy channel's ACKs), and in
+    //     applyDataMode when mod/rate actually change (the sender's adoption
+    //     observed — the once-per-committed-move idempotency latch).
+    // Repeated ACK emits between crater and adoption re-carry the SAME command
+    // (diversity against ACK loss); the SENDER dedups by group_seq (below), which
+    // is frozen during a crater (zero progress ⇒ base cannot advance), so the
+    // command acts at most once per move. Only ever non-zero when the knob is ON.
+    uint8_t rx_rate_cmd_pending_ = 0;
+    // SENDER side: last group_seq whose non-zero rung command was consumed
+    // (-1 = none this connection) — the drive_advisory dedup pattern. NOT reset on
+    // mode change (a straggler duplicate ACK of the consumed command must stay
+    // deduped after the demote commits); reset in enterConnected/enterDisconnected.
+    int rx_rate_cmd_seq_seen_ = -1;
+    // Receiver emit-side decision (called from onBurstGroupReceived before the
+    // group's tone-burst ACK is emitted) and sender consume-side action (called
+    // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE
+    // applyAdaptiveRateFeedback ran, so one ACK's evidence moves the rung at most
+    // once). Both are hard no-ops while the knob is OFF.
+    void updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask);
+    void maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
+                                 Modulation mod_at_ack, CodeRate rate_at_ack);
     std::string last_adaptive_action_;      // GUI: short human-readable action
     // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON since 2026-07-02). See
     // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK

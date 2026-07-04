@@ -772,6 +772,60 @@ bool test_move_epoch_bump_on_abort_and_stamp() {
     return true;
 }
 
+// TX side, second bump site (2026-07-04 fix, Phase-2 adversarial-review finding):
+// a mid-window regrid through the CW-change abort ALONE — same code rate, so
+// setCodeRate early-returns — must ALSO enter a new era. This is the Phase-2
+// receiver-commanded QAM16 R3/4 -> QPSK R3/4 demote shape: without the bump the
+// receiver's in-order rx_base is stranded below the abandoned seqs with no
+// rebase-anchor (BUG-ARQ-SEQ-COLLISION by the other door).
+bool test_move_epoch_bump_on_cw_abort_same_rate() {
+    TEST("MOVE-EPOCH: bump on same-rate CW-change abort (Phase-2 mid-window regrid)");
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ tx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    tx.sendData(Bytes{0x01});
+    tx.sendData(Bytes{0x02});
+    if (transmitted.size() != 2) FAIL("Expected 2 initial transmissions");
+    if (tx.txMoveEpoch() != 0) FAIL("Epoch must start at 0");
+
+    // Same-rate mid-window regrid: ONLY the CW count changes (mod-change shape).
+    tx.setFixedFrameCodewords(2);
+    if (tx.txMoveEpoch() != 1)
+        FAIL("CW-change abort dropping live payload must bump the epoch");
+
+    tx.sendData(Bytes{0x03});  // first frame of the new era at the advanced base
+    {
+        auto f = v2::DataFrame::deserialize(transmitted.back());
+        if (!f) FAIL("Post-abort frame did not parse");
+        if (v2::epochFromFlags(f->flags) != 1)
+            FAIL("Post-abort frame must carry the bumped epoch 1");
+        if ((f->flags & v2::Flags::EPOCH_REBASE) == 0)
+            FAIL("Post-abort base frame must carry EPOCH_REBASE (the rx re-anchor)");
+    }
+
+    // An abort with NOTHING live must NOT bump (no remap happened — e.g. teardown
+    // on an idle window must not burn mod-4 epoch space).
+    tx.abortPendingTx();  // window already empty? no: seq 0x03 is live — drain first
+    const uint8_t epoch_after_live_abort = tx.txMoveEpoch();
+    if (epoch_after_live_abort != 2)
+        FAIL("abortPendingTx dropping a live frame must bump");
+    tx.abortPendingTx();  // now truly empty
+    if (tx.txMoveEpoch() != epoch_after_live_abort)
+        FAIL("abortPendingTx on an empty window must NOT bump");
+
+    PASS();
+    return true;
+}
+
 // RX side: the W16 regrid case. A below-window seq with a NEWER epoch and the
 // EPOCH_REBASE anchor is NOT a duplicate — the receiver adopts the era,
 // re-anchors rx_base to the rebase seq, and DELIVERS the re-gridded content
@@ -2408,6 +2462,7 @@ int main() {
 
     std::cout << "\nMOVE-EPOCH Tests (BUG-ARQ-SEQ-COLLISION structural fix):\n";
     test_move_epoch_bump_on_abort_and_stamp();
+    test_move_epoch_bump_on_cw_abort_same_rate();
     test_move_epoch_regrid_resend_accepted();
     test_move_epoch_stale_ack_ignored();
     test_move_epoch_unanchored_wait_for_rebase();

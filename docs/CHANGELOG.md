@@ -10,6 +10,113 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-03 — feat(arq/ladder): receiver rung command in the tone-ACK Phase 2 (`ULTRA_RX_RATE_CMD`, default-OFF byte-identical) — **EDITS-ONLY / UNVALIDATED (not built, not run — a rig validation batch was cycling; build + ctest + faithful gate owed before any claim)**
+
+**What it closes (the Phase-1 D3 finding, entry below):** with climbs ~free under the
+descriptor commit, the ESCAPE side became the measured bottleneck — crest probing pays a
+collapse-escape + legacy MODE_CHANGE exchange per wrong probe (4 cycles/90 s on a rough
+Moderate epoch). The RECEIVER sees a 16QAM crater IMMEDIATELY (failed group decode: the
+descriptor decoded, zero data frames delivered); the sender only learns after ~2
+zero-progress rounds (~2×RTO). Phase 2 rides the verdict back on the cratered group's own
+tone-burst ACK — the 4-FSK control plane that out-survives every OFDM waveform by
+~15-20 dB on fading — so the demote fires one ACK after the crater instead of two RTOs
+after it. Design: `docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md` §5.2, now marked
+implemented with three recorded deviations.
+
+**Wire (bits 42-43, airtime-invariant):** tone-ACK payload widens 42 → 44 bits =
+EXACTLY the 4×(15,11) Hamming info capacity (44/44 — the free-bit budget is now spent;
+the next bit added grows the burst 34 → 38 symbols). Still 30 payload symbols + 4
+Costas = 34 symbols — ACK airtime unchanged in every knob state. New field `rung_cmd`
+(`kRungCmdNone=0` / `kRungCmdDownOne=1` / `kRungCmdDownHard=2` / `kRungCmdReserved=3`),
+demote-only BY DESIGN — **no UP command** (climbs stay sender-side with the EMA;
+deviation 1 from the design sketch, which had STEP-UP/DROP-TO-FLOOR). Knob-OFF: bits
+stay 0 → byte-identical on air (they were the transmitted Hamming zero-pad).
+
+**CRC decision (deviation 3 — the command IS protected, knob-conditionally):** unlike
+move_epoch (corrupted echo fails SAFE: ACK ignored → RTO), a forged command fails
+ACTIVE (fires a wrong demote), so Hamming-only protection was rejected. Knob-ON widens
+the CRC-12 message 28 → 30 bits (`kPayloadCrcMessageBitsCmd`, rung_cmd as message bits
+28-29); knob-OFF keeps 28 → byte-identical. Consequence (documented lockstep
+semantics): a mixed knob pair CRC-rejects EVERY ACK — deterministically (CRC affinity:
+the two spans differ by a fixed nonzero constant for every payload), so mismatch fails
+loudly as ACK-loss/retx, never as silent mis-steering. The span is a *parameter* of the
+payload codec (`packPayload/verifyPayloadCRC/encode/decodePayloadDibits` explicit-span
+overloads; env `ULTRA_RX_RATE_CMD` bound ONCE in `tone_burst_payload.cpp`
+`rungCmdCrcSpanEnabled()`) — the codec stays stateless; tests pass the span explicitly.
+With span-ON, any Hamming block-4 miscorrect touching the command also breaks the CRC →
+whole-ACK drop (existing lost-ACK semantics), closing the forge channel.
+
+**Receiver emit (`Connection::updateRxRateCommandFromGroup`, called in
+`onBurstGroupReceived` before the group's ACK emits):** CRATER-ONLY DOWN-hard
+(deviation 2 — Phase 2 minimal: the receiver has NO quality EMA/streak machinery, the
+RateController runs sender-side only, and a parallel estimator is an anti-goal;
+DOWN-one is wire-defined + consumed but nothing emits it yet). Crater predicate, both
+arms derived from existing quantizations (no new constants): `frame_mask == 0` (zero
+frames delivered — the decoder's whole-fail/fast-NACK signature; quality is exactly 0.0
+for any `!all_ok` group so the 3-bit rate_hint axis carries no finer grade) at **QAM16
+only** (the modulation whose demote-on-one-bad-group policy is already codified,
+`kQam16DemoteBadStreak=1`; at QPSK rungs a zero group is an irreducible deep null —
+commanding there would re-introduce the 2026-06-09 single-NACK ratchet). Idempotency:
+the standing command re-rides every ACK between crater and observed adoption (ACK-loss
+diversity), cleared when a group delivers frames (stale-demote guard) or when
+`applyDataMode` applies a real mod/rate change (the adoption latch); per-connection
+reset in enterConnected/enterDisconnected.
+
+**Sender consume (`Connection::maybeApplyRxRateCommand`, in `onToneBurstAck` inside the
+defer-refill bracket):** ADVISORY, never blind-obeyed — guards: knob, cmd∈{1,2},
+CONNECTED, OFDM_CHIRP, `rateAdaptationActive()` (operator pin wins), `!mode_change_pending_`,
+dedup by group_seq (drive_advisory pattern; the base is frozen during a crater so all
+re-emitted copies bear one seq → at most one action per command episode; seq recorded
+before the policy guards = fail-soft drop, and NOT reset on mode change so post-commit
+stragglers stay swallowed), and **one-move-per-ACK** (skip if the EMA/QAM16 machinery
+already moved the rung on this ACK — the command and the quality byte are the same
+evidence measured two ways; compared against a mod/rate snapshot taken before
+`applyAdaptiveRateFeedback`). Target = the sender's OWN tables: DOWN-hard mirrors
+`executeEscapeDrop` (QAM16 → QPSK R3/4 + `noteQam16Demoted(2)`; else one robust rung +
+`noteRungFailed`/ssthresh; floor guard); DOWN-one mirrors the soft-demote ladder.
+Commit: clean boundary → Phase-1 `tryDescriptorModeSwitch`; **MID-WINDOW (the design
+case — the crater keeps the window busy so the clean boundary never comes) → descriptor
+commit GATED ON `arq_.moveEpochEnabled()`** (new accessor; the ARQ abort inside
+`commitLocalModeSwitch` bumps the move-epoch → the regrid is a recognized new era,
+BUG-ARQ-SEQ-COLLISION machinery) — legacy `requestModeChange` fallback without it
+(exactly today's escape commit). The sender's OWN zero-ACK escapes
+(`executeEscapeDrop`/collapse) stay legacy in EVERY knob state — deliberately: they fire
+precisely when the reverse control channel is silent, so the synchronized exchange
+doubles as the deaf-peer escalation (design §6 rows 6-7); a command in hand is proof the
+tone-ACK channel is alive, which is what licenses the descriptor commit. Receiver-adopt
+WARN for buffered-RX-frames softens to INFO when move-epoch is ON (the expected Phase-2
+escape-adopt shape). Log: `RX-RATE-CMD down-hard: QAM16 R2/3 -> QPSK R3/4 via
+DESC-SWITCH (seq=N)`; also mirrored into the GUI "Adapt:" action text.
+
+**Files:** `tone_burst_constants.hpp` (44-bit layout, offsets/asserts, `kRungCmd*`,
+`kPayloadCrcMessageBitsCmd`, capacity-saturation note), `tone_burst_payload.{hpp,cpp}`
+(field, clamp, span-parameterized pack/verify/codec + env binding),
+`selective_repeat_arq.hpp` (`moveEpochEnabled()`), `connection.{hpp,cpp}` (knob read,
+emit/consume, latch lifecycle, comment updates on the escape/commit scope).
+
+**Tests (edited, NOT run — verification owed):** `tests/test_tone_burst_ack_payload.cpp`
+— rung_cmd round-trip both spans + clamp, knob-OFF span byte-identity (raws differ only
+in bits 42-43, CRC identical), knob-ON coverage proof (any flipped command bit fails
+CRC; move_epoch stays outside BOTH spans), deterministic cross-span mutual rejection,
+capacity-saturation asserts (44==44, 34 symbols). `tests/test_connection_adaptive.cpp`
+— knob pinned 0 in main + `test_rx_rate_cmd_knob_off_is_byte_identical` (emit writes 0
+on a QAM16 crater; consume ignores DOWN-hard: no move, no MODE_CHANGE frame, no
+descriptor commit), `test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move`
+(crater→DOWN-hard on the group's ACK; re-ride on unchanged state; adoption clears;
+non-QAM16 crater commands nothing; delivered frames clear),
+`test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch` (all three
+knobs ON: mid-window DOWN-hard → immediate QPSK R3/4 via DESC-SWITCH, zero MODE_CHANGE
+frames, **TX move-epoch 0→1**, full-anchor one-shot; duplicate same-seq command = no-op).
+
+**Verification owed before any knob-ON claim:** `cmake --build build -j4 && ctest
+--test-dir build --output-on-failure -j4`, then design §7.2/§7.4 paired faithful-gate +
+trough-targeted cells (g43-class 16QAM craters: recovery ≤1 group vs the multi-retry
+grind) and a §7.3 rig leg with BOTH ends `ULTRA_RX_RATE_CMD=1 ULTRA_DESCRIPTOR_MODE_SWITCH=1
+ULTRA_ARQ_MOVE_EPOCH=1`. Cross-refs: KNOWN_BUGS BUG-ARQ-SEQ-COLLISION (mid-window
+dependency), MODEM_INFRASTRUCTURE_MAP §6 `ULTRA_RX_RATE_CMD` row + §7 register 9e.
+
+---
+
 ## 2026-07-03 — feat(arq/ladder): descriptor-committed mode switch Phase 1 (`ULTRA_DESCRIPTOR_MODE_SWITCH`, default-OFF byte-identical) — **sim-validated + RIG-VALIDATED (3-run IONOS MPG@20 batch)**
 
 **Rig validation (2026-07-02 late, both ends 9d7d47e, knob ON + standing set):** 13

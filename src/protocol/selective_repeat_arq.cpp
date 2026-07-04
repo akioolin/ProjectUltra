@@ -2249,6 +2249,24 @@ void SelectiveRepeatARQ::setSendCompleteCallback(SendCompleteCallback cb) {
 }
 
 void SelectiveRepeatARQ::abortPendingTx() {
+    // MOVE-EPOCH (2026-07-04 fix, Phase-2 review finding): detect whether this abort
+    // actually drops live payload BEFORE clearing the slots. The 2026-07-03 design
+    // assumed forward abandonment (tx_base_seq_ = tx_next_seq_ below) needs no epoch
+    // because seqs are never RE-USED — true, but blind to the second collision arm:
+    // with a mid-window regrid (Phase-2 receiver-commanded demote at the SAME code
+    // rate, where setCodeRate early-returns and only the CW-change abort fires) the
+    // RECEIVER's in-order rx_base is left below the abandoned seqs with no
+    // rebase-anchor — an unfillable hole = the BUG-ARQ-SEQ-COLLISION stall by another
+    // door. Any abort that drops live payload is a seq↔payload remap and must enter
+    // a new era; the first post-abort frame (at the advanced base) then carries the
+    // bumped epoch + EPOCH_REBASE and the receiver re-anchors.
+    bool dropped_payload = tx_in_flight_ > 0;
+    for (const auto& slot : tx_window_) {
+        if (slot.active && !slot.acked) {
+            dropped_payload = true;
+            break;
+        }
+    }
     for (auto& slot : tx_window_) {
         slot.active = false;
         slot.acked = false;
@@ -2269,6 +2287,12 @@ void SelectiveRepeatARQ::abortPendingTx() {
 
     tx_base_seq_ = tx_next_seq_;
     tx_in_flight_ = 0;
+
+    if (move_epoch_enabled_ && dropped_payload) {
+        tx_epoch_ = static_cast<uint8_t>((tx_epoch_ + 1) & 0x3);
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH bumped to %u on pending-TX abort (regrid)",
+                  tx_epoch_);
+    }
 
     // Cancel pending control TX from ARQ side as well.
     sack_pending_ = false;

@@ -118,6 +118,17 @@ void test_pack_unpack_round_trip() {
         p.move_epoch = 3;
         cases.push_back(p);
     }
+    {
+        // RUNG-CMD (2026-07-03 Phase 2, bits 42-43, ULTRA_RX_RATE_CMD): a non-zero
+        // command must round-trip intact even under the DEFAULT (knob-OFF) CRC span
+        // — the bits ride the wire regardless; only the coverage is knob-gated.
+        ToneBurstAckPayload p;
+        p.group_seq = 11; p.frame_mask = 0x0F0F; p.rate_hint = 0; p.type = AckType::Ack;
+        p.drive_advisory = kDriveAdvisoryHold;
+        p.move_epoch = 1;
+        p.rung_cmd = kRungCmdDownHard;
+        cases.push_back(p);
+    }
 
     for (const auto& orig : cases) {
         const uint64_t raw = packPayload(orig);
@@ -129,6 +140,7 @@ void test_pack_unpack_round_trip() {
         EXPECT_EQ(static_cast<int>(rt.type), static_cast<int>(orig.type));
         EXPECT_EQ(rt.drive_advisory, orig.drive_advisory);
         EXPECT_EQ(rt.move_epoch, orig.move_epoch);
+        EXPECT_EQ(rt.rung_cmd, orig.rung_cmd);
     }
 
     // MOVE-EPOCH knob-OFF byte-identity: two payloads differing ONLY in move_epoch
@@ -180,6 +192,7 @@ void test_pack_clamps_out_of_range_fields() {
     p.type = AckType::Ack;
     p.drive_advisory = 7;       // > 3 (2-bit) -> clamps
     p.move_epoch = 6;           // > 3 (2-bit) -> clamps
+    p.rung_cmd = 5;             // > 3 (2-bit) -> clamps
     const uint64_t raw = packPayload(p);
     EXPECT(verifyPayloadCRC(raw));
     const auto rt = unpackPayload(raw);
@@ -191,6 +204,107 @@ void test_pack_clamps_out_of_range_fields() {
     EXPECT_EQ(rt.rate_hint, static_cast<uint8_t>(15 & 0x07));
     EXPECT_EQ(rt.drive_advisory, static_cast<uint8_t>(7 & 0x03));
     EXPECT_EQ(rt.move_epoch, static_cast<uint8_t>(6 & 0x03));
+    EXPECT_EQ(rt.rung_cmd, static_cast<uint8_t>(5 & 0x03));
+}
+
+// ============================================================================
+// RUNG-CMD (Phase 2, ULTRA_RX_RATE_CMD) — wire bits 42-43 + knob-conditional
+// CRC span. Uses the EXPLICIT-span overloads so the assertions are immune to
+// env ordering (the parameter-less overloads latch ULTRA_RX_RATE_CMD once,
+// process-wide).
+// ============================================================================
+
+void test_rung_cmd_knob_off_span_is_byte_identical() {
+    std::printf("[test] rung_cmd_knob_off_span_is_byte_identical\n");
+    // Knob-OFF span (28-bit CRC message): two payloads differing ONLY in rung_cmd
+    // must differ ONLY in bits 42-43 — identical CRC field. With the production
+    // knob-OFF emitter always writing rung_cmd=0, the packed payload is therefore
+    // bit-identical to a pre-Phase-2 build's (bits 42-43 were the transmitted
+    // Hamming zero-pad).
+    ToneBurstAckPayload a;
+    a.group_seq = 5; a.frame_mask = 0x0F0F; a.rate_hint = 2; a.type = AckType::Ack;
+    a.drive_advisory = kDriveAdvisoryHold;
+    a.move_epoch = 0;
+    a.rung_cmd = kRungCmdNone;
+    ToneBurstAckPayload b = a;
+    b.rung_cmd = kRungCmdDownHard;
+    const uint64_t raw_a = packPayload(a, /*cover_rung_cmd=*/false);
+    const uint64_t raw_b = packPayload(b, /*cover_rung_cmd=*/false);
+    EXPECT_EQ(raw_a ^ raw_b,
+              static_cast<uint64_t>(kRungCmdDownHard) << kBitOffsetRungCmd);
+    EXPECT(verifyPayloadCRC(raw_a, false));
+    EXPECT(verifyPayloadCRC(raw_b, false));
+    // Under the OFF span a flipped command bit is invisible to the CRC (Hamming-only,
+    // like move_epoch) — this documents WHY the knob-ON span must cover it: the
+    // knob-OFF consume side ignores the field entirely, so the exposure is nil OFF
+    // and CRC-closed ON.
+    EXPECT(verifyPayloadCRC(raw_a ^ (1ull << kBitOffsetRungCmd), false));
+}
+
+void test_rung_cmd_knob_on_span_covers_command() {
+    std::printf("[test] rung_cmd_knob_on_span_covers_command\n");
+    ToneBurstAckPayload p;
+    p.group_seq = 33; p.frame_mask = 0x00FF; p.rate_hint = 0; p.type = AckType::Ack;
+    p.drive_advisory = kDriveAdvisoryHold;
+    p.move_epoch = 2;
+    p.rung_cmd = kRungCmdDownHard;
+    const uint64_t raw = packPayload(p, /*cover_rung_cmd=*/true);
+    EXPECT(verifyPayloadCRC(raw, true));
+    // Coverage proof: any flipped command bit must fail the widened-span CRC
+    // (CRC linearity: a single flipped message bit always changes the CRC).
+    for (uint32_t i = 0; i < kPayloadRungCmdBits; ++i) {
+        EXPECT(!verifyPayloadCRC(raw ^ (1ull << (kBitOffsetRungCmd + i)), true));
+    }
+    // A forged command therefore cannot ride an unchanged CRC: differing commands
+    // produce differing CRC fields under the ON span.
+    ToneBurstAckPayload q = p;
+    q.rung_cmd = kRungCmdNone;
+    const uint64_t raw_q = packPayload(q, true);
+    const uint32_t crc_p = static_cast<uint32_t>(
+        (raw >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u));
+    const uint32_t crc_q = static_cast<uint32_t>(
+        (raw_q >> kBitOffsetCRC) & ((1u << kPayloadCRCBits) - 1u));
+    EXPECT(crc_p != crc_q);
+    // move_epoch stays OUTSIDE the CRC in BOTH spans (its own knob's byte-identity
+    // rationale is untouched by Phase 2): flipping it never fails either span.
+    EXPECT(verifyPayloadCRC(raw ^ (1ull << kBitOffsetMoveEpoch), true));
+
+    // Round-trip under the ON span, including the dibit codec (airtime-invariant:
+    // still kPayloadSymbols/kTotalSymbols — the command consumed pad, not symbols).
+    const auto dibits = encodePayloadDibits(p, /*cover_rung_cmd=*/true);
+    EXPECT_EQ(dibits.size(), static_cast<size_t>(kPayloadSymbols));
+    PayloadDecodeStats stats;
+    const auto rt = decodePayloadDibits(dibits, stats, /*cover_rung_cmd=*/true);
+    EXPECT(rt.has_value());
+    if (rt) {
+        EXPECT_EQ(rt->rung_cmd, p.rung_cmd);
+        EXPECT_EQ(rt->move_epoch, p.move_epoch);
+        EXPECT_EQ(rt->frame_mask, p.frame_mask);
+    }
+}
+
+void test_rung_cmd_span_mismatch_is_rejected() {
+    std::printf("[test] rung_cmd_span_mismatch_is_rejected\n");
+    // Lockstep semantics: the two spans must be mutually unintelligible so a
+    // mixed-version pair fails LOUDLY (CRC reject -> ACK-lost -> RTO) instead of
+    // silently mis-steering. Deterministic, not probabilistic: by CRC affinity,
+    // crc_30(m) == crc_28(m) XOR D where D = crc(init, 30 zeros) XOR
+    // crc(init, 28 zeros) is a nonzero constant (the zero-feed register orbit from
+    // init 0xFFF cannot have period 2 — x is invertible mod 0x80F and x^2 != 1) —
+    // so EVERY payload's CRC differs between spans, even with rung_cmd = 0.
+    ToneBurstAckPayload p;
+    p.group_seq = 12; p.frame_mask = 0x3C3C; p.rate_hint = 6; p.type = AckType::Nack;
+    p.drive_advisory = kDriveAdvisoryDown;
+    p.rung_cmd = kRungCmdNone;
+    const uint64_t raw_off = packPayload(p, /*cover_rung_cmd=*/false);
+    const uint64_t raw_on = packPayload(p, /*cover_rung_cmd=*/true);
+    EXPECT(!verifyPayloadCRC(raw_off, true));   // knob-ON RX rejects knob-OFF TX
+    EXPECT(!verifyPayloadCRC(raw_on, false));   // knob-OFF RX rejects knob-ON TX
+    // And the constants themselves: the payload now saturates the 4-block Hamming
+    // info capacity — the free-bit budget is spent (a future widen changes airtime).
+    EXPECT_EQ(kPayloadBits, kHammingInfoBitsTotal);
+    EXPECT_EQ(kPayloadBits, kBitOffsetRungCmd + kPayloadRungCmdBits);
+    EXPECT_EQ(kTotalSymbols, 34u);
 }
 
 // ============================================================================
@@ -448,6 +562,9 @@ int main() {
     test_constants_sanity();
     test_pack_unpack_round_trip();
     test_pack_clamps_out_of_range_fields();
+    test_rung_cmd_knob_off_span_is_byte_identical();
+    test_rung_cmd_knob_on_span_covers_command();
+    test_rung_cmd_span_mismatch_is_rejected();
     test_crc12_detects_single_bit_flips();
     test_crc12_detects_two_bit_flips_in_useful_bits();
     test_hamming_round_trip_all_codewords();

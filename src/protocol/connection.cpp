@@ -195,6 +195,16 @@ Connection::Connection(const ConnectionConfig& config)
         descriptor_mode_switch_enabled_ = true;
     }
 
+    // RX-RATE-CMD Phase 2 (design §5.2, knob ULTRA_RX_RATE_CMD, read once per
+    // Connection; default OFF = byte-identical — rung_cmd bits stay 0 AND the tone-ACK
+    // CRC span stays 28 bits, see tone_burst_payload.cpp rungCmdCrcSpanEnabled()).
+    // SEMANTICS-BREAKING lockstep when ON; the descriptor-committed consume path
+    // additionally needs ULTRA_DESCRIPTOR_MODE_SWITCH (+ ULTRA_ARQ_MOVE_EPOCH for
+    // mid-window) — it falls back to the legacy MODE_CHANGE exchange without them.
+    if (const char* rc = std::getenv("ULTRA_RX_RATE_CMD"); rc && rc[0] == '1') {
+        rx_rate_cmd_enabled_ = true;
+    }
+
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
@@ -268,6 +278,12 @@ Connection::Connection(const ConnectionConfig& config)
                 // MOVE-EPOCH echo (ULTRA_ARQ_MOVE_EPOCH, BUG-ARQ-SEQ-COLLISION):
                 // payload bits 40-41; always 0 while the knob is OFF (byte-identical).
                 tba.move_epoch = move_epoch;
+                // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): payload bits 42-43 — the
+                // standing receiver rung command computed per group event in
+                // updateRxRateCommandFromGroup (crater-only DOWN-hard). Only ever
+                // non-zero when the knob is ON (byte-identical OFF); re-emitted ACK
+                // copies re-carry the same command, the sender dedups by group_seq.
+                tba.rung_cmd = rx_rate_cmd_pending_;
                 // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
                 // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
                 // in onToneBurstAck and feeds its RateController. -1 (no sample yet) -> 0.
@@ -1722,6 +1738,12 @@ bool Connection::onToneBurstAck(
         // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
         // unification cut. A NACK (group lost) still feeds 0. (Replaces the legacy GROUP_ACK
         // quality byte; same controller, now on the unified tone-burst path.)
+        // RX-RATE-CMD Phase 2: snapshot the mode BEFORE the controller runs — one ACK is
+        // ONE piece of channel evidence, so if the EMA/QAM16 machinery already moved the
+        // rung on this ACK, the piggybacked command (same evidence, measured receiver-side)
+        // must not fire a second move (maybeApplyRxRateCommand compares against these).
+        const Modulation mod_at_ack = data_modulation_;
+        const CodeRate rate_at_ack = data_code_rate_;
         const float fed_quality =
             detection.payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
                 ? 0.0f
@@ -1741,6 +1763,13 @@ bool Connection::onToneBurstAck(
                 on_drive_advisory_(advisory, detection.payload.group_seq);
             }
         }
+        // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): consume the receiver's rung command
+        // (bits 42-43) — ADVISORY input through the sender's own guards, never a blind
+        // obey. Runs INSIDE the defer-refill bracket so a committed demote's refill
+        // coalesces into the single outermost runDeferredArqRefill below (which then
+        // sends the [holes]+[new] burst at the NEW rung). Hard no-op while OFF.
+        maybeApplyRxRateCommand(detection.payload.rung_cmd, detection.payload.group_seq,
+                                mod_at_ack, rate_at_ack);
         if (outermost) {
             arq_callback_defer_refill_ = false;
             // §RETX-PACING §1.1 round boundary: every tone-burst ack ends a resend round.
@@ -1907,10 +1936,16 @@ bool Connection::rateAdaptationActive() const {
 // DESC-SWITCH Phase-1 scope gate (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §7):
 // the escape drops fire MID-WINDOW (frames in flight, bypassing the clean-boundary gate
 // BY DESIGN) — a descriptor-committed regrid here is only era-safe under the move-epoch
-// machinery (ULTRA_ARQ_MOVE_EPOCH), which is still rig-validation-pending. Until it
-// graduates, escape commits stay on the legacy requestModeChange exchange even with
-// ULTRA_DESCRIPTOR_MODE_SWITCH on. Phase 2 routes them through commitLocalModeSwitch
-// (the ARQ abort then bumps the epoch, selective_repeat_arq.cpp:226-235).
+// machinery (ULTRA_ARQ_MOVE_EPOCH). These sender-initiated escapes stay on the legacy
+// requestModeChange exchange in EVERY knob state — DELIBERATELY, Phase 2 included: they
+// fire on zero-ACK evidence, i.e. precisely when the tone-burst control plane from the
+// peer has gone silent, so a descriptor-only (announce-and-hope) commit would be aimed
+// at a receiver that is demonstrably not confirming reception — the synchronized
+// exchange doubles as the deaf-peer escalation (§6.5/§6 row 7). The RECEIVER-commanded
+// demote (RX-RATE-CMD Phase 2, maybeApplyRxRateCommand below) is the mid-window case
+// that DOES ride the descriptor commit: a command in hand proves the reverse control
+// channel is alive, and the ARQ abort inside commitLocalModeSwitch bumps the epoch
+// (setCodeRate rate-abort, or the abortPendingTx payload-drop bump for same-rate regrids — 2026-07-04 fix) for era safety.
 void Connection::executeEscapeDrop(const char* trigger) {
     if (data_modulation_ == Modulation::QAM16) {
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
@@ -1947,6 +1982,163 @@ void Connection::executeEscapeDrop(const char* trigger) {
     rate_controller_.noteRungFailed(data_code_rate_);
     requestModeChange(data_modulation_, robust, wireSnrDb(),
                       v2::ModeChangeReason::CHANNEL_DEGRADED);
+}
+
+// ═══════ RX-RATE-CMD Phase 2 — receiver rung command in the tone-burst ACK ═══════
+// docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.2 as amended (knob
+// ULTRA_RX_RATE_CMD, default OFF = byte-identical; SEMANTICS-BREAKING lockstep when
+// ON: live payload bits 42-43 + the widened tone-ACK CRC span). Motivation (the
+// Phase-1 D3 rig finding): with climbs ~free under the descriptor commit, the ESCAPE
+// side became the measured bottleneck — the RECEIVER sees a 16QAM crater IMMEDIATELY
+// (failed group decode) while the sender only learns after ~2 zero-progress rounds
+// (~2×RTO); 4 climb/escape cycles in 90 s on a Moderate epoch. The command closes
+// that gap: the verdict rides the cratered group's own tone-burst ACK — the 4-FSK
+// control plane whose detection floor out-survives every OFDM waveform by ~15-20 dB
+// on fading (§1.2), exactly the channel a trough verdict must cross.
+//
+// DELIBERATE deviations from the design doc's §5.2 sketch (stated in-doc too):
+//   - NO UP command (the sketch's value 1 = STEP-UP): climbs stay sender-side where
+//     the quality EMA + ssthresh + climb streaks live — a second upward driver would
+//     double-drive the control loop (two integrators, one plant) and re-open the
+//     2026-06-09 churn arm. Demote-only keeps the command channel single-purpose:
+//     trough-escape latency. Wire encoding: 0 none / 1 DOWN-one / 2 DOWN-hard /
+//     3 reserved-hold (tone_burst_constants.hpp kRungCmd*).
+//   - Emit policy is CRATER-ONLY DOWN-hard: the receiver has NO quality EMA/streak
+//     machinery (the RateController runs sender-side only) and building a parallel
+//     estimator is an explicit anti-goal. DOWN-one is defined on the wire and
+//     consumed (forward-compatible), but nothing emits it yet.
+
+// RECEIVER side (called from onBurstGroupReceived, before the group's ACK emits).
+// Crater predicate — both arms derived from EXISTING policy quantizations, no new
+// numeric constants:
+//   frame_mask == 0  ⇔ ZERO frames delivered — the decoder's whole-fail/fast-NACK
+//                      signature and the same zero-progress evidence class the
+//                      sender's collapse escape counts. No finer grade exists on
+//                      this axis: the decoder assigns quality EXACTLY 0.0 to any
+//                      !all_ok group (streaming_burst_interleave.cpp), so the
+//                      3-bit rate_hint quantization already saturates at 0 for
+//                      every partial-fail — mask==0 is the only receiver-side
+//                      distinction between "cliff" and "ordinary fade losses".
+//   QAM16 only       — the modulation whose demote-on-a-single-bad-group policy is
+//                      already codified sender-side (kQam16DemoteBadStreak = 1: the
+//                      decodability-cliff asymmetry). At QPSK rungs a zero group is
+//                      indistinguishable from an irreducible deep null (fading loss
+//                      is irreducible at ANY rate); commanding DOWN there would
+//                      bypass the deliberately EMA-smoothed policy and re-introduce
+//                      the 2026-06-09 single-NACK ratchet-to-R1/4.
+void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) {
+    using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
+    using ultra::waveform::tone_burst_ack::kRungCmdNone;
+    if (all_ok || frame_mask != 0) {
+        // The group delivered frames — the crater state (if any) ended. A standing
+        // demote command must not keep riding a healthy channel's ACKs: with the
+        // base advancing again, each ACK carries a FRESH group_seq and the sender's
+        // dedup would no longer swallow the stale command.
+        rx_rate_cmd_pending_ = kRungCmdNone;
+        return;
+    }
+    if (data_modulation_ != Modulation::QAM16) {
+        return;  // deep null at a robust rung: irreducible fading, not a rate signal
+    }
+    // Total crater at the high-order mode → command the sender's escape target.
+    // Idempotent across consecutive craters: the SAME command keeps riding every
+    // re-emitted ACK until the sender's move is observed (applyDataMode clears the
+    // latch on a real mod/rate change — the once-per-committed-move rule). That
+    // re-carry is ACK-loss diversity for free and storm-safe: a crater freezes the
+    // ARQ base, so every copy carries ONE group_seq and the sender acts once.
+    rx_rate_cmd_pending_ = kRungCmdDownHard;
+}
+
+// SENDER side (called from onToneBurstAck, inside the defer-refill bracket, AFTER
+// applyAdaptiveRateFeedback). The command is ADVISORY: it routes through the sender's
+// own guards, ladder tables, caps and cooldowns — the receiver is authoritative about
+// what it could not decode; the sender stays authoritative about what it transmits
+// (design §4.1 arbitration).
+void Connection::maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
+                                         Modulation mod_at_ack, CodeRate rate_at_ack) {
+    using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
+    using ultra::waveform::tone_burst_ack::kRungCmdDownOne;
+    if (!rx_rate_cmd_enabled_) return;  // knob OFF: byte-identical (bits ignored)
+    if (cmd != kRungCmdDownOne && cmd != kRungCmdDownHard) {
+        return;  // 0 = no command; 3 = reserved, treat as hold (forward compat)
+    }
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // wideband ladder only
+    // One action attempt per command episode: a crater freezes the ARQ base, so every
+    // re-emitted copy of the command carries the same group_seq (the drive_advisory
+    // dedup pattern, connection.cpp:1718-1731 class). Recorded BEFORE the policy
+    // guards below — a transiently-blocked command is dropped, not retried later
+    // under the same seq (fail-soft to the sender's own escape backstops, which
+    // remain armed and unchanged).
+    if (static_cast<int>(group_seq) == rx_rate_cmd_seq_seen_) return;
+    rx_rate_cmd_seq_seen_ = group_seq;
+    if (!rateAdaptationActive()) return;  // ULTRA_LOCK_RATE / rate-adapt-off wins
+    if (mode_change_pending_) return;     // a legacy exchange is already re-anchoring
+    if (mod_at_ack != data_modulation_ || rate_at_ack != data_code_rate_) {
+        // The EMA/QAM16 machinery already moved the rung on THIS ack (the command and
+        // the quality byte are the same channel evidence measured two ways) — one ACK
+        // may move the ladder at most once.
+        return;
+    }
+
+    // Target selection — the sender's OWN ladder tables, never a receiver-named rung:
+    // DOWN-hard mirrors executeEscapeDrop exactly (crater semantics: QAM16 → straight
+    // to the robust QPSK R3/4 home gear + double-weight re-climb cooldown; below QAM16
+    // → one rung more robust + noteRungFailed so ssthresh remembers the cratered
+    // rung). DOWN-one mirrors the soft ack-driven demote ladder (single-weight).
+    Modulation target_mod = data_modulation_;
+    CodeRate target_rate = data_code_rate_;
+    if (data_modulation_ == Modulation::QAM16) {
+        if (cmd == kRungCmdDownOne && qam16R34Enabled() &&
+            data_code_rate_ == CodeRate::R3_4) {
+            target_rate = CodeRate::R2_3;  // crest-rung step-down: stays on QAM16
+        } else {
+            target_mod = Modulation::QPSK;
+            target_rate = CodeRate::R3_4;
+            noteQam16Demoted(cmd == kRungCmdDownHard ? 2 : 1);
+        }
+    } else {
+        const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
+        if (robust == data_code_rate_) {
+            return;  // already the most robust rung — irreducible (floor guard)
+        }
+        if (cmd == kRungCmdDownHard) {
+            rate_controller_.noteRungFailed(data_code_rate_);
+        }
+        target_rate = robust;
+    }
+
+    // COMMIT. Mid-window is the whole point of the command (the crater keeps the
+    // window busy, so the clean boundary the Phase-1 sites wait for never comes):
+    // a descriptor commit there regrids live seqs → only era-safe under the
+    // move-epoch machinery, so gate on ULTRA_ARQ_MOVE_EPOCH and fall back to the
+    // legacy synchronized exchange without it (exactly executeEscapeDrop's commit).
+    // At a clean boundary no epoch is needed (Phase-1 invariant: empty window ⇒
+    // nothing to abort). tryDescriptorModeSwitch re-checks the Phase-1 knob and
+    // scope (incl. the descriptor-bearing >1-frame-remaining guard) and returns
+    // false out of scope — the guards compose, never duplicate.
+    const bool busy =
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+    bool desc_committed = false;
+    if (!busy || arq_.moveEpochEnabled()) {
+        desc_committed = tryDescriptorModeSwitch(
+            target_mod, target_rate, wireSnrDb(),
+            v2::ModeChangeReason::CHANNEL_DEGRADED);
+    }
+    if (!desc_committed) {
+        requestModeChange(target_mod, target_rate, wireSnrDb(),
+                          v2::ModeChangeReason::CHANNEL_DEGRADED);
+    }
+    char buf[112];
+    std::snprintf(buf, sizeof(buf), "RX-RATE-CMD %s: %s %s -> %s %s via %s (seq=%u)",
+                  cmd == kRungCmdDownHard ? "down-hard" : "down-one",
+                  modulationToString(mod_at_ack), codeRateToString(rate_at_ack),
+                  modulationToString(target_mod), codeRateToString(target_rate),
+                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE",
+                  static_cast<unsigned>(group_seq));
+    LOG_MODEM(WARN, "Connection: %s", buf);
+    last_adaptive_action_ = buf;
 }
 
 void Connection::maybeEscapeStuckFrame() {
@@ -2454,6 +2646,14 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // next tone-burst ack carries it back to ALPHA in rate_hint (the loop the unification cut).
         if (quality >= 0.0f) {
             last_group_quality_ = quality;
+        }
+        // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): refresh the receiver's standing rung
+        // command BEFORE the ARQ emits this group's tone-burst ACK (endGroupReceiveAndAck
+        // below) so the verdict rides THIS ACK — the crater is visible to the sender one
+        // whole escape-detection cycle (~2×RTO) earlier than its own zero-progress
+        // evidence. Hard no-op while the knob is OFF.
+        if (rx_rate_cmd_enabled_) {
+            updateRxRateCommandFromGroup(all_ok, frame_mask);
         }
         // BURST-AWARE ACK: this callback IS the group boundary the operator pointed to —
         // "whatever ALPHA sends as a burst, BRAVO must ack, it knows the group ended."
@@ -4129,6 +4329,14 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
     zero_progress_rounds_ = 0;
     retx_pace_hold_ms_ = 0;
+    // RX-RATE-CMD Phase 2: an APPLIED mod/rate change is exactly the adoption the
+    // receiver's standing rung command was waiting for (descriptor adopt and legacy
+    // MODE_CHANGE both funnel through here) — clear the once-per-committed-move latch
+    // so the next ACK stops carrying the consumed command. An idempotent re-apply
+    // (nothing changed) is NOT an adoption and keeps the latch.
+    if (rate_changed || mod_changed) {
+        rx_rate_cmd_pending_ = 0;
+    }
     if (rate_changed || cw_changed || mod_changed) {
         soft_combine_harq_.clear();  // mod change => old-constellation LLRs would corrupt HARQ
         // 2026-05-28: recompute burst ack_timeout for the new mode (same
@@ -4174,10 +4382,15 @@ void Connection::commitPendingModeChange(const char* outcome) {
 // locally and the next burst's BURST_HEADER descriptor — control-profile QPSK R1/4,
 // already trusted by the RX demod for exactly this reconfiguration — IS the announcement.
 //
-// Phase-1 scope gate: CLEAN-BOUNDARY wideband-OFDM ladder moves only. Excluded BY DESIGN
-// (all keep the legacy MODE_CHANGE exchange, in every knob state):
-//   - ESCAPE/collapse drops (mid-window; era-safety needs rig-validated
-//     ULTRA_ARQ_MOVE_EPOCH — §7 hard dependency; see executeEscapeDrop),
+// Phase-1 scope gate: CLEAN-BOUNDARY wideband-OFDM ladder moves. This function itself
+// carries NO in-flight guard — the boundary property comes from its callers. Phase 2
+// (RX-RATE-CMD, maybeApplyRxRateCommand) adds the ONE sanctioned mid-window caller: a
+// receiver-commanded demote, pre-gated on arq_.moveEpochEnabled() so the resulting
+// commitLocalModeSwitch regrid is era-safe (the ARQ abort bumps the move-epoch).
+// Excluded BY DESIGN (all keep the legacy MODE_CHANGE exchange, in every knob state):
+//   - the sender's OWN ESCAPE/collapse drops (zero-ACK evidence = the reverse control
+//     channel is silent, so the synchronized exchange doubles as the deaf-peer
+//     escalation; see the executeEscapeDrop comment),
 //   - connect-time INITIAL_SETUP and USER_REQUEST moves,
 //   - MC-DPSK rung moves (carriers/sps need ladder_rung_id on the wire) and OFDM_NARROW,
 //   - the deaf-peer escalation fallback (§6.5).
@@ -4227,12 +4440,18 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
 
 // The COMMIT half (§5.1 steps 1-3): applyDataMode NOW — no mode_change_pending_, no
 // retry timer, no TX freeze; the next burst's descriptor (stamped with the new
-// mod/rate/cw/z by transmitBurst → setDataMode) announces the move. Clean-boundary
-// invariant: callers commit only with the send window drained, so requeuePendingChunks()
-// and arq_.setCodeRate's abort/rewind are no-ops — an EMPTY-window regrid is
-// collision-free by construction and needs NO epoch bump (when ULTRA_ARQ_MOVE_EPOCH is
-// ON the existing machinery still stamps EPOCH_REBASE on the first frame at the window
-// base and echoes the epoch on the tone-ACK — belt-and-braces, zero extra work here).
+// mod/rate/cw/z by transmitBurst → setDataMode) announces the move. Boundary cases:
+//   - CLEAN boundary (all Phase-1 callers): the send window is drained, so
+//     requeuePendingChunks() and arq_.setCodeRate's abort/rewind are no-ops — an
+//     EMPTY-window regrid is collision-free by construction and needs NO epoch bump
+//     (when ULTRA_ARQ_MOVE_EPOCH is ON the existing machinery still stamps
+//     EPOCH_REBASE on the first frame at the window base and echoes the epoch on the
+//     tone-ACK — belt-and-braces, zero extra work here).
+//   - MID-WINDOW (Phase 2's receiver-commanded demote, the ONLY such caller, itself
+//     gated on arq_.moveEpochEnabled()): frames ARE in flight — applyDataMode
+//     requeues the pending chunks and the arq_.setCodeRate abort/rewind fires,
+//     bumping the TX move-epoch (setCodeRate rate-abort; same-rate mod/CW regrids bump via the abortPendingTx payload-drop site, 2026-07-04) so the regrid is
+//     a recognized new era, and the log line below shows the bumped value.
 void Connection::commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_count,
                                        float measured_snr, uint8_t reason) {
     (void)reason;  // decision telemetry only — nothing rides a control frame on this path
@@ -4291,16 +4510,25 @@ void Connection::onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_pe
     }
     // §8 checklist 4: clean-boundary invariant — at a boundary switch the RX slots are
     // provably empty (the sender's drained window ⟹ we delivered in-order), so
-    // arq_.setCodeRate's RX discard below is a no-op. Non-empty slots here mean the
-    // sender committed mid-window without an epoch adoption (Phase-2 escape territory) —
-    // log loudly; the discard still runs (existing setCodeRate semantics) and the
-    // sender's ARQ resends cover the loss.
+    // arq_.setCodeRate's RX discard below is a no-op. Non-empty slots + move-epoch OFF
+    // mean the sender committed mid-window without era safety — log loudly; the discard
+    // still runs (existing setCodeRate semantics) and the sender's ARQ resends cover
+    // the loss. With move-epoch ON this is the EXPECTED Phase-2 escape-adopt shape
+    // (RX-RATE-CMD mid-window commit: the descriptor arrives ahead of the EPOCH_REBASE
+    // frames whose adoption performs the discard) — INFO, not a violation.
     if (arq_.bufferedRxFrameCount() > 0) {
-        LOG_MODEM(WARN,
-                  "Connection: DESC-SWITCH adopt with %zu buffered RX frames — "
-                  "clean-boundary invariant violated (mid-window regrids belong to the "
-                  "move-epoch machinery)",
-                  arq_.bufferedRxFrameCount());
+        if (arq_.moveEpochEnabled()) {
+            LOG_MODEM(INFO,
+                      "Connection: DESC-SWITCH mid-window adopt with %zu buffered RX "
+                      "frames — era safety via move-epoch (Phase-2 escape path)",
+                      arq_.bufferedRxFrameCount());
+        } else {
+            LOG_MODEM(WARN,
+                      "Connection: DESC-SWITCH adopt with %zu buffered RX frames — "
+                      "clean-boundary invariant violated (mid-window regrids belong to "
+                      "the move-epoch machinery)",
+                      arq_.bufferedRxFrameCount());
+        }
     }
     // A/B grep line (§7.2 metric).
     LOG_MODEM(INFO, "Connection: DESC-SWITCH adopt %s %s",
@@ -4354,6 +4582,10 @@ void Connection::enterConnected() {
     // Software-ALC receiver-side state is per-connection.
     rx_level_low_streak_ = 0;
     rx_level_clipped_ = false;
+    // RX-RATE-CMD Phase 2 state is per-connection (the seq dedup space restarts with
+    // the ARQ reset below; a stale standing command must never leak across sessions).
+    rx_rate_cmd_pending_ = 0;
+    rx_rate_cmd_seq_seen_ = -1;
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
@@ -4404,6 +4636,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     pending_remote_call_.clear();
     mode_change_pending_ = false;
     desc_switch_full_anchor_pending_ = false;
+    rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
+    rx_rate_cmd_seq_seen_ = -1;
     mode_change_ack_repeat_jobs_.clear();
     disconnect_frame_.clear();
     disconnect_pending_ = false;

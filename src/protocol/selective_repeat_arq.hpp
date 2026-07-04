@@ -158,6 +158,11 @@ public:
     // ULTRA_ARQ_MOVE_EPOCH is OFF; a CLEAN-boundary commit never bumps it (an empty
     // window has nothing to abort — see setCodeRate's bump condition).
     uint8_t txMoveEpoch() const { return tx_epoch_; }
+    // RX-RATE-CMD Phase 2 gate (design §5.2/§7): a receiver-commanded MID-WINDOW
+    // descriptor commit regrids live seqs — only era-safe when the move-epoch
+    // machinery is active. Exposes the ctor-latched ULTRA_ARQ_MOVE_EPOCH state so
+    // Connection can fall back to the legacy MODE_CHANGE exchange when it is OFF.
+    bool moveEpochEnabled() const { return move_epoch_enabled_; }
 
     // Set codewords per fixed OFDM data frame (default 4).
     void setFixedFrameCodewords(int cw_count);
@@ -396,11 +401,18 @@ private:
     // seqs the receiver already retired. Two independent per-direction 2-bit (mod-4)
     // counters:
     //
-    //   tx_epoch_ — MY data direction. BUMP: in setCodeRate(), exactly when the
-    //     existing TX-abort branch fires (the branch that rewinds tx_next_seq_ — the
-    //     collision precondition). setFixedFrameCodewords()/abortPendingTx() do NOT
-    //     bump: they move tx_base FORWARD to tx_next (seq abandonment, no re-use, no
-    //     collision). STAMP: every DATA-frame send path ORs epochToFlags(tx_epoch_)
+    //   tx_epoch_ — MY data direction. BUMP: (a) in setCodeRate(), when the TX-abort
+    //     branch fires (rewinds tx_next_seq_ — the seq-REUSE collision arm); (b) in
+    //     abortPendingTx() when it drops live unacked payload (2026-07-04, Phase-2
+    //     review): forward abandonment (tx_base -> tx_next) never re-uses a seq, but
+    //     a mid-window regrid through the CW-change abort alone (same-rate mod change,
+    //     e.g. QAM16 R3/4 -> QPSK R3/4, where setCodeRate early-returns) leaves the
+    //     receiver's in-order rx_base below the abandoned seqs with no rebase-anchor —
+    //     an unfillable hole, the SAME bug by the other door. Any abort dropping live
+    //     payload is a seq<->payload remap = new era. The two bumps are mutually
+    //     exclusive per move (whichever abort runs first empties the window, so the
+    //     other's condition sees nothing live). STAMP: every DATA-frame send path ORs
+    //     epochToFlags(tx_epoch_)
     //     into flags; additionally EPOCH_REBASE is stamped iff the frame is created
     //     while seq == tx_base_seq_ ("nothing un-retired below me in this era" — an
     //     invariant that stays true for the frame's whole life, since only a

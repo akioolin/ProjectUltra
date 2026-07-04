@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstdlib>
 
 namespace ultra {
 namespace waveform {
@@ -45,6 +46,7 @@ bool ToneBurstAckPayload::clampToWireWidths() {
     const uint8_t rate_hint_max = (1u << kPayloadRateHintBits) - 1u;
     const uint8_t drive_advisory_max = (1u << kPayloadDriveAdvisoryBits) - 1u;
     const uint8_t move_epoch_max = (1u << kPayloadMoveEpochBits) - 1u;
+    const uint8_t rung_cmd_max = (1u << kPayloadRungCmdBits) - 1u;
 
     bool clean = true;
     if (group_seq > group_seq_max) { group_seq &= group_seq_max; clean = false; }
@@ -58,30 +60,58 @@ bool ToneBurstAckPayload::clampToWireWidths() {
         move_epoch &= move_epoch_max;
         clean = false;
     }
+    if (rung_cmd > rung_cmd_max) {
+        rung_cmd &= rung_cmd_max;
+        clean = false;
+    }
     return clean;
 }
 
 namespace {
 
-// Assemble the 28-bit CRC message: 26 useful bits (0..25) + the 2 drive-advisory
-// bits appended as message bits 26..27. The advisory rides ABOVE the CRC field on
-// the wire (bits 38..39), so the message is built explicitly rather than masked.
-// Fits a uint32_t (kPayloadCrcMessageBits = 28), matching crc12()'s input width.
-inline uint32_t crcMessage(uint64_t raw) {
+// Assemble the CRC message: 26 useful bits (0..25) + the 2 drive-advisory
+// bits appended as message bits 26..27; with cover_rung_cmd (ULTRA_RX_RATE_CMD
+// lockstep span) the 2 rung_cmd bits are further appended as message bits
+// 28..29. The advisory/command ride ABOVE the CRC field on the wire (bits
+// 38..39 / 42..43), so the message is built explicitly rather than masked.
+// Fits a uint32_t (max span kPayloadCrcMessageBitsCmd = 30), matching
+// crc12()'s input width.
+inline uint32_t crcMessage(uint64_t raw, bool cover_rung_cmd) {
     const uint32_t useful =
         static_cast<uint32_t>(raw & ((1ull << kPayloadUsefulBits) - 1ull));
     const uint32_t advisory = static_cast<uint32_t>(
         getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits));
-    return useful | (advisory << kPayloadUsefulBits);
+    uint32_t msg = useful | (advisory << kPayloadUsefulBits);
+    if (cover_rung_cmd) {
+        const uint32_t rung = static_cast<uint32_t>(
+            getBits(raw, kBitOffsetRungCmd, kPayloadRungCmdBits));
+        msg |= rung << kPayloadCrcMessageBits;  // message bits 28..29
+    }
+    return msg;
+}
+
+inline uint32_t crcMessageBits(bool cover_rung_cmd) {
+    return cover_rung_cmd ? kPayloadCrcMessageBitsCmd : kPayloadCrcMessageBits;
 }
 
 }  // namespace
+
+// ULTRA_RX_RATE_CMD process-wide binding for the parameter-less overloads.
+// Read ONCE (static; same pattern as ULTRA_ARQ_MOVE_EPOCH's ctor read) — the
+// codec functions themselves stay stateless via the explicit-span overloads.
+bool rungCmdCrcSpanEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("ULTRA_RX_RATE_CMD");
+        return e != nullptr && e[0] == '1';
+    }();
+    return v;
+}
 
 // ============================================================================
 // Pack / unpack
 // ============================================================================
 
-uint64_t packPayload(const ToneBurstAckPayload& p) {
+uint64_t packPayload(const ToneBurstAckPayload& p, bool cover_rung_cmd) {
     ToneBurstAckPayload sanitized = p;
     sanitized.clampToWireWidths();
 
@@ -94,13 +124,22 @@ uint64_t packPayload(const ToneBurstAckPayload& p) {
     raw = putBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits,
                   sanitized.drive_advisory);
     // move_epoch (2026-07-03) rides the former zero-pad bits 40..41 and is NOT
-    // part of the CRC message (crcMessage() below) — knob-OFF byte-identity.
+    // part of the CRC message (crcMessage() above) — knob-OFF byte-identity.
     raw = putBits(raw, kBitOffsetMoveEpoch, kPayloadMoveEpochBits,
                   sanitized.move_epoch);
+    // rung_cmd (2026-07-03 Phase 2) rides the last former zero-pad bits 42..43;
+    // CRC-covered only under the widened span (cover_rung_cmd).
+    raw = putBits(raw, kBitOffsetRungCmd, kPayloadRungCmdBits,
+                  sanitized.rung_cmd);
 
-    const uint16_t crc = crc12(crcMessage(raw), kPayloadCrcMessageBits);
+    const uint16_t crc =
+        crc12(crcMessage(raw, cover_rung_cmd), crcMessageBits(cover_rung_cmd));
     raw = putBits(raw, kBitOffsetCRC, kPayloadCRCBits, crc);
     return raw;
+}
+
+uint64_t packPayload(const ToneBurstAckPayload& p) {
+    return packPayload(p, rungCmdCrcSpanEnabled());
 }
 
 ToneBurstAckPayload unpackPayload(uint64_t raw) {
@@ -113,6 +152,8 @@ ToneBurstAckPayload unpackPayload(uint64_t raw) {
         getBits(raw, kBitOffsetDriveAdvisory, kPayloadDriveAdvisoryBits));
     p.move_epoch = static_cast<uint8_t>(
         getBits(raw, kBitOffsetMoveEpoch, kPayloadMoveEpochBits));
+    p.rung_cmd = static_cast<uint8_t>(
+        getBits(raw, kBitOffsetRungCmd, kPayloadRungCmdBits));
     return p;
 }
 
@@ -140,10 +181,15 @@ uint16_t crc12(uint32_t value, uint32_t bits) {
     return static_cast<uint16_t>(crc & kCrcMask);
 }
 
-bool verifyPayloadCRC(uint64_t raw) {
-    const uint16_t expected = crc12(crcMessage(raw), kPayloadCrcMessageBits);
+bool verifyPayloadCRC(uint64_t raw, bool cover_rung_cmd) {
+    const uint16_t expected =
+        crc12(crcMessage(raw, cover_rung_cmd), crcMessageBits(cover_rung_cmd));
     const uint16_t observed = static_cast<uint16_t>(getBits(raw, kBitOffsetCRC, kPayloadCRCBits));
     return expected == observed;
+}
+
+bool verifyPayloadCRC(uint64_t raw) {
+    return verifyPayloadCRC(raw, rungCmdCrcSpanEnabled());
 }
 
 // ============================================================================
@@ -234,7 +280,7 @@ uint16_t hammingDecode15_11(uint16_t coded_bits, int& corrected_errors) {
 }
 
 // ============================================================================
-// Full payload encode/decode (32-bit payload <-> dibits)
+// Full payload encode/decode (44-bit packed payload <-> dibits)
 // ============================================================================
 
 namespace {
@@ -289,10 +335,12 @@ uint64_t dibitsToCodedBits(const std::vector<uint8_t>& dibits) {
 
 }  // namespace
 
-std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p) {
-    // 42-bit raw payload; the bits above kPayloadBits up to
-    // kHammingInfoBitsTotal (44) are the zero pad for the clean 4-block split.
-    const uint64_t info = packPayload(p);
+std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p,
+                                         bool cover_rung_cmd) {
+    // 44-bit raw payload — exactly the 4-block Hamming info capacity
+    // (kHammingInfoBitsTotal == kPayloadBits since the 2026-07-03 Phase-2
+    // rung_cmd bits consumed the last pad; zero pad remains).
+    const uint64_t info = packPayload(p, cover_rung_cmd);
 
     auto blocks = splitToHammingBlocks(info);
     uint64_t coded = 0;
@@ -305,8 +353,13 @@ std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p) {
     return codedBitsToDibits(coded);
 }
 
+std::vector<uint8_t> encodePayloadDibits(const ToneBurstAckPayload& p) {
+    return encodePayloadDibits(p, rungCmdCrcSpanEnabled());
+}
+
 std::optional<ToneBurstAckPayload> decodePayloadDibits(
-    const std::vector<uint8_t>& dibits, PayloadDecodeStats& stats) {
+    const std::vector<uint8_t>& dibits, PayloadDecodeStats& stats,
+    bool cover_rung_cmd) {
     stats.hamming_corrected_blocks = 0;
     stats.crc_ok = false;
 
@@ -327,15 +380,20 @@ std::optional<ToneBurstAckPayload> decodePayloadDibits(
     }
 
     const uint64_t info = mergeFromHammingBlocks(info_blocks);
-    // Drop the Hamming zero-pad above the 42 payload bits (2 pad bits remain
-    // at 42..43 since move_epoch took the former pad bits 40..41, 2026-07-03).
+    // Mask to the 44 payload bits (== the 4-block info capacity exactly since
+    // rung_cmd took the last former pad bits 42..43, 2026-07-03 Phase 2).
     const uint64_t raw = info & ((1ull << kPayloadBits) - 1ull);
 
-    if (!verifyPayloadCRC(raw)) {
+    if (!verifyPayloadCRC(raw, cover_rung_cmd)) {
         return std::nullopt;
     }
     stats.crc_ok = true;
     return unpackPayload(raw);
+}
+
+std::optional<ToneBurstAckPayload> decodePayloadDibits(
+    const std::vector<uint8_t>& dibits, PayloadDecodeStats& stats) {
+    return decodePayloadDibits(dibits, stats, rungCmdCrcSpanEnabled());
 }
 
 std::vector<uint8_t> buildOnAirDibits(const ToneBurstAckPayload& p) {

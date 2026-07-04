@@ -377,23 +377,69 @@ using them. (Log a REMOVAL_BACKLOG candidate only after the fallback proves unne
 
 ### 5.2 Phase 2 — receiver steering (knob `ULTRA_RX_RATE_CMD`, default OFF; needs Phase 1)
 
-Re-purpose tone-ACK pad bits 42-43 as a 2-bit **relative rung command**, deduped by
-`group_seq` (the proven drive_advisory pattern):
+**STATUS: IMPLEMENTED 2026-07-03 (edits-only, UNVALIDATED — see CHANGELOG entry), with
+three deliberate deviations from the sketch below; the implemented wire encoding and
+policy are normative, this subsection's original table is kept for the record.**
 
-| value | meaning | sender action (clamped through caps/ssthresh/cooldowns) |
+Re-purpose tone-ACK pad bits 42-43 as a 2-bit rung command, deduped by
+`group_seq` (the proven drive_advisory pattern). Original sketch:
+
+| value | sketch meaning (superseded) | IMPLEMENTED meaning (`kRungCmd*`) |
 |---|---|---|
-| 0 | no command (back-compat zero) | EMA feedback via rate_hint as today |
-| 1 | STEP-UP | one rung up the sender's own ladder table (incl. QPSK R3/4 → QAM16 R2/3 hop) at next clean boundary |
-| 2 | STEP-DOWN | one rung down, immediately at next boundary (drop-safety asymmetric) |
-| 3 | DROP-TO-FLOOR | trough panic: straight to the rung floor (QPSK R1/4 class) |
+| 0 | no command (back-compat zero) | no command (back-compat zero) |
+| 1 | STEP-UP | **DOWN one rung** |
+| 2 | STEP-DOWN | **DOWN hard** (crater — the sender's escape target, e.g. QAM16 → QPSK R3/4) |
+| 3 | DROP-TO-FLOOR | **reserved / treat-as-hold** |
+
+**Deviation 1 — NO UP command (PHY-theorist veto).** Climbs stay sender-side where the
+quality EMA + ssthresh + climb streaks live; a receiver-driven UP would put two
+integrators on one plant and re-open the 2026-06-09 churn arm. This also deletes the
+sketch's 2-consecutive-climb miscorrect guard (nothing to guard). The command channel
+is single-purpose: **trough-escape latency** — the D3 rig finding (climbs ~free under
+Phase 1, the escape side now the bottleneck: receiver sees a 16QAM crater immediately,
+sender learns ~2×RTO later; 4 climb/escape cycles in 90 s) is exactly a demote-latency
+problem.
+
+**Deviation 2 — emit policy is CRATER-ONLY DOWN-hard.** The receiver has no quality
+EMA/streak machinery (the RateController runs sender-side only) and building a parallel
+estimator is an anti-goal; DOWN-one is defined on the wire and consumed
+(forward-compatible) but nothing emits it yet. Crater predicate (no new constants,
+both arms from existing quantizations): `frame_mask == 0` (ZERO frames delivered — the
+decoder's whole-fail signature; quality is exactly 0.0 for any `!all_ok` group so the
+rate_hint axis carries no finer grade) **at QAM16 only** (the modulation whose
+demote-on-one-bad-group policy is already codified, `kQam16DemoteBadStreak=1`; at QPSK
+rungs a zero group is an irreducible deep null — commanding there would re-introduce
+the 2026-06-09 single-NACK ratchet).
+
+**Deviation 3 — the command IS CRC-protected (knob-conditionally).** The sketch said
+"NOT CRC-covered (byte-identity precedent)" — rejected on re-analysis: unlike
+move_epoch (a corrupted echo fails SAFE — the ACK is ignored), a forged command fails
+ACTIVE (fires a wrong demote). Knob-ON widens the CRC-12 message 28 → 30 bits to
+include bits 42-43 (`kPayloadCrcMessageBitsCmd`); knob-OFF keeps the 28-bit span →
+byte-identical. The widened span is part of the knob's lockstep semantics (a mixed
+pair CRC-rejects every ACK — fails loudly, not mis-steers). The span is a *parameter*
+of the payload codec (env bound once in `tone_burst_payload.cpp`, explicit in tests),
+keeping the codec stateless.
+
+Sender consume (`maybeApplyRxRateCommand`): ADVISORY through the sender's own guards
+(CONNECTED, OFDM_CHIRP, `rateAdaptationActive`, not-pending, floor, one-move-per-ACK
+vs the EMA, dedup by group_seq) and its own ladder tables (DOWN-hard = the
+executeEscapeDrop target incl. `noteQam16Demoted(2)`/`noteRungFailed`; DOWN-one = the
+soft-demote ladder). Commit: clean boundary → Phase-1 `tryDescriptorModeSwitch`;
+MID-WINDOW (the design case — the crater keeps the window busy) → descriptor commit
+**gated on `ULTRA_ARQ_MOVE_EPOCH`** (the ARQ abort inside `commitLocalModeSwitch`
+bumps the epoch → era-safe regrid), legacy `requestModeChange` fallback without it.
+Idempotency: the receiver re-carries the SAME standing command on every ACK between
+crater and observed adoption (`applyDataMode` clears it on a real mod/rate change) —
+ACK-loss diversity; the base is frozen during a crater so all copies bear one
+group_seq and the sender acts once. The sender's OWN zero-ACK escapes stay on the
+legacy exchange in every knob state (they fire precisely when the reverse control
+channel is silent — the exchange doubles as the deaf-peer escalation).
 
 `rate_hint` keeps its (actual) quality semantics — the sender EMA remains the
 belt-and-braces decision-maker and the sole authority when commands are absent (deaf
-receiver ⇒ no ACK ⇒ escape-drop path, unchanged). Arbitration rule (§4.1): most-robust
-verdict wins within a boundary; climbs additionally require 2 consecutive identical
-STEP-UP commands (miscorrect guard, §4.1). Wire: NOT CRC-covered (byte-identity
-precedent, `tone_burst_constants.hpp:170-178`), Hamming-protected, fails-soft under the
-Phase-1 mechanism. Airtime: unchanged (44-bit block capacity, 34 symbols).
+receiver ⇒ no ACK ⇒ escape-drop path, unchanged). Airtime: unchanged (44-bit block
+capacity now EXACTLY saturated, 34 symbols — the free-bit budget is spent).
 
 Rationale for staging: Phase 1 already removes the measured dead-air (the exchange);
 Phase 2 improves decision LATENCY/fidelity (receiver sees the trough one group earlier

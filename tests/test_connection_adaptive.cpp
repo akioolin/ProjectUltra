@@ -18,6 +18,7 @@
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "helpers/temp_dir.hpp"
 
 #include <cstdlib>
@@ -307,6 +308,11 @@ struct ConnectionAdaptiveTestAccess {
 
     static int dataFrameCWCount(const Connection& c) {
         return c.data_frame_cw_count_;
+    }
+
+    // RX-RATE-CMD (Phase 2, ULTRA_RX_RATE_CMD) hooks.
+    static uint8_t rxRateCmdPending(const Connection& c) {
+        return c.rx_rate_cmd_pending_;
     }
 };
 
@@ -765,6 +771,198 @@ void test_descriptor_adopt_reconfigures_receiver_without_ack() {
           "skipped adopt must not count");
 }
 
+// ─────────── RX-RATE-CMD (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md Phase 2) ───────────
+
+using ultra::waveform::tone_burst_ack::AckType;
+using ultra::waveform::tone_burst_ack::ToneBurstAckDetection;
+using ultra::waveform::tone_burst_ack::ToneBurstAckPayload;
+using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
+using ultra::waveform::tone_burst_ack::kRungCmdNone;
+
+ToneBurstAckDetection makeRungCmdDetection(uint8_t group_seq, uint8_t rung_cmd) {
+    ToneBurstAckDetection d;
+    d.payload.group_seq = group_seq;
+    d.payload.frame_mask = 0;               // total crater: nothing delivered
+    d.payload.rate_hint = 0;                // quality 0 (the crater's quantized grade)
+    d.payload.type = AckType::Ack;
+    d.payload.move_epoch = 0;               // matches the sender's initial TX epoch
+    d.payload.rung_cmd = rung_cmd;
+    return d;
+}
+
+// Knob-OFF identity pin (ULTRA_RX_RATE_CMD=0, the baseline pinned in main): the
+// receiver's emitted tone-ACK carries rung_cmd 0 even for a QAM16 crater, and the
+// sender ignores an incoming DOWN-hard command outright — no mode move, no
+// MODE_CHANGE frame, no descriptor commit.
+void test_rx_rate_cmd_knob_off_is_byte_identical() {
+    // Receiver emit side: a total QAM16 crater must NOT set the command.
+    Connection r;
+    std::vector<ToneBurstAckPayload> acks;
+    r.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& p) { acks.push_back(p); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        r, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    r.onBurstGroupReceived(3, {}, /*all_ok=*/false, /*quality=*/0.0f,
+                           /*frame_mask=*/0, /*interleaved=*/true, /*group_size=*/8);
+    CHECK(!acks.empty(), "crater group must still emit its tone-burst ACK");
+    CHECK(acks.back().rung_cmd == kRungCmdNone,
+          "knob-off: the emitted rung_cmd bits must stay 0 (byte-identical wire)");
+    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r) == 0,
+          "knob-off: no standing command may be latched");
+
+    // Sender consume side: an incoming DOWN-hard command must be ignored.
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    TempPayloadFile payload("rx_rate_cmd_off", 60 * 1024);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::fillArqWindow(c, 4);
+
+    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
+
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R2_3,
+          "knob-off: an incoming rung command must not move the mode");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "knob-off: an incoming rung command must not arm a MODE_CHANGE");
+    CHECK(countModeChangeFrames(tx_frames) == 0,
+          "knob-off: no MODE_CHANGE frame may go on the wire");
+    CHECK(c.getStats().descriptor_mode_switches == 0,
+          "knob-off: no descriptor commit may be counted");
+}
+
+// Knob-ON receiver emit: a TOTAL crater (frame_mask == 0) at QAM16 sets DOWN-hard on
+// the group's ACK; the SAME command re-rides subsequent ACKs of the unchanged state
+// (ACK-loss diversity, sender dedups by group_seq); the observed adoption (a real
+// mod/rate change through applyDataMode) clears it; a group that delivers frames
+// clears it; a crater at a non-QAM16 mode commands nothing (deep null at a robust
+// rung is irreducible fading, not a rate signal — the 2026-06-09 ratchet guard).
+void test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move() {
+    setenv("ULTRA_RX_RATE_CMD", "1", 1);
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);  // adoption path for the clear
+    Connection r;  // ctor latches both knobs ON for this instance
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);  // restore the pinned baseline
+    setenv("ULTRA_RX_RATE_CMD", "0", 1);
+
+    std::vector<ToneBurstAckPayload> acks;
+    r.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& p) { acks.push_back(p); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        r, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+
+    // Total crater at QAM16 -> DOWN-hard rides this group's ACK.
+    r.onBurstGroupReceived(5, {}, false, 0.0f, 0, true, 8);
+    CHECK(!acks.empty() && acks.back().rung_cmd == kRungCmdDownHard,
+          "QAM16 total crater must command DOWN-hard on the group's own ACK");
+
+    // Unchanged state -> the SAME standing command re-rides (idempotent diversity;
+    // the ARQ base is frozen during a crater so the sender dedups all copies).
+    r.onBurstGroupReceived(5, {}, false, 0.0f, 0, true, 8);
+    CHECK(acks.back().rung_cmd == kRungCmdDownHard,
+          "repeated crater ACKs re-carry the same standing command");
+
+    // Sender's adoption observed (descriptor announces QPSK R3/4) -> latch clears.
+    r.onDescriptorModeChange(Modulation::QPSK, CodeRate::R3_4, 8);
+    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r) == 0,
+          "an applied mod/rate change is the adoption — the command latch must clear");
+    r.onBurstGroupReceived(6, {}, false, 0.0f, 0, true, 8);
+    CHECK(acks.back().rung_cmd == kRungCmdNone,
+          "post-adoption crater at QPSK must NOT command (non-QAM16 = fade physics)");
+
+    // A delivering group ends any crater state (fresh QAM16 instance).
+    setenv("ULTRA_RX_RATE_CMD", "1", 1);
+    Connection r2;
+    setenv("ULTRA_RX_RATE_CMD", "0", 1);
+    std::vector<ToneBurstAckPayload> acks2;
+    r2.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& p) { acks2.push_back(p); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        r2, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    r2.onBurstGroupReceived(9, {}, false, 0.0f, 0, true, 8);
+    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == kRungCmdDownHard,
+          "crater must latch the command");
+    r2.onBurstGroupReceived(10, {}, false, 0.0f, /*frame_mask=*/0x3, true, 8);
+    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == 0,
+          "any delivered frame ends the crater — a stale demote command must not "
+          "ride a recovering channel's ACKs");
+}
+
+// Knob-ON sender consume, MID-WINDOW (the Phase-2 case): a DOWN-hard command with
+// frames in flight routes the escape target (QAM16 -> QPSK R3/4) through the
+// DESCRIPTOR commit — no MODE_CHANGE frame, mode applied immediately, and the ARQ
+// abort bumps the move-epoch (era safety; requires ULTRA_ARQ_MOVE_EPOCH ON). A
+// duplicate of the same command (same group_seq) before adoption is a no-op.
+void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    setenv("ULTRA_RX_RATE_CMD", "1", 1);
+    Connection c;  // ctor latches all three knobs ON for this instance
+    setenv("ULTRA_RX_RATE_CMD", "0", 1);  // restore the pinned baselines
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    std::vector<bool> burst_full_anchor;
+    std::vector<size_t> burst_sizes;
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t /*seq*/,
+                                   bool force_full_preamble) {
+        burst_sizes.push_back(frames.size());
+        burst_full_anchor.push_back(force_full_preamble);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    TempPayloadFile payload("rx_rate_cmd_mid", 60 * 1024);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::fillArqWindow(c, 4);  // MID-window: frames in flight
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 0,
+          "fresh connection starts at TX move-epoch 0");
+
+    // The crater group's ACK arrives carrying DOWN-hard (epoch echo 0 = current era).
+    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
+
+    CHECK(c.getDataModulation() == Modulation::QPSK &&
+              c.getDataCodeRate() == CodeRate::R3_4,
+          "DOWN-hard at QAM16 must commit the escape target (QPSK R3/4) immediately");
+    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R3_4,
+          "the ARQ must be reconfigured to the committed rate");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "the descriptor commit must not arm the MODE_CHANGE stop-and-wait");
+    CHECK(countModeChangeFrames(tx_frames) == 0,
+          "NO MODE_CHANGE control frame may go on the wire (that was the dead-air)");
+    CHECK(c.getStats().descriptor_mode_switches == 1,
+          "the commit must count as a descriptor switch");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 1,
+          "the MID-WINDOW regrid must bump the TX move-epoch (era safety)");
+    bool full_anchor_armed_or_consumed =
+        ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
+    for (size_t i = 0; i < burst_full_anchor.size(); ++i) {
+        if (burst_sizes[i] >= 2 && burst_full_anchor[i]) {
+            full_anchor_armed_or_consumed = true;
+        }
+    }
+    CHECK(full_anchor_armed_or_consumed,
+          "the first post-switch burst group must carry the full chirp+LTS anchor");
+
+    // Rate-limit: the SAME command (same group_seq — the base was frozen by the
+    // crater) re-arriving before the receiver's adoption is deduped: no second
+    // demote (QPSK R3/4 would otherwise step to R2/3), no new commit.
+    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
+    CHECK(c.getDataModulation() == Modulation::QPSK &&
+              c.getDataCodeRate() == CodeRate::R3_4,
+          "a duplicate command (same group_seq) before adoption must be a no-op");
+    CHECK(c.getStats().descriptor_mode_switches == 1,
+          "a duplicate command must not commit again");
+    CHECK(countModeChangeFrames(tx_frames) == 0,
+          "a duplicate command must not fall back to MODE_CHANGE either");
+}
+
 void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
     Connection c;
     std::vector<Bytes> tx_frames;
@@ -863,6 +1061,11 @@ int main() {
     // this one is latched PER Connection in its ctor — the knob-ON tests flip the env
     // around a single construction and restore it, so ordering here is baseline-only.
     setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    // RX-RATE-CMD (design Phase 2): same per-Connection-ctor latch pattern. NOTE: the
+    // tone_burst_payload CRC-span binding reads this env ONCE process-wide, but this
+    // binary never routes payloads through the parameter-less codec overloads, so the
+    // per-test flips below cannot skew the wire span (payload tests use explicit spans).
+    setenv("ULTRA_RX_RATE_CMD", "0", 1);
 
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();
@@ -878,6 +1081,9 @@ int main() {
     test_descriptor_switch_knob_off_is_byte_identical();
     test_descriptor_switch_commits_locally_at_clean_boundary();
     test_descriptor_adopt_reconfigures_receiver_without_ack();
+    test_rx_rate_cmd_knob_off_is_byte_identical();
+    test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move();
+    test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
 

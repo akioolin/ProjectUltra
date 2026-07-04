@@ -149,7 +149,7 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // Payload + FEC layout
 // ============================================================================
 //
-// Payload (packed into 42 bits):
+// Payload (packed into 44 bits — the full 4-block Hamming info capacity):
 //   bits  0..5   group_seq (6 bits, mod-64 sequence number)
 //   bits  6..21  frame_mask (16 bits, 1 = frame OK, 0 = frame FAIL)  [widened 6->8 2026-06-17,
 //                8->16 2026-07-02 so a coherent high-throughput window (16 frames) is fully
@@ -176,6 +176,25 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 //                miscorrect that lands on the epoch fails SAFE at the sender — an
 //                epoch-mismatched ACK is IGNORED (= ACK-lost -> RTO resend), never
 //                mis-credited.
+//   bits 42..43  rung_cmd (2 bits, 2026-07-03, MODE_SWITCH_PIGGYBACK Phase 2, knob
+//                ULTRA_RX_RATE_CMD default-OFF): receiver-commanded relative rung step
+//                for the wideband-OFDM fade-riding ladder — 0 = no command (back-compat
+//                zero), 1 = DOWN one rung, 2 = DOWN hard (crater: go to the sender's
+//                escape target), 3 = reserved/treat-as-hold. NO UP command exists BY
+//                DESIGN: climbs stay sender-side where the quality EMA lives (a
+//                receiver UP would double-drive the control loop). These were the LAST
+//                two Hamming zero-pad bits, so a knob-OFF build (cmd always 0) is
+//                BYTE-IDENTICAL on air. CRC coverage is KNOB-CONDITIONAL (unlike
+//                move_epoch): when ULTRA_RX_RATE_CMD is ON the CRC message widens
+//                28 -> 30 bits to include these bits (kPayloadCrcMessageBitsCmd) —
+//                a corrupted command fails ACTIVE (fires a wrong demote) rather than
+//                SAFE (ignored) like a corrupted epoch, so unlike the epoch it MUST
+//                be integrity-checked; the widened span is part of the knob's
+//                lockstep semantics (a knob-OFF peer CRC-fails every knob-ON ACK,
+//                same both-ends-or-neither class as the mask widen). The env knob is
+//                still read OUTSIDE this header (once, in tone_burst_payload.cpp) and
+//                every pack/verify entry point also takes the span as an explicit
+//                parameter, keeping the codec functions themselves stateless.
 //
 // WIRE-BREAKING (2026-06-17, 2026-07-02 twice): no version field on the tone-burst
 // payload — both stations MUST run the same build. 2026-06-17: the frame_mask widen
@@ -188,13 +207,18 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 // ULTRA_ARQ_MOVE_EPOCH is OFF (default). When ON the feature is SEMANTICS-BREAKING:
 // both stations must run it in lockstep (a knob-OFF peer echoes epoch 0 forever, so
 // the knob-ON sender ignores all its ACKs after the first rate-change abort).
+// 2026-07-03 (rung_cmd, Phase 2): bits 42..43 (the LAST former zero-pad bits) —
+// byte-identical while ULTRA_RX_RATE_CMD is OFF (default: cmd 0, CRC span unchanged).
+// When ON the feature is SEMANTICS-BREAKING lockstep TWICE over: the command bits are
+// live AND the CRC message widens 28 -> 30 bits, so a knob-OFF peer CRC-rejects every
+// knob-ON ACK (deliberate: mixed-version pairs must fail loudly, not mis-steer).
 //
-// FEC: (15,11) Hamming code applied per nibble-block. 42 payload bits ->
-// four 11-bit groups (padded), each encoded to 15 coded bits = 60 coded
+// FEC: (15,11) Hamming code applied per nibble-block. 44 payload bits ->
+// four 11-bit groups, each encoded to 15 coded bits = 60 coded
 // bits = 30 symbols at 4-FSK. Hamming corrects 1 bit error per block,
 // detects 2.
 
-inline constexpr uint32_t kPayloadBits = 42;       // raw payload incl. CRC + move_epoch
+inline constexpr uint32_t kPayloadBits = 44;       // raw payload incl. CRC + move_epoch + rung_cmd
 inline constexpr uint32_t kPayloadUsefulBits = 26; // bits before CRC (6+16+3+1)
 inline constexpr uint32_t kPayloadGroupSeqBits = 6;
 inline constexpr uint32_t kPayloadFrameMaskBits = 16;  // widened 6->8 (2026-06-17), 8->16 (2026-07-02): 16-frame SACK window
@@ -203,12 +227,14 @@ inline constexpr uint32_t kPayloadTypeBits = 1;
 inline constexpr uint32_t kPayloadCRCBits = 12;
 inline constexpr uint32_t kPayloadDriveAdvisoryBits = 2;  // formerly reserved (2026-07-02)
 inline constexpr uint32_t kPayloadMoveEpochBits = 2;      // formerly zero-pad (2026-07-03)
+inline constexpr uint32_t kPayloadRungCmdBits = 2;        // formerly zero-pad (2026-07-03 Phase 2)
 static_assert(kPayloadUsefulBits == kPayloadGroupSeqBits + kPayloadFrameMaskBits +
               kPayloadRateHintBits + kPayloadTypeBits, "payload bit layout mismatch");
 static_assert(kPayloadBits == kPayloadUsefulBits + kPayloadCRCBits +
-              kPayloadDriveAdvisoryBits + kPayloadMoveEpochBits, "payload total mismatch");
+              kPayloadDriveAdvisoryBits + kPayloadMoveEpochBits + kPayloadRungCmdBits,
+              "payload total mismatch");
 
-// Bit-field offsets in the packed 42-bit payload (carried in a uint64_t).
+// Bit-field offsets in the packed 44-bit payload (carried in a uint64_t).
 inline constexpr uint32_t kBitOffsetGroupSeq = 0;
 inline constexpr uint32_t kBitOffsetFrameMask = 6;
 inline constexpr uint32_t kBitOffsetRateHint = 22;
@@ -216,13 +242,15 @@ inline constexpr uint32_t kBitOffsetType = 25;
 inline constexpr uint32_t kBitOffsetCRC = 26;
 inline constexpr uint32_t kBitOffsetDriveAdvisory = 38;
 inline constexpr uint32_t kBitOffsetMoveEpoch = 40;
+inline constexpr uint32_t kBitOffsetRungCmd = 42;
 static_assert(kBitOffsetFrameMask == kBitOffsetGroupSeq + kPayloadGroupSeqBits &&
               kBitOffsetRateHint == kBitOffsetFrameMask + kPayloadFrameMaskBits &&
               kBitOffsetType == kBitOffsetRateHint + kPayloadRateHintBits &&
               kBitOffsetCRC == kBitOffsetType + kPayloadTypeBits &&
               kBitOffsetDriveAdvisory == kBitOffsetCRC + kPayloadCRCBits &&
               kBitOffsetMoveEpoch == kBitOffsetDriveAdvisory + kPayloadDriveAdvisoryBits &&
-              kPayloadBits == kBitOffsetMoveEpoch + kPayloadMoveEpochBits,
+              kBitOffsetRungCmd == kBitOffsetMoveEpoch + kPayloadMoveEpochBits &&
+              kPayloadBits == kBitOffsetRungCmd + kPayloadRungCmdBits,
               "payload bit offsets must tile the packed payload exactly");
 
 // CRC message = the 26 useful bits with the 2 drive-advisory bits appended above
@@ -231,8 +259,14 @@ static_assert(kBitOffsetFrameMask == kBitOffsetGroupSeq + kPayloadGroupSeqBits &
 // message positions — pack/verify assemble this 28-bit message explicitly.
 // NOTE: the move_epoch bits (40..41) are INTENTIONALLY excluded — see the layout
 // comment above (knob-OFF byte-identity; Hamming-only protection fails safe).
+// The rung_cmd bits (42..43) are appended as message bits 28..29 ONLY when
+// ULTRA_RX_RATE_CMD is ON (kPayloadCrcMessageBitsCmd) — a corrupted command fires
+// a wrong demote (fails ACTIVE), so unlike the epoch it must be CRC-checked; the
+// widened span is part of the knob's lockstep semantics.
 inline constexpr uint32_t kPayloadCrcMessageBits =
-    kPayloadUsefulBits + kPayloadDriveAdvisoryBits;  // 28
+    kPayloadUsefulBits + kPayloadDriveAdvisoryBits;  // 28 (knob-OFF span)
+inline constexpr uint32_t kPayloadCrcMessageBitsCmd =
+    kPayloadCrcMessageBits + kPayloadRungCmdBits;    // 30 (ULTRA_RX_RATE_CMD span)
 
 // Drive-advisory wire values (software-ALC, 2026-07-02).
 inline constexpr uint8_t kDriveAdvisoryHold = 0;
@@ -240,19 +274,31 @@ inline constexpr uint8_t kDriveAdvisoryUp = 1;    // receiver chain-noise-limite
 inline constexpr uint8_t kDriveAdvisoryDown = 2;  // receiver sees clip signature: drop drive
 inline constexpr uint8_t kDriveAdvisoryReserved = 3;  // treat as hold
 
+// Rung-command wire values (MODE_SWITCH_PIGGYBACK Phase 2, ULTRA_RX_RATE_CMD,
+// 2026-07-03). Demote-only BY DESIGN — no UP command (climbs stay sender-side
+// where the quality EMA lives; a receiver UP would double-drive the loop).
+inline constexpr uint8_t kRungCmdNone = 0;      // no command (back-compat zero)
+inline constexpr uint8_t kRungCmdDownOne = 1;   // one rung more robust
+inline constexpr uint8_t kRungCmdDownHard = 2;  // crater: sender's escape target
+inline constexpr uint8_t kRungCmdReserved = 3;  // treat as hold/no command
+
 // (15,11) Hamming: 11 info bits -> 15 coded bits per block.
-// ceil(42 / 11) = 4 blocks (last block partially populated with 0s: 2 pad
-// bits at 42..43 since the 2026-07-03 move_epoch bits took 40..41).
-// Block count is DERIVED from kPayloadBits so a future payload widen can
-// never silently truncate the top bits (the 2026-07-02 8->16 mask widen
-// grew 3 -> 4 blocks; the 2026-07-03 40->42 widen kept 4 blocks, so the
-// symbol count — and ACK airtime — is unchanged at 34).
+// ceil(44 / 11) = 4 blocks. The 2026-07-03 Phase-2 rung_cmd bits consumed the
+// LAST two pad bits: the payload now fills the 4-block info capacity EXACTLY
+// (44/44 — zero pad remains). Block count is DERIVED from kPayloadBits so a
+// future payload widen can never silently truncate the top bits — but the next
+// single bit added grows the burst to 5 blocks = 75 coded bits = 38 symbols,
+// i.e. it CHANGES the ACK airtime for every knob state (wire-breaking AND
+// airtime-breaking). The free-bit budget is spent; a future field must earn a
+// symbol-count change. (History: the 2026-07-02 8->16 mask widen grew 3 -> 4
+// blocks; move_epoch (40..41) and rung_cmd (42..43) both rode the block-4 pad,
+// keeping the symbol count — and ACK airtime — unchanged at 34.)
 inline constexpr uint32_t kHammingInfoBitsPerBlock = 11;
 inline constexpr uint32_t kHammingCodedBitsPerBlock = 15;
 inline constexpr uint32_t kHammingNumBlocks =
     (kPayloadBits + kHammingInfoBitsPerBlock - 1) / kHammingInfoBitsPerBlock;  // 4
 inline constexpr uint32_t kHammingInfoBitsTotal =
-    kHammingNumBlocks * kHammingInfoBitsPerBlock;  // 44 (pad payload by 4 zeros)
+    kHammingNumBlocks * kHammingInfoBitsPerBlock;  // 44 (== kPayloadBits: capacity saturated, zero pad left)
 static_assert(kHammingInfoBitsTotal >= kPayloadBits,
               "Hamming blocks must cover the whole payload");
 static_assert(kHammingInfoBitsTotal <= 64,
