@@ -951,6 +951,9 @@ private:
     // at QAM16 (receiver side). 2+ -> DownOne command (a total crater still commands
     // immediately). Reset on any clean group, non-QAM16, and session boundaries.
     int qam16_rx_bad_streak_ = 0;
+    // HALF-OPEN timeout accumulator (2026-07-04, F29): ms in CONNECTED with the
+    // responder handshake never confirmed; 240 s -> release the session.
+    uint32_t responder_half_open_ms_ = 0;
     // Receiver emit-side decision (called from onBurstGroupReceived before the
     // group's tone-burst ACK is emitted) and sender consume-side action (called
     // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE

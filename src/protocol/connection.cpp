@@ -3462,6 +3462,27 @@ void Connection::tick(uint32_t elapsed_ms) {
                     responder_handshake_wait_ms_ -= elapsed_ms;
                 }
             }
+            // HALF-OPEN TIMEOUT (2026-07-04, F29: a one-way CONNECT_ACK loss left the
+            // responder "Connected" for 31 minutes while the initiator had cleanly
+            // given up ~356 s in after its 10 connect retries). If the handshake NEVER
+            // confirms — no classic frame, no burst group, nothing — the initiator is
+            // provably gone once its whole retry ladder (~340 s) has elapsed: release
+            // the session and return to listening. 240,000 ms > 6x the worst normal
+            // confirm time observed (~38 s) and inside the initiator give-up bound.
+            if (!is_initiator_ && !handshake_confirmed_) {
+                responder_half_open_ms_ += elapsed_ms;
+                if (responder_half_open_ms_ >= 240000) {
+                    LOG_MODEM(WARN,
+                              "Connection: handshake never confirmed %u ms after "
+                              "CONNECT_ACK — initiator presumed gone (one-way ACK "
+                              "loss); releasing the half-open session",
+                              responder_half_open_ms_);
+                    enterDisconnected("handshake never confirmed (half-open timeout)");
+                    return;
+                }
+            } else {
+                responder_half_open_ms_ = 0;
+            }
 
             tickModeChangeAckRepeats(elapsed_ms);
 
