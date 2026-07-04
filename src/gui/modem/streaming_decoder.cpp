@@ -195,6 +195,11 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
             ultra::waveform::tone_burst_ack::kSymbolMsMargSNR,   // 100 ms
         };
         tba_cfg.sweep_step_samples = 32;
+        // TAIL-WINDOW sweep (2026-07-04): production monitors run on constrained
+        // hosts (Pi5 ARM) at a 100 ms armed cadence — per-pass cost must not scale
+        // with the (now 172.8 k) buffer. See the Config comment; the always-on
+        // polling tests keep the legacy whole-buffer default.
+        tba_cfg.tail_window_sweep = true;
         // Buffer DERIVED from the scan set (2026-07-04, R3/4 ACK-miss forensics):
         // it must hold one full burst at the SLOWEST scanned rung + the armed
         // detection cadence (4800) + sweep margin, or runDetectionPass silently

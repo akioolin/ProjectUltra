@@ -83,6 +83,13 @@ public:
         // Coarse sweep step inside the detector for each cadence-triggered
         // pass. 8 samples is the default; smaller = finer + slower.
         uint32_t sweep_step_samples = 8;
+        // TAIL-WINDOW sweep (2026-07-04, Pi5 ARM regression fix): when true, each
+        // detection pass sweeps only the newest needed+cadence+spp window instead
+        // of the whole buffer — per-pass CPU stops scaling with buffer capacity
+        // (the 100 ms-rung capacity growth pushed the Pi5 ~19 s behind live and
+        // the sender went ACK-deaf). Default OFF = legacy whole-buffer semantics
+        // (always-on polling tests pin them); the PRODUCTION armed path enables it.
+        bool tail_window_sweep = false;
         // Maximum samples the internal sliding buffer holds. Needs to be at
         // least kTotalSymbols × max_symbol_ms × kSampleRate / 1000 + slack.
         // For 100 ms max symbol: 34 × 100 × 48 = 163,200 (34 symbols since the

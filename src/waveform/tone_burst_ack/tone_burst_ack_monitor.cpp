@@ -139,7 +139,22 @@ void ToneBurstAckMonitor::runDetectionPass() {
             }
             continue;
         }
-        const auto r = detector_.detectAndDecode(buffer_.data(), buffer_.size(),
+        // TAIL-WINDOW sweep (2026-07-04, rig F2 regression): sweeping the WHOLE
+        // buffer per duration per pass scales the per-pass CPU with buffer size —
+        // the forensic-arc capacity growth (120 k -> 172.8 k, needed so the 100 ms
+        // rung is decodable AT ALL) pushed the Pi5's ARM decode thread ~19 s behind
+        // live and the sender went ACK-deaf (1/4 detected). A pass only ever needs
+        // to find a burst whose TAIL arrived since the previous pass: one full
+        // burst length + one cadence interval + one symbol of alignment guard,
+        // anchored at the buffer's newest end. This is also strictly cheaper than
+        // the pre-arc code (which swept 120 k even for the 19.6 k fast rung).
+        const size_t cadence_guard = armed_ ? cfg_.detect_interval_samples_armed
+                                            : cfg_.detect_interval_samples;
+        const size_t window = cfg_.tail_window_sweep
+            ? std::min(buffer_.size(), needed + cadence_guard + spp)
+            : buffer_.size();
+        const size_t tail_base = buffer_.size() - window;
+        const auto r = detector_.detectAndDecode(buffer_.data() + tail_base, window,
                                                   symbol_ms, cfg_.sweep_step_samples);
         if (!r.decode.payload.has_value()) continue;
         if (!r.decode.stats.crc_ok) continue;
@@ -152,7 +167,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
         if (r.costas_correlation_peak < min_peak) continue;
 
         const uint64_t detected_stream_offset =
-            buffer_start_stream_offset_ +
+            buffer_start_stream_offset_ + static_cast<uint64_t>(tail_base) +
             static_cast<uint64_t>(r.detected_offset_samples);
 
         // Duplicate-detection suppression: drop if the previous detection
