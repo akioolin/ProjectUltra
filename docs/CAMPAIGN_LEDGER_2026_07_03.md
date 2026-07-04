@@ -120,3 +120,13 @@ Baseline (main 8a771f9, 5-cell gate): g42=1940 g43=1210 g7=1310 | AWGN ref=3370 
 ## AFFINE VALIDATION BATCH (a425658 + full stack)
 - V2: 1.42 transfer / 1.34 session, CRC ok. **ENTRY 9.3 -> R2/3 Good (affine working — was R1/2 pre-fix)**, 16QAM@105, 2 MC retries on the climb, SALVAGE 5 dupes.
 - V3: 1.60 transfer / 1.49 session, CRC ok. **ENTRY 7.3 -> R2/3 Good (clamp region working)**, 16QAM@226. SALVAGE 0.
+- V4: 0.74 transfer / 0.71 session, CRC ok. ENTRY 13.6 -> R2/3 Good ✓. Deep-fade epoch (peer_fading 0.65 @300s, demote R1/2), SALVAGE x18. 47/47 byte-exact.
+- V5: **2.18 transfer / 1.99 session, CRC ok — rig records at the time**. ENTRY 13.5 -> R2/3 Good ✓ (batch 4/4), 16QAM@95, done 188.2s. 48/48.
+== AFFINE BATCH: entry gate 4/4 R2/3 Good across readings 7.3-13.6 (two sub-10 draws correct — pre-fix R1/2; baseline false-Moderate 18.8%). NOTE: whole V-batch ran at Mac output volume 75 (drift; calibrated=100, restored for D-batch). ==
+== Cross-env checks: sim good@20 affine entry 13.7->R2/3 = same band as rig (calibration doc §8); sim good@14 UNMEASURABLE (pre-existing handshake floor). Low-dial leg falls to the IONOS multi-dial sweep (user must set the dial). ==
+
+## DESCRIPTOR-SWITCH RIG BATCH (ULTRA_DESCRIPTOR_MODE_SWITCH=1 + standing set, both ends 9d7d47e)
+- D1: 1.37 transfer / 1.30 session, CRC ok. ENTRY 10.1 -> R2/3 ✓ (5/5). **FIRST HW DESC-SWITCH adopt** (climb R2/3->R3/4 @101.6, [MODE] local_measured/n-a signature — DESC INFO lines don't pass the GUI log filter); collapse-escape R3/4->R2/3 correctly legacy (1 retry). SALVAGE 1. 49/49.
+- D2: **2.43 transfer / 2.20 session, CRC ok — ALL-TIME RIG RECORDS**. ENTRY 10.1 -> R2/3 ✓ (6/6). BOTH climbs via descriptor (R3/4@109, 16QAM@143), ZERO mid-transfer control exchanges/retries/salvages. Done 168.4s. 50/50.
+- D3: 0.50 transfer / 0.47 session, CRC ok @813.2s — survival run, genuine Moderate epoch (peer_fading 0.71). 10 descriptor adopts (incl. R1/2->R2/3 recovery @641), SALVAGE 33, clean disconnect. 51/51.
+== D-BATCH: 13 adopts / 0 failures / 0 stale-epoch / 0 corruption. THE FINDING: climbs now ~free -> crest probing -> the ESCAPE side (collapse + legacy exchange) is the measured bottleneck (D3: 4 climb-escape cycles in 90s). Phase 2 (receiver rung command, tone-ACK pad bits 42-43) is the quantified next lever; interim candidate = fading-class-gated re-climb streak. ==

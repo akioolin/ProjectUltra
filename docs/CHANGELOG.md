@@ -10,7 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-07-03 — feat(arq/ladder): descriptor-committed mode switch Phase 1 (`ULTRA_DESCRIPTOR_MODE_SWITCH`, default-OFF byte-identical) — **sim-validated; rig batch pending**
+## 2026-07-03 — feat(arq/ladder): descriptor-committed mode switch Phase 1 (`ULTRA_DESCRIPTOR_MODE_SWITCH`, default-OFF byte-identical) — **sim-validated + RIG-VALIDATED (3-run IONOS MPG@20 batch)**
+
+**Rig validation (2026-07-02 late, both ends 9d7d47e, knob ON + standing set):** 13
+descriptor adopts across 3 transfers, zero adopt failures / stale-epoch / clean-boundary
+WARNs, 3/3 CRC byte-exact. D2 = **all-time rig records 2.43 kbps transfer / 2.20 session**
+with ZERO mid-transfer control exchanges (both climbs rode descriptors). D1: first HW
+adopt + a collapse-escape correctly falling back to legacy. D3 (rough Moderate epoch,
+peer fading 0.71): 10 adopts incl. an R1/2→R2/3 recovery, delivered at 813 s — and the
+measured new bottleneck is the ESCAPE side (climbs now ~free → crest probing → each
+wrong probe pays a collapse-escape + legacy exchange; 4 cycles/90 s observed). That cost
+inversion is the quantified case for Phase 2 (receiver rung command in tone-ACK pad
+bits 42-43, receiver-driven demotes). Rig log caveat: the `DESC-SWITCH` INFO lines don't
+pass the GUI log filter — the adopt marker on hardware is the `[MODE]` line signature
+`local_measured` + `peer_fading=n/a` mid-transfer.
 
 **Validation (2026-07-02 late evening):** build clean first-shot; ctest 80/81 (the one red =
 pre-existing UltraTncSimAudio PING-floor, documented) including the 3 new unit tests.
