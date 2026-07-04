@@ -3427,7 +3427,24 @@ void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ac
         return;
     }
 
-    const int repeat_count = arq_.getAckRepeatCount();
+    // The MODE_CHANGE ACK is the ONE control ACK that still rides the fragile
+    // 1-CW control path AND gates every rate move — but it inherited the DATA
+    // ack-repeat count, which the tone-ACK path dials to 1 (kWideOFDMAckRepeat
+    // = interactive ? 1 : 3). One lost ~1.4 s copy in a trough = a full-deadline
+    // (~18.5 s) sender retry; rig measured up to 5 receptions per climb. Decouple:
+    // on a fading channel send staggered repeats (the scheduler below already
+    // exists and early-returned at count 1); AWGN-class keeps the single copy.
+    // ULTRA_MC_ACK_REPEATS [1..3] pins for A/B.
+    static const int env_pin = [] {
+        if (const char* e = std::getenv("ULTRA_MC_ACK_REPEATS")) {
+            const int n = std::atoi(e);
+            if (n >= 1 && n <= 3) return n;
+        }
+        return 0;
+    }();
+    const int fading_aware = fading_index_ >= kFadingAwgnMax ? 3 : 1;
+    const int repeat_count =
+        env_pin > 0 ? env_pin : std::max(arq_.getAckRepeatCount(), fading_aware);
     if (repeat_count <= 1) {
         return;
     }

@@ -384,12 +384,15 @@ void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
 
-    // Tone-burst OFDM path: ONE prompt ack per burst — NOT a redundant ack-diversity chain.
-    // The tone-burst group-ack fires once; a lost ack is backstopped by the sender's ARQ
-    // retransmit (re-sends the group -> the receiver re-acks). Repeating it would key the
-    // receiver deaf for ~5 s. See configureArqForCurrentDataMode (kWideOFDMAckRepeatCount).
-    const int repeat_count = ConnectionAdaptiveTestAccess::arqAckRepeatCount(c);
-    CHECK(repeat_count == 1, "tone-burst OFDM path uses a single prompt ack (no diversity chain)");
+    // DATA acks: ONE prompt tone-burst ack per burst (lost acks are backstopped by the
+    // sender's ARQ retransmit). But the MODE_CHANGE ACK rides the fragile 1-CW control
+    // path and gates every rate move — since 2026-07-03 it gets FADING-AWARE repeats
+    // (3 staggered copies on a fading channel; rig measured 5 receptions per climb at
+    // single-copy). This Connection has fading 0.48 -> expect 3 MC-ACK copies while the
+    // ARQ data-ack count stays 1.
+    CHECK(ConnectionAdaptiveTestAccess::arqAckRepeatCount(c) == 1,
+          "tone-burst OFDM path uses a single prompt DATA ack (no diversity chain)");
+    const int repeat_count = 3;  // fading-aware MC-ACK repeat count at fading >= 0.15
 
     auto frame = v2::ControlFrame::makeModeChange(
         "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
