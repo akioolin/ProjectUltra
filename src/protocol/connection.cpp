@@ -2101,13 +2101,24 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
     if (data_modulation_ != Modulation::QAM16) {
         return;  // deep null at a robust rung: irreducible fading, not a rate signal
     }
-    // Total crater at the high-order mode → command the sender's escape target.
-    // Idempotent across consecutive craters: the SAME command keeps riding every
-    // re-emitted ACK until the sender's move is observed (applyDataMode clears the
-    // latch on a real mod/rate change — the once-per-committed-move rule). That
-    // re-carry is ACK-loss diversity for free and storm-safe: a crater freezes the
-    // ARQ base, so every copy carries ONE group_seq and the sender acts once.
-    rx_rate_cmd_pending_ = kRungCmdDownHard;
+    // Total crater at the high-order mode → command a demote. Idempotent across
+    // consecutive craters: the SAME command keeps riding every re-emitted ACK until
+    // the sender's move is observed (applyDataMode clears the latch on a real
+    // mod/rate change — the once-per-committed-move rule). That re-carry is
+    // ACK-loss diversity for free and storm-safe: a crater freezes the ARQ base,
+    // so every copy carries ONE group_seq and the sender acts once.
+    //
+    // CREST-RUNG graded landing (2026-07-04, F10 finding): a crater AT 16QAM R3/4
+    // commands DOWN-ONE (→ 16QAM R2/3, the sender's DownOne mapping) — R2/3's
+    // requirement sits ~1.5 dB below R3/4's, so a trough that kills the crest rung
+    // by inches usually leaves R2/3 alive (F10: the pre-hop R2/3 groups ran 0.85-0.98
+    // in the same epoch). One rung per evidence quantum; if R2/3 craters too, the
+    // NEXT command is DOWN-hard to the QPSK home gear. R2/3 craters keep the
+    // straight-to-QPSK exit (the decodability-cliff asymmetry).
+    rx_rate_cmd_pending_ =
+        (data_code_rate_ == CodeRate::R3_4)
+            ? ultra::waveform::tone_burst_ack::kRungCmdDownOne
+            : kRungCmdDownHard;
 }
 
 // SENDER side (called from onToneBurstAck, inside the defer-refill bracket, AFTER
