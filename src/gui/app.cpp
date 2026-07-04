@@ -528,6 +528,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     };
     ultra::gui::wireModemToProtocol(modem_, protocol_, std::move(modem_hooks));
 
+    // BUG-MC-RETRY-SPURIOUS (2026-07-04): the MODE_CHANGE retry deadline holds while
+    // our TX is keyed — half-duplex: keyed time is not ACK-loss evidence (the E1
+    // forensics: the frame rode the tail of a ~10.6 s bundled key-down and the
+    // request-anchored deadline retried spuriously on every trough exchange).
+    // tx_in_progress_ is the app's atomic key-down truth; called from the engine
+    // tick under its mutex — atomic read only.
+    protocol_.setTxActiveProvider(
+        [this] { return tx_in_progress_.load(std::memory_order_relaxed); });
+
     // Set up status callback to show codeword progress in RX log
     modem_.setStatusCallback([this](const std::string& status) {
         enqueueOperatorLogLine(status);
@@ -963,6 +972,26 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                                     mc_dpsk_samples_per_symbol,
                                     mod == Modulation::DBPSK ? 1 :
                                     mod == Modulation::D8PSK ? 3 : 2);
+        }
+        // BUG-MC-RETRY-SPURIOUS fix 4: the protocol layer just COMMITTED a data
+        // mode. If the (mod, rate, cw) tuple actually changed, bump the data-mode
+        // generation — any CCA/serialize-deferred DATA-class audio rendered under
+        // the old generation is now provably undecodable by the peer (wrong
+        // constellation/rate/CW geometry) and purgeStaleDeferredDataTx() drops it
+        // before flush; the ARQ re-renders those frames at the new mode on its
+        // next refill. Tuple-change gate keeps same-mode re-notifies (e.g. a
+        // duplicate-free SNR refresh) from discarding viable deferred audio. The
+        // last-seen tuple is only touched here (engine mutex serializes callbacks);
+        // the generation itself is atomic (defer/purge read it on the main thread).
+        if (!data_mode_gen_seen_valid_ ||
+            data_mode_gen_seen_mod_ != mod ||
+            data_mode_gen_seen_rate_ != rate ||
+            data_mode_gen_seen_cw_ != cw_count) {
+            data_mode_gen_seen_valid_ = true;
+            data_mode_gen_seen_mod_ = mod;
+            data_mode_gen_seen_rate_ = rate;
+            data_mode_gen_seen_cw_ = cw_count;
+            data_mode_generation_.fetch_add(1, std::memory_order_release);
         }
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
@@ -3004,6 +3033,10 @@ void App::deferTxSamples(const std::vector<float>& samples, const char* context,
                    in_qso_data,
                    false,
                    earliest_flush});
+    // Fix 4: this audio was rendered under the CURRENT data mode — stamp it so a
+    // later mode commit invalidates it (purgeStaleDeferredDataTx).
+    deferred_tx_.back().data_mode_gen =
+        data_mode_generation_.load(std::memory_order_acquire);
     const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         earliest_flush > now ? earliest_flush - now
                              : std::chrono::steady_clock::duration::zero()).count();
@@ -3034,6 +3067,10 @@ void App::deferTxFrame(const Bytes& frame, const char* context,
                    true,
                    expect_full_ofdm_anchor_after_tx,
                    now + std::chrono::milliseconds(backoff_ms)});
+    // Fix 4: pre-encode defer — the frame BYTES were chunked under the current
+    // ARQ grid; a mode commit re-chunks them, so stamp the generation here too.
+    deferred_tx_.back().data_mode_gen =
+        data_mode_generation_.load(std::memory_order_acquire);
     guiLog("CCA: deferred %s in-QSO DATA pre-encode (rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
            context ? context : "TX audio",
            modem_.channelRms(), modem_.channelQuietThreshold(),
@@ -3060,13 +3097,68 @@ void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context,
                    false,
                    now + std::chrono::milliseconds(backoff_ms),
                    group_seq});
+    // Fix 4: pre-encode burst defer — same staleness contract as deferTxFrame.
+    deferred_tx_.back().data_mode_gen =
+        data_mode_generation_.load(std::memory_order_acquire);
     guiLog("CCA: deferred %s in-QSO DATA pre-encode (frames=%zu rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
            context ? context : "TX burst audio",
            frames.size(), modem_.channelRms(), modem_.channelQuietThreshold(),
            deferred_tx_.size(), backoff_ms);
 }
 
+void App::purgeStaleDeferredDataTx() {
+    // BUG-MC-RETRY-SPURIOUS fix 4 (stale CCA-deferred TX guard). Forensic fact
+    // (rig E1): a data burst rendered at R3/4/epoch-0 was CCA-deferred at 149.990,
+    // the mode committed to R2/3 at 152.757, and the stale audio was flushed anyway
+    // at 160.670-169.652 — 9.0 s of airtime the peer could not decode (wrong
+    // rate/geometry) on a half-duplex channel where every second of TX is the ONLY
+    // second of link time. Dropping is strictly better: the ARQ still owns the
+    // un-ACKed frames and re-renders them at the committed mode on its next refill.
+    // Only DATA-class entries (in_qso_data) are eligible — control audio
+    // (MODE_CHANGE, ACKs, tone bursts) never enters the deferred queue while
+    // connected (see queueRealTxSamples), and pre-connection probes carry
+    // in_qso_data=false, so the guard structurally cannot drop control frames.
+    if (deferred_tx_.empty()) {
+        return;
+    }
+    const uint32_t gen = data_mode_generation_.load(std::memory_order_acquire);
+    double dropped_audio_sec = 0.0;   // rendered (Samples) entries
+    size_t dropped_frames = 0;        // pre-encode (Frame/Burst) entries
+    size_t dropped_entries = 0;
+    for (auto it = deferred_tx_.begin(); it != deferred_tx_.end();) {
+        if (it->in_qso_data && it->data_mode_gen != gen) {
+            switch (it->kind) {
+                case DeferredTxKind::Samples:
+                    dropped_audio_sec += it->samples.size() / 48000.0;
+                    break;
+                case DeferredTxKind::Frame:
+                    dropped_frames += 1;
+                    break;
+                case DeferredTxKind::Burst:
+                    dropped_frames += it->frames.size();
+                    break;
+            }
+            ++dropped_entries;
+            it = deferred_tx_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (dropped_entries > 0) {
+        guiLog("CCA WARN: data-mode commit invalidated %zu deferred DATA TX entr%s "
+               "(%.1f s rendered audio, %zu pre-encode frame(s)) — dropped, ARQ "
+               "re-renders at the committed mode",
+               dropped_entries, dropped_entries == 1 ? "y" : "ies",
+               dropped_audio_sec, dropped_frames);
+        if (deferred_tx_.empty()) {
+            // Nothing left to guard; the deadline re-arms on the next deferral.
+            deferred_tx_deadline_ = {};
+        }
+    }
+}
+
 void App::flushDeferredTxIfReady() {
+    purgeStaleDeferredDataTx();
     if (deferred_tx_.empty()) {
         return;
     }

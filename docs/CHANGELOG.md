@@ -10,6 +10,117 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-04 — fix(control-plane): the E1/seed-42 forensic arc — six defects root-caused by adversarial workflows and fixed, all validated on the deterministic seed
+
+Full mechanism narratives: the three workflow verdicts (E1 MODE_CHANGE, R3/4 ACK-miss,
+16QAM zero-decode) are summarized in KNOWN_BUGS entries. Fixes, each proven on seed 42:
+1. **MC retry TX-hold** (`setTxActiveProvider`): the retry deadline holds while own TX is
+   keyed — kills the every-trough spurious retry (timer lost to the sender's own 10.6 s
+   bundled key-down). Unit-tested; unwired hosts keep legacy behavior.
+2. **WAITING-REBASE voice** (tone-ACK rung_cmd=3 under ULTRA_RX_RATE_CMD): the ack-silenced
+   unanchored receiver voices "alive, resend the era base"; sender resets zero-progress
+   evidence + standalone base resend — kills the manufactured collapse (E1 demote 2).
+3. **Receiver MODE_CHANGE dedup** (same seq,mod,rate → single re-ACK, no re-apply/notify).
+4. **Stale CCA-deferred data-TX purge** on mode commit (9.0 s undecodable air observed).
+5. **Phantom-frame kill**: wire descriptor group size locked from BURST_HEADER consume to
+   group end (v2; the DESC-SWITCH adopt clobbered 5→6/9→6 → phantom noise frame → poisoned
+   the ACK staircase to the 100 ms bin → structurally undecodable at the sender (monitor
+   buffer 120 k < 163.2 k) → 3/3 missed → ~18% goodput tax). Monitor buffer now DERIVED
+   from the scan set (172.8 k); silent capacity skip now WARNs.
+6. **Mode-hop cursor fix**: the descriptor-adopt's redundant setConnectedOFDMMode reset no
+   longer clobbers the search cursor/floor parked at the group anchor when a descriptor
+   group is in flight — first descriptor-committed 16QAM group now arms via the chirp FFT
+   (was: 9.7 k-sample beheading → FFT starvation → stochastic fallback → 18 s silent RTO).
+   Plus a group-abandonment backstop NACK (declared group exhausted unarmed → empty
+   finalize → fast mask-0 NACK). 7. **Responder handshake confirm** now fires on the first
+   delivered burst group (descriptor-era sessions never confirmed → 3.1 s MC-DPSK control
+   frames all session).
+Acceptance (seed 42, full stack): PASS, goodput 1450→1670, RTO-repairs 3→0, slow-ACK
+misses 3→0, first 16QAM group 9/9 (was silent stall), handshake confirmed at t=38 (was
+t=294). ctest 80/81 (known red).
+
+## 2026-07-04 — fix(protocol/gui): BUG-MC-RETRY-SPURIOUS fixes 3+4 — receiver MODE_CHANGE dedup (single re-ACK per duplicate) + stale CCA-deferred data-TX guard (drop on data-mode commit) — **EDITS-ONLY / UNVALIDATED (parallel-edits session: not built, not run — the main session integrates and runs build + ctest + faithful gate; fixes 1+2 of the same verdict land in the main session)**
+
+**Context:** the 2026-07-04 rig forensics behind `docs/KNOWN_BUGS.md`
+BUG-MC-RETRY-SPURIOUS (and its sibling BUG-UNANCHORED-SILENCE-ESCAPE). The MODE_CHANGE
+retry timer is request-time-anchored while the frame rides the tail of a ~10.6 s
+bundled key-down, so EVERY trough exchange retried even though copy #1 was ACKed
+(E1/D1/D3: cycles 21.07/21.27/30.37 s vs the 18.2 s deadline). The retry-anchor fix
+itself (fix 1/2) is the main session's; this entry covers the two receiver/GUI-side
+consequences caught in the same forensics.
+
+**Fix 3 — receiver MODE_CHANGE dedup (`src/protocol/connection_handlers.cpp`
+`handleModeChange`, state block in `src/protocol/connection.hpp`):**
+1. *Broken:* every decoded duplicate MODE_CHANGE copy (sender diversity copies AND the
+   spurious retries) re-ran `applyDataMode` (ARQ/file-transfer reconfigure), re-notified
+   the GUI (the operator-visible duplicate `[MODE]` lines), and scheduled a FRESH
+   fading-aware 3-copy ACK repeat set — up to 9 control-ACK frames of half-duplex
+   airtime per trough exchange.
+2. *Changed:* `handleModeChange` now tracks the last APPLIED request as a
+   `(seq, mod, rate)` tuple (`last_applied_mode_change_*`, clearly-marked block in
+   connection.hpp). A re-arriving copy matching the tuple short-circuits: ONE single
+   MODE_CHANGE_ACK copy is transmitted (diversity re-ACK — the duplicate means the
+   sender may have missed our ACKs; one copy per duplicate reception is the calibrated
+   response), no re-apply, no GUI re-notify, no fresh repeat set. First-copy behavior
+   byte-identical. Dedup keys on the tuple, not seq alone: the sender never resets
+   `mode_change_seq_` per session, but a peer RESTART restarts its counter — the tuple
+   guards that reuse corner, and same-seq-different-tuple applies as a new request.
+   State clears at session establishment in the two handler-side paths
+   (`handleConnect` post-guard — also covers the manual `acceptCall()` establishment,
+   which enters connected inside connection.cpp — and `handleConnectAck` post-guard).
+3. *Why correct (PHY/operator lenses):* a duplicate carries exactly one bit of
+   information — "sender hasn't seen my ACK" — so the matched response is one more
+   diversity ACK copy, not a full repeat set (which was calibrated for a FIRST
+   reception under fading, not per-copy); re-applying an identical mode is a no-op
+   physically but not operationally (GUI noise, ARQ reconfigure churn on the RX path).
+4. *Verification (owed):* new `test_duplicate_mode_change_single_reack_no_reapply` in
+   `tests/test_connection_adaptive.cpp` — two identical receptions → mode applied once,
+   GUI notified once, first reception emits the full fading-aware ACK set, each
+   duplicate emits exactly one ACK frame and schedules nothing; fresh-seq and
+   same-seq-different-tuple both apply normally. Run
+   `ctest --test-dir build --output-on-failure -j4` after integration.
+   **INTEGRATION NOTE (main session):** ideally also clear
+   `last_applied_mode_change_valid_ = false` in `enterConnected()`/`enterDisconnected()`
+   (connection.cpp — deliberately untouched by this parallel session).
+
+**Fix 4 — stale CCA-deferred data-TX guard (`src/gui/app.cpp` + `src/gui/app.hpp`):**
+1. *Broken (rig E1 forensic fact):* a data burst rendered at R3/4/epoch-0 was
+   CCA-deferred at Pi5-149.990, the mode committed to R2/3 at 152.757, and the stale
+   audio was flushed anyway at 160.670–169.652 — **9.0 s of undecodable airtime** on a
+   half-duplex channel (wrong rate/constellation/CW geometry at the receiver).
+2. *Changed:* the GUI's deferred-TX queue (`App::DeferredTx`) now stamps every entry
+   with a data-mode **generation** (`data_mode_generation_`, atomic, bumped by the
+   existing `setDataModeChangedCallback` handler only when the committed
+   `(mod, rate, cw)` tuple actually changes — covers MODE_CHANGE commits both
+   directions, CONNECT-time initial mode, and descriptor-switch commits, all of which
+   funnel through `notifyDataModeChanged`). `purgeStaleDeferredDataTx()` (called at the
+   top of `flushDeferredTxIfReady()`, main thread) drops any deferred entry that is
+   DATA-class (`in_qso_data`) AND stamped with an older generation, logging
+   `CCA WARN: data-mode commit invalidated … (X.X s rendered audio, N pre-encode
+   frame(s)) — dropped` with the dropped duration in seconds. No knob — dropping
+   provably-undecodable audio is strictly better: the ARQ still owns the un-ACKed
+   frames and re-renders them at the committed mode on its next refill.
+3. *Control-frame safety (structural, not filtered):* control audio (MODE_CHANGE
+   itself, ACKs, tone bursts) NEVER enters the deferred queue while connected —
+   `queueRealTxSamples` only defers pre-connection (CCA) or `in_qso_data` (DATA-frame
+   audio, classified by `isInQsoDataFrame` at the TX callbacks) — and pre-connection
+   probes carry `in_qso_data=false`; the purge condition requires `in_qso_data`, so it
+   cannot drop control frames by construction. The dormant pre-encode defer kinds
+   (`Frame`/`Burst`, behind `shouldDeferInQsoDataForTx()`==false) are stamped too:
+   their frame BYTES were chunked under the old ARQ grid, so they are equally stale.
+4. *Verification (owed):* no headless unit test — `App` is the monolithic GUI object
+   (SDL/audio/protocol wiring; no existing test instantiates it) and the guard is
+   private main-thread queue logic. Validation path = the faithful gate
+   (`tools/gui_qso_scenario.sh`) plus rig: grep for the `CCA WARN: data-mode commit
+   invalidated` line adjacent to a MODE_CHANGE commit; the E1 signature (stale-rate
+   burst flushed post-commit) must not reproduce.
+
+**Files:** `src/protocol/connection_handlers.cpp`, `src/protocol/connection.hpp`
+(marked state block), `src/gui/app.cpp`, `src/gui/app.hpp`,
+`tests/test_connection_adaptive.cpp`.
+
+---
+
 ## 2026-07-03 — feat(arq/ladder): receiver rung command in the tone-ACK Phase 2 (`ULTRA_RX_RATE_CMD`, default-OFF byte-identical) — **EDITS-ONLY / UNVALIDATED (not built, not run — a rig validation batch was cycling; build + ctest + faithful gate owed before any claim)**
 
 **What it closes (the Phase-1 D3 finding, entry below):** with climbs ~free under the

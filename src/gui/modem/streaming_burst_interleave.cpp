@@ -223,6 +223,7 @@ void StreamingDecoder::accumulateBurstFrames() {
             stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
+        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
         clearBurstDiagnostics();
         {
@@ -259,6 +260,7 @@ void StreamingDecoder::accumulateBurstFrames() {
                 stats_.frames_failed += burst_group_size;
             }
             burst_soft_buffer_.clear();
+            descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             clearBurstDiagnostics();
             {
@@ -277,6 +279,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
             finalizeBurstGroup();
             burst_soft_buffer_.clear();
+            descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             clearBurstDiagnostics();
             {
@@ -746,12 +749,14 @@ void StreamingDecoder::finalizeBurstGroup() {
         // controller resends. Without this catch the thread dies silently
         // and the entire RX side stops responding.
         burst_soft_buffer_.clear();
+        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         return;
     } catch (...) {
         LOG_MODEM(ERROR,
                   "[%s] BurstInterleaver::deinterleave threw UNKNOWN exception — group dropped",
                   log_prefix_.c_str());
         burst_soft_buffer_.clear();
+        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         return;
     }
     }  // end interleave-on deinterleave branch

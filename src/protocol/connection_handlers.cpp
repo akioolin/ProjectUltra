@@ -170,6 +170,14 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         return;
     }
 
+    // BUG-MC-RETRY-SPURIOUS fix 3: a genuinely NEW inbound connection is being
+    // established (every duplicate/busy/collision case returned above). Clear the
+    // MODE_CHANGE dedup tuple so a restarted peer's reused seq can't be mistaken
+    // for a duplicate of the previous session. Placed here (not enterConnected —
+    // connection.cpp is owned by the main session) so it also covers the manual
+    // acceptCall() establishment path, which enters connected in connection.cpp.
+    last_applied_mode_change_valid_ = false;
+
     // Get capabilities from ConnectFrame
     uint8_t remote_caps = frame.mode_capabilities;
     WaveformMode remote_pref = static_cast<WaveformMode>(frame.negotiated_mode);
@@ -489,6 +497,10 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         return;
     }
 
+    // BUG-MC-RETRY-SPURIOUS fix 3: new session on the initiator side — clear the
+    // MODE_CHANGE dedup tuple (see handleConnect for the responder-side clear).
+    last_applied_mode_change_valid_ = false;
+
     // Get negotiated waveform mode from ConnectFrame
     WaveformMode mode = static_cast<WaveformMode>(frame.negotiated_mode);
     negotiated_mode_ = mode;
@@ -648,6 +660,33 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     // Parse MODE_CHANGE payload
     auto info = frame.getModeChangeInfo();
 
+    // BUG-MC-RETRY-SPURIOUS fix 3: dedup re-arriving copies of an ALREADY-APPLIED
+    // MODE_CHANGE (the sender's diversity copies and its request-time-anchored
+    // spurious retries — rig E1/D1/D3 saw a retry EVERY trough exchange even though
+    // copy #1 was ACKed). Re-applying is not idempotent from the operator's seat: it
+    // re-notifies the GUI (duplicate [MODE] lines) and schedules a FRESH fading-aware
+    // 3-copy ACK set per copy (up to 9 control frames of airtime per exchange on a
+    // fading channel — half-duplex airtime the data plane pays for). The duplicate
+    // DOES carry information: the sender may have missed our ACKs. Calibrated
+    // response = exactly ONE re-ACK copy per duplicate reception (any staggered
+    // repeats from the first reception still drain independently). Dedup keys on the
+    // (seq, mod, rate) tuple — see the state block in connection.hpp for the
+    // seq-reuse rationale.
+    if (last_applied_mode_change_valid_ &&
+        frame.seq == last_applied_mode_change_seq_ &&
+        info.modulation == last_applied_mode_change_mod_ &&
+        info.code_rate == last_applied_mode_change_rate_) {
+        auto dup_ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
+        transmitFrame(dup_ack.serialize());
+        LOG_MODEM(INFO,
+                  "Connection: duplicate MODE_CHANGE seq=%u (%s %s) from %s — mode already applied; single re-ACK only",
+                  static_cast<unsigned>(frame.seq),
+                  modulationToString(info.modulation),
+                  codeRateToString(info.code_rate),
+                  remote_call_.c_str());
+        return;
+    }
+
     const char* reason_str = "unknown";
     switch (info.reason) {
         case v2::ModeChangeReason::CHANNEL_IMPROVED: reason_str = "channel improved"; break;
@@ -671,6 +710,13 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     // stay in lockstep on frame geometry.
     applyDataMode(info.modulation, info.code_rate,
                   info.data_frame_cw_count, info.ladder_rung_id);
+
+    // BUG-MC-RETRY-SPURIOUS fix 3: record what we just applied so duplicate copies
+    // of this exact request short-circuit above (single re-ACK, no re-apply).
+    last_applied_mode_change_valid_ = true;
+    last_applied_mode_change_seq_ = frame.seq;
+    last_applied_mode_change_mod_ = info.modulation;
+    last_applied_mode_change_rate_ = info.code_rate;
 
     // Send ACK for the MODE_CHANGE
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);

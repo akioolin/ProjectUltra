@@ -185,6 +185,9 @@ private:
     // detection is gated by cfg_.armed_only (false = original always-on;
     // true = idle until armed again).
     bool armed_ = false;
+    // 2026-07-04: one-shot latch for the capacity-skip WARN (runDetectionPass) —
+    // the mismatch is structural per config, so once per monitor lifetime suffices.
+    bool capacity_skip_warned_ = false;
     uint64_t arm_deadline_stream_offset_ = 0;
 };
 

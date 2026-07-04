@@ -303,6 +303,11 @@ public:
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
     bool getBurstInterleave() const { return use_burst_interleave_; }
     void setBurstInterleaveGroupSize(int size);
+    // PHANTOM-FRAME fix (2026-07-04): BURST_HEADER consume path — the wire
+    // descriptor group size always wins immediately; the config setter above is
+    // the descriptor-missed FALLBACK, ignored while a descriptor-declared group
+    // is mid-collection (see .cpp comment for the DESC-SWITCH phantom incident).
+    void setBurstGroupSizeFromDescriptor(int size);
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
     // Last received burst descriptor (§14.17), for GUI display of the burst type.
@@ -893,6 +898,12 @@ private:
     int rx_level_last_logged_verdict_ = -1;  // LEVEL ADVISORY log: once per change
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
     int burst_group_size_ = 8;
+    // PHANTOM-FRAME fix v2 (2026-07-04): TRUE from BURST_HEADER consume until the
+    // group finalizes/aborts (cleared at every burst_soft_buffer_ clear site).
+    // v1 keyed on buffer-non-empty — WRONG: the DESC-SWITCH adopt fires ~2 ms
+    // after header consume, BEFORE any frame is collected, so the policy clobber
+    // (5-&gt;6 phantom / 9-&gt;6 deinterleave scramble) walked past an empty buffer.
+    bool descriptor_group_size_locked_ = false;
     static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin
 
     // MC-DPSK continuous burst state. The first frame is decoded through the

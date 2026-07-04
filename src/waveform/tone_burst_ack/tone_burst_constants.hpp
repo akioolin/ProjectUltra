@@ -280,7 +280,15 @@ inline constexpr uint8_t kDriveAdvisoryReserved = 3;  // treat as hold
 inline constexpr uint8_t kRungCmdNone = 0;      // no command (back-compat zero)
 inline constexpr uint8_t kRungCmdDownOne = 1;   // one rung more robust
 inline constexpr uint8_t kRungCmdDownHard = 2;  // crater: sender's escape target
-inline constexpr uint8_t kRungCmdReserved = 3;  // treat as hold/no command
+inline constexpr uint8_t kRungCmdReserved = 3;  // WAITING-REBASE voice (2026-07-04,
+// BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3): the unanchored receiver's only
+// utterance during the move-epoch interregnum ack-silence — "alive, forward link
+// works, the era-base frame keeps dying: resend it". NOT an ack: the sender
+// consumes it whole in Connection::onToneBurstAck (no SACK parse, no rate-
+// controller feed; zero-progress collapse evidence reset + standalone base
+// resend via SelectiveRepeatARQ::expireBaseSlotTimerForRebase). Same
+// ULTRA_RX_RATE_CMD lockstep as the demote commands; a knob-OFF build never
+// emits it and never reaches the consume branch.
 
 // (15,11) Hamming: 11 info bits -> 15 coded bits per block.
 // ceil(44 / 11) = 4 blocks. The 2026-07-03 Phase-2 rung_cmd bits consumed the

@@ -163,6 +163,18 @@ public:
     // machinery is active. Exposes the ctor-latched ULTRA_ARQ_MOVE_EPOCH state so
     // Connection can fall back to the legacy MODE_CHANGE exchange when it is OFF.
     bool moveEpochEnabled() const { return move_epoch_enabled_; }
+    // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3): receiver
+    // side — true while the unanchored interregnum holds (epoch adopted, era base
+    // not yet seen, total ack silence). Connection reads it per burst-group event
+    // to emit the rung_cmd=3 "waiting-rebase" tone signal (ULTRA_RX_RATE_CMD).
+    bool rxWaitingRebase() const { return rx_epoch_wait_rebase_; }
+    // WAITING-REBASE voice, sender side: the peer told us it is unanchored — the
+    // era-base frame (head-of-burst, the most fade-exposed acquisition slot) keeps
+    // dying. Force the BASE slot's retransmit timer due so the existing resend
+    // machinery re-sends it promptly — typically as a STANDALONE single-frame
+    // burst with its own preamble (a different acquisition shape than the
+    // head-of-burst slot that kept failing). All standard pacing/dedup applies.
+    void expireBaseSlotTimerForRebase();
 
     // Set codewords per fixed OFDM data frame (default 4).
     void setFixedFrameCodewords(int cw_count);

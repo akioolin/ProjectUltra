@@ -564,3 +564,29 @@ already carries the measurement (and has 2 free bits to carry a command). The re
 work is deleting a round-trip, wiring one receiver-side notification, and enforcing the
 full-anchor rule the ladder already pays for — turning every rate move from a
 stop-and-wait exchange (2.4 s clean, 60-90 s in troughs) into **zero extra key-downs**.
+
+## 5.3 WAITING-REBASE voice + spurious-retry hold (2026-07-04, from the E1 forensics)
+
+Root causes (adjudicated HIGH confidence, docs/KNOWN_BUGS.md BUG-UNANCHORED-SILENCE-ESCAPE
++ BUG-MC-RETRY-SPURIOUS): (a) the MODE_CHANGE retry deadline was request-anchored while the
+frame rides the TAIL of the sender's own ~10.6 s bundled key-down — every observed trough
+exchange (21-30 s pipeline vs 18.2 s timer) retried spuriously though copy #1 was ACKed;
+(b) a lost EPOCH_REBASE head frame put the receiver into by-design ack-silence while it
+kept DELIVERING data → the sender's zero-progress escape manufactured a demote of a working
+rate (E1: R2/3→R1/2, ~83 s burned; same signature D1/D3).
+
+Fixes (both rode `ULTRA_RX_RATE_CMD` where wire-visible):
+1. **TX-hold on the retry clock** (no wire change): `Connection::setTxActiveProvider` wires
+   the host's tx-keyed atomic; the MODE_CHANGE deadline HOLDS while own TX is keyed —
+   half-duplex means keyed time is not ACK-loss evidence. Effective anchor = key-up.
+2. **rung_cmd=3 = WAITING-REBASE** (wire semantics for the formerly reserved value, same
+   knob/lockstep/CRC as the Phase-2 commands): the unanchored receiver — whose SACKs are
+   suppressed by the interregnum rules — voices once per received group on the 4-FSK plane.
+   Sender consumes it WHOLE and FIRST in onToneBurstAck: mask never parsed as SACK, no
+   rate-controller feed (the voice proves the forward link works), zero-progress collapse
+   evidence reset on every copy, and a group_seq-deduped standalone resend of the era-base
+   frame (`expireBaseSlotTimerForRebase`: base slot timer → due; the resend leaves through
+   the normal machinery as a single-frame burst with its OWN preamble — a different
+   acquisition shape than the head-of-burst slot that kept dying). Receiver emits AFTER the
+   group's frames processed (if this group carried the base, the interregnum just ended —
+   no voice). Escape policy is thereby reverse-path-aware: silence-with-voice ≠ crater.

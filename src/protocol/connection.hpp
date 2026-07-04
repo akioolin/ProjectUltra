@@ -222,6 +222,16 @@ public:
 
     void setTransmitCallback(TransmitCallback cb);
     void setTransmitInfoCallback(TransmitInfoCallback cb);
+    // BUG-MC-RETRY-SPURIOUS (2026-07-04): host-provided "is our TX keyed right now"
+    // predicate (the app's tx_in_progress_ atomic). While WE are transmitting we
+    // physically cannot have decoded the peer's control ACK (half-duplex), so the
+    // MODE_CHANGE retry deadline HOLDS during own TX instead of ticking — the timer
+    // effectively anchors at key-UP of the burst that carried the frame. Unwired
+    // (headless/tests) => nullptr => legacy request-anchored behavior.
+    void setTxActiveProvider(std::function<bool()> provider) {
+        tx_active_provider_ = std::move(provider);
+    }
+
     void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
         on_transmit_tone_burst_ack_ = std::move(cb);
     }
@@ -719,6 +729,24 @@ private:
     };
     std::deque<ModeChangeAckRepeatJob> mode_change_ack_repeat_jobs_;
 
+    // ==== BUG-MC-RETRY-SPURIOUS fix 3 (receiver MODE_CHANGE dedup) — 2026-07-04 ====
+    // Last MODE_CHANGE actually APPLIED this connection. A re-arriving copy with the
+    // same (seq, mod, rate) is the sender's diversity copy / spurious retry: it means
+    // the sender may have missed our ACKs, so the calibrated response is ONE re-ACK
+    // copy — not a re-apply, not a GUI re-notify, not a fresh fading-aware repeat set
+    // (handleModeChange, connection_handlers.cpp). Dedup keys on the full tuple, not
+    // seq alone: mode_change_seq_ is never reset per-session on the sender, but a peer
+    // RESTART restarts its counter — the tuple guards that seq-reuse corner. State is
+    // written ONLY in connection_handlers.cpp (handleModeChange applies; handleConnect/
+    // handleConnectAck clear at session establishment). INTEGRATION NOTE for the main
+    // session: ideally ALSO cleared in enterConnected()/enterDisconnected()
+    // (connection.cpp — deliberately not edited by the parallel session that added this).
+    bool last_applied_mode_change_valid_ = false;
+    uint16_t last_applied_mode_change_seq_ = 0;
+    Modulation last_applied_mode_change_mod_ = Modulation::DQPSK;
+    CodeRate last_applied_mode_change_rate_ = CodeRate::R1_4;
+    // ==== end BUG-MC-RETRY-SPURIOUS fix 3 block ====
+
     // ARQ for reliable data transfer (Selective Repeat for higher throughput)
     SelectiveRepeatARQ arq_;
     fec::SoftCombineBuffer soft_combine_harq_;
@@ -907,11 +935,19 @@ private:
     // mode change (a straggler duplicate ACK of the consumed command must stay
     // deduped after the demote commits); reset in enterConnected/enterDisconnected.
     int rx_rate_cmd_seq_seen_ = -1;
+    // WAITING-REBASE voice dedup (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3): last
+    // group_seq whose rung_cmd==3 voice triggered a base-slot resend. The zero-
+    // progress reset still runs on EVERY voice copy (cheap, idempotent, and the
+    // point); only the resend expiry is deduped. Reset with the pair above.
+    int rx_rebase_voice_seq_seen_ = -1;
     // Receiver emit-side decision (called from onBurstGroupReceived before the
     // group's tone-burst ACK is emitted) and sender consume-side action (called
     // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE
     // applyAdaptiveRateFeedback ran, so one ACK's evidence moves the rung at most
     // once). Both are hard no-ops while the knob is OFF.
+    // BUG-RESPONDER-HANDSHAKE-NEVER-CONFIRMS (2026-07-04): single confirm site,
+    // called from BOTH the classic frame path and the burst-group path (see .cpp).
+    void maybeConfirmResponderHandshake(const char* evidence);
     void updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask);
     void maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
                                  Modulation mod_at_ack, CodeRate rate_at_ack);
@@ -1091,6 +1127,7 @@ private:
     TransmitCallback on_transmit_;
     TransmitInfoCallback on_transmit_info_;
     TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
+    std::function<bool()> tx_active_provider_;  // BUG-MC-RETRY-SPURIOUS: see setter
     DriveAdvisoryCallback on_drive_advisory_;  // software-ALC sender-side hook
     ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
     ConnectedCallback on_connected_;

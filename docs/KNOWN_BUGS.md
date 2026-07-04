@@ -1,12 +1,49 @@
 # Known Bugs
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-RESPONDER-HANDSHAKE-NEVER-CONFIRMS: responder handshake_confirmed_ only flipped in the CLASSIC frame path — a descriptor-era burst-only session never confirms, so the modem TX-routes every classic control frame via the handshake last-RX-waveform mirror = 3.1 s MC-DPSK DBPSK (operator saw "MC-DPSK at the end of the run")
+- Status: **FIXED 2026-07-04** — confirm extracted to maybeConfirmResponderHandshake, now also fired on the first delivered burst group (equally hard evidence the initiator heard our CONNECT_ACK). Legacy runs confirmed via the initiator first MODE_CHANGE side effect (OFF-arm log: confirm@77s); full-descriptor runs confirmed only at DISCONNECT (@294s). Exposed by Phase 1/2 eliminating classic control frames by design.
+
+
+### BUG-STAIRCASE-SNAPSHOT-INPUT: the tone-ACK staircase reads a single last-frame SNR cache write — no validity gate (a total-erasure slot at noise-floor RMS with 100% zero soft bits still lands in the cache), no fade averaging, no rung clamp
+- Status: **ACTIVE, deferred (2026-07-04 forensics link 2).** The detonator (phantom frame from the DESC-SWITCH group-size clobber) and the trap (monitor buffer < 100ms rung) are both FIXED 2026-07-04, which de-fangs this for the observed incident class; the input remains unprincipled. Fix direction: gate cache writes on frame validity (zero-soft-bit/noise-RMS slots are not measurements) + fade-averaged/median statistic over kept frames (aligns with task #58) + clamp emitted rungs to the sender-decodable set.
+
+
+### BUG-UNANCHORED-SILENCE-ESCAPE: a lost EPOCH_REBASE head frame makes the receiver by-design ACK-SILENT while it keeps DELIVERING data → the sender's zero-progress collapse-escape reads the silence as a forward-link crater → MANUFACTURED demote of a working rate + forced re-delivery
+- Status: **FIX IMPLEMENTED 2026-07-04 (WAITING-REBASE voice: rung_cmd=3 under ULTRA_RX_RATE_CMD — unanchored receiver voices per group; sender resets zero-progress evidence + standalone era-base resend; design \x{a7}5.3). Validation: build+ctest+sim, then rig batch.**
+  forensics, HIGH confidence, no rerun needed). Fix in progress.**
+- Mechanism (E1, IONOS MPG@20, clocks aligned Mac=Pi5+16.93s): after the demote-1 epoch
+  rewind, the epoch-1 EPOCH_REBASE frame (seq 33, head-of-burst = the most fade-exposed
+  slot: acquisition marker-timing retries logged) never decoded across 3 rounds. The
+  receiver adopted epoch 1 UNANCHORED → deliberate ack-silence
+  (`selective_repeat_arq.cpp` interregnum rules) while still SALVAGING frames 34-37 every
+  round — receiver rx_base=38 (everything delivered) vs sender acked=33. Two ACK-less RTO
+  rounds → collapse-escape demoted working R2/3 → R1/2 (+ another full stop-and-wait
+  exchange + re-delivery). ~83 s of a 600 s window burned. Same signature in D1 (base 15
+  vs rewind 10) and D3 (four cycles, two 4-retry exhaustions).
+- Fix direction (ranked by the adjudicator): give the unanchored receiver a VOICE on the
+  4-FSK tone plane (rung_cmd reserved value 3 = "waiting-rebase" under `ULTRA_RX_RATE_CMD`)
+  → sender resends the era-base frame instead of counting zero rounds; escape policy
+  becomes reverse-path-aware (silence-while-unanchored ≠ forward crater).
+
+### BUG-MC-RETRY-SPURIOUS: MODE_CHANGE retry timer is anchored at REQUEST time, but the frame rides the TAIL of the sender's own bundled key-down (~10.6 s) → the 18.2 s deadline structurally loses to the real 21-30 s pipeline → EVERY trough exchange retries even though copy #1 was ACKed
+- Status: **ACTIVE (proven on E1 demotes 1+2, D1, D3 — all observed cycles 21.07/21.27/30.37 s
+  vs 18.2 s timer; the winning MC-ACK had fully ARRIVED 1.9-3.0 s before each retry fired —
+  the sender's own RX decode pipeline surfaces control decodes only after key-up).
+  ALL FOUR FIXES IMPLEMENTED 2026-07-04:** (1) TX-hold retry clock (setTxActiveProvider — deadline holds while keyed), (3) receiver same-(seq,mod,rate) dedup single-re-ACK, (4) stale CCA-deferred data-TX purge on mode commit, plus (2) the waiting-rebase voice above. Validation: build+ctest+sim, then rig batch.
+  carried the frame (evidence-driven), not at request time. Related receiver-side wart:
+  `handleModeChange` has NO same-seq dedup — every duplicate copy re-applies + re-notifies
+  + emits a fresh fading-aware 3-copy ACK set (the operator-visible dup [MODE] lines).
+- Also caught in the same forensics: a stale CCA-deferred TX burst rendered at the OLD
+  rate/epoch pre-commit was flushed post-commit → 9.0 s of undecodable airtime (fix:
+  drop/re-render deferred audio on mode/epoch commit).
 
 ### BUG-ARQ-SEQ-COLLISION: rate-change abort under ONE-WAY ACK loss re-chunks DIFFERENT file bytes under seq numbers the receiver already retired → receiver's seq-keyed dedup destroys them before the offset-idempotent file layer can see them → permanent byte hole + sender false-complete + receiver stranded
 - Status: **STRUCTURAL FIX IMPLEMENTED 2026-07-03 (knob-gated `ULTRA_ARQ_MOVE_EPOCH`,

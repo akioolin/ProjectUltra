@@ -749,7 +749,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             if (auto cf = v2::ControlFrame::deserialize(data_r14)) {
                                 const auto bi = cf->getBurstHeaderInfo();
                                 if (bi.group_size >= 2) {
-                                    setBurstInterleaveGroupSize(bi.group_size);
+                                    setBurstGroupSizeFromDescriptor(bi.group_size);
                                 }
                                 if (bi.cw_per_frame >= 1) {
                                     setFixedFrameCodewords(bi.cw_per_frame);
@@ -804,6 +804,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 sync_controller_.last_burst_descriptor_ = bi;
                                 sync_controller_.have_burst_descriptor_ = true;
+                                // Backstop-NACK window (2026-07-04): HEADNULL
+                                // drops count PER descriptor-declared group.
+                                headnull_resync_drop_count_ = 0;
                                 // #69 anchor-skip: stash the sender's announcement of the NEXT
                                 // group's anchor type so noteGroupDelivered arms the right search
                                 // (full-search chirp groups, light-search announced-skip groups).
@@ -1126,6 +1129,31 @@ void StreamingDecoder::decodeCurrentFrame() {
                       "[%s] [HEADNULL] sync-accepted frame consumed without decode "
                       "attempt (group not armed; drop #%u)",
                       log_prefix_.c_str(), headnull_resync_drop_count_);
+            // GROUP-ABANDONMENT BACKSTOP NACK (2026-07-04, 16QAM zero-decode
+            // forensics fix #5): when the drops exhaust the descriptor-declared
+            // group (every member frame consumed unarmed), the sender would
+            // otherwise hear NOTHING — no finalize, no ACK — and eat a full ~18 s
+            // burst-RTO. Synthesize an EMPTY finalize (mask 0) so the normal
+            // group-ack path emits a fast NACK (~one group period instead of the
+            // RTO; this deliberately restores the fast-NACK latency the pre-fix
+            // premature finalize provided by accident, without its geometry
+            // corruption). group size >= 2 guaranteed by have_burst_descriptor_.
+            {
+                const int declared = std::max(2, burst_group_size_);
+                if (static_cast<int>(headnull_resync_drop_count_) >= declared &&
+                    burst_soft_buffer_.empty() && burst_group_callback_) {
+                    LOG_MODEM(WARN,
+                              "[%s] [HEADNULL] declared group (%d) exhausted unarmed — "
+                              "synthesizing empty finalize (backstop NACK)",
+                              log_prefix_.c_str(), declared);
+                    headnull_resync_drop_count_ = 0;
+                    sync_controller_.have_burst_descriptor_ = false;
+                    burst_group_callback_(/*group_seq=*/0, {}, /*all_ok=*/false,
+                                          /*quality=*/0.0f, /*frame_mask=*/0,
+                                          use_burst_interleave_,
+                                          static_cast<uint8_t>(declared));
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                 sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
@@ -1364,6 +1392,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         // Initialize accumulation state with first frame's soft bits
         burst_soft_buffer_.clear();
+        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
         burst_soft_buffer_.push_back(std::move(soft_bits));
         burst_min_block_ = static_cast<size_t>(

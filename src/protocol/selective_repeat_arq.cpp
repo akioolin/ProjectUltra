@@ -2248,6 +2248,26 @@ void SelectiveRepeatARQ::setSendCompleteCallback(SendCompleteCallback cb) {
     on_send_complete_ = std::move(cb);
 }
 
+void SelectiveRepeatARQ::expireBaseSlotTimerForRebase() {
+    const size_t idx = seqToSlot(tx_base_seq_);
+    auto& slot = tx_window_[idx];
+    if (!slot.active || slot.acked || slot.seq != tx_base_seq_) {
+        return;  // no live base frame — nothing to re-anchor with
+    }
+    // Only pull the timer in when it is not already imminent: the receiver's
+    // fading-aware ACK repeats deliver up to 3 voice copies ~seconds apart, and
+    // each group event re-voices — without this floor every copy would re-fire
+    // a resend. 2 s ≈ the shortest control turnaround; an already-due timer
+    // means the machinery is about to act anyway.
+    if (slot.timeout_ms > 2000) {
+        LOG_MODEM(WARN,
+                  "SR-ARQ: WAITING-REBASE voice — expiring base slot seq=%u timer "
+                  "(was %u ms) for a standalone era-base resend",
+                  slot.seq, slot.timeout_ms);
+        slot.timeout_ms = 1;
+    }
+}
+
 void SelectiveRepeatARQ::abortPendingTx() {
     // MOVE-EPOCH (2026-07-04 fix, Phase-2 review finding): detect whether this abort
     // actually drops live payload BEFORE clearing the slots. The 2026-07-03 design

@@ -268,6 +268,13 @@ public:
         connection_.setDriveAdvisoryCallback(std::move(cb));
     }
 
+    // BUG-MC-RETRY-SPURIOUS (2026-07-04): host TX-keyed predicate — see
+    // Connection::setTxActiveProvider. Set once at wiring; called from the engine
+    // tick under the mutex, so it must be trivially thread-safe (read an atomic).
+    void setTxActiveProvider(std::function<bool()> provider) {
+        connection_.setTxActiveProvider(std::move(provider));
+    }
+
     // Half-duplex INTERACTIVE (bidirectional) data path — the TNC / Winlink-B2F
     // case where both stations alternately transmit. Keeps the ISS/IRS turn gate
     // on burst sends so the directions serialize instead of colliding.

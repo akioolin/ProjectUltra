@@ -169,9 +169,29 @@ private:
         bool expect_full_ofdm_anchor_after_tx = false;
         std::chrono::steady_clock::time_point earliest_flush{};
         uint16_t group_seq = 0;  // §14.27 burst group seq (re-emit stamps descriptor)
+        // BUG-MC-RETRY-SPURIOUS fix 4: data_mode_generation_ at defer time. DATA-class
+        // audio (in_qso_data) rendered under an OLDER generation is provably
+        // undecodable after a mode/rate/CW commit — purged, never flushed (rig E1:
+        // a stale R3/4 burst deferred pre-commit was flushed 8 s after the R2/3
+        // commit = 9.0 s of noise airtime). Control audio never enters this queue
+        // while connected (queueRealTxSamples only defers pre-connection or
+        // in_qso_data), so control frames are structurally exempt from the purge.
+        uint32_t data_mode_gen = 0;
     };
     std::deque<DeferredTx> deferred_tx_;
     std::chrono::steady_clock::time_point deferred_tx_deadline_{};
+    // BUG-MC-RETRY-SPURIOUS fix 4: monotonically increasing data-mode generation.
+    // Bumped by the DataModeChangedCallback (runs under the ProtocolEngine mutex,
+    // possibly off the main thread) whenever the committed (mod, rate, cw) tuple
+    // actually CHANGES; read on the main thread at defer time (stamp) and in
+    // purgeStaleDeferredDataTx() (drop stale DATA-class entries). Atomic because
+    // writer thread != reader thread; the last-seen tuple below is only touched
+    // inside the callback (serialized by the engine mutex), so it stays plain.
+    std::atomic<uint32_t> data_mode_generation_{0};
+    bool data_mode_gen_seen_valid_ = false;
+    Modulation data_mode_gen_seen_mod_{};
+    CodeRate data_mode_gen_seen_rate_{};
+    int data_mode_gen_seen_cw_ = 0;
     static constexpr size_t kMaxDeferredTx = 32;    // bounded memory (drop-oldest)
     static constexpr uint32_t kMaxTxDeferMs = 4000; // ~one max OFDM burst; never deadlock
     static constexpr uint32_t kInQsoDataQuietGuardMs = 2000;
@@ -417,6 +437,10 @@ private:
                       uint16_t group_seq = 0);
     uint32_t nextInQsoDataBackoffMs();
     void flushDeferredTxIfReady();
+    // BUG-MC-RETRY-SPURIOUS fix 4: drop deferred DATA-class TX rendered under a
+    // superseded data-mode generation (undecodable by the peer after the commit).
+    // Runs at the top of flushDeferredTxIfReady() on the main thread.
+    void purgeStaleDeferredDataTx();
     ptt::PttConfig pttConfigFromSettings(const AppSettings& settings) const;
     bool ensurePttReadyLocked(const AppSettings& settings);
     bool ensurePttReady();

@@ -440,6 +440,129 @@ void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
     }
 }
 
+// BUG-MC-RETRY-SPURIOUS fix 1: the MODE_CHANGE retry deadline HOLDS while our own
+// TX is keyed — half-duplex means keyed time cannot be ACK-loss evidence (rig E1:
+// the frame rode the tail of a ~10.6 s bundled key-down, so the request-anchored
+// 18.2 s deadline lost to the 21-30 s pipeline and retried spuriously EVERY trough
+// exchange). With the host provider reporting keyed, ticks must neither decrement
+// nor fire the deadline; on key-up the deadline resumes from where it held.
+void test_mode_change_retry_holds_while_tx_keyed() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.50f, Modulation::QPSK);
+
+    bool tx_keyed = true;
+    c.setTxActiveProvider([&tx_keyed] { return tx_keyed; });
+
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+
+    c.requestModeChange(Modulation::QPSK, CodeRate::R1_2, 20.0f,
+                        v2::ModeChangeReason::CHANNEL_DEGRADED);
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::modeChangeRetryMs(c);
+    const size_t frames_after_request = tx_frames.size();
+
+    // Keyed: three full deadlines elapse — the deadline must HOLD (no retry).
+    for (int i = 0; i < 3; ++i) c.tick(retry_ms);
+    CHECK(tx_frames.size() == frames_after_request,
+          "keyed TX must hold the MODE_CHANGE retry deadline (no spurious retry)");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "the exchange must stay pending across the hold");
+
+    // Key-up: the deadline resumes and one full deadline fires exactly one retry.
+    tx_keyed = false;
+    c.tick(retry_ms);
+    CHECK(tx_frames.size() == frames_after_request + 1,
+          "after key-up one elapsed deadline must fire exactly one retry");
+}
+
+// BUG-MC-RETRY-SPURIOUS fix 3: a re-arriving copy of an ALREADY-APPLIED MODE_CHANGE
+// (sender diversity copy or its request-time-anchored spurious retry — rig E1/D1/D3:
+// a retry fired EVERY trough exchange although copy #1 was ACKed) must not re-apply
+// the mode, must not re-notify the GUI (the operator-visible duplicate [MODE] lines),
+// and must not schedule a fresh fading-aware repeat set. The duplicate still carries
+// information — the sender may have missed our ACKs — so the calibrated response is
+// exactly ONE re-ACK copy per duplicate reception.
+void test_duplicate_mode_change_single_reack_no_reapply() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    int notify_count = 0;
+    c.setDataModeChangedCallback([&](Modulation, CodeRate, int, float, float,
+                                     int, int, bool) {
+        ++notify_count;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
+
+    const int repeat_count = 3;  // fading-aware MC-ACK repeat count at fading >= 0.15
+    const uint32_t drain_ms =
+        selective_repeat_arq_policy::ackRepeatDelayForCopy(
+            ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c), repeat_count) +
+        selective_repeat_arq_policy::kAckRepeatMaxJitterMs;
+
+    auto frame = v2::ControlFrame::makeModeChange(
+        "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
+        19.8f, 0.48f, v2::ModeChangeReason::CHANNEL_DEGRADED);
+
+    // First copy: full behavior — apply + one GUI notify + full fading-aware ACK set.
+    c.onFrameReceived(frame.serialize());
+    CHECK(c.getDataCodeRate() == CodeRate::R1_2,
+          "first MODE_CHANGE copy should apply the requested rate");
+    CHECK(notify_count == 1, "first MODE_CHANGE copy should notify the GUI once");
+    CHECK(tx_frames.size() == 1, "first MODE_CHANGE copy should ACK immediately");
+    c.tick(drain_ms);
+    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count),
+          "first MODE_CHANGE copy should emit the full fading-aware ACK set");
+
+    // Duplicate copy (same seq, same mod/rate): exactly ONE re-ACK, nothing else.
+    c.onFrameReceived(frame.serialize());
+    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 1,
+          "duplicate MODE_CHANGE should emit exactly one re-ACK copy");
+    auto dup_ack = v2::ControlFrame::deserialize(tx_frames.back());
+    CHECK(dup_ack && dup_ack->type == v2::FrameType::ACK && dup_ack->seq == 44,
+          "the duplicate's re-ACK should acknowledge the request seq");
+    CHECK(notify_count == 1, "duplicate MODE_CHANGE must not re-notify the GUI");
+    CHECK(c.getDataCodeRate() == CodeRate::R1_2,
+          "duplicate MODE_CHANGE must leave the applied mode untouched");
+    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_2,
+          "duplicate MODE_CHANGE must not re-run applyDataMode/ARQ reconfig");
+    c.tick(drain_ms);
+    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 1,
+          "duplicate MODE_CHANGE must not schedule a fresh ACK repeat set");
+
+    // Every further duplicate reception earns one more diversity re-ACK.
+    c.onFrameReceived(frame.serialize());
+    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 2,
+          "each duplicate reception should earn exactly one re-ACK copy");
+    CHECK(notify_count == 1, "repeated duplicates must stay notify-silent");
+
+    // A genuinely NEW request (fresh seq) applies normally again.
+    const size_t before_new = tx_frames.size();
+    auto next = v2::ControlFrame::makeModeChange(
+        "K2DEF", "W1ABC", 45, Modulation::QPSK, CodeRate::R2_3,
+        20.2f, 0.48f, v2::ModeChangeReason::CHANNEL_IMPROVED);
+    c.onFrameReceived(next.serialize());
+    CHECK(c.getDataCodeRate() == CodeRate::R2_3,
+          "a new MODE_CHANGE seq should apply normally after a dedup");
+    CHECK(notify_count == 2, "a new MODE_CHANGE seq should notify the GUI again");
+    CHECK(tx_frames.size() == before_new + 1,
+          "a new MODE_CHANGE seq should ACK immediately");
+
+    // Seq-reuse guard: SAME seq but a DIFFERENT (mod, rate) tuple is NOT a duplicate
+    // (a restarted peer restarts its seq counter) — it must be applied, not deduped.
+    auto reused_seq = v2::ControlFrame::makeModeChange(
+        "K2DEF", "W1ABC", 45, Modulation::QPSK, CodeRate::R1_2,
+        18.0f, 0.48f, v2::ModeChangeReason::CHANNEL_DEGRADED);
+    c.onFrameReceived(reused_seq.serialize());
+    CHECK(c.getDataCodeRate() == CodeRate::R1_2,
+          "same seq with a different mode tuple must apply (seq-reuse guard)");
+    CHECK(notify_count == 3,
+          "same seq with a different mode tuple must notify (it is a new request)");
+}
+
 void test_wide_ofdm_configures_short_tail_sack_delay() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 10.0f, 0.05f);
@@ -1071,6 +1194,8 @@ int main() {
     test_local_mode_change_timeout_keeps_current_arq_mode();
     test_remote_mode_change_reconfigures_arq();
     test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity();
+    test_mode_change_retry_holds_while_tx_keyed();
+    test_duplicate_mode_change_single_reack_no_reapply();
     test_wide_ofdm_configures_short_tail_sack_delay();
     test_accepted_ofdm_data_sync_keeps_connect_ack_rescue_armed();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();

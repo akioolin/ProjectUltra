@@ -122,7 +122,23 @@ void ToneBurstAckMonitor::runDetectionPass() {
     for (uint32_t symbol_ms : cfg_.symbol_durations_ms) {
         const uint32_t spp = (kSampleRate * symbol_ms) / 1000u;
         const size_t needed = static_cast<size_t>(kTotalSymbols) * spp;
-        if (buffer_.size() < needed) continue;
+        if (buffer_.size() < needed) {
+            // 2026-07-04 (R3/4 ACK-miss forensics): this skip was SILENT while the
+            // production buffer could never hold the 100 ms rung — every slow-bin
+            // ACK was structurally undecodable and left no sender-side trace.
+            // WARN once per pass-capacity mismatch (capacity, not fill level:
+            // buffer_ at capacity still < needed means the rung can NEVER decode).
+            if (buffer_.size() >= cfg_.buffer_capacity_samples &&
+                !capacity_skip_warned_) {
+                capacity_skip_warned_ = true;
+                LOG_MODEM(WARN,
+                          "ToneBurstAckMonitor: %u ms rung UNDECODABLE — needs %zu "
+                          "samples, buffer capacity %zu (a peer ACK at this rung "
+                          "will be silently missed)",
+                          symbol_ms, needed, cfg_.buffer_capacity_samples);
+            }
+            continue;
+        }
         const auto r = detector_.detectAndDecode(buffer_.data(), buffer_.size(),
                                                   symbol_ms, cfg_.sweep_step_samples);
         if (!r.decode.payload.has_value()) continue;

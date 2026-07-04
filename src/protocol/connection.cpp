@@ -1713,6 +1713,31 @@ bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
     if (state_ != ConnectionState::CONNECTED) return false;
 
+    // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3, gated on
+    // ULTRA_RX_RATE_CMD): rung_cmd==3 is NOT an ack — it is the unanchored peer's
+    // only utterance ("I am alive, forward data is arriving, but the era-base frame
+    // keeps dying — resend it"). Consume it FIRST and consume it WHOLE: its mask is
+    // meaningless (must not reach the ARQ as a SACK) and it must not feed the rate
+    // controller a 0 (the voice is proof the forward link WORKS — treating it as
+    // demote evidence would re-manufacture the exact collapse it exists to prevent).
+    if (rx_rate_cmd_enabled_ &&
+        detection.payload.rung_cmd ==
+            ultra::waveform::tone_burst_ack::kRungCmdReserved) {
+        const int seen = static_cast<int>(detection.payload.group_seq);
+        // Reset the collapse evidence every voice copy: silence-while-unanchored is
+        // by design, not a forward crater (the E1/D1/D3 manufactured demotes).
+        zero_progress_rounds_ = 0;
+        if (seen != rx_rebase_voice_seq_seen_) {
+            rx_rebase_voice_seq_seen_ = seen;
+            LOG_MODEM(WARN,
+                      "Connection: WAITING-REBASE voice from peer (seq=%d) — "
+                      "re-sending era base standalone; zero-progress evidence reset",
+                      seen);
+            arq_.expireBaseSlotTimerForRebase();
+        }
+        return true;  // consumed whole — no ARQ sack, no controller feed, no advisory
+    }
+
     // TRANSPORT MERGE (step 1): when interactive tone-burst acks are enabled and we have
     // interactive SR-ARQ frames in flight (no active burst owns this ack), route it to
     // the ARQ window. The ARQ reconstructs the seq and drives its normal ack path.
@@ -2624,12 +2649,41 @@ void Connection::setRxLevelVerdict(int verdict, uint32_t seq) {
     }
 }
 
+// Responder handshake confirmation (BUG-RESPONDER-HANDSHAKE-NEVER-CONFIRMS,
+// 2026-07-04): the single site that flips a responder's handshake_confirmed_ and
+// fires on_handshake_confirmed_() (→ the modem switches TX onto the negotiated OFDM
+// data waveform instead of the handshake last-RX-waveform mirror). Historically it
+// ran only in onFrameReceived — the CLASSIC frame path — because in the legacy
+// control plane the initiator's first MODE_CHANGE frame always arrived there. The
+// descriptor-committed control plane (Phase 1/2) eliminated classic frames BY
+// DESIGN, so a burst-only session never confirmed: the responder's modem sat in
+// handshake TX-routing all session and its rare classic control TXs (frame NACKs)
+// went out as 3.1 s MC-DPSK DBPSK full-preamble frames (last_rx_waveform_ = the
+// CONNECT-phase MC-DPSK) — the "MC-DPSK at the end of the run" the operator saw.
+// A DELIVERED BURST GROUP is equally hard evidence the initiator heard our
+// CONNECT_ACK (it only sends data after it), so the group path confirms too.
+void Connection::maybeConfirmResponderHandshake(const char* evidence) {
+    if (state_ != ConnectionState::CONNECTED || is_initiator_ || handshake_confirmed_) {
+        return;
+    }
+    LOG_MODEM(INFO, "Connection: Handshake confirmed (%s)", evidence);
+    handshake_confirmed_ = true;
+    responder_handshake_wait_ms_ = 0;
+    if (on_handshake_confirmed_) {
+        on_handshake_confirmed_();
+    }
+    // Initial data mode is already carried in CONNECT_ACK.
+}
+
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                                       bool all_ok, float quality, uint16_t frame_mask,
                                       bool interleaved, uint8_t group_size) {
     if (!use_burst_transport_) {
         return;
     }
+    // Descriptor-era handshake evidence (see maybeConfirmResponderHandshake): a
+    // burst-only session must confirm here — classic frames may never arrive.
+    maybeConfirmResponderHandshake("first delivered burst group from initiator");
 
     // TRANSPORT MERGE (increment 1): one seq space END-TO-END. The sender formed these
     // frames through arq_ (unified TX), so feed each decoded REAL frame back through the
@@ -2696,6 +2750,28 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
             processArqFrame(frame);  // a file-completing frame clears burst_activity_ (wins)
         }
         arq_.endGroupReceiveAndAck();
+        // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3, gated on
+        // ULTRA_RX_RATE_CMD): checked AFTER the frames processed — if THIS group carried
+        // the era base, the interregnum just ended and no voice is needed. While it
+        // holds, the ARQ suppressed the group ack above (total ack silence by design),
+        // so this is the receiver's ONLY utterance: a tone burst with rung_cmd=3 whose
+        // mask/type the sender never parses as an ack (consumed whole in
+        // onToneBurstAck). It tells the sender "alive + forward link works + resend
+        // the era base" — the anti-manufactured-collapse signal, on the 4-FSK plane
+        // that out-survives every OFDM waveform in the trough.
+        if (rx_rate_cmd_enabled_ && arq_.rxWaitingRebase() &&
+            kInteractiveToneAckEnabled() && on_transmit_tone_burst_ack_) {
+            ultra::waveform::tone_burst_ack::ToneBurstAckPayload voice;
+            voice.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
+            voice.frame_mask = 0;  // meaningless — consumed whole, never as a SACK
+            voice.type = ultra::waveform::tone_burst_ack::AckType::Nack;
+            voice.rung_cmd = ultra::waveform::tone_burst_ack::kRungCmdReserved;  // 3
+            LOG_MODEM(WARN,
+                      "Connection: WAITING-REBASE — voicing unanchored state to the "
+                      "sender (group_seq=%u)",
+                      group_seq);
+            on_transmit_tone_burst_ack_(voice);
+        }
         return;
     }
 }
@@ -2812,22 +2888,8 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
 
     // Responder handshake confirmation: first valid protocol frame after CONNECT_ACK
     // means the initiator received our ACK and switched to data/control exchange.
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_ &&
-        !duplicate_connect_retry) {
-        // First valid frame from the initiator confirms the handshake. This is the single
-        // site that flips a responder's handshake_confirmed_ and fires on_handshake_confirmed_()
-        // (→ the modem switches TX onto the negotiated OFDM data waveform). It fires at the
-        // right time for ALL regimes: a decoded OFDM frame is guaranteed past the modem's
-        // setConnected()/setWaveformMode(). In B2F the initiator proactively yields a TURNOVER
-        // (see tick()), so that TURNOVER is the responder's "first valid frame" — no special
-        // pre-confirm needed.
-        LOG_MODEM(INFO, "Connection: Handshake confirmed (received first valid frame from initiator)");
-        handshake_confirmed_ = true;
-        responder_handshake_wait_ms_ = 0;
-        if (on_handshake_confirmed_) {
-            on_handshake_confirmed_();
-        }
-        // Initial data mode is already carried in CONNECT_ACK.
+    if (!duplicate_connect_retry) {
+        maybeConfirmResponderHandshake("first valid classic frame from initiator");
     }
 
     // Resolve source callsign from hash if possible
@@ -3310,8 +3372,18 @@ void Connection::tick(uint32_t elapsed_ms) {
 
             tickModeChangeAckRepeats(elapsed_ms);
 
-            // Handle MODE_CHANGE timeout
-            if (mode_change_pending_) {
+            // Handle MODE_CHANGE timeout.
+            // BUG-MC-RETRY-SPURIOUS (2026-07-04, E1 forensics): the deadline HOLDS
+            // while our own TX is keyed — half-duplex means we cannot have decoded
+            // the peer's MC-ACK during our key-down, so wall time spent transmitting
+            // is not evidence of ACK loss. The MODE_CHANGE rides the TAIL of a
+            // bundled data key-down (~10.6 s observed), which alone ate most of the
+            // old request-anchored 18.2 s deadline; all three observed spurious-retry
+            // cycles (21.1/21.3/30.4 s pipelines) become retry-free with the hold.
+            // Unwired provider (tests/headless) => legacy behavior.
+            if (mode_change_pending_ && tx_active_provider_ && tx_active_provider_()) {
+                // keyed: hold the deadline (neither decrement nor fire)
+            } else if (mode_change_pending_) {
                 if (elapsed_ms >= mode_change_timeout_ms_) {
                     mode_change_retry_count_++;
                     if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
@@ -4586,6 +4658,8 @@ void Connection::enterConnected() {
     // the ARQ reset below; a stale standing command must never leak across sessions).
     rx_rate_cmd_pending_ = 0;
     rx_rate_cmd_seq_seen_ = -1;
+    rx_rebase_voice_seq_seen_ = -1;
+    last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
@@ -4638,6 +4712,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     desc_switch_full_anchor_pending_ = false;
     rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
     rx_rate_cmd_seq_seen_ = -1;
+    rx_rebase_voice_seq_seen_ = -1;
+    last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();
     disconnect_frame_.clear();
     disconnect_pending_ = false;

@@ -195,14 +195,23 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
             ultra::waveform::tone_burst_ack::kSymbolMsMargSNR,   // 100 ms
         };
         tba_cfg.sweep_step_samples = 32;
-        // Buffer must hold one full burst + the armed detection cadence (4800) so
-        // the burst start is still buffered at the first pass after burst end.
-        // 34 symbols since the 2026-07-02 frame_mask widen (was 27): the 50 ms rung
-        // is 34×50×48 = 81,600 samples — the old 90,000 left only 3,600 samples of
-        // worst-case margin. 120,000 (~2.5 s) restores headroom. (The 100 ms rung,
-        // 163,200, never fit this production buffer even at 27 symbols — at <5 dB
-        // in-band the ARQ timeout backstops a missed ACK; pre-existing gap.)
-        tba_cfg.buffer_capacity_samples = 120000;  // ~2.5 s
+        // Buffer DERIVED from the scan set (2026-07-04, R3/4 ACK-miss forensics):
+        // it must hold one full burst at the SLOWEST scanned rung + the armed
+        // detection cadence (4800) + sweep margin, or runDetectionPass silently
+        // skips that rung forever (`buffer_.size() < needed -> continue`). The old
+        // hand-tuned 120,000 could never hold the 100 ms rung (34×100×48=163,200)
+        // — the staircase's "a conservative choice is always decodable" contract
+        // was structurally false and every symbol_ms=100 ACK was missed (3/3 in
+        // the forensic run: clean delivery, idle window, 5× noise floor, undecoded
+        // -> full RTO resend each time). Cost of the fix: +240 KB float buffer.
+        {
+            uint32_t max_ms = 0;
+            for (uint32_t ms : tba_cfg.symbol_durations_ms) max_ms = std::max(max_ms, ms);
+            const size_t slowest_burst =
+                static_cast<size_t>(ultra::waveform::tone_burst_ack::kTotalSymbols) *
+                ((48000u * max_ms) / 1000u);
+            tba_cfg.buffer_capacity_samples = slowest_burst + 4800 + 4800;  // 172,800
+        }
         tone_burst_monitor_ =
             ultra::waveform::tone_burst_ack::ToneBurstAckMonitor(tba_cfg);
         // Install default log-only callback. Step 4d replaces.
@@ -238,7 +247,41 @@ StreamingDecoder::~StreamingDecoder() {
 }
 
 void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
+    // PHANTOM-FRAME fix (2026-07-04, R3/4 ACK-miss forensics): while a group is
+    // mid-collection the size in force came from THAT group's own BURST_HEADER
+    // descriptor (streaming_ofdm_decode.cpp ~752) — the receiver self-describes
+    // from the wire and must NOT be clobbered by a config/policy write racing in
+    // between descriptor consume and group end (the DESC-SWITCH adopt did exactly
+    // that: descriptor said 5, policy default 6 overwrote it 2 ms later, and the
+    // demod then read 1.2 s of post-burst noise as a phantom 6th frame whose
+    // noise-vs-noise "SNR" poisoned the ACK staircase; the 16QAM adopts got 9->6
+    // scrambled into 0/6 deinterleave failures the same way). Defer the config
+    // value to group end; the next group's descriptor overrides it anyway.
+    const int sanitized = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
+    if (descriptor_group_size_locked_) {
+        // Dropped, not stashed: every multi-frame group's own descriptor re-declares
+        // the size (the config value is only the descriptor-missed fallback), so a
+        // deferred config write would be overridden before it could ever matter.
+        // v2 (acceptance rerun caught v1): the lock spans BURST_HEADER consume ->
+        // group finalize/abort — a buffer-emptiness key missed the DESC-SWITCH
+        // adopt, which fires ~2 ms after the header, before any frame collects.
+        LOG_MODEM(INFO,
+                  "StreamingDecoder: burst group size cfg %d IGNORED — descriptor-"
+                  "declared group (%d) in flight (%zu frames held); the wire "
+                  "descriptor is authoritative for the in-flight group",
+                  sanitized, burst_group_size_, burst_soft_buffer_.size());
+        return;
+    }
+    burst_group_size_ = sanitized;
+}
+
+// Descriptor-consume path (streaming_ofdm_decode.cpp BURST_HEADER): the wire value
+// ALWAYS wins immediately — including over a stale partial collection (a retransmit
+// group's header must re-describe the new group unconditionally) — and LOCKS the
+// size until the group finalizes/aborts (every burst_soft_buffer_ clear site).
+void StreamingDecoder::setBurstGroupSizeFromDescriptor(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
+    descriptor_group_size_locked_ = true;
 }
 
 void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t count) {
@@ -404,6 +447,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
             pending_total_cw_ = 0;
             burst_blocks_decoded_ = 0;
             burst_soft_buffer_.clear();
+            descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             mc_burst_pending_frame_ = false;
             mc_burst_pending_soft_bits_.clear();
@@ -692,6 +736,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
+    descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
@@ -902,12 +947,33 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
-    burst_soft_buffer_.clear();
-    burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
-    sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
-    sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
+    // MODE-HOP CURSOR FIX (2026-07-04, 16QAM zero-decode forensics): when this
+    // reconfig is the DESCRIPTOR-ADOPT's redundant second reset (a wire-declared
+    // group is IN FLIGHT — descriptor_group_size_locked_), the BURST_HEADER
+    // consume already parked correlation_pos_/search-floor EXACTLY at the group
+    // anchor's up-chirp start. Overwriting the cursor with write_pos_/total_fed_
+    // here beheads that anchor by the decode lag (~9.7 k samples measured), after
+    // which the 120 k chirp-FFT quota STARVES in equilibrium against the light
+    // search's 4800-per-run shared-cursor advance, and first-group arming
+    // degenerates to the stochastic decayed-threshold fallback (the 18 s no-ACK
+    // RTO the operator watched; byte-exact counterfactual: cursor preserved ->
+    // the FFT runs at the next quota poll with its window starting AT the
+    // up-chirp). Preserve cursor + in-flight group state; KEEP the waveform
+    // rebuild, COLD demotion and expect_full_ofdm_anchor_ semantics. Legacy-path
+    // reconfigs (half-duplex turnaround, receiver idle, no group in flight) keep
+    // the full reset — there the cursor jump is harmless by construction.
+    if (!descriptor_group_size_locked_) {
+        burst_soft_buffer_.clear();
+        burst_metric_templates_.clear();
+        sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
+        sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
+    } else {
+        LOG_MODEM(INFO,
+                  "StreamingDecoder: connected-OFDM reconfig with descriptor group in "
+                  "flight — search cursor/floor and group state PRESERVED (mode-hop)");
+    }
 
     LOG_MODEM(INFO, "StreamingDecoder: connected OFDM mode=%s, mod=%s, rate=%s, carriers=%d data=%d bps=%zu",
               protocol::waveformModeToString(mode_),
@@ -1183,6 +1249,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
+    descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
