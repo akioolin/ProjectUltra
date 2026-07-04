@@ -2556,7 +2556,27 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             }();
             const int walk_streak_needed =
                 (kFastCrest && quality >= 0.99f) ? 1 : qam16ClimbStreak();
-            if (qam16_r34_clean_streak_ >= walk_streak_needed) {
+            // CALM-GATE (2026-07-04, F3-replication + crest A/B, knob
+            // ULTRA_R34_CALM_FADING default-OFF byte-identical): the R3/4 walk fired
+            // on `quality` alone — a BACKWARD-looking signal (the group that just
+            // decoded had headroom). But R3/4 must survive the NEXT ~9 s, which is a
+            // channel-COHERENCE property, not a decode-headroom one. In a chop
+            // realization a clean group is routinely followed by a crater, so blind
+            // probing pays 1 cratered group + a re-climb per probe (afternoon A/B:
+            // crest median 1.25 vs crest-OFF 1.43/1.62 in the SAME chop; F3's 2.50
+            // was a zero-crater 16QAM cruise that NEVER probed). Gate the walk on the
+            // coherence-adjusted fading index: probe only in AWGN/low-Doppler calm —
+            // exactly F3's cruise condition — otherwise stay at 16QAM R2/3 and cruise.
+            // Set the knob to a threshold (e.g. 0.30) to enable; absent = legacy.
+            static const float kR34CalmFading = [] {
+                const char* e = std::getenv("ULTRA_R34_CALM_FADING");
+                return (e && e[0]) ? std::strtof(e, nullptr) : -1.0f;  // <0 = gate off
+            }();
+            const bool calm_gate_ok =
+                kR34CalmFading < 0.0f ||
+                connection_policy::coherenceAdjustedFadingIndex(
+                    fading_index_, coherence_score_, coherence_valid_) <= kR34CalmFading;
+            if (calm_gate_ok && qam16_r34_clean_streak_ >= walk_streak_needed) {
                 const bool busy =
                     file_transfer_.getState() == FileTransferState::SENDING &&
                     (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
