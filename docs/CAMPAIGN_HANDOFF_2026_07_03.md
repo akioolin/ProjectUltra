@@ -132,3 +132,7 @@ killer. **STANDING CONFIG (F24+): the §7 12-knob set (crest knobs INCLUDED agai
 ULTRA_ALC_MAX_DRIVE=0.70. Drop the §7.1 ULTRA_SOFTWARE_ALC=0.** F24: 1.89 through a deep
 trough, 5th best. Extremum-seeking ALC redesign remains queued (the cap is the
 per-hardware pragmatic form).
+GOTCHA (F25 post-mortem): NEVER combine the Mac GUI launch with the (lingering) Pi5 ssh
+in ONE shell command — a runner timeout SIGKILLs the whole process group and reaps the
+backgrounded GUI (nohup shields SIGHUP, not a group kill; the GUI died at exactly the
+60 s timeout mark, no crash report). One command per launch, always.
