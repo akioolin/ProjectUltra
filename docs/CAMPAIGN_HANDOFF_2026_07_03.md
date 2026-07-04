@@ -136,3 +136,14 @@ GOTCHA (F25 post-mortem): NEVER combine the Mac GUI launch with the (lingering) 
 in ONE shell command — a runner timeout SIGKILLs the whole process group and reaps the
 backgrounded GUI (nohup shields SIGHUP, not a group kill; the GUI died at exactly the
 60 s timeout mark, no crash report). One command per launch, always.
+
+### §7.3 STANDING CONFIG UPDATE (2026-07-04 ~18:10, Opus): add the R3/4 CALM-GATE
+F3's 2.50 = a zero-crater 16QAM R2/3 cruise that never probed R3/4 (pre-crest-rung). The
+crest rung (24c6f48/f713064) probes R3/4 on backward-looking `quality`; in chop each probe
+craters + re-climbs = tax. A/B (afternoon chop): crest-blind median 1.25 < crest-OFF
+{1.43,1.62,0.44}=1.43 ≈ calm-gate 1.49 (F56, 0 probes fired — gate suppressed chop-probing
+as designed). **STANDING CONFIG (F56+): §7.2 knobs PLUS ULTRA_R34_CALM_FADING=0.30** (gate
+R3/4 walk on coherence-adjusted fading <= 0.30; commit a4ffee1, default-OFF/byte-identical
+without the knob). This recovers F3's chop cruise while keeping R3/4 upside in genuine calm
+(fading < 0.30). To replicate 2.50 needs BOTH this config AND a calm channel window (~90s
+zero-crater) — the latter is pure IONOS sampling (stationary; F3-class draws recur).
