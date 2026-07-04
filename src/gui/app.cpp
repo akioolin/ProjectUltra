@@ -2924,7 +2924,21 @@ void App::handleDriveAdvisory(uint8_t advisory, uint8_t group_seq) {
     alc_last_advisory_ = advisory;
 
     const float baseline = settings_.tx_drive;
-    const float ceiling = ultra::sim::kSoftwareAlcMaxPeakTarget;  // 0.85 abs digital
+    // ALC ceiling: per-hardware tunable (2026-07-04, F19-F22 forensics). The Pi5
+    // cheap card compresses above ~0.70 digital drive — 16QAM R3/4 craters cluster
+    // there, and the walk has no natural DOWN on TX-side compression (no RX clip
+    // signature), so the code ceiling IS the equilibrium. Radio-agnostic rule: the
+    // knee is a property of the attached card — ULTRA_ALC_MAX_DRIVE overrides the
+    // 0.85 default (clamped [0.3, kSoftwareAlcMaxPeakTarget]).
+    static const float kAlcCeiling = [] {
+        const float dflt = ultra::sim::kSoftwareAlcMaxPeakTarget;  // 0.85 abs digital
+        if (const char* e = std::getenv("ULTRA_ALC_MAX_DRIVE")) {
+            const float v = std::strtof(e, nullptr);
+            if (v >= 0.3f && v <= dflt) return v;
+        }
+        return dflt;
+    }();
+    const float ceiling = kAlcCeiling;
     const float floor = std::min(baseline, ceiling);  // never below configured drive
     const float cur = alc_tx_drive_.load(std::memory_order_relaxed);
     float next = cur;
