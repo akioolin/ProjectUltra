@@ -40,3 +40,74 @@ Wide coherent window 16 (default; +36% rig) · SNR pool + defer + wire freshness
 - The peer cannot ACK until its decode backlog drains → control retry timers must cover the full burst deadline (~18.5s); shorter timers livelock (proven twice).
 - Half-duplex: retries key down ON TOP of the ACK in flight. Demote is cheap (1 bad group), climb is expensive (streaks) → bias entries/classification UP.
 - 50KB against a 600s window is marginal below ~R1/2 average — window-fails in deep fades are physics, not bugs.
+
+---
+
+## 7. CURRENT EXACT RUNBOOK (2026-07-04 ~11:50 — the state any successor model reruns from)
+
+Build: BOTH ends on origin/feat/coherent-window-16 (Mac local `main` tracks it; push via
+`git push origin main:feat/coherent-window-16`). Pi5 update: `ssh -i ~/.ssh/id_pi5
+math@192.168.160.163 'cd ~/ProjectUltra && git fetch origin && git merge --ff-only
+origin/feat/coherent-window-16 && cmake --build build -j4'` (~10 min ARM; NEVER build the
+Mac while a rig run is live).
+
+**THE 12-KNOB STANDING ENV (both ends, identical, all validated today):**
+```
+ULTRA_R34_FAST_CREST=1 ULTRA_QAM16_R34=1 ULTRA_RX_RATE_CMD=1 \
+ULTRA_DESCRIPTOR_MODE_SWITCH=1 ULTRA_CONNECT_AFFINE_BASIS=1 ULTRA_ARQ_MOVE_EPOCH=1 \
+ULTRA_RETX_TROUGH_PACING=1 ULTRA_COLLAPSE_ESCAPE_ROUNDS=2 ULTRA_PROMOTE_EMA_CARRY=1 \
+ULTRA_ENTRY_CAP_R34=1 ULTRA_CONNECT_SNR_POOL=1 ULTRA_WIRE_SNR_FRESH=1
+```
+(Wire/semantics-lockstep set: DESCRIPTOR_MODE_SWITCH, RX_RATE_CMD, ARQ_MOVE_EPOCH — both
+ends or neither. The rest are sender/receiver-local but run them everywhere. Everything is
+default-OFF in code; this env IS the campaign configuration.)
+
+**Mac receiver launch** (repo root; check volume EVERY launch — it drifts):
+```
+osascript -e 'set volume output volume 100'   # MUST be 100 (GOTCHA: drifts to 63-75)
+(ENV… nohup ./build/ultra_gui --auto-accept --log-categories operator,modem,sync \
+  > /tmp/campaign_3000/fN_mac_stdout.log 2>&1 &)
+```
+**Pi5 sender launch** (pkill in a SEPARATE ssh first; </dev/null is REQUIRED or the
+launch dies; never pkill+launch in one ssh session — exit 255):
+```
+ssh -i ~/.ssh/id_pi5 math@192.168.160.163 'pkill -x ultra_gui'
+ssh -i ~/.ssh/id_pi5 math@192.168.160.163 'cd ~/ProjectUltra && DISPLAY=:0 \
+  XAUTHORITY=/home/math/.Xauthority ENV… nohup ./build/ultra_gui --auto-connect MAC \
+  --connect-delay 8 --auto-send-file ~/bench/r50k.bin --auto-disconnect-after 900 \
+  --log-categories operator,modem,sync </dev/null >/tmp/fN_pi5_stdout.log 2>&1 & \
+  sleep 3; pgrep -x ultra_gui'
+```
+**Early-check monitor** (line-buffered end-to-end; NEVER pipe through `cut` — it buffers
+and the monitor goes silent):
+```
+tail -F logs/gui.log | grep --line-buffered -E \
+ "MODE_CHANGE:.*local_measured|DESC-SWITCH adopt|delivered as unit: 0/|ESCAPE-drop.*via|WAITING-REBASE|exhausted unarmed|Received .*CRC ok|Disconnected|MC-DPSK DBPSK R1/4"
+```
+**Per-completion loop:** md5 ~/Downloads/r50k.bin == bc8c74571d2277ce7f194620ded9319b →
+cp logs/gui.log /tmp/campaign_3000/rig_FN_mac.log → mv the received file → append verdict
+to /tmp/campaign_3000/RESULTS.md → pkill both ends → relaunch. **Kill-don't-wait:** an
+entry line showing MC-DPSK or R1/4 at dial 20 (reading <7 with fading >0.6 in the window)
+is a fade-snapshot miss (~2/30 tonight) — kill both ends, relaunch, ledger it.
+Every ~4-5 runs: append to docs/CAMPAIGN_LEDGER_2026_07_03.md, commit docs, push.
+
+**Success signatures (healthy run):** entry `MODE_CHANGE:.*local_measured` → QPSK R2/3
+Good (29/29 tonight, readings 6.2-16.1); descriptor climbs (`adopt QPSK R3/4` ~70-120s,
+`adopt 16QAM R2/3` ~90-230s); first group after ANY adopt delivers N/M>0 within ~7s
+(the mode-hop cursor fix — a silent no-delivery stall here is a REGRESSION); craters
+(`delivered as unit: 0/N`) resolve via an adopt within ~4s (receiver rung command);
+`WAITING-REBASE` voices are SAVES not errors; `exhausted unarmed` backstop NACKs are
+SAVES. Failure smells: >15s with no adopt after a crater; any `TX: Handshake mode` after
+the CONNECT_ACK; MC-DPSK frames mid-session; the same MODE_CHANGE line repeating.
+
+**Scoreboard at handoff-refresh:** records 2.50 (F3) / 2.17 (F5) / 2.12 (F13) / 2.00
+(F20, clean-drive); 73/73 lifetime byte-exact; entries 29/29 R2/3 since the affine fix.
+Clean-drive era (post-ALC-guard 7b0953c): 1.77, 2.00 — both above the prior chop band.
+
+**Open watch items:** (a) whether 16QAM R3/4 sustains at healthy drive or the Pi5 cheap
+card's distortion floor caps it (~3-4 R3/4 probes/run, most crater; graded landings keep
+probes ~net-positive — if a calm-epoch run still can't hold R3/4, the last stretch to
+3000 is EQUIPMENT: a cleaner USB card); (b) fade-snapshot entries ~2/30 (#58 fix =
+fade-averaged connect SNR, queued); (c) queued structural: descriptor-armed accumulation
+(HEADNULL), predicted-anchor timed window, fallback hygiene (all in the 16QAM-verdict
+fix list, KNOWN_BUGS cross-refs). Main-merge PR remains the user's call.
