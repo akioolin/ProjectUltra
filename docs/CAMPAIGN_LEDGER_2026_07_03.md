@@ -116,3 +116,7 @@ Baseline (main 8a771f9, 5-cell gate): g42=1940 g43=1210 g7=1310 | AWGN ref=3370 
 - W49 (killed mid-flight per user STOP at ~25%): THE MOTIVATING EXHIBIT — entry R1/4 @11.4/fading-0.66-Moderate at dial-20 Good (user screenshot). Ladder recovered by t=174 (16QAM) but the misclassified entry cost ~100s of R1/4 crawl. Fading-pool fix in flight.
 == LOOP STOPPED by user 20:35. Rig parked. Fix cycle: fading pooling at entry + dial-20 calibration doc + sidebar dial-equivalent display. ==
 - V1 (pre-margin build, the user's 2nd screenshot): 1.05 CRC ok — entry R1/4 @11.3/0.69-Moderate = the "before" specimen. Margin fix 2996e37 deployed after it; affine basis + piggyback design in flight.
+
+## AFFINE VALIDATION BATCH (a425658 + full stack)
+- V2: 1.42 transfer / 1.34 session, CRC ok. **ENTRY 9.3 -> R2/3 Good (affine working — was R1/2 pre-fix)**, 16QAM@105, 2 MC retries on the climb, SALVAGE 5 dupes.
+- V3: 1.60 transfer / 1.49 session, CRC ok. **ENTRY 7.3 -> R2/3 Good (clamp region working)**, 16QAM@226. SALVAGE 0.
