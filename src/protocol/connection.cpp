@@ -2659,7 +2659,25 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         } else {
             qam16_clean_streak_ = 0;
         }
-        if (qam16_clean_streak_ >= qam16ClimbStreak()) {
+        // 16QAM CALM-GATE (2026-07-04, crater-frequency lever, knob
+        // ULTRA_QAM16_CALM_FADING default-OFF byte-identical): the climb fires on
+        // backward-looking `quality`; 16QAM R2/3 sits at ZERO fade-headroom, so in a
+        // choppy realization it climbs into a trough and craters (afternoon 8/29 vs
+        // F3's calm 1/18). Now that crater RECOVERY is fast (self-echo fix, ~3.5 s),
+        // the residual tax is crater FREQUENCY. Gate the hop on the coherence-adjusted
+        // fading index — climb to 16QAM only when the channel is calm (fade-riding:
+        // 16QAM on crests), else hold the robust QPSK R3/4 and cruise. The streak is
+        // preserved when the gate blocks (same deferral semantics as a busy window),
+        // so the hop re-asserts the moment calm returns. Mirror of the R3/4 calm-gate.
+        static const float kQam16CalmFading = [] {
+            const char* e = std::getenv("ULTRA_QAM16_CALM_FADING");
+            return (e && e[0]) ? std::strtof(e, nullptr) : -1.0f;  // <0 = gate off
+        }();
+        const bool qam16_calm_ok =
+            kQam16CalmFading < 0.0f ||
+            connection_policy::coherenceAdjustedFadingIndex(
+                fading_index_, coherence_score_, coherence_valid_) <= kQam16CalmFading;
+        if (qam16_clean_streak_ >= qam16ClimbStreak() && qam16_calm_ok) {
             target_mod = Modulation::QAM16;
             target_rate = CodeRate::R2_3;
             qam16_hop = true;
