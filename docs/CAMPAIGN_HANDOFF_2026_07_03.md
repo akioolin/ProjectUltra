@@ -111,3 +111,15 @@ probes ~net-positive — if a calm-epoch run still can't hold R3/4, the last str
 fade-averaged connect SNR, queued); (c) queued structural: descriptor-armed accumulation
 (HEADNULL), predicted-anchor timed window, fallback hygiene (all in the 16QAM-verdict
 fix list, KNOWN_BUGS cross-refs). Main-merge PR remains the user's call.
+
+### §7.1 ENV AMENDMENT (2026-07-04 ~12:10, F23+): ALC frozen, crest rung parked
+F19-F22 forensics (full chain in RESULTS.md/ledger): the software-ALC has NO EQUILIBRIUM
+on the Pi5 cheap card — LOW readings while delivering keep walking tx_drive up (0.50 ->
+the 0.85 cap every long run); the only DOWN trigger is an RX clip signature that TX
+compression never produces; 16QAM R3/4 craters cluster above ~0.70 drive (0/9 even at
+fading 0.11-0.21). **F23+ env = the §7 12-knob set MINUS ULTRA_QAM16_R34 and
+ULTRA_R34_FAST_CREST, PLUS ULTRA_SOFTWARE_ALC=0** (drive fixed at baseline — the config
+that set D2's 2.43). This measures the clean 16QAM-R2/3 ceiling. QUEUED REDESIGN:
+extremum-seeking ALC (quality-derived DOWN, perturb-and-observe) — until then the ALC
+stays OFF on this hardware. R3/4 on this rig is an EQUIPMENT question (cleaner USB card)
+— re-arm both crest knobs after any card swap or at fixed drive <=0.65 for an A/B.
