@@ -500,6 +500,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         cached_inband_snr_db_.store(snr_db, std::memory_order_relaxed);
         cached_inband_snr_source_.store(snr_source, std::memory_order_relaxed);
         cached_fading_index_.store(fading, std::memory_order_relaxed);
+        // BUG-STAIRCASE-SNAPSHOT-INPUT: feed the median ring alongside the
+        // last-value cache (the staircase reads the median under ULTRA_ACK_SNR_MEDIAN).
+        cached_snr_ring_[cached_snr_ring_idx_.fetch_add(1, std::memory_order_relaxed) %
+                         cached_snr_ring_.size()]
+            .store(snr_db, std::memory_order_relaxed);
         // Monitor mode: surface every decoded frame's payload in the RX log regardless of
         // addressing (the protocol layer would otherwise drop frames whose dst hash doesn't
         // match local call, making the GUI silent on OTA captures from peers).
@@ -669,9 +674,27 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     kFadeEdgeEnabled &&
                     cached_fading_index_.load(std::memory_order_relaxed) >=
                         ultra::protocol::kFadingAwgnMax;
+                // BUG-STAIRCASE-SNAPSHOT-INPUT fix (ULTRA_ACK_SNR_MEDIAN, default
+                // OFF): read the MEDIAN of the last 5 readings instead of the last
+                // value — one erasure-slot/trough snapshot (F98: 9.4 written over a
+                // 22 dB channel → 1.7 s ACK → phantom demote → 54 s saga) cannot
+                // move a median-of-5; genuine decline still tracks in ~3 groups.
+                static const bool kAckSnrMedian = [] {
+                    const char* e = std::getenv("ULTRA_ACK_SNR_MEDIAN");
+                    return e && e[0] == '1';
+                }();
+                float staircase_snr =
+                    cached_inband_snr_db_.load(std::memory_order_relaxed);
+                if (kAckSnrMedian) {
+                    std::array<float, 5> v;
+                    for (size_t i = 0; i < v.size(); ++i) {
+                        v[i] = cached_snr_ring_[i].load(std::memory_order_relaxed);
+                    }
+                    std::sort(v.begin(), v.end());
+                    staircase_snr = v[v.size() / 2];
+                }
                 symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
-                    cached_inband_snr_db_.load(std::memory_order_relaxed),
-                    fading_present);
+                    staircase_snr, fading_present);
             }
             // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
             // inputs behind every ACK duration — greppable on sim and rig.

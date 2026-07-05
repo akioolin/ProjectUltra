@@ -22,6 +22,7 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 
@@ -275,6 +276,16 @@ private:
     // §15.5 staircase fast edge is basis-dependent — fade-effective SNR uses the
     // 16 dB edge, AWGN the 18 dB one (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01).
     std::atomic<float> cached_fading_index_{0.0f};
+    // BUG-STAIRCASE-SNAPSHOT-INPUT fix (ULTRA_ACK_SNR_MEDIAN, 2026-07-05): ring of
+    // the last 5 cached readings; the staircase reads the MEDIAN. A single
+    // erasure-slot/trough snapshot (F98: one 4/5 partial wrote 9.4 over a 22 dB
+    // channel → 50 ms ACK bin → phantom demote → 54 s epoch saga) cannot move a
+    // median-of-5, while a genuine SNR decline still tracks within ~3 groups.
+    // Lock-free per the same discipline (independent atomics; ordering slack
+    // between slots is harmless for a median).
+    std::array<std::atomic<float>, 5> cached_snr_ring_{
+        {12.0f, 12.0f, 12.0f, 12.0f, 12.0f}};
+    std::atomic<uint32_t> cached_snr_ring_idx_{0};
 
     // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
     // Closed-loop TX-drive: the peer's per-burst level verdict rides back on the
