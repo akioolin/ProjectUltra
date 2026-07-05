@@ -2743,23 +2743,38 @@ std::string App::testCat(AppSettings settings) {
 // fade draw decorrelated by >= the knob delay. Runs on the GUI tick; never touches
 // protocol_ (the §15.5 deadlock rule).
 void App::maybeFireAckRepeatIfSilent() {
+    // CONTINUOUS-QUIET gate (F100 correction): a single CCA sample at the deadline
+    // races the rig's 1.5-3 s turnaround — a momentarily-quiet instant fired 25
+    // redundant repeats in F100 and their TX blanked inbound burst heads (13
+    // craters). Sample the channel EVERY tick while pending: ANY busy reading
+    // between the ack and the deadline means something is (or was) inbound —
+    // copy 1 was heard — CANCEL. Only an unbroken silent window fires (a waiting
+    // sender is the only source of multi-second silence mid-transfer; an inbound
+    // 8-10 s burst cannot hide from continuous sampling).
+    {
+        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        if (!ack_repeat_pending_) return;
+        if (conn_state_cached_.load(std::memory_order_relaxed) !=
+            protocol::ConnectionState::CONNECTED) {
+            ack_repeat_pending_ = false;  // session ended — moot
+            return;
+        }
+        if (modem_.channelBusyForTx()) {
+            ack_repeat_pending_ = false;
+            guiLog("ACK-REPEAT-SILENT: canceled (channel activity in window — "
+                   "copy 1 evidently heard)");
+            return;
+        }
+        if (std::chrono::steady_clock::now() < ack_repeat_fire_time_) return;
+    }
     std::vector<float> copy;
     {
         std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
         if (!ack_repeat_pending_) return;
-        if (std::chrono::steady_clock::now() < ack_repeat_fire_time_) return;
         ack_repeat_pending_ = false;
         copy.swap(ack_repeat_samples_);
     }
-    if (conn_state_cached_.load(std::memory_order_relaxed) !=
-        protocol::ConnectionState::CONNECTED) {
-        return;  // session ended while pending — the ack is moot
-    }
-    if (modem_.channelBusyForTx()) {
-        guiLog("ACK-REPEAT-SILENT: skipped (channel busy — copy 1 evidently heard)");
-        return;
-    }
-    guiLog("ACK-REPEAT-SILENT: firing (channel quiet at +window — copy 1 likely lost)");
+    guiLog("ACK-REPEAT-SILENT: firing (unbroken quiet window — copy 1 likely lost)");
     queueRealTxSamples(copy, "TX tone-burst ACK repeat (silent-gated)",
                        /*in_qso_data=*/false);
 }
