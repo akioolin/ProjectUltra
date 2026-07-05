@@ -196,6 +196,39 @@ void StreamingDecoder::accumulateBurstFrames() {
                                 (burst_group_size / 4.0f));
     }();
 
+    // LATE-JOIN group-end inference (design §3.4 + F1): a late-joined group's true end
+    // cannot be counted (we do not know how many head frames died), and the airtime-
+    // derived timeout below budgets a FULL group from ITS start — waiting it out here
+    // would idle ~RTO-long and defeat the join. The slicer's WAITING is the "no new
+    // member on the wire" sentinel; ~2 frame-times + margin of member silence after the
+    // last catch means the key-down ended — tail-anchor and finalize NOW.
+    if (late_join_head_missing_ && !burst_soft_buffer_.empty()) {
+        const auto member_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - late_join_last_frame_time_).count();
+        const long frame_ms =
+            (burst_min_block_ > 0)
+                ? static_cast<long>(burst_min_block_) * 1000 / 48000
+                : 1500;
+        if (member_idle_ms > frame_ms * 2 + 1000) {
+            LOG_MODEM(WARN,
+                      "[%s] [LATE-JOIN] member silence %lld ms (~%ld ms/frame) — group "
+                      "ended; tail-anchored finalize with %zu caught frame(s)",
+                      log_prefix_.c_str(), static_cast<long long>(member_idle_ms),
+                      frame_ms, burst_soft_buffer_.size());
+            finalizeBurstGroup();
+            burst_soft_buffer_.clear();
+            descriptor_group_size_locked_ = false;
+            burst_metric_templates_.clear();
+            clearBurstDiagnostics();
+            {
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
+            }
+            state_ = DecoderState::SEARCHING;
+            return;
+        }
+    }
+
     // Timeout check
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - burst_start_time_).count();
@@ -275,7 +308,9 @@ void StreamingDecoder::accumulateBurstFrames() {
             return;  // Next frame not on the wire yet — (B) boundary; resume next tick.
         }
 
-        // SUCCESS — check if group complete
+        // SUCCESS — stamp the late-join member clock (group-end inference above).
+        late_join_last_frame_time_ = std::chrono::steady_clock::now();
+        // Check if group complete
         if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
             finalizeBurstGroup();
             burst_soft_buffer_.clear();
@@ -300,6 +335,102 @@ void StreamingDecoder::accumulateBurstFrames() {
     }
     // Drained group_size frames without group-complete (shouldn't happen — completion returns above);
     // fall through and resume next tick.
+}
+
+// LATE-JOIN (ULTRA_DESC_ARMED_ACCUM, docs/DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md §3):
+// the group HEAD (marker frame / descriptor anchor) died in a fade, so accumulation never
+// armed — but THIS sync-accepted frame is a live group member carrying 1/N of every
+// logical codeword (cross-frame interleave) or one whole independent logical frame
+// (interleave-off). Arm the NORMAL accumulation/slicer machinery AT this frame using the
+// latched descriptor geometry (the decoder's profile state is sticky from the latch);
+// finalizeBurstGroup tail-anchors the caught run with leading erasures. §14.24 honored by
+// construction: data-profile demod only, per-frame light-LTS channel estimate, fresh group
+// seed (no control-profile probe, no stale shared estimate).
+// Returns false when a full data frame is not yet in the ring (the caller keeps the legacy
+// drop path; the NEXT member sync retries the join).
+bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
+    if (!waveform_) return false;
+    const size_t data_block = static_cast<size_t>(
+        waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
+    if (data_block == 0) return false;
+    std::vector<float> block;
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        size_t available;
+        if (sync_controller_.ring_.write_pos_ >= sync_position_) {
+            available = sync_controller_.ring_.write_pos_ - sync_position_;
+        } else {
+            available = sync_controller_.ring_.buffer_capacity_samples_ - sync_position_ +
+                        sync_controller_.ring_.write_pos_;
+        }
+        if (available < data_block) return false;
+        block.assign(data_block, 0.0f);
+        for (size_t i = 0; i < data_block; ++i) {
+            block[i] = sync_controller_.ring_.buffer_[
+                sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + i)];
+        }
+    }
+    float sum_sq = 0.0f;
+    for (float s : block) sum_sq += s * s;
+    const float join_rms = std::sqrt(sum_sq / static_cast<float>(block.size()));
+
+    const float tracked_cfo = cfo_tracker_.tracked();
+    const float pre_cfo = frame_demodulator_.applyCFOPreCorrection(
+        block, tracked_cfo, frame_sync_abs, log_prefix_.c_str());
+    waveform_->setAbsoluteTrainingPosition(frame_sync_abs);
+    waveform_->setFrequencyOffset((std::abs(pre_cfo) > 0.01f) ? 0.0f : tracked_cfo);
+    const bool ok = processWaveformForCodewords(
+        SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
+
+    // Arm the group state exactly like the marker path (a failed member joins as an
+    // in-place erasure — the join itself still buys the REST of the group).
+    pending_total_cw_ = 0;
+    burst_soft_buffer_.clear();
+    burst_metric_templates_.clear();
+    descriptor_group_size_locked_ = false;
+    burst_min_block_ = data_block;
+    burst_snr_ = sync_snr_;
+    burst_cfo_ = tracked_cfo;
+    burst_start_time_ = std::chrono::steady_clock::now();
+    late_join_last_frame_time_ = burst_start_time_;
+    burst_anchor_rms_ = join_rms;
+    burst_level_sum_sq_ = 0.0;
+    burst_level_sample_count_ = 0;
+    burst_level_peak_ = 0.0f;
+
+    auto soft = ok ? waveform_->getSoftBits() : std::vector<float>{};
+    if (ok && !soft.empty()) {
+        const float residual = waveform_->estimatedCFO();
+        const auto cfo_update = cfo_tracker_.ingestPilotResidual(
+            pre_cfo, residual, tracked_cfo, /*clamp_drift=*/true);
+        burst_cfo_ = cfo_update.accepted_cfo;
+        burst_soft_buffer_.push_back(std::move(soft));
+        DecodeResult m;
+        populateDecodeMetrics(m, protocol::isOFDMMode(mode_), residual);
+        burst_metric_templates_.push_back(m);
+        beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(), join_rms,
+                                   pre_cfo, residual, burst_cfo_);
+    } else {
+        burst_soft_buffer_.emplace_back(
+            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
+            0.0f);
+        DecodeResult m;
+        populateDecodeMetrics(m, protocol::isOFDMMode(mode_), 0.0f);
+        burst_metric_templates_.push_back(m);
+        beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(), join_rms,
+                                   pre_cfo, 0.0f, burst_cfo_);
+    }
+    late_join_head_missing_ = true;
+    headnull_resync_drop_count_ = 0;
+    burst_next_pos_ =
+        sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + data_block);
+    LOG_MODEM(WARN,
+              "[%s] [LATE-JOIN] descriptor-armed accumulation from mid-group member "
+              "(member_decode=%d cw=%d declared_group=%d) — head erasure-filled at finalize",
+              log_prefix_.c_str(), ok ? 1 : 0, fixed_frame_codewords_,
+              std::max(2, burst_group_size_));
+    state_ = DecoderState::BURST_ACCUMULATING;
+    return true;
 }
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
@@ -688,6 +819,42 @@ void StreamingDecoder::computeBurstLevelVerdict() {
 
 void StreamingDecoder::finalizeBurstGroup() {
     const int burst_group_size = std::max(2, burst_group_size_);
+
+    // LATE-JOIN tail-anchor (design §3.4): the caught run has exact RELATIVE order (the
+    // fixed-stride slicer preserves it, missed members already in-place erasures); the
+    // unknown absolute offset is anchored to the TAIL — the group-end inference fires
+    // ~2 frame-times after the last catch, consistent with the tail having survived.
+    // The missing HEAD becomes leading zero-LLR erasures (exactly the representation
+    // the deinterleaver + LDPC already absorb). A wrong anchor (tail also nulled, F2)
+    // fails per-CW LDPC/CRC ⇒ prompt NACK — degradation is impossible by construction.
+    if (late_join_head_missing_) {
+        late_join_head_missing_ = false;
+        const size_t declared = static_cast<size_t>(burst_group_size);
+        if (burst_soft_buffer_.size() < declared) {
+            const size_t missing = declared - burst_soft_buffer_.size();
+            const std::vector<float> erasure(
+                static_cast<size_t>(
+                    fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
+                0.0f);
+            burst_soft_buffer_.insert(burst_soft_buffer_.begin(), missing, erasure);
+            DecodeResult m;
+            populateDecodeMetrics(m, protocol::isOFDMMode(mode_), 0.0f);
+            burst_metric_templates_.insert(burst_metric_templates_.begin(), missing, m);
+            // group_seq inference (design F5): the latched seq is the PREVIOUS group's
+            // (this group's descriptor died with the head); a NEW group is +1. Resends
+            // carry full-chirp anchors and rarely head-null; a wrong guess only affects
+            // tone-ack dedup/crater matching for one event — the decoded frames' own
+            // seq headers drive the actual SACK.
+            last_burst_group_seq_ =
+                static_cast<uint8_t>((last_burst_group_seq_ + 1u) & 0x3Fu);
+            LOG_MODEM(WARN,
+                      "[%s] [LATE-JOIN] tail-anchored finalize: %zu caught + %zu head "
+                      "erasure(s) = %d declared (group_seq inferred %u)",
+                      log_prefix_.c_str(), declared - missing, missing, burst_group_size,
+                      static_cast<unsigned>(last_burst_group_seq_));
+        }
+    }
+
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
               log_prefix_.c_str(), burst_group_size);
 

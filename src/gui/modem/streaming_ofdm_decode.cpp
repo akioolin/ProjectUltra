@@ -1115,6 +1115,19 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Only re-search when we are genuinely mid-burst (a descriptor is active).
         if ((use_burst_interleave_ || burst_transport_rx_) && connected_ &&
             sync_controller_.have_burst_descriptor_) {
+            // LATE-JOIN recovery (ULTRA_DESC_ARMED_ACCUM, default OFF;
+            // docs/DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md): instead of
+            // dropping this clean group-member, arm accumulation AT it using the
+            // latched descriptor geometry; finalize tail-anchors with head
+            // erasures. Falls through to the legacy drop when the member's full
+            // data frame is not yet in the ring (the next member retries).
+            static const bool kDescArmedAccum = [] {
+                const char* e = std::getenv("ULTRA_DESC_ARMED_ACCUM");
+                return e && e[0] == '1';
+            }();
+            if (kDescArmedAccum && lateJoinBurstAccumulation(frame_sync_abs)) {
+                return;  // armed at this member; the slicer owns the rest of the group
+            }
             // BUG-BURST-HEADNULL-DROP observability (2026-07-01): when the group
             // HEAD (marker frame) is nulled, accumulation never arms and every
             // clean mid-group frame lands here and is re-searched away with no
@@ -1123,7 +1136,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             // re-search itself stays (the §14.24 estimate-poisoning guard is
             // load-bearing); this counter makes the drop measurable. Recovery
             // (enter accumulation from any group-member sync with the head
-            // erasure-marked) is the tracked follow-up.
+            // erasure-marked) is LATE-JOIN above (knob-gated).
             ++headnull_resync_drop_count_;
             LOG_MODEM(INFO,
                       "[%s] [HEADNULL] sync-accepted frame consumed without decode "

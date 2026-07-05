@@ -660,6 +660,11 @@ private:
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
     void finalizeBurstGroup();
+    // LATE-JOIN (ULTRA_DESC_ARMED_ACCUM, docs/DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md):
+    // arm accumulation from a mid-group member sync when the group HEAD died (the
+    // BUG-BURST-HEADNULL-DROP recovery). Returns false when a full data frame is not
+    // yet in the ring (caller keeps the legacy drop; the next member retries).
+    bool lateJoinBurstAccumulation(size_t frame_sync_abs);
     // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): derive the per-burst RX level
     // verdict (OK/LOW/CLIPPED) from the group's kept-data-frame RMS/peak vs the
     // idle chain-noise floor. Called at the top of finalizeBurstGroup (fresh
@@ -857,6 +862,11 @@ private:
     // mid-burst re-search with no decode attempt (group head nulled -> accumulation
     // never armed). Monotonic since construction; [HEADNULL] log per event.
     uint32_t headnull_resync_drop_count_ = 0;
+    // LATE-JOIN state (lateJoinBurstAccumulation): the group was armed from a
+    // mid-group member (head died) — finalize tail-anchors with leading erasures;
+    // the member clock drives the group-end inference in accumulateBurstFrames.
+    bool late_join_head_missing_ = false;
+    std::chrono::steady_clock::time_point late_join_last_frame_time_{};
     // HARQ provisional keys (2026-07-01, restricted design — fable_analysis/09 §3.4):
     // when a burst logical frame's CW0 peek fails, key its soft bits by the
     // POSITION-PREDICTED seq (receiver's ARQ mirror, pulled once per group via
