@@ -1080,6 +1080,28 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
         return;
     }
 
+    // NEVER-SENT guard (BUG-TONEACK-FABRICATION defense-in-depth): the window-based
+    // Future guard above admits seqs up to window+1 past base, but the receiver can
+    // only ever ack seqs we actually TRANSMITTED — [base-1, tx_next_seq_-1]. An ack
+    // beyond tx_next_seq_-1 is fabricated (corrupt frame that survived its CRC, or a
+    // mis-expanded tone ack) and cumulative-retiring on it destroys payload bytes
+    // irreversibly (fires on_send_complete for undelivered frames). Drop = ack loss,
+    // always recoverable.
+    {
+        const uint16_t fwd = static_cast<uint16_t>((seq - ack_base) & 0xFFFF);
+        const uint16_t sent_span =
+            static_cast<uint16_t>((tx_next_seq_ - tx_base_seq_) & 0xFFFF);
+        if (fwd < 0x8000 && fwd > sent_span) {
+            stats_.fabricated_acks_dropped++;
+            LOG_MODEM(WARN,
+                      "SR-ARQ: ACK seq=%d beyond highest sent seq %u (base=%u) — "
+                      "dropped as fabricated",
+                      seq, static_cast<unsigned>((tx_next_seq_ - 1) & 0xFFFF),
+                      tx_base_seq_);
+            return;
+        }
+    }
+
     // ACK-repeat dedup guard: suppress clustered duplicate ACKs carrying
     // identical cumulative+bitmap information.
     if (arq_policy::shouldSuppressDuplicateAck(
@@ -1110,7 +1132,12 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 
     // --- Cumulative ACK: advance base past all frames up to seq ---
     uint16_t base_before_ack = tx_base_seq_;
-    while (tx_in_flight_ > 0 && tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
+    // tx_base_seq_ != tx_next_seq_: structural invariant — the cumulative walk can
+    // never advance base PAST the highest seq ever sent, whatever the ack claims
+    // (F116: a fabricated base=69 walked base 57->63 with tx_next=63, then the split
+    // window was unhealable because every real ack read as stale).
+    while (tx_in_flight_ > 0 && tx_base_seq_ != tx_next_seq_ &&
+           tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
         size_t slot = seqToSlot(tx_base_seq_);
         if (tx_window_[slot].active) {
             maybeSampleRTT(tx_window_[slot]);
@@ -1820,17 +1847,33 @@ void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bit
 
 void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
                                         uint8_t move_epoch) {
-    // Reconstruct the full 16-bit ack base from the 6-bit group_seq, picking the value
-    // whose low 6 bits match and that is nearest to (tx_base_seq_ - 1) — the seq a SACK
-    // would carry. The interactive window is far smaller than 64, so this is unambiguous.
+    // SUPPORT-CONSTRAINED decode (BUG-TONEACK-FABRICATION, F116 2026-07-05): a
+    // cumulative ack can only reference the receiver's in-order base, which lives in
+    // [tx_base_seq_-1, tx_next_seq_-1] — behind base-1 is stale (our base only
+    // advances on the receiver's own acks), ahead of the highest seq EVER SENT is
+    // impossible (the receiver cannot ack what never left this radio). That support
+    // spans <= window+1 < 64 seqs, so the 6-bit decode is UNIQUE inside it. A decode
+    // OUTSIDE the support is a corrupt/aliased/foreign detection and must be DROPPED
+    // — equivalent to ack loss, which half-duplex ARQ already survives via RTO. It
+    // must never be nearest-mapped onto the window: a fabricated cumulative ack fires
+    // on_send_complete(true) for undelivered frames, which irreversibly pops the
+    // FileTransfer tx ledger (F116 silently lost bytes 34944..38688 to a stale-audio
+    // 50 ms re-decode that CRC-12-fluked into group_seq6=5 and nearest-mapped to
+    // base=69 across a 6-frame in-flight window).
     const uint16_t ref = static_cast<uint16_t>((tx_base_seq_ - 1) & 0xFFFF);
-    uint16_t base = static_cast<uint16_t>((ref & 0xFFC0) | (group_seq6 & 0x3F));
-    const int16_t diff = static_cast<int16_t>(base - ref);
-    if (diff > 32) {
-        base -= 64;
-    } else if (diff < -32) {
-        base += 64;
+    const uint16_t span =
+        static_cast<uint16_t>((tx_next_seq_ - tx_base_seq_) & 0xFFFF);  // seqs outstanding
+    const uint16_t delta =
+        static_cast<uint16_t>((group_seq6 - (ref & 0x3F)) & 0x3F);  // forward distance from ref
+    if (delta > span) {
+        stats_.fabricated_acks_dropped++;
+        LOG_MODEM(WARN,
+                  "SR-ARQ: TONE-BURST ack group_seq6=%u decodes OUTSIDE the sent window "
+                  "(base-1=%u, span=%u, delta=%u) — dropped as corrupt/aliased/foreign",
+                  group_seq6, ref, span, delta);
+        return;
     }
+    const uint16_t base = static_cast<uint16_t>((ref + delta) & 0xFFFF);
 
     // MOVE-EPOCH: fold the tone-burst payload's epoch echo into bitmap bits 16-17
     // (the tone frame_mask is 16 bits, so those bits are free) so handleAckFrame

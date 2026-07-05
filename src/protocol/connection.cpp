@@ -1762,6 +1762,25 @@ bool Connection::onToneBurstAck(
         return true;  // consumed whole — no ARQ sack, no controller feed, no advisory
     }
 
+    // FOREIGN-SEMANTICS gate (BUG-TONEACK-FABRICATION, F116 2026-07-05): nothing on
+    // the unified path emits a Nack-TYPED tone burst — a crater'd group still acks as
+    // an Ack-typed no-progress SACK (sendSack: base = rx_base-1, holes in the mask),
+    // and the only real Nack producer is the WAITING-REBASE voice, whose group_seq is
+    // a BURST-GROUP ordinal in a DIFFERENT sequence space (consumed above when
+    // ULTRA_RX_RATE_CMD is on). A Nack-typed detection reaching this point is foreign
+    // or corrupt (F116: a stale-audio re-decode at the wrong symbol_ms rung that
+    // fluked Costas+Hamming+CRC-12) — its fields must NEVER be indexed into the ARQ
+    // window, the rate controller, or the drive advisory. Consume it whole; worst
+    // case is one lost real ack, which the RTO covers.
+    if (detection.payload.type == ultra::waveform::tone_burst_ack::AckType::Nack) {
+        LOG_MODEM(WARN,
+                  "Connection: Nack-typed tone-burst detection dropped whole "
+                  "(group_seq=%u mask=0x%X) — foreign or corrupt",
+                  detection.payload.group_seq,
+                  detection.payload.frame_mask);
+        return true;
+    }
+
     // TRANSPORT MERGE (step 1): when interactive tone-burst acks are enabled and we have
     // interactive SR-ARQ frames in flight (no active burst owns this ack), route it to
     // the ARQ window. The ARQ reconstructs the seq and drives its normal ack path.

@@ -192,6 +192,7 @@ public:
     }
     size_t getWindowSize() const { return config_.window_size; }
     uint16_t getRxBaseSeq() const { return rx_base_seq_; }
+    uint16_t getTxBaseSeq() const { return tx_base_seq_; }
     // HARQ provisional keys (2026-07-01): the receiver's mirror of the
     // sender's next-burst seq fill = ascending !received seqs in the rx
     // window. The sender fills bursts [unacked holes in window order][new

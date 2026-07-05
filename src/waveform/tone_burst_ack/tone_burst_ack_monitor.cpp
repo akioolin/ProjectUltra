@@ -230,6 +230,22 @@ void ToneBurstAckMonitor::runDetectionPass() {
                 ++suppressed_attempts_;
                 return;
             }
+            // STREAM-MONOTONICITY guard (BUG-TONEACK-FABRICATION, F116 2026-07-05):
+            // detections must move FORWARD in stream time. A detection at/behind the
+            // previous one is a re-scan of already-consumed audio — the F116 phantom
+            // was the peer's old 12 ms ACK re-decoded 60k samples later at the 50 ms
+            // rung (duration aliasing) after the under-consume bug below left it in
+            // the buffer. Real consecutive acks always advance the stream.
+            if (detected_stream_offset <= last_detection_stream_offset_) {
+                ++suppressed_attempts_;
+                LOG_MODEM(WARN,
+                          "ToneBurstAckMonitor: REGRESSED detection at stream %llu "
+                          "(last %llu, symbol_ms=%d) — stale-audio re-decode dropped",
+                          static_cast<unsigned long long>(detected_stream_offset),
+                          static_cast<unsigned long long>(last_detection_stream_offset_),
+                          symbol_ms);
+                return;
+            }
         }
 
         last_detection_stream_offset_ = detected_stream_offset;
@@ -253,10 +269,16 @@ void ToneBurstAckMonitor::runDetectionPass() {
         // Drop everything in the buffer up to past the decoded burst so
         // we don't re-scan the same audio on the next cadence tick. Leave
         // ~50 ms of trailing samples as guard.
-        const size_t consume_until = r.detected_offset_samples + needed;
+        // r.detected_offset_samples is WINDOW-relative (the detector saw
+        // buffer_ + tail_base) — the consume point must add tail_base back
+        // (F116: omitting it under-consumed whenever tail_base > 0, leaving the
+        // decoded burst re-scannable at OTHER symbol_ms rungs on later ticks —
+        // the duration-aliased phantom-ack surface).
+        const size_t consume_until = tail_base + r.detected_offset_samples + needed;
         const size_t guard = static_cast<size_t>(kSampleRate) * 50u / 1000u;
-        const size_t drop = (consume_until > guard) ? (consume_until - guard) : 0;
-        if (drop > 0 && drop <= buffer_.size()) {
+        const size_t drop = std::min(
+            buffer_.size(), (consume_until > guard) ? (consume_until - guard) : 0);
+        if (drop > 0) {
             buffer_.erase(buffer_.begin(), buffer_.begin() + drop);
             buffer_start_stream_offset_ += drop;
             last_detect_pos_in_buffer_ =

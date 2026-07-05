@@ -1,12 +1,25 @@
 # Known Bugs
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-TONEACK-FABRICATION: phantom tone-ACK detection fabricated cumulative delivery of 6 undelivered frames — silent 3.7KB file hole + 9.5-min zombie stall (F116)
+- Status: **FIXED 2026-07-05 (4-layer, unconditional — data integrity, no knob).** Root-caused from F116 rig forensics + 5-agent adversarial verification (workflow wf_1e79fe9e).
+- Failure shape: rig 50KB transfer died with receiver FileTransfer stuck at `expected=34944` while BOTH ARQ ends stayed "consistent" — sender fully ACKed → "payload drained" → 900s-grace auto-disconnect; receiver kept ACKing everything it saw. Bytes 34944..38688 (exactly the crater'd 8PSK group) were never retransmitted by anyone. No error surfaced anywhere.
+- Trigger: ToneBurstAckMonitor false positive on STALE AUDIO. The post-detection `consume_until` omitted `tail_base` (window-relative offset used as buffer-relative) → the decoded burst stayed re-scannable; a later cadence tick re-decoded the peer's old 12ms ACK at the 50ms rung (duration aliasing) and fluked Costas+Hamming+CRC-12 (1/4096/candidate) into `group_seq=5/type=NACK/mask=0x7E02` — 60k samples BEHIND the previous detection. The {12,25,50,100}ms multi-rung scan (2026-06-15) is the false-positive surface.
+- Amplification: `SelectiveRepeatARQ::onToneBurstAck` nearest-mapped the 6-bit value onto the seq space → base=69, a seq NEVER SENT (nothing consulted `tx_next_seq_`); freshness guard passed (13 ≤ window+1); the cumulative walk retired all 6 in-flight slots firing `on_send_complete(true)` each → FileTransfer ledger popped irreversibly → every later `requeuePendingChunks()` resumed at 38688, past the hole. `tx_base` also advanced PAST `tx_next` (split window) so every real ack afterwards read as stale.
+- Fix (all unconditional):
+  1. `tone_burst_ack_monitor.cpp` — consume coordinates fixed (`tail_base + offset + needed`) + stream-MONOTONICITY guard (a detection at/behind the previous one is a stale-audio re-decode → dropped, WARN).
+  2. `selective_repeat_arq.cpp onToneBurstAck` — SUPPORT-CONSTRAINED decode: an ack can only reference `[tx_base-1, tx_next-1]`; span ≤ window+1 < 64 ⇒ the 6-bit decode is unique inside the support; outside = prior probability zero → DROP as ack-loss (RTO recovers). Never nearest-map.
+  3. `connection.cpp onToneBurstAck` — Nack-TYPED detections consumed whole before the ARQ/rate-controller/drive-advisory (nothing on the unified path emits type=Nack; the WAITING-REBASE voice's group_seq is a different sequence space).
+  4. `handleAckFrame` — never-sent guard on the shared ack path (covers corrupt control-frame SACKs too) + structural invariant `tx_base != tx_next` in the cumulative walk. New stat `fabricated_acks_dropped`.
+- Regression: `tests/test_arq_toneburst_fabrication.cpp` (4/4: exact F116 repro, 64-value property sweep, control-path fabrication, legit-ack preservation).
+- Residual: a corrupt control-frame SACK could still phantom-retire WITHIN the sent window (needs an LDPC+frame-CRC fluke — astronomically rarer than the tone path).
 
 ### BUG-POSTTX-ACK-MISS: tone monitor tail-window sweep never scans audio deeper than ~520ms into a single feedAudio append — the first ACK after our own key-down (capture-resume backlog) is captured, fed, and never scanned (~19s RTO each, 2/run F76-F77)
 - Status: **FIXED 2026-07-05 (ULTRA_ACK_MONITOR_GAPLESS, DEFAULT-ON since 6340f51+flip; =0 opts out).** Root cause: all cadence passes triggered inside one feedAudio(count) call scan the SAME end-anchored window (tail_base = buffer end - window); a chunk larger than a bin's tail window leaves a permanent blind hole (12ms bin window ≈ 25k samples). Fade and staircase-bin mismatch REFUTED by capture ledger (tone arrived rms 0.033-0.091, all ACKs symbol_ms=12).

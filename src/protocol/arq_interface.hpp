@@ -50,6 +50,7 @@ struct ARQStats {
     int hole_events = 0;                // ACK hole indications observed
     int stale_acks_ignored = 0;         // ACK rejected as too old
     int future_acks_ignored = 0;        // ACK rejected as implausibly ahead
+    int fabricated_acks_dropped = 0;    // ack referenced a seq NEVER SENT — corrupt/aliased/foreign, dropped
     int duplicate_acks_ignored = 0;     // ACK suppressed by dedup window
     // SACK trigger-reason counters (Phase 2 instrumentation, exclusive bumps —
     // each SACK send increments exactly one of these so the four sum equals

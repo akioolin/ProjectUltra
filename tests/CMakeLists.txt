@@ -310,6 +310,12 @@ add_executable(test_selective_repeat_policy test_selective_repeat_policy.cpp)
 target_link_libraries(test_selective_repeat_policy PRIVATE ultra_core)
 add_test(NAME SelectiveRepeatPolicy COMMAND test_selective_repeat_policy)
 
+# BUG-TONEACK-FABRICATION (F116): fabricated/aliased tone acks must never
+# retire undelivered frames (support-constrained 6-bit decode + never-sent guard)
+add_executable(test_arq_toneburst_fabrication test_arq_toneburst_fabrication.cpp)
+target_link_libraries(test_arq_toneburst_fabrication PRIVATE ultra_core)
+add_test(NAME ArqToneburstFabrication COMMAND test_arq_toneburst_fabrication)
+
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
 add_executable(test_sync_detection test_sync_detection.cpp)

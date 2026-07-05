@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-05 — fix(arq/tone-ack): BUG-TONEACK-FABRICATION — phantom detection fabricated delivery, silent data loss (F116)
+
+**Broken:** F116 (rig, 50KB, first full-ladder run) failed with a silent 3744-byte hole
+(offsets 34944..38688 — exactly the crater'd 8PSK group) and a 9.5-minute zombie stall
+ending in the scenario watchdog's disconnect. Root cause chain (verified by a 5-agent
+adversarial workflow against both station logs + code): (1) ToneBurstAckMonitor's
+post-detection consume used a WINDOW-relative offset as buffer-relative (missing
+`tail_base`) → under-consumed, leaving decoded ACK audio re-scannable; (2) a later pass
+re-decoded that stale 12ms ACK at the 50ms rung (duration aliasing) and passed
+Costas+Hamming+CRC-12 → phantom `group_seq6=5/NACK/mask=0x7E02`; (3)
+`onToneBurstAck` nearest-mapped 5 → base=69, a seq NEVER SENT; (4) `handleAckFrame`'s
+cumulative walk retired all 6 undelivered in-flight frames, firing `on_send_complete(true)`
+each → FileTransfer ledger popped irreversibly, `tx_base` advanced past `tx_next`
+(unhealable split — all real acks then "stale"), every later requeue resumed past the hole.
+
+**Changed:** `src/waveform/tone_burst_ack/tone_burst_ack_monitor.cpp` (consume
+coordinates + stream-monotonicity guard), `src/protocol/selective_repeat_arq.cpp`
+(support-constrained 6-bit decode in `onToneBurstAck`; never-sent guard + `tx_base !=
+tx_next` walk invariant in `handleAckFrame`), `src/protocol/connection.cpp` (Nack-typed
+detections consumed whole pre-ARQ), `src/protocol/arq_interface.hpp` + `selective_repeat_arq.hpp`
+(`fabricated_acks_dropped` stat, `getTxBaseSeq()` accessor).
+
+**Why it works (principled):** a cumulative ack can only reference the receiver's
+in-order base, which lives in `[tx_base-1, tx_next-1]`; that support spans ≤ window+1
+< 64 so the 6-bit decode is UNIQUE inside it, and outside it has prior probability
+zero — must be dropped (= ack loss, RTO-recoverable in seconds), never nearest-mapped
+(fabricated delivery is unrecoverable). Asymmetric loss function ⇒ drop-on-doubt is
+optimal. All four layers unconditional: data integrity is not a knob.
+
+**Verified:** new `tests/test_arq_toneburst_fabrication.cpp` 4/4 (exact F116 repro,
+64-value property sweep — no over-retire, base never passes next — control-path
+fabrication, legit-ack preservation); full ctest green except pre-existing
+UltraTncSimAudio red (fails at PING classify, upstream of every touched path;
+baseline A/B at 904a990 confirms); faithful gate re-probe post-fix.
+
 ## 2026-07-05 — validation: 10-run overnight batch; ACK-listen guard + gapless monitor DEFAULT-ON
 
 1. **Scope:** user mandate — fix BUG-POSTTX-ACK-MISS, validate over 10 rig runs with every
