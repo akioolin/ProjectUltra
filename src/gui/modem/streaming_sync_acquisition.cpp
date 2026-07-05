@@ -273,16 +273,19 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
-    // ACK-LISTEN tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM, default OFF =
-    // byte-identical): while this station's tone-burst ACK monitor is armed (we sent a
-    // burst and await the peer's 4-FSK ACK — half-duplex, the peer cannot be sending
-    // OFDM), suppress the warm DATA-sync acceptance paths in the SyncController so the
-    // ACK tone cannot S&C-false-lock the OFDM searcher and race the tone monitor for
-    // the same samples (the F73/F74 missed-ACK spirals). The dual-chirp path stays
-    // live. Refreshed every search pass; disarms automatically with the monitor.
+    // ACK-LISTEN tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM): while this station's
+    // tone-burst ACK monitor is armed (we sent a burst and await the peer's 4-FSK ACK —
+    // half-duplex, the peer cannot be sending OFDM), suppress the warm DATA-sync
+    // acceptance paths in the SyncController so the ACK tone cannot S&C-false-lock the
+    // OFDM searcher and race the tone monitor for the same samples (the F73/F74
+    // missed-ACK spirals). The dual-chirp path stays live. Refreshed every search
+    // pass; disarms automatically with the monitor.
     static const bool kAckListenSuppressOfdm = [] {
         const char* e = std::getenv("ULTRA_ACKLISTEN_SUPPRESS_OFDM");
-        return e && e[0] == '1';  // default OFF
+        // DEFAULT-ON 2026-07-05 (=0 opts out): rig-proven — F75 record 2.62 kbps +
+        // 10-run batch F78-F87 (~280 ack exchanges, 0 misses, 0 expired-undetected);
+        // half-duplex-provably safe (the peer cannot send OFDM during our ACK window).
+        return !(e && e[0] == '0');
     }();
     sync_controller_.setAckListenSuppressDataSync(
         kAckListenSuppressOfdm && connected_ &&

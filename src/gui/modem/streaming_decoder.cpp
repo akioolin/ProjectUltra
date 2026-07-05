@@ -200,15 +200,17 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
         // with the (now 172.8 k) buffer. See the Config comment; the always-on
         // polling tests keep the legacy whole-buffer default.
         tba_cfg.tail_window_sweep = true;
-        // GAPLESS armed sweep (ULTRA_ACK_MONITOR_GAPLESS, default OFF =
-        // byte-identical; BUG-POSTTX-ACK-MISS 2026-07-05): closes the tail-window
-        // coverage hole where one large feedAudio append (post-TX capture-resume
-        // backlog) exceeds a bin's tail window and a tone inside it is never
-        // scanned — the rig's first-ACK-after-own-keydown misses (F76/F77,
-        // ~19 s RTO each). See the monitor Config comment for the induction.
+        // GAPLESS armed sweep (ULTRA_ACK_MONITOR_GAPLESS; BUG-POSTTX-ACK-MISS
+        // 2026-07-05): closes the tail-window coverage hole where one large
+        // feedAudio append (post-TX capture-resume backlog) exceeds a bin's tail
+        // window and a tone inside it is never scanned — the rig's
+        // first-ACK-after-own-keydown misses (F76/F77, ~19 s RTO each). See the
+        // monitor Config comment for the induction. DEFAULT-ON 2026-07-05
+        // (=0 opts out): correctness-by-construction + 10-run rig batch F78-F87
+        // (0 misses) + sim parity + tone-burst tests 5/5.
         {
             const char* e = std::getenv("ULTRA_ACK_MONITOR_GAPLESS");
-            tba_cfg.gapless_armed_sweep = (e && e[0] == '1');
+            tba_cfg.gapless_armed_sweep = !(e && e[0] == '0');
         }
         // Buffer DERIVED from the scan set (2026-07-04, R3/4 ACK-miss forensics):
         // it must hold one full burst at the SLOWEST scanned rung + the armed

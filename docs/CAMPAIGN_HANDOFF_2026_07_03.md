@@ -159,3 +159,19 @@ acceptance paths while the tone monitor is armed (dual-chirp stays live). Rig F7
 sender-effective). ULTRA_ENTRY_QAM16_SNR exists (20f6006) but stays OFF — cold 16QAM entry
 is marginal (F73: quality 0.35, ladder collapse); the QPSK-first climb warms the equalizer.
 Queued: multi-seed F76+ validation of the guard; bfe5676 "SELF-ECHO" log-line rename.
+
+### §7.5 OVERNIGHT VALIDATION + DEFAULT FLIPS (2026-07-05 ~02:00, Opus — user mandate: "fix, 10 runs, verify every retx, commit, maybe default-on")
+BUG-POSTTX-ACK-MISS root-caused + fixed (6340f51): the tone monitor's tail-window sweep
+never scanned audio deeper than ~520ms into a single feedAudio append (post-TX capture-
+resume backlog) — the peer's fast ACK landed there: captured, fed, never scanned (~19s
+RTO ×2/run in F76/F77). Fix = gapless armed sweep (high-water anchored, induction-proven)
++ permanent monitor forensics (arm/detect/expiry INFO lines with max_chunk classification).
+**10-RUN BATCH (F78-F87, guard+gapless, rough 00:30-01:50 epoch): 10/10 delivered
+md5-EXACT (135/135 lifetime), median 1.24 (draws 0.93-1.61), ~280 ack exchanges 0 misses,
+0 expired-undetected windows, EVERY RTO forensically classified genuine fade (forward-path
+group losses = the open HEADNULL class, quantified at up to ~200s/run — the next lever).**
+**DEFAULTS FLIPPED (both ends, =0 opts out): ULTRA_ACKLISTEN_SUPPRESS_OFDM,
+ULTRA_ACK_MONITOR_GAPLESS.** The 12-knob standing set remains env-gated — flipping 14
+defaults at once overnight would be un-bisectable; candidates for the next flips (weeks of
+rig proof each): ARQ_MOVE_EPOCH, CONNECT_AFFINE_BASIS, the pool knobs. STANDING ENV
+(F88+) = the §7.3 set (the two flipped knobs may be dropped from the env at will).

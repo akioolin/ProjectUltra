@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-05 — validation: 10-run overnight batch; ACK-listen guard + gapless monitor DEFAULT-ON
+
+1. **Scope:** user mandate — fix BUG-POSTTX-ACK-MISS, validate over 10 rig runs with every
+   timeout/retx forensically classified (bug vs genuine fade), then flip proven defaults.
+2. **BUG-POSTTX-ACK-MISS fixed (6340f51):** tail-window sweep blind hole (see KNOWN_BUGS
+   entry) — gapless armed sweep + permanent monitor forensics (arm/detect/expiry INFO with
+   max_chunk classification).
+3. **10-run batch (F78-F87, IONOS MPG@20, rough 00:30-01:50 epoch):** 10/10 delivered
+   md5-EXACT (135/135 lifetime); goodput 0.93-1.61 median 1.24; ~280 ack exchanges 0 misses,
+   0 expired-undetected windows (was 2/run); EVERY RTO = genuine fade (forward-path group
+   losses, the open BUG-BURST-HEADNULL-DROP class — quantified at up to ~200s/run = the next
+   structural lever). No bug-caused timeout observed in any run.
+4. **Defaults flipped (=0 opts out): ULTRA_ACKLISTEN_SUPPRESS_OFDM + ULTRA_ACK_MONITOR_GAPLESS**
+   — rig-proven (record F75 2.62 + the batch), half-duplex-provably safe / correct-by-
+   construction. The 12-knob standing campaign set remains env-gated (one-at-a-time flip
+   discipline); next candidates: ARQ_MOVE_EPOCH, CONNECT_AFFINE_BASIS, pool knobs.
+   Verification: build clean, full ctest green with flipped defaults (UltraTncSimAudio
+   pre-existing red excluded), rig confirm run F88 (defaults active, knobs dropped from env).
+
 ## 2026-07-05 — fix(sync): ACK-listen tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM) — the "self-echo" mechanism corrected; all-time rig record 2.62 kbps
 
 1. **Broken:** during the sender's post-burst ACK-listen, the peer's 4-FSK tone-burst ACK
