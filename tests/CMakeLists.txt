@@ -316,6 +316,12 @@ add_executable(test_arq_toneburst_fabrication test_arq_toneburst_fabrication.cpp
 target_link_libraries(test_arq_toneburst_fabrication PRIVATE ultra_core)
 add_test(NAME ArqToneburstFabrication COMMAND test_arq_toneburst_fabrication)
 
+# 8PSK ladder-aware climb (F121): QPSK->QAM8->QAM16 walk; own binary because
+# psk8LadderEnabled() latches its env on first call
+add_executable(test_psk8_climb test_psk8_climb.cpp)
+target_link_libraries(test_psk8_climb PRIVATE ultra_core)
+add_test(NAME Psk8Climb COMMAND test_psk8_climb)
+
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
 add_executable(test_sync_detection test_sync_detection.cpp)

@@ -2776,8 +2776,49 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             } else {
                 std::snprintf(buf, sizeof(buf), "hold QAM16 R2/3 (q=%.2f)", quality);
             }
+        } else if (!is_qam16 && psk8LadderEnabled() &&
+                   data_code_rate_ == CodeRate::R2_3) {
+            // QAM8 R2/3 -> QAM16 R2/3 modulation crest-step (2026-07-05, F121 finding:
+            // QAM8 was entry-only — no upward walk existed). Same gates as the QAM16
+            // R3/4 crest walk above: qam16ClimbStreak() CONSECUTIVE clean groups
+            // (>= climb_above; one sub-threshold group resets), fire only at a clean
+            // send boundary, streak KEPT on a busy hold so the step re-asserts.
+            // Reuses qam16_r34_clean_streak_ (identical lifecycle, mutually exclusive
+            // with the QAM16 walk via the is_qam16 arm; rename tracked in the cleanup
+            // register). +1 bit/symbol at -3.6 dB margin — strictly a crest move, the
+            // streak is the calm gate.
+            const float climb_above = rate_controller_.config().climb_above;
+            if (quality >= climb_above) ++qam16_r34_clean_streak_;
+            else qam16_r34_clean_streak_ = 0;
+            if (qam16_r34_clean_streak_ >= qam16ClimbStreak() &&
+                qam16_reclimb_cooldown_ == 0) {
+                const bool busy =
+                    file_transfer_.getState() == FileTransferState::SENDING &&
+                    (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+                if (busy) {
+                    std::snprintf(buf, sizeof(buf),
+                                  "hold QAM8 R2/3 for clean boundary (want QAM16 R2/3, q=%.2f)",
+                                  quality);
+                } else {
+                    qam16_r34_clean_streak_ = 0;  // step FIRED at a clean boundary -> reset
+                    const bool desc_committed = tryDescriptorModeSwitch(
+                        Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                        v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    if (!desc_committed) {
+                        requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                                          v2::ModeChangeReason::CHANNEL_IMPROVED);
+                    }
+                    std::snprintf(buf, sizeof(buf),
+                                  "QAM8 R2/3 -> QAM16 R2/3 climb via %s (q=%.2f)",
+                                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
+                    LOG_MODEM(INFO, "Connection: adaptive %s", buf);
+                }
+            } else {
+                std::snprintf(buf, sizeof(buf), "hold QAM8 R2/3 (q=%.2f)", quality);
+            }
         } else {
-            std::snprintf(buf, sizeof(buf), "hold QAM16 %s (q=%.2f)",
+            std::snprintf(buf, sizeof(buf), "hold %s %s (q=%.2f)",
+                          modulationToString(data_modulation_),
                           codeRateToString(data_code_rate_), quality);
         }
         last_adaptive_action_ = buf;
@@ -2821,8 +2862,21 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     Modulation target_mod = data_modulation_;
     CodeRate target_rate = next;
     bool qam16_hop = false;
+    // LADDER-AWARE dense climb (2026-07-05, F121 finding): with the 8PSK ladder on,
+    // the first dense rung above QPSK R3/4 is QAM8 R2/3 (constant-envelope, ~3.6 dB
+    // more constellation margin than 16QAM). Without this the hop was hardcoded
+    // QPSK->QAM16, making QAM8 ENTRY-ONLY: any exit mid-transfer stranded the run on
+    // the QPSK<->QAM16 loop (F121 never revisited 8PSK after an 18 dB connect
+    // snapshot). The streak / cooldown / calm-gate machinery below is unchanged —
+    // only the hop TARGET generalizes. The QAM8 R2/3 -> QAM16 R2/3 upward step lives
+    // in the dense-constellation branch above (this code is unreachable while on a
+    // dense mod — that branch returns). (The qam16_* names now cover the generic
+    // dense-climb machinery; rename tracked in the cleanup register.)
+    const Modulation climb_to_mod =
+        psk8LadderEnabled() ? Modulation::QAM8 : Modulation::QAM16;
     if (qam16_climb_enabled &&
-        data_modulation_ == Modulation::QPSK && prev == CodeRate::R3_4 && next == CodeRate::R3_4) {
+        data_modulation_ == Modulation::QPSK && prev == CodeRate::R3_4 &&
+        next == CodeRate::R3_4) {
         const float climb_above = rate_controller_.config().climb_above;
         if (quality >= climb_above) {
             if (qam16_reclimb_cooldown_ > 0) {
@@ -2853,7 +2907,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             connection_policy::coherenceAdjustedFadingIndex(
                 fading_index_, coherence_score_, coherence_valid_) <= kQam16CalmFading;
         if (qam16_clean_streak_ >= qam16ClimbStreak() && qam16_calm_ok) {
-            target_mod = Modulation::QAM16;
+            target_mod = climb_to_mod;
             target_rate = CodeRate::R2_3;
             qam16_hop = true;
             // NOTE: do NOT reset the streak here. If the change is DEFERRED below (busy send
