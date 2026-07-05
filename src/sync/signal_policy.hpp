@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 namespace ultra {
 namespace sync {
@@ -15,6 +16,15 @@ inline constexpr float kMinPreSyncLLR = 1.5f;
 inline constexpr float kMinBurstContinuationLLR = 2.0f;
 inline constexpr float kNearZeroLLR = 0.1f;
 inline constexpr float kMaxErasureLikeFraction = 0.30f;
+// SHAPE-BASED false-lock rejection (ULTRA_LLR_REJECT_SHAPE, 2026-07-05): the fraction of
+// the population at which near-zero LLRs alone prove noise. Measured populations: every
+// genuine noise/false lock logged (PING-window noise, tone-locks, echo-era junk) reads
+// near_zero 52-99%; genuine-but-weak frames (16QAM head frame after a mode-hop COLD
+// reset, F92: mean 0.94, near_zero 18.5%) sit far below. The legacy `mean < 1.5` OR-arm
+// is modulation-blind — 16QAM's inner bits give mean |LLR| ~1 at moderate SNR (vs QPSK
+// 3-8), so the guard shredded real, LDPC-decodable 16QAM frames as "false locks"
+// (the first-group-after-adopt crater class; three consecutive RTOs per incident).
+inline constexpr float kNoiseZeroDominatedFraction = 0.50f;
 inline constexpr float kMinLTSSignalPower = 1.0e-3f;
 inline constexpr float kMinLTSChannelMagnitude = 5.0e-2f;
 inline constexpr float kMaxSyncCFODriftHz = 1.0f;
@@ -70,8 +80,26 @@ inline LLRQuality evaluatePreSyncLLR(const float* bits,
     quality.mean_abs = sum / static_cast<float>(quality.count);
     quality.near_zero_fraction = static_cast<float>(quality.near_zero_count) /
                                  static_cast<float>(quality.count);
-    quality.reject_as_false_lock = quality.mean_abs < min_mean_abs ||
-                                   quality.near_zero_fraction > max_near_zero_fraction;
+    // ULTRA_LLR_REJECT_SHAPE (default OFF = byte-identical): reject on the population
+    // SHAPE, not the mean alone. Noise is zero-DOMINATED (fraction > 0.50 — every
+    // measured noise lock reads 52-99%); a low mean with a low near-zero fraction is
+    // a weak-but-REAL signal — exactly what LDPC exists to decode (the legacy
+    // mean-alone OR-arm shredded genuine 16QAM head frames at mean ~0.9, F92). The
+    // low-mean arm survives but requires erasure-like support (mean < min AND
+    // fraction > 0.30) so a truly degenerate stream still short-circuits pre-LDPC.
+    static const bool kShapeGate = [] {
+        const char* e = std::getenv("ULTRA_LLR_REJECT_SHAPE");
+        return e && e[0] == '1';
+    }();
+    if (kShapeGate) {
+        quality.reject_as_false_lock =
+            quality.near_zero_fraction > kNoiseZeroDominatedFraction ||
+            (quality.mean_abs < min_mean_abs &&
+             quality.near_zero_fraction > max_near_zero_fraction);
+    } else {
+        quality.reject_as_false_lock = quality.mean_abs < min_mean_abs ||
+                                       quality.near_zero_fraction > max_near_zero_fraction;
+    }
     return quality;
 }
 
