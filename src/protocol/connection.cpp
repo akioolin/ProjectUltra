@@ -2289,6 +2289,33 @@ void Connection::maybeCollapseEscape() {
     if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be collapsing
     if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
 
+    // ESCAPE EPISODE CAP (ULTRA_ESCAPE_EPISODE_CAP, default 0 = OFF = unlimited/legacy).
+    // A fade null is TIME-bounded (~Tc-scale), not rate-bounded: during the null NO rung
+    // delivers (SNR is -inf in the null regardless of code rate), so zero-progress
+    // evidence measures time-stuck, not rate error. ONE drop hedges the post-null
+    // decode; further drops buy zero delivery during the null and cost minutes of
+    // under-rated cruise after (F89: one trough cascaded R3/4->R2/3->R1/2->R1/4 while
+    // the deliveries BETWEEN stalls ran q=0.94-0.99). Saturate at the cap per silent
+    // episode (consecutive_escape_drops_ resets on ANY ack progress — the episode
+    // boundary); the trough-pacing hold owns the time axis, and a genuinely over-
+    // climbed rung post-null still demotes via the ack-driven RateController (partial
+    // deliveries feed it) and the stuck-frame escape (frame-death evidence, uncapped).
+    static const int kEscapeEpisodeCap = [] {
+        if (const char* e = std::getenv("ULTRA_ESCAPE_EPISODE_CAP")) {
+            const int n = std::atoi(e);
+            if (n >= 1 && n <= 8) return n;
+        }
+        return 0;  // OFF — today's unlimited cascade
+    }();
+    if (kEscapeEpisodeCap > 0 && consecutive_escape_drops_ >= kEscapeEpisodeCap) {
+        LOG_MODEM(INFO,
+                  "Connection: COLLAPSE-escape SATURATED (episode cap %d, drops %d) — "
+                  "holding rung through the null",
+                  kEscapeEpisodeCap, consecutive_escape_drops_);
+        zero_progress_rounds_ = 0;  // consume the evidence; re-accumulates before the next poll
+        return;
+    }
+
     // §2.1 window-collapse evidence: ≥⌈burst_cap/2⌉ frames pending at the current rung.
     // in_flight ≥ ceil(cap/2) ⇔ 2·in_flight ≥ cap (integer).
     const size_t burst_cap = burstAirtimeBudgetFrames(arq_.getWindowSize());
