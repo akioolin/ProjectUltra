@@ -1929,6 +1929,22 @@ static int collapseEscapeRounds() {
 // needs the trough exit to be as prompt as the cliff NACK exit) or on a NACK.
 // The ULTRA_QAM16_R34 crest-rung walk (QAM16 R2/3 -> R3/4, default-OFF) reuses this same
 // streak length as its climb gate — one clean-evidence constant for both upward moves.
+// MID-RUNG demote landing (ULTRA_QAM16_DEMOTE_MIDRUNG, default OFF; F102 finding):
+// with the 16QAM R1/2 rung ladder-enabled, a crater/escape at 16QAM R2/3+ lands at
+// 16QAM R1/2 (raw ~2.45k, ~2x the FEC margin) instead of skipping to QPSK R3/4
+// (~2.05k raw). The channel that craters R2/3 often still carries R1/2 — that is
+// the margin argument the epoch-stats exposed (broadband ~24 dB, damage-limited).
+// If R1/2 craters too, the NEXT command lands QPSK R3/4 (one extra ~12 s step).
+// Requires ULTRA_ENABLE_QAM16_LADDER (the rung must be selectable at all).
+static bool qam16DemoteMidrungEnabled() {
+    static const bool v = [] {
+        const char* a = std::getenv("ULTRA_QAM16_DEMOTE_MIDRUNG");
+        const char* b = std::getenv("ULTRA_ENABLE_QAM16_LADDER");
+        return a && a[0] == '1' && b && b[0] == '1';
+    }();
+    return v;
+}
+
 static int qam16ClimbStreak() {
     static const int v = [] {
         if (const char* e = std::getenv("ULTRA_QAM16_CLIMB_STREAK")) {
@@ -2009,7 +2025,16 @@ void Connection::executeEscapeDrop(const char* trigger) {
         // cooldown (a frame nearly died — stronger evidence than a soft demote, but not a permanent
         // forfeit of the next fade crest). requestModeChange re-anchors both stations at a clean
         // boundary.
-        noteQam16Demoted(2);
+        // MID-RUNG landing (ULTRA_QAM16_DEMOTE_MIDRUNG): the escape lands at 16QAM
+        // R1/2 (2x margin, stays on QAM16 ⇒ no reclimb cooldown) unless already
+        // there — a second escape then takes the QPSK R3/4 exit below.
+        const bool midrung_exit =
+            qam16DemoteMidrungEnabled() && data_code_rate_ != CodeRate::R1_2;
+        const Modulation esc_mod =
+            midrung_exit ? Modulation::QAM16 : Modulation::QPSK;
+        const CodeRate esc_rate =
+            midrung_exit ? CodeRate::R1_2 : CodeRate::R3_4;
+        if (!midrung_exit) noteQam16Demoted(2);
         // PHASE-3 (2026-07-04): the FIRST escape of a silent stretch commits via the
         // descriptor (mid-window era-safe under move-epoch; the wire self-describes,
         // so a briefly-deaf peer re-syncs on the first descriptor it decodes, and the
@@ -2025,16 +2050,17 @@ void Connection::executeEscapeDrop(const char* trigger) {
         bool desc_committed = false;
         if (desc_escape_ok) {
             desc_committed = tryDescriptorModeSwitch(
-                Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+                esc_mod, esc_rate, wireSnrDb(),
                 v2::ModeChangeReason::CHANNEL_DEGRADED);
         }
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> QPSK R3/4 (%s) via %s",
-                  codeRateToString(data_code_rate_), trigger,
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> %s %s (%s) via %s",
+                  codeRateToString(data_code_rate_), modulationToString(esc_mod),
+                  codeRateToString(esc_rate), trigger,
                   desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
         if (!desc_committed) {
             // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
             // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
-            requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
+            requestModeChange(esc_mod, esc_rate, wireSnrDb(),
                               v2::ModeChangeReason::CHANNEL_DEGRADED);
         }
         return;
@@ -2207,6 +2233,12 @@ void Connection::maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
         if (cmd == kRungCmdDownOne && qam16R34Enabled() &&
             data_code_rate_ == CodeRate::R3_4) {
             target_rate = CodeRate::R2_3;  // crest-rung step-down: stays on QAM16
+        } else if (qam16DemoteMidrungEnabled() &&
+                   data_code_rate_ != CodeRate::R1_2) {
+            // MID-RUNG landing: stay on 16QAM at R1/2 (2x margin) instead of the
+            // QPSK R3/4 exit. Stays-on-QAM16 ⇒ no noteQam16Demoted (mirrors the
+            // crest step-down above); a further crater lands QPSK via the else.
+            target_rate = CodeRate::R1_2;
         } else {
             target_mod = Modulation::QPSK;
             target_rate = CodeRate::R3_4;
