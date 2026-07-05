@@ -1099,11 +1099,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // byte can also carry the -10 dB stale sentinel (no reading fresher than
         // 3*Tc at the sender) — render that as n/a, never as a number.
         char link_snr_text[24];
-        const auto mode_stats = modem_.getStats();
-        if (mode_stats.has_ofdm_broadband_snr_db &&
-            std::isfinite(mode_stats.ofdm_broadband_snr_db)) {
+        // Lock-free LAST-VALID atomics, not the stats-queue snapshot: the queue's
+        // has_ofdm flag is per-drained-result and a control decode (the MODE_CHANGE
+        // frame itself!) clears it right before this line renders — measured still
+        // "(wire)" mid-transfer on the first fix attempt.
+        if (modem_.hasLastOFDMBroadbandSNR() &&
+            std::isfinite(modem_.getLastOFDMBroadbandSNR())) {
             snprintf(link_snr_text, sizeof(link_snr_text), "%.1f dB (lts)",
-                     mode_stats.ofdm_broadband_snr_db);
+                     modem_.getLastOFDMBroadbandSNR());
         } else if (snr_db <=
                    protocol::connection_policy::kConnectSnrStaleSentinelDb + 0.5f) {
             snprintf(link_snr_text, sizeof(link_snr_text), "n/a");
