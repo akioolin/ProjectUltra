@@ -10,6 +10,45 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-05 — fix(sync): ACK-listen tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM) — the "self-echo" mechanism corrected; all-time rig record 2.62 kbps
+
+1. **Broken:** during the sender's post-burst ACK-listen, the peer's 4-FSK tone-burst ACK
+   S&C-false-locks the warm OFDM data-sync detectors (the tone's periodic carrier lead-in +
+   repeated FSK symbols give sc~0.9+ while the LTS matched filter stays ~0.1 — the
+   sc-high/mf-low signature on every such lock). The garbage decode + blind 120k re-search
+   races the tone monitor for the same samples; on the rig (decoder behind live, #56 class)
+   the race is lost: first ACK missed → 28.5s RTO stall + wasted resend + demote (F74);
+   cold-16QAM entry collapsed the whole ladder to R1/4 (F73). **Mechanism correction:** this
+   was previously attributed to "self-echo" (bfe5676) — disproven three ways: OTASim's mixer
+   excludes self-audio by construction (ota_channel_core/mixer.cpp:40-42), a solo-station
+   control heard nothing, and rig capture is stopped during TX (app.cpp:3360-3364). The tone
+   locks land exactly on the ack-repeat copy (+376ms) in sim.
+2. **Changed:** `sync_controller.hpp/.cpp` — unconditional not-found guards at the top of
+   `detectConnectedLightSync` and `detectFullAnchorFallback` while
+   `ack_listen_suppress_data_sync_` is set (once-per-window throttled log); flag set per
+   search pass in `streaming_sync_acquisition.cpp::searchForSync` from
+   (ULTRA_ACKLISTEN_SUPPRESS_OFDM && connected && OFDM_CHIRP && tone_burst_monitor_.isArmed()).
+3. **Why it works:** half-duplex — while our tone monitor is armed the peer cannot be
+   sending OFDM, so warm data-sync acceptance in that window can only be a false lock. A
+   threshold cannot gate it (the tone scores 0.94, above every decayed threshold including
+   the full-anchor-wait 0.52 gate it slipped in F74) — only unconditional suppression works.
+   The dual-chirp path stays live (a tone cannot fake the up+down pair at the 28800-sample
+   gap) so full-anchor control frames still acquire; reject streaks/§16.4 are untouched
+   (a suppressed window is not acquisition-failure evidence); the flag auto-clears with the
+   monitor (ACK decode or expiry) so it can never wedge the search. Knob unset =
+   byte-identical.
+4. **Verification:** OTASim A/B seed42 good@20: tone-locks 50→0, false-chirp rejects →0,
+   0 timeout-resends, all 25 ACKs heard, PASS 1990 bps (baseline 1730). Rig F75 (standing
+   config + knob, both ends 7752d60): first ACK 9.9s (F74: 28.5s), ACK cadence 9.56s
+   metronomic, 0 timeout-resends, 0 craters, 16QAM R2/3 cruise, **2.62 kbps @156.5s CRC-ok
+   byte-exact — all-time rig record** (prior 2.50). Single cell; mechanism metrics are the
+   proof. ctest green except pre-existing UltraTncSimAudio red (user-confirmed pre-existing).
+   Also landed: `ULTRA_ENTRY_QAM16_SNR` (20f6006, default-OFF) — cold 16QAM connect entry;
+   F73 measured it MARGINAL (quality 0.35 cold decode, no warm estimate) → keep OFF, the
+   QPSK-first climb warms the equalizer. Standing campaign config += ULTRA_ACKLISTEN_SUPPRESS_OFDM=1.
+
+---
+
 ## 2026-07-04 — fix(control-plane): the E1/seed-42 forensic arc — six defects root-caused by adversarial workflows and fixed, all validated on the deterministic seed
 
 Full mechanism narratives: the three workflow verdicts (E1 MODE_CHANGE, R3/4 ACK-miss,

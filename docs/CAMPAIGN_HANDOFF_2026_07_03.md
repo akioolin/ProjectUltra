@@ -147,3 +147,15 @@ R3/4 walk on coherence-adjusted fading <= 0.30; commit a4ffee1, default-OFF/byte
 without the knob). This recovers F3's chop cruise while keeping R3/4 upside in genuine calm
 (fading < 0.30). To replicate 2.50 needs BOTH this config AND a calm channel window (~90s
 zero-crater) — the latter is pure IONOS sampling (stationary; F3-class draws recur).
+
+### §7.4 STANDING CONFIG UPDATE (2026-07-05 ~00:00, Opus): ACK-LISTEN TONE-LOCK GUARD — all-time record 2.62
+The "self-echo" story is CORRECTED (see KNOWN_BUGS BUG-ACKLISTEN-TONE-FALSELOCK + CHANGELOG
+2026-07-05): the sender's warm data-sync detector was S&C-false-locking on the PEER'S TONE
+ACK (sc~0.9/mf~0.1; self-echo disproven — OTASim mixer excludes self, solo-station control
+heard nothing, rig capture stopped during TX). Fix 7752d60 suppresses both warm data-sync
+acceptance paths while the tone monitor is armed (dual-chirp stays live). Rig F75: first ACK
+9.9s (was 28.5s), 9.56s metronomic cadence, 0 resends, 0 craters, **2.62 kbps RECORD**.
+**STANDING CONFIG (F75+): the §7.3 set PLUS ULTRA_ACKLISTEN_SUPPRESS_OFDM=1** (both ends;
+sender-effective). ULTRA_ENTRY_QAM16_SNR exists (20f6006) but stays OFF — cold 16QAM entry
+is marginal (F73: quality 0.35, ladder collapse); the QPSK-first climb warms the equalizer.
+Queued: multi-seed F76+ validation of the guard; bfe5676 "SELF-ECHO" log-line rename.
