@@ -1830,6 +1830,10 @@ bool Connection::onToneBurstAck(
             const int round_progress = arq_.lastAckProgressFrames();
             arq_.consumeAckProgress();
             noteArqRoundOutcome(round_progress, "toneburst-ack");
+            // TROUGH AMNESTY: progress after a zero-progress episode = the null ended;
+            // restore the pre-episode rung (see maybeTroughAmnesty). Inside the same
+            // defer-refill bracket, so the restored rung rides the very next refill.
+            maybeTroughAmnesty(round_progress, detection.payload.rung_cmd);
             // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
             // to send the next burst (resend remaining holes + new frames). Trigger the
             // refill even when the cumulative base did NOT advance: a SACK with a hole at
@@ -2397,6 +2401,60 @@ uint32_t Connection::elapsedSinceLastDataBurstEndMs() const {
 //                          ack-signature dedup): NOT a round, touch nothing.
 // Partial-SACK rounds land here with progress > 0 and therefore resend immediately
 // (status quo) — only zero-progress rounds ever defer (§3).
+// TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY, default OFF = byte-identical). A fade null is
+// TIME-bounded: a rung proven clean seconds before it is not invalidated by it. Yet the
+// down-side (collapse escape + quality-EMA demote) and the up-side (ssthresh pins +
+// per-rung climb streaks) both treat trough evidence as RATE evidence — F89/F91 measured
+// a ~20 s bidirectional/forward null demoting three rungs and then sitting at R1/4 for
+// minutes while delivering 8/8 q=0.9+. When the episode ends (the first progress-bearing
+// ack), restore the pre-episode rung directly: if the channel genuinely worsened, one
+// crater at the restored rung re-demotes in ~3.5 s (receiver rung command) — bounded
+// downside, minutes of upside. Ordering with the receiver's rung command: the command
+// applies BEFORE the round outcome in onToneBurstAck, so (a) an episode that starts on a
+// crater ack snapshots the POST-crater rung (crater evidence kept), and (b) amnesty
+// SKIPS when this ack carries a fresh DOWN command (receiver evidence wins).
+static int coherentRungOrdinal(Modulation m, CodeRate r) {
+    const int mod_rank = (m == Modulation::QAM16) ? 1 : 0;
+    return mod_rank * 16 + static_cast<int>(ofdmCodeRateValue(r) * 12.0f + 0.5f);
+}
+void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
+    if (!trough_episode_active_ || progress_frames <= 0) return;
+    trough_episode_active_ = false;  // the episode is over either way
+    static const bool kAmnestyOn = [] {
+        const char* e = std::getenv("ULTRA_TROUGH_AMNESTY");
+        return e && e[0] == '1';
+    }();
+    if (!kAmnestyOn) return;
+    if (rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdNone) return;
+    if (state_ != ConnectionState::CONNECTED) return;
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
+    if (!rateAdaptationActive() || mode_change_pending_) return;
+    if (coherentRungOrdinal(data_modulation_, data_code_rate_) >=
+        coherentRungOrdinal(pre_episode_mod_, pre_episode_rate_)) {
+        return;  // nothing was lost to the trough
+    }
+    LOG_MODEM(WARN,
+              "Connection: TROUGH-AMNESTY restore %s %s -> %s %s (null ended; "
+              "trough demotes are not rate evidence)",
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_),
+              modulationToString(pre_episode_mod_), codeRateToString(pre_episode_rate_));
+    // Same commit envelope as maybeApplyRxRateCommand (we are inside the ack's
+    // defer-refill bracket): descriptor commit when era-safe, legacy exchange fallback.
+    bool desc_committed = false;
+    const bool busy =
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+    if (!busy || arq_.moveEpochEnabled()) {
+        desc_committed = tryDescriptorModeSwitch(
+            pre_episode_mod_, pre_episode_rate_, wireSnrDb(),
+            v2::ModeChangeReason::CHANNEL_IMPROVED);
+    }
+    if (!desc_committed) {
+        requestModeChange(pre_episode_mod_, pre_episode_rate_, wireSnrDb(),
+                          v2::ModeChangeReason::CHANNEL_IMPROVED);
+    }
+}
+
 void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     if (progress_frames > 0) {
         if (retx_pace_hold_ms_ > 0) {
@@ -2421,6 +2479,15 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     }
 
     ++zero_progress_rounds_;
+    // TROUGH AMNESTY: snapshot the rung active as the episode BEGINS. Runs after
+    // maybeApplyRxRateCommand in the ack path, so a crater rung-command landing on
+    // this same ack has already applied — the snapshot is the post-crater rung
+    // (legitimate receiver evidence is kept; only trough-driven drops are amnestied).
+    if (zero_progress_rounds_ == 1) {
+        trough_episode_active_ = true;
+        pre_episode_mod_ = data_modulation_;
+        pre_episode_rate_ = data_code_rate_;
+    }
     LOG_MODEM(INFO, "Connection: zero-progress ARQ round %d (%s)",
               zero_progress_rounds_, origin);
     // The §2 collapse escape is POLLED from the CONNECTED tick (maybeCollapseEscape), not
@@ -4593,6 +4660,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // §RETX-PACING: a mode/rate change starts a NEW era — the zero-round evidence and any
     // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
     zero_progress_rounds_ = 0;
+    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     // RX-RATE-CMD Phase 2: an APPLIED mod/rate change is exactly the adoption the
     // receiver's standing rung command was waiting for (descriptor adopt and legacy
@@ -4843,6 +4911,7 @@ void Connection::enterConnected() {
     coherence_valid_ = false;
     // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
     zero_progress_rounds_ = 0;
+    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
     // Software-ALC receiver-side state is per-connection.
@@ -5284,6 +5353,7 @@ void Connection::reset() {
     coherence_valid_ = false;
     // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
     zero_progress_rounds_ = 0;
+    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
     ladder_telemetry_active_ = false;

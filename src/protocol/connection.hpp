@@ -882,6 +882,11 @@ private:
     // ⇒ count it and, knob-gated, arm the §1.2 deferral on BOTH triggers; <0 ⇒ no fresh ack
     // (dup/stale) ⇒ not a round).
     void noteArqRoundOutcome(int progress_frames, const char* origin);
+    // TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY): on the first progress-bearing ack after a
+    // zero-progress episode, restore the pre-episode rung (trough demotes are not rate
+    // evidence — see the member comment at trough_episode_active_). Called from the
+    // toneburst-ack path inside the defer-refill bracket, after noteArqRoundOutcome.
+    void maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd);
     // Record the modeled end-of-key-down time of an OFDM data burst (flush time + derived
     // burst airtime) — the reference for T_defer's t_since_last_tx_end subtraction (§1.2).
     // Recording is unconditional and behavior-free; all decisions stay knob-gated. Wall
@@ -898,6 +903,17 @@ private:
     // synchronized MODE_CHANGE exchange (the deaf-peer escalation ladder). Reset on
     // any ACK progress (noteArqRoundOutcome).
     int consecutive_escape_drops_ = 0;
+    // TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY, 2026-07-05): snapshot of the rung ACTIVE
+    // when a zero-progress episode began. A fade null is time-bounded — a rung proven
+    // clean seconds before the null is not invalidated by it, yet the escape + EMA
+    // demotes (down) and ssthresh + climb streaks (up) treat trough evidence as rate
+    // evidence (F89/F91: a ~20 s null sentenced transfers to minutes of R1/4 while
+    // delivering 8/8 q=0.9+). When the episode ends (first progress-bearing ack),
+    // restore this rung directly; if the channel genuinely worsened, one cheap crater
+    // (~3.5 s rung-command demote) re-drops it — bounded loss, minutes gained.
+    bool trough_episode_active_ = false;
+    Modulation pre_episode_mod_ = Modulation::QPSK;
+    CodeRate pre_episode_rate_ = CodeRate::R1_4;
     // Active trough-pacing hold (sender-local, ticks down in the CONNECTED tick BEFORE
     // runDeferredArqRefill; gates the turn refill — trigger #1. The slot-RTO trigger #2 is
     // gated by SelectiveRepeatARQ::deferPendingRetransmits armed alongside this).
