@@ -43,7 +43,16 @@ void ToneBurstAckMonitor::arm(size_t window_samples) {
     }
     armed_ = true;
     arm_deadline_stream_offset_ = new_deadline;
-    LOG_MODEM(DEBUG, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu",
+    // BUG-POSTTX-ACK-MISS forensics (2026-07-05): reset the per-window counters +
+    // the gapless anchor (nothing before arm-time can be our ACK — same argument
+    // as the last_detect_pos skip-forward below). INFO (was DEBUG) so a standard
+    // rig log shows every armed window — an undetected ACK is then diagnosable
+    // from the log alone (armed? expired? max chunk?).
+    scan_high_water_stream_ = total_samples_fed_;
+    max_feed_chunk_while_armed_ = 0;
+    passes_while_armed_ = 0;
+    armed_at_stream_ = total_samples_fed_;
+    LOG_MODEM(INFO, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu",
               window_samples, (unsigned long long)total_samples_fed_,
               (unsigned long long)arm_deadline_stream_offset_, buffer_.size());
     // Reset the cadence counter so the FIRST detection pass happens at the
@@ -78,6 +87,12 @@ void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
         }
     }
 
+    // BUG-POSTTX-ACK-MISS forensics: track the largest single append while
+    // armed — a chunk larger than a bin's tail window is the tail-hole trigger.
+    if (armed_ && count > max_feed_chunk_while_armed_) {
+        max_feed_chunk_while_armed_ = count;
+    }
+
     // §15 step 4d-late: pick the active cadence based on armed state.
     //   armed:    detect_interval_samples_armed (tight, low latency)
     //   not armed (and armed_only): no cadence — runDetectionPass is gated
@@ -87,6 +102,17 @@ void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
         // protocol layer's existing ack_timeout will handle the
         // retransmit; we go idle until armed again.
         armed_ = false;
+        // Forensic INFO: an expired-undetected window is the missed-ACK
+        // signature — log enough to classify it from a standard rig log
+        // (fed_in_window ~0 = capture never resumed / deaf at audio layer;
+        // max_chunk > ~25k = the tail-hole class; healthy fed + small chunks
+        // + many passes = the tone genuinely wasn't decodable = fade).
+        LOG_MODEM(INFO,
+                  "ToneBurstAckMonitor: armed window EXPIRED undetected — "
+                  "fed_in_window=%llu max_chunk=%zu passes=%llu buf=%zu",
+                  (unsigned long long)(total_samples_fed_ - armed_at_stream_),
+                  max_feed_chunk_while_armed_,
+                  (unsigned long long)passes_while_armed_, buffer_.size());
     }
     if (!armed_ && cfg_.armed_only) {
         // Idle: skip detection entirely. No CPU work on the audio thread.
@@ -114,6 +140,14 @@ void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
 }
 
 void ToneBurstAckMonitor::runDetectionPass() {
+    if (armed_) ++passes_while_armed_;
+    // GAPLESS armed sweep: advance the high-water mark to the buffer end AFTER
+    // this pass's windows are computed (each bin's window below is derived from
+    // the PRE-pass hw). A tone straddling the end whose tail hasn't arrived yet
+    // fails decode this pass; it is re-covered next pass because its start sits
+    // above (hw_new − needed) — see the Config comment's induction argument.
+    const uint64_t hw_after_this_pass =
+        buffer_start_stream_offset_ + buffer_.size();
     // For each candidate symbol duration, try to detect+decode in the
     // current buffer. Take the FIRST CRC-passing decode (the §15.5
     // staircase implicitly suggests trying short first, then longer if
@@ -150,9 +184,25 @@ void ToneBurstAckMonitor::runDetectionPass() {
         // the pre-arc code (which swept 120 k even for the 19.6 k fast rung).
         const size_t cadence_guard = armed_ ? cfg_.detect_interval_samples_armed
                                             : cfg_.detect_interval_samples;
-        const size_t window = cfg_.tail_window_sweep
+        size_t window = cfg_.tail_window_sweep
             ? std::min(buffer_.size(), needed + cadence_guard + spp)
             : buffer_.size();
+        // GAPLESS armed sweep (BUG-POSTTX-ACK-MISS — see Config comment): extend
+        // this bin's window to also cover everything since the scan high-water
+        // mark plus one burst of context, so a single large append (post-TX
+        // capture-resume backlog) cannot leave audio that no pass ever scans.
+        // Steady state: hw trails the end by ~one cadence → window ≈ tail
+        // behavior; a backlog chunk pays a one-off proportional sweep.
+        if (cfg_.gapless_armed_sweep && armed_) {
+            const uint64_t end_stream =
+                buffer_start_stream_offset_ + buffer_.size();
+            const uint64_t hw =
+                std::max(scan_high_water_stream_, buffer_start_stream_offset_);
+            const uint64_t unscanned = (end_stream > hw) ? (end_stream - hw) : 0;
+            const size_t gapless_window = static_cast<size_t>(std::min<uint64_t>(
+                buffer_.size(), unscanned + needed + spp));
+            window = std::min(buffer_.size(), std::max(window, gapless_window));
+        }
         const size_t tail_base = buffer_.size() - window;
         const auto r = detector_.detectAndDecode(buffer_.data() + tail_base, window,
                                                   symbol_ms, cfg_.sweep_step_samples);
@@ -212,8 +262,15 @@ void ToneBurstAckMonitor::runDetectionPass() {
             last_detect_pos_in_buffer_ =
                 (last_detect_pos_in_buffer_ > drop) ? last_detect_pos_in_buffer_ - drop : 0;
         }
+        scan_high_water_stream_ =
+            std::max(scan_high_water_stream_, hw_after_this_pass);
         return;
     }
+    // GAPLESS armed sweep: everything up to the buffer end has now been inside
+    // a scan window with full per-bin context (windows were derived from the
+    // PRE-pass hw above).
+    scan_high_water_stream_ =
+        std::max(scan_high_water_stream_, hw_after_this_pass);
 }
 
 }  // namespace tone_burst_ack

@@ -109,6 +109,25 @@ public:
         // a generous cliff that no real burst dips below. See
         // computeMinPeakForSymbolMs() for the per-duration absolute floor.
         float min_peak_fraction = 0.05f;
+
+        // GAPLESS armed sweep (BUG-POSTTX-ACK-MISS, 2026-07-05). The tail-window
+        // sweep's invariant ("a pass only needs bursts whose TAIL arrived since
+        // the previous pass") breaks when ONE feedAudio() append exceeds a
+        // bin's tail window (~25k samples / 520 ms for the 12 ms bin): all the
+        // cadence passes triggered inside that call scan the SAME end-anchored
+        // window, so a tone deeper in the chunk is never scanned — the rig's
+        // post-TX capture-resume backlog produced exactly this (F76/F77: the
+        // first ACK after our own key-down arrives strong, is captured, and is
+        // missed; ~19 s RTO each). When true (production sets it from
+        // ULTRA_ACK_MONITOR_GAPLESS), each armed pass extends the bin's window
+        // to also cover everything since the scan high-water mark plus one
+        // full burst of context — gapless by induction (hw jumps to the buffer
+        // end each pass; a tone straddling the end is re-covered on the next
+        // pass because its start sits above hw − needed). Steady-state cost ≈
+        // 2×needed per small bin (the 100 ms bin already sweeps ~the full
+        // buffer today); a backlog chunk pays a one-off proportional sweep,
+        // bounded by buffer_capacity_samples.
+        bool gapless_armed_sweep = false;
     };
 
     // Ideal-clean-channel Costas peak magnitude at the given symbol
@@ -196,6 +215,18 @@ private:
     // the mismatch is structural per config, so once per monitor lifetime suffices.
     bool capacity_skip_warned_ = false;
     uint64_t arm_deadline_stream_offset_ = 0;
+
+    // BUG-POSTTX-ACK-MISS diagnostics + gapless-sweep state (2026-07-05).
+    // scan_high_water_stream_: stream offset the armed sweep has fully covered
+    // (with per-bin burst context) — the gapless anchor. Reset on arm().
+    uint64_t scan_high_water_stream_ = 0;
+    // Per-armed-window forensic counters: the largest single feedAudio chunk
+    // (the tail-hole trigger) and the number of detection passes run. Logged
+    // by the window-expiry INFO line so an undetected window is diagnosable
+    // from a standard rig log.
+    size_t max_feed_chunk_while_armed_ = 0;
+    uint64_t passes_while_armed_ = 0;
+    uint64_t armed_at_stream_ = 0;
 };
 
 }  // namespace tone_burst_ack

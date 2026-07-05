@@ -200,6 +200,16 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
         // with the (now 172.8 k) buffer. See the Config comment; the always-on
         // polling tests keep the legacy whole-buffer default.
         tba_cfg.tail_window_sweep = true;
+        // GAPLESS armed sweep (ULTRA_ACK_MONITOR_GAPLESS, default OFF =
+        // byte-identical; BUG-POSTTX-ACK-MISS 2026-07-05): closes the tail-window
+        // coverage hole where one large feedAudio append (post-TX capture-resume
+        // backlog) exceeds a bin's tail window and a tone inside it is never
+        // scanned — the rig's first-ACK-after-own-keydown misses (F76/F77,
+        // ~19 s RTO each). See the monitor Config comment for the induction.
+        {
+            const char* e = std::getenv("ULTRA_ACK_MONITOR_GAPLESS");
+            tba_cfg.gapless_armed_sweep = (e && e[0] == '1');
+        }
         // Buffer DERIVED from the scan set (2026-07-04, R3/4 ACK-miss forensics):
         // it must hold one full burst at the SLOWEST scanned rung + the armed
         // detection cadence (4800) + sweep margin, or runDetectionPass silently
@@ -244,7 +254,28 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
 }
 
 void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
-    tone_burst_monitor_.setCallback(std::move(cb));
+    // BUG-POSTTX-ACK-MISS forensics (2026-07-05): chain a monitor-level INFO log
+    // in FRONT of the production callback (which replaces the construction-time
+    // log-only default). Without this, production logs show only the SR-ARQ
+    // consumption line — a detection dropped upstream (dedup/epoch/guards) is
+    // indistinguishable from a never-detected tone. One line per detection.
+    tone_burst_monitor_.setCallback(
+        [this, cb = std::move(cb)](
+            const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
+            LOG_MODEM(INFO,
+                      "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
+                      "peak=%.1f symbol_ms=%u stream_offset=%llu",
+                      log_prefix_.c_str(),
+                      static_cast<unsigned>(d.payload.group_seq),
+                      d.payload.type ==
+                              ultra::waveform::tone_burst_ack::AckType::Nack
+                          ? "NACK"
+                          : "ACK",
+                      d.correlation_peak,
+                      static_cast<unsigned>(d.symbol_ms_used),
+                      static_cast<unsigned long long>(d.detected_stream_offset));
+            if (cb) cb(d);
+        });
 }
 
 StreamingDecoder::~StreamingDecoder() {
