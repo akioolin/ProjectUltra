@@ -70,6 +70,9 @@ struct ConnectionAdaptiveTestAccess {
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
     static Modulation pendingModulation(const Connection& c) { return c.pending_modulation_; }
     static CodeRate pendingCodeRate(const Connection& c) { return c.pending_code_rate_; }
+    static void fillArq(Connection& c) {
+        c.arq_.sendData(Bytes{0x01, 0x02, 0x03});  // one frame in flight = busy
+    }
 };
 
 }  // namespace protocol
@@ -101,19 +104,53 @@ static bool test_verdict_maps_snr_to_rung() {
     return true;
 }
 
-// Crater override: a failed group must never command at/above the current rung,
-// whatever the (lagging) SNR map says.
-static bool test_crater_never_commands_up() {
-    TEST("crater clamps the command below the failed rung");
+// TWO-CRATER rule: a single crater holds the rung (irreducible null — the ARQ's
+// job); the SECOND consecutive crater clamps below it whatever the map says.
+static bool test_two_crater_rule() {
+    TEST("single crater holds; second consecutive crater clamps below");
 
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
     c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);  // map says stay high
-    TA::verdict(c, /*all_ok=*/false, /*quality=*/0.0f);
     const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
+
+    TA::verdict(c, /*all_ok=*/false, /*quality=*/0.0f);  // crater #1
+    if (TA::rxCmd(c) != cur)
+        FAIL("single crater moved the command (idx " +
+             std::to_string(TA::rxCmd(c)) + ", want hold " + std::to_string(cur) + ")");
+
+    TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
     if (TA::rxCmd(c) >= cur)
-        FAIL("crater verdict idx " + std::to_string(TA::rxCmd(c)) +
+        FAIL("confirmed crater verdict idx " + std::to_string(TA::rxCmd(c)) +
              " not below current " + std::to_string(cur));
+
+    // A clean group resets the streak: the next single crater holds again.
+    c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+    TA::verdict(c, true, 0.9f);
+    TA::verdict(c, false, 0.0f);
+    const uint8_t cur2 = coherentRungIndexFor(c.getDataModulation(), c.getDataCodeRate());
+    if (TA::rxCmd(c) < cur2 && cur2 != kRungIdxNone)
+        FAIL("post-clean single crater demoted (streak not reset)");
+    PASS();
+    return true;
+}
+
+// Boundary asymmetry: with data in flight, an UP command defers (no mode change);
+// a DOWN command obeys immediately.
+static bool test_busy_defers_up_not_down() {
+    TEST("busy window: climb defers, demote obeys");
+
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM8);
+    // Put a frame in flight directly through the friend'd ARQ.
+    TA::fillArq(c);
+    TA::obey(c, kRungIdxQam16R23);  // UP from QAM8 R2/3
+    if (TA::modeChangePending(c)) FAIL("climb fired mid-window");
+    TA::obey(c, kRungIdxQpskR23);   // DOWN
+    if (!TA::modeChangePending(c)) FAIL("demote deferred mid-window");
+    if (TA::pendingModulation(c) != Modulation::QPSK ||
+        TA::pendingCodeRate(c) != CodeRate::R2_3)
+        FAIL("demote target wrong");
     PASS();
     return true;
 }
@@ -189,7 +226,8 @@ int main() {
     std::cout << "RX-AUTHORITY suite\n";
     bool ok = true;
     ok &= test_verdict_maps_snr_to_rung();
-    ok &= test_crater_never_commands_up();
+    ok &= test_two_crater_rule();
+    ok &= test_busy_defers_up_not_down();
     ok &= test_clean_never_commands_down();
     ok &= test_no_observation_no_command();
     ok &= test_sender_obeys_and_dedups();

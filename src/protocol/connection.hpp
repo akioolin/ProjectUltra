@@ -1020,10 +1020,10 @@ private:
     // rate anchors are calibrated on dial-equivalent SNR, so the verdict input is
     // the dB mean over the last few groups (~30 s ≈ many Tc), not the instant
     // fade state. Entries age out via tick (stale channel must not steer).
-    static constexpr size_t kRxAuthObsRing = 4;
-    static constexpr uint32_t kRxAuthObsMaxAgeMs = 120000;
-    float rx_auth_obs_db_[kRxAuthObsRing] = {0, 0, 0, 0};
-    uint32_t rx_auth_obs_age_ms_[kRxAuthObsRing] = {0, 0, 0, 0};
+    static constexpr size_t kRxAuthObsRing = 6;
+    static constexpr uint32_t kRxAuthObsMaxAgeMs = 180000;
+    float rx_auth_obs_db_[kRxAuthObsRing] = {0};
+    uint32_t rx_auth_obs_age_ms_[kRxAuthObsRing] = {0};
     size_t rx_auth_obs_count_ = 0;
     size_t rx_auth_obs_next_ = 0;
     // RECEIVER: per-rung crater-margin memory — the anchor map is a PRIOR; the
@@ -1035,6 +1035,11 @@ private:
     // Receiver-side analogue of the sender's ssthresh, measured where the
     // channel actually is. Sized by kRungIdxCount (waveform_selection.hpp).
     float rx_auth_rung_penalty_db_[16] = {0};
+    // TWO-CRATER rule (F122 finding: 10 moves/283 s, each paying the full-anchor
+    // + requeue-rewind tax): at a ~10 s decision quantum vs Tc 2-4 s a SINGLE
+    // crater is an irreducible deep null — the ARQ's job, not the ladder's.
+    // Only CONSECUTIVE craters demote (and charge the crater margin).
+    int rx_auth_crater_streak_ = 0;
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;

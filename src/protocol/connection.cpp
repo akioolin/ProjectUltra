@@ -2307,13 +2307,18 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     const CoherentPick mapped = selectCoherentOFDM(snr_avg, eff_fading);
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
-    // CRATER-MARGIN memory (posterior beats prior; second-probe finding: at avg
-    // 22 dB the map re-commanded 16QAM R2/3 after every crater — anchor 20 said
-    // yes, the decode said no every ~2.5 groups). A crater charges the CURRENT
-    // rung (+2 dB, cap 6); every clean group decays all penalties (0.25 dB) — the
-    // fade epoch ends, the evidence expires. Receiver-side ssthresh analogue.
+    // TWO-CRATER rule + CRATER-MARGIN memory (F122: 10 moves/283 s — a single
+    // crater at a ~10 s decision quantum vs Tc 2-4 s is an irreducible deep null
+    // the ARQ absorbs, NOT rate evidence; chasing singles paid the full-anchor +
+    // requeue-rewind tax every ~28 s). Only CONSECUTIVE craters demote and charge
+    // the rung's margin memory (+2 dB, cap 6; posterior beats prior). Every clean
+    // group decays all penalties (0.25 dB) — the fade epoch ends, evidence expires.
+    const bool crater = (quality <= 0.0f && !all_ok);
+    if (crater) ++rx_auth_crater_streak_;
+    else if (all_ok) rx_auth_crater_streak_ = 0;
+    const bool crater_confirmed = crater && rx_auth_crater_streak_ >= 2;
     if (cur != kRungIdxNone && cur < kRungIdxCount) {
-        if (quality <= 0.0f && !all_ok) {
+        if (crater_confirmed) {
             rx_auth_rung_penalty_db_[cur] =
                 std::min(6.0f, rx_auth_rung_penalty_db_[cur] + 2.0f);
         } else if (all_ok) {
@@ -2326,10 +2331,10 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     if (cur != kRungIdxNone) {
         if (cmd > cur) {
             // CLIMB HYSTERESIS + crater margin: an up-command must survive a
-            // haircut — the base 1.5 dB guards against slow swells; the target
+            // haircut — the base 2.5 dB guards against slow swells; the target
             // rung's crater penalty demands the channel PROVE headroom the anchors
             // only assumed. Descents take the map directly (down is safe).
-            constexpr float kClimbMarginDb = 1.5f;
+            constexpr float kClimbMarginDb = 2.5f;
             const float haircut = kClimbMarginDb +
                 ((cmd < kRungIdxCount) ? rx_auth_rung_penalty_db_[cmd] : 0.0f);
             const CoherentPick guarded =
@@ -2338,10 +2343,15 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
                 coherentRungIndexFor(guarded.mod, guarded.rate);
             if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
         }
-        if (quality <= 0.0f && !all_ok) {
-            // Crater override: the strongest evidence is the failure itself.
+        if (crater_confirmed) {
+            // Confirmed-crater override: two in a row is the rung failing, not a
+            // null — command below whatever the (lagging) map says.
             const uint8_t below = static_cast<uint8_t>(cur > 1 ? cur - 1 : 1);
             if (cmd >= cur) cmd = below;
+        } else if (crater && cmd > cur) {
+            // Single crater: hold the rung (the ARQ resends through the null) —
+            // but never climb ON a crater either.
+            cmd = cur;
         } else if (all_ok && cmd < cur) {
             // Clean-group override: this rung just WORKED end to end.
             cmd = cur;
@@ -2394,6 +2404,26 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
         return;
     }
     const bool faster = isFasterMode(mod, rate, data_modulation_, data_code_rate_);
+    if (faster) {
+        // UP-commands defer to a CLEAN send boundary (F122): a mid-window switch
+        // discards the receiver's buffered frames and rewinds the file cursor by
+        // the whole in-flight window — pure gain-chasing must never pay that
+        // redundant-airtime tax. The receiver re-stamps the command on every ACK,
+        // so the deferred climb re-asserts free at the next full-ack tick.
+        // DOWN-commands obey immediately: a failing window never drains (waiting
+        // would deadlock), and its frames need resending anyway — the rewind is
+        // free information-wise; move-epoch makes it era-safe.
+        const bool busy =
+            arq_.getTxInFlightBytes() > 0 ||
+            (file_transfer_.getState() == FileTransferState::SENDING &&
+             file_transfer_.hasPendingChunks());
+        if (busy) {
+            LOG_MODEM(DEBUG,
+                      "Connection: RX-AUTHORITY hold climb idx=%u for clean boundary",
+                      cmd_idx);
+            return;  // do NOT arm dedup — the re-carried command must retry
+        }
+    }
     const uint8_t reason = faster ? v2::ModeChangeReason::CHANNEL_IMPROVED
                                   : v2::ModeChangeReason::CHANNEL_DEGRADED;
     const char* old_mod = modulationToString(data_modulation_);
@@ -5256,6 +5286,7 @@ void Connection::enterConnected() {
     tx_authority_last_obeyed_ = 0;
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
+    rx_auth_crater_streak_ = 0;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
@@ -5319,6 +5350,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     tx_authority_last_obeyed_ = 0;
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
+    rx_auth_crater_streak_ = 0;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
