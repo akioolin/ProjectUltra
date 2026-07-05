@@ -705,6 +705,34 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                       cached_fading_index_.load(std::memory_order_relaxed));
             auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
+                // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default 0 = off;
+                // BUG-TONE-FADE residual, handoff §7.6): ~2 ACKs/run die to genuine
+                // tone fades (captured at healthy RMS, gaplessly scanned, undecodable
+                // — F76/F99), and the built-in close repeat sits inside the same fade
+                // null (Tc ~2-4 s >> 376 ms). Stash this ACK; the GUI tick retransmits
+                // it once, +knob ms after the copy-1 airtime ends, ONLY if the channel
+                // is then quiet (modem_.channelBusyForTx() == false). Self-gating: if
+                // copy 1 survived, the peer's next burst is already arriving (CCA
+                // busy) and the repeat is skipped — a BLIND timed repeat would blank
+                // that burst's anchor with our own TX and reintroduce the head-null
+                // class. If copy 1 died, the peer waits silently and the repeat rides
+                // a decorrelated fade draw (p^2 loss instead of p).
+                static const uint32_t kAckRepeatSilentMs = [] {
+                    if (const char* e = std::getenv("ULTRA_ACK_REPEAT_SILENT_MS")) {
+                        const long v = std::atol(e);
+                        if (v >= 300 && v <= 5000) return static_cast<uint32_t>(v);
+                    }
+                    return 0u;  // OFF
+                }();
+                if (kAckRepeatSilentMs > 0) {
+                    const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
+                    std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+                    ack_repeat_samples_ = samples;  // copy (samples also queued below)
+                    ack_repeat_fire_time_ =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
+                    ack_repeat_pending_ = true;
+                }
                 // Carry the same in_qso_data flag as the OFDM ACK (false —
                 // ACKs are control frames, not in-QSO data).
                 queueRealTxSamples(samples, "TX tone-burst ACK audio",
@@ -2250,6 +2278,10 @@ void App::render() {
     // Scenario scripting: drive the real connect/accept/send actions.
     tickScenario();
 
+    // ACK repeat-if-silent (handoff §7.6): fire the decorrelated tone-ACK copy
+    // if its window elapsed AND the channel is quiet (see the stash site).
+    maybeFireAckRepeatIfSilent();
+
     // Drain bounded modem/protocol UI events on the GUI thread after protocol
     // work for this frame. Formatting and log-file flushes happen here, never
     // on the RX decode / ARQ callback path.
@@ -2701,6 +2733,35 @@ std::string App::testCat(AppSettings settings) {
         return error.empty() ? "CAT test failed" : error;
     }
     return {};
+}
+
+// ACK repeat-if-silent (ULTRA_ACK_REPEAT_SILENT_MS; handoff §7.6, BUG-TONE-FADE
+// residual): fire the stashed decorrelated tone-ACK copy when its window elapsed,
+// ONLY if the channel is quiet. CCA-busy = the peer's next burst is arriving =
+// copy 1 was heard = repeat both unnecessary AND dangerous (our TX would blank the
+// incoming anchor). CCA-quiet = copy 1 likely died on air = the repeat rides a
+// fade draw decorrelated by >= the knob delay. Runs on the GUI tick; never touches
+// protocol_ (the §15.5 deadlock rule).
+void App::maybeFireAckRepeatIfSilent() {
+    std::vector<float> copy;
+    {
+        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        if (!ack_repeat_pending_) return;
+        if (std::chrono::steady_clock::now() < ack_repeat_fire_time_) return;
+        ack_repeat_pending_ = false;
+        copy.swap(ack_repeat_samples_);
+    }
+    if (conn_state_cached_.load(std::memory_order_relaxed) !=
+        protocol::ConnectionState::CONNECTED) {
+        return;  // session ended while pending — the ack is moot
+    }
+    if (modem_.channelBusyForTx()) {
+        guiLog("ACK-REPEAT-SILENT: skipped (channel busy — copy 1 evidently heard)");
+        return;
+    }
+    guiLog("ACK-REPEAT-SILENT: firing (channel quiet at +window — copy 1 likely lost)");
+    queueRealTxSamples(copy, "TX tone-burst ACK repeat (silent-gated)",
+                       /*in_qso_data=*/false);
 }
 
 void App::tickScenario() {

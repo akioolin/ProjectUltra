@@ -286,6 +286,15 @@ private:
     std::array<std::atomic<float>, 5> cached_snr_ring_{
         {12.0f, 12.0f, 12.0f, 12.0f, 12.0f}};
     std::atomic<uint32_t> cached_snr_ring_idx_{0};
+    // ACK repeat-if-silent (ULTRA_ACK_REPEAT_SILENT_MS, 2026-07-05; handoff §7.6):
+    // the stashed decorrelated tone-ACK copy + its fire time. Written on the
+    // protocol callback (stash), consumed on the GUI tick (CCA-gated fire) —
+    // guarded by its own mutex, never held across protocol_ calls.
+    std::mutex ack_repeat_mutex_;
+    std::vector<float> ack_repeat_samples_;
+    std::chrono::steady_clock::time_point ack_repeat_fire_time_{};
+    bool ack_repeat_pending_ = false;
+    void maybeFireAckRepeatIfSilent();
 
     // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
     // Closed-loop TX-drive: the peer's per-burst level verdict rides back on the
