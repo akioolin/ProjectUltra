@@ -499,6 +499,20 @@ void Connection::acceptCall() {
         }
     }
 
+    // ULTRA_ENTRY_QAM16_SNR (experiment): start AT 16QAM R2/3 on a strong Good-class
+    // connect instead of QPSK-and-climb (the fade-riding strategy). AFTER the bootstrap
+    // cap, BEFORE forced overrides. Mirrors the responder site in connection_handlers.cpp.
+    if (isOFDMMode(negotiated_mode_) &&
+        entryQam16Promote(accept_selection_snr_db, entry_fading, rec_mod,
+                          accept_snr_data_aided)) {
+        LOG_MODEM(INFO,
+                  "Connection: ENTRY-QAM16 promote %s %s -> 16QAM R2/3 (data-aided SNR=%.1f, fading=%.2f)",
+                  modulationToString(rec_mod), codeRateToString(rec_rate),
+                  accept_selection_snr_db, entry_fading);
+        rec_mod = Modulation::QAM16;
+        rec_rate = CodeRate::R2_3;
+    }
+
     // 2026-05-28 experiment (env-gated): the industry leader's tactical ladder
     // picks QPSK R2/3 (~3230 bps net) as its 3000 bps speed slot, not R3/4
     // or R5/6. Stronger FEC -> fewer drop-on-timeout cascades -> higher

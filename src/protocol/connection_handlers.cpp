@@ -351,6 +351,21 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
+        // ULTRA_ENTRY_QAM16_SNR (experiment): start AT 16QAM R2/3 on a strong Good-class
+        // connect instead of QPSK-and-climb (the fade-riding strategy). AFTER the bootstrap
+        // cap (so it overrides the QPSK R2/3 pin) and BEFORE forced overrides (so an operator
+        // force still wins). The initiator applies whatever we stamp into CONNECT_ACK.
+        if (isOFDMMode(negotiated_mode_) &&
+            entryQam16Promote(selection_snr_db, rate_fading, rec_mod,
+                              selection_snr_data_aided)) {
+            LOG_MODEM(INFO,
+                      "Connection: ENTRY-QAM16 promote %s %s -> 16QAM R2/3 (data-aided SNR=%.1f, fading=%.2f)",
+                      modulationToString(rec_mod), codeRateToString(rec_rate),
+                      selection_snr_db, rate_fading);
+            rec_mod = Modulation::QAM16;
+            rec_rate = CodeRate::R2_3;
+        }
+
         // 2026-05-28: ULTRA_MAX_OFDM_RATE responder-side bootstrap cap.
         if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
             const std::string s(env);

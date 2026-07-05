@@ -403,6 +403,31 @@ inline bool dataAidedEntryClearsR34(bool entry_cap_r34_on, float snr_db,
     return snr_db >= r34_anchor_db + kConnectSnrReadingSigmaDb;
 }
 
+// ULTRA_ENTRY_QAM16_SNR (default unset = OFF, byte-identical): EXPERIMENT — enter the
+// coherent ladder directly AT 16QAM R2/3 when the data-aided fade-averaged connect reading
+// clears the given threshold on a Good-class channel, INSTEAD of entering QPSK and climbing.
+// Rationale (the "ride the fade cycle" strategy the commercial fade-riding modems use):
+// start on the aggressive rung from frame 0 and let the closed-loop demote/re-climb machinery
+// ride the troughs, rather than spending the calm windows crawling up the ladder. Entry-only:
+// the adaptive ladder still demotes on a crater (receiver rung-command + sender escape) and
+// re-climbs. Gates: promote only an AUTO QPSK entry (never a forced or MC-DPSK rung), Good-class
+// fading only (fading_index < kFadingGoodMax — never Moderate/Poor, where 16QAM has no margin),
+// and only the DATA-AIDED reading (the #58 fade-averaged estimate, not a raw chirp snapshot).
+// NOTE the reading is EFFECTIVE (fade-compressed) SNR: at dial 20 Good it reads ~12 mean
+// (CONNECT_ENTRY_CALIBRATION), so the threshold lives in READING-space, not dial-space —
+// ~10-12 fires at dial 20; raise it to be selective (only the calmer snapshots start 16QAM).
+inline bool entryQam16Promote(float snr_db, float fading_index, Modulation rec_mod,
+                              bool data_aided) {
+    const char* e = std::getenv("ULTRA_ENTRY_QAM16_SNR");
+    if (!e || !e[0]) return false;                     // OFF -> byte-identical
+    const float thresh = std::strtof(e, nullptr);
+    if (thresh <= 0.0f) return false;
+    if (rec_mod != Modulation::QPSK) return false;     // promote only an AUTO QPSK entry
+    if (!data_aided) return false;                     // trust only the fade-averaged reading
+    if (fading_index >= kFadingGoodMax) return false;  // Good-class only (never Moderate/Poor)
+    return snr_db >= thresh;
+}
+
 // Initial OFDM rate at handshake bootstrap: start at the LADDER rate for the measured
 // (snr, fading) — never above what the ladder supports, but no more conservative either.
 // The per-class anchors (kCoherentLadder: AWGN measure_ack_fer 2026-06-06, GOOD measured
