@@ -175,3 +175,34 @@ ULTRA_ACK_MONITOR_GAPLESS.** The 12-knob standing set remains env-gated — flip
 defaults at once overnight would be un-bisectable; candidates for the next flips (weeks of
 rig proof each): ARQ_MOVE_EPOCH, CONNECT_AFFINE_BASIS, the pool knobs. STANDING ENV
 (F88+) = the §7.3 set (the two flipped knobs may be dropped from the env at will).
+
+### §7.6 THE 2026-07-05 MORNING ARC (Opus, user live-catching): five more root causes, all shipped
+User watched runs live and caught, in order: (1) collapse-escape cascade to R1/4 through a
+20s null while deliveries ran q=0.99 → **ULTRA_ESCAPE_EPISODE_CAP=1** (faa6cc3) +
+**ULTRA_TROUGH_AMNESTY=1** (4d9195d, restore pre-trough rung on first progress); re-climb
+penalty cut (**ULTRA_QAM16_RECLIMB_COOLDOWN=1 ULTRA_QAM16_CLIMB_STREAK=1
+ULTRA_RATE_CLIMB_STREAK=1**). (2) "bursts decent, receiver not acking" → the modulation-blind
+pre-LDPC LLR guard shredding real 16QAM head frames (mean 0.94/near_zero 18.5%) →
+**ULTRA_LLR_REJECT_SHAPE=1** (8230fea, shape-based rejection). (3) The HEADNULL class →
+**ULTRA_DESC_ARMED_ACCUM=1** late-join accumulation (9465d00, design doc
+DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md): first firings recovered a WHOLE 5-frame sim
+group and 3/4 on the rig. (4) F98 cascade: one 4/5 partial wrote 9.4 dB over a 22 dB channel
+→ 1.7s ACK → phantom demote → 54s blackout → **ULTRA_ACK_SNR_MEDIAN=1** (1535ef7,
+median-of-5 staircase) + the RANK-1 forensic (workflow wmx7okiz2): the tone-ACK TX
+echo-clear reset DISARMED the armed full-anchor wait every ACK →
+**ULTRA_PRESERVE_ANCHOR_WAIT=1** (35a8b7f). Entry-16QAM (ULTRA_ENTRY_QAM16_SNR, 20f6006)
+tested twice, cold-decode marginal — keep OFF.
+**STANDING ENV (F99+) = §7.3 set + ULTRA_ESCAPE_EPISODE_CAP=1 ULTRA_TROUGH_AMNESTY=1
+ULTRA_RATE_CLIMB_STREAK=1 ULTRA_QAM16_RECLIMB_COOLDOWN=1 ULTRA_QAM16_CLIMB_STREAK=1
+ULTRA_LLR_REJECT_SHAPE=1 ULTRA_DESC_ARMED_ACCUM=1 ULTRA_ACK_SNR_MEDIAN=1
+ULTRA_PRESERVE_ANCHOR_WAIT=1** (guard+gapless are defaults since e2f6096).
+F99 (all on): 1.52 EXACT (144/144), all losses classified — residual = ~2/run TONE-FADE
+(ack captured at healthy rms, gaplessly scanned, genuinely undecodable; confirmed F76/F77/
+F99). **NEXT LEVER (designed, NOT built): decorrelated ACK repeat-if-silent** — copy 2 at
++~1.5s (≥Tc) gated on CCA-quiet. ⚠ A naive timed repeat is FORBIDDEN: the sender's next
+burst turns around ~1-2s after copy 1, so an unconditional +1.5s copy would blank the
+incoming anchor with our own TX and reintroduce the head-null class. If copy 1 survived,
+the arriving burst self-gates the repeat; if it died, the channel is silent and copy 2 is
+safe. Needs the CCA query wired on the RX ack path (production isChannelBusy is unwired —
+see memory). Default-flip candidates now rig-proven for the next batch: DESC_ARMED_ACCUM,
+PRESERVE_ANCHOR_WAIT, ACK_SNR_MEDIAN, LLR_REJECT_SHAPE.
