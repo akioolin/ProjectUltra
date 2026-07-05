@@ -206,3 +206,18 @@ the arriving burst self-gates the repeat; if it died, the channel is silent and 
 safe. Needs the CCA query wired on the RX ack path (production isChannelBusy is unwired —
 see memory). Default-flip candidates now rig-proven for the next batch: DESC_ARMED_ACCUM,
 PRESERVE_ANCHOR_WAIT, ACK_SNR_MEDIAN, LLR_REJECT_SHAPE.
+
+### §7.7 NEXT BUILD (designed 2026-07-05 ~13:30): 8PSK revival — the cheap-card-proof rung
+cw16 SHIPPED+PROVEN (sim 2670 seed42 = +35-55%; IONOS 5-run median 1.34 vs cw8 1.02 chop
+= +31%). NEXT: revive coherent 8PSK. The demapper EXISTS (soft_demap.hpp demap8PSK, same
+Gray geometry as proven D8PSK); the killer is BUG-8PSK-001 — the dd_qam16_* decision-
+directed tracker slices 16QAM amplitude rings and corrupts the 8PSK estimate on fading
+(THE canonical CLAUDE.md adaptivity case). CASE: (1) constant envelope = immune to the
+Pi5 cheap-card compression that craters 16QAM above drive 0.70 (the ALC saga's root);
+(2) +3.6dB-over-QPSK margin = the sweet spot at broadband ~24dB w/ swings; 8PSK R2/3
+(~3.0k net) slots between 16QAM R1/2 (2.45) and R2/3 (3.3) at BETTER fade robustness
+(|H|-magnitude errors don't move phase boundaries); (3) cw12 normalizes to 1272ms (cap
+already 16). WORK: make the DD tracker constellation-generic (phase-only slicing for
+8PSK is SIMPLER than 16QAM), ladder rungs + floor measurement, cw12 rule. EQUALIZER-CORE
+surgery — open it on a FRESH session, INVARIANTS first. Also queued: fade-predictive
+rate hints (path-A step 3), HARQ combine-then-standalone-retry (step 4).
