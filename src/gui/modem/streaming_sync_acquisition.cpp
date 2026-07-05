@@ -273,6 +273,21 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
+    // ACK-LISTEN tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM, default OFF =
+    // byte-identical): while this station's tone-burst ACK monitor is armed (we sent a
+    // burst and await the peer's 4-FSK ACK — half-duplex, the peer cannot be sending
+    // OFDM), suppress the warm DATA-sync acceptance paths in the SyncController so the
+    // ACK tone cannot S&C-false-lock the OFDM searcher and race the tone monitor for
+    // the same samples (the F73/F74 missed-ACK spirals). The dual-chirp path stays
+    // live. Refreshed every search pass; disarms automatically with the monitor.
+    static const bool kAckListenSuppressOfdm = [] {
+        const char* e = std::getenv("ULTRA_ACKLISTEN_SUPPRESS_OFDM");
+        return e && e[0] == '1';  // default OFF
+    }();
+    sync_controller_.setAckListenSuppressDataSync(
+        kAckListenSuppressOfdm && connected_ &&
+        mode_ == protocol::WaveformMode::OFDM_CHIRP && tone_burst_monitor_.isArmed());
+
     // Save generation counter - if reset() is called during our search,
     // we'll detect it and discard our results
     uint32_t gen_at_start = reset_generation_.load();

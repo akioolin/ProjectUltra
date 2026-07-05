@@ -284,6 +284,33 @@ public:
     bool     warmSyncActive() const { return warm_sync_active_; }
     void     clearRejectStreak() { sync_reject_streak_ = 0; }
 
+    // ACK-LISTEN tone-lock guard (ULTRA_ACKLISTEN_SUPPRESS_OFDM, 2026-07-05).
+    // While the sender's tone-burst ACK monitor is armed, the ONLY signal the peer can
+    // emit is the 4-FSK tone ACK (half-duplex: it is the peer's ACK turn). The tone's
+    // periodic segments (carrier lead-in + repeated FSK symbols) score ~0.9+ on the
+    // Schmidl-Cox metric while the LTS matched filter stays ~0.1 (sc-high/mf-low), so
+    // the warm DATA-sync detectors false-lock on the peer's ACK, decode garbage, and
+    // the ensuing re-search races the tone monitor for the same samples — the measured
+    // cause of missed ACKs / RTO spirals (F73/F74; previously misattributed to
+    // "self-echo": OTASim excludes self-audio by construction (mixer.cpp:40) and rig
+    // capture is stopped during TX (app.cpp:3360-3364), so a true echo was never
+    // physically possible on either bench).
+    // While set, BOTH warm data-sync acceptance paths (detectConnectedLightSync,
+    // detectFullAnchorFallback) return not-found unconditionally — a threshold cannot
+    // gate this (the tone scores 0.94, above every decayed threshold). The full
+    // dual-chirp path (detectSync) stays live: a tone cannot fake an up+down chirp
+    // pair at the exact 28800-sample gap, so a real full-anchor control frame (e.g. a
+    // legacy MODE_CHANGE_ACK) is still acquired during the window. Not-found leaves
+    // reject streaks / §16.4 escalation untouched (a suppressed window is not
+    // acquisition failure evidence). Set per search pass by the decoder from
+    // (knob && connected && monitor.isArmed()); auto-clears when the ACK decodes
+    // (monitor disarm) or the window expires — it can never wedge the search.
+    void setAckListenSuppressDataSync(bool v) {
+        if (v != ack_listen_suppress_data_sync_) ack_listen_suppress_logged_ = false;
+        ack_listen_suppress_data_sync_ = v;
+    }
+    bool ackListenSuppressDataSync() const { return ack_listen_suppress_data_sync_; }
+
     // --- TRANSITIONAL PUBLIC shell-move state (refactor §7.5#1) -------------------
     // These were StreamingDecoder members; relocated here verbatim so the (still-
     // external) orchestration reads/writes them as `sync_controller_.<name>`. They
@@ -337,6 +364,10 @@ private:
     float    frame_arrival_confidence_ = 0.0f;
     int      consecutive_sync_misses_ = 0;
     bool     warm_sync_active_ = false;      // in the warm (locked+predicting) regime
+
+    // ACK-LISTEN tone-lock guard state (see setAckListenSuppressDataSync above).
+    bool ack_listen_suppress_data_sync_ = false;
+    bool ack_listen_suppress_logged_ = false;    // once-per-window log throttle
 
     // Last-frame arrival memory (RE-PRIVATIZED §7.4: written only by noteFrameArrival* /
     // seedArrivalAfterDelay / resetFrameArrivalTracking; read by the decoder via the lastFrame*

@@ -635,6 +635,22 @@ bool SyncController::detectConnectedLightSync(
     bool is_coherent, bool connected, protocol::WaveformMode mode,
     const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
     float known_cfo, SyncResult& sync_result) {
+    // ACK-LISTEN tone-lock guard (see the setter comment in the header): while the
+    // sender awaits a tone-burst ACK, the peer cannot be sending OFDM — the only
+    // signal on the medium is the ACK tone, which S&C-false-locks this detector
+    // (sc~0.9/mf~0.1). Return not-found WITHOUT running the detector and WITHOUT
+    // touching the reject streak / §16.4 escalation (a suppressed window is not
+    // acquisition-failure evidence).
+    if (ack_listen_suppress_data_sync_ && connected) {
+        if (!ack_listen_suppress_logged_) {
+            ack_listen_suppress_logged_ = true;
+            LOG_MODEM(INFO,
+                      "[%s] ACK-LISTEN: warm data-sync suppressed (tone window; "
+                      "S&C tone-lock guard)",
+                      log_prefix_.c_str());
+        }
+        return false;
+    }
     // known_cfo is the tracked CFO (§7 C-CFO-1: passed in from the decoder's CFOTracker).
 
     bool found = waveform->detectDataSync(
@@ -707,6 +723,23 @@ FullAnchorFallbackResult SyncController::detectFullAnchorFallback(
     size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,
     float known_cfo, SyncResult& sync_result) {
     FullAnchorFallbackResult result;
+
+    // ACK-LISTEN tone-lock guard (see the setter comment in the header). This fallback
+    // is the exact path that ACCEPTED the peer's ACK tone at corr=0.94 during
+    // full-anchor-wait (F74) — the tone scores above every threshold, so only an
+    // unconditional gate works. The dual-chirp detectSync above this fallback stays
+    // live (a tone cannot fake the up+down chirp pair), so a genuine full-anchor
+    // frame is still acquired during the window.
+    if (ack_listen_suppress_data_sync_ && connected) {
+        if (!ack_listen_suppress_logged_) {
+            ack_listen_suppress_logged_ = true;
+            LOG_MODEM(INFO,
+                      "[%s] ACK-LISTEN: full-anchor DATA fallback suppressed (tone "
+                      "window; S&C tone-lock guard)",
+                      log_prefix_.c_str());
+        }
+        return result;
+    }
 
     // §16 Phase 5 instrumentation: detectSync failed to lock the descriptor chirp.
     // sync_result.correlation holds the peak dual-chirp correlation (max up/down) even on failure.
