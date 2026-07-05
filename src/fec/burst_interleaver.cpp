@@ -7,7 +7,10 @@ namespace ultra {
 namespace fec {
 
 int BurstInterleaver::sanitizeCodewordCount(int codeword_count) {
-    return std::clamp(codeword_count, 1, 8);
+    // 8 -> 16 (2026-07-05, cw16 build): same duplicated-cap defect as
+    // FrameInterleaver::sanitizeCodewordCount (see its comment) — MUST track
+    // v2::kMaxFixedFrameCodewords manually (fec/ has no protocol includes).
+    return std::clamp(codeword_count, 1, 16);
 }
 
 int BurstInterleaver::bytesPerFrame(int codeword_count, int bytes_per_cw) {

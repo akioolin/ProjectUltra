@@ -1341,6 +1341,21 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
         (void)rate;
         return 3;
     }
+    // cw16 for 16QAM (ULTRA_QAM16_CW16, default OFF; 2026-07-05 — fable 09 §5.5):
+    // a 16QAM cw8 frame is only ~672 ms, so the dense rung pays the LTS/header
+    // overhead TWICE as often per bit as QPSK cw8 (~1272 ms). Baseline 16 restores
+    // the proven cw8-QPSK frame airtime at 16QAM (same coherence exposure, half
+    // the per-bit overhead; rung ceiling 3.3k -> ~3.9k). BASELINE only:
+    // recommendCWCountForChannel's coherence walk still shrinks the frame whenever
+    // its airtime would exceed the measured coherence time — the selection stays
+    // channel-adaptive by construction (adaptivity rule).
+    if (waveform == WaveformMode::OFDM_CHIRP && mod == Modulation::QAM16) {
+        static const bool kQam16Cw16 = [] {
+            const char* e = std::getenv("ULTRA_QAM16_CW16");
+            return e && e[0] == '1';
+        }();
+        if (kQam16Cw16) return 16;
+    }
     return recommendCWCount(rate, waveform);
 }
 

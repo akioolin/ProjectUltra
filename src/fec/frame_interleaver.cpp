@@ -12,7 +12,14 @@ std::vector<int> FrameInterleaver::deinterleave_table_;
 bool FrameInterleaver::tables_initialized_ = false;
 
 int FrameInterleaver::sanitizeCodewordCount(int codeword_count) {
-    return std::clamp(codeword_count, 1, 8);
+    // 8 -> 16 (2026-07-05, cw16 build): this clamp silently duplicated the OLD
+    // v2::kMaxFixedFrameCodewords and lagged its 8->16 raise — the first cw16 TX
+    // threw ('expected 8 codewords, got 16', encodeBurstLight abort, 46 s of
+    // silent no-TX in the first sim run). The table builder is fully generic in
+    // (codeword_count, bits_per_codeword); this bound is only an insanity guard
+    // and MUST track v2::kMaxFixedFrameCodewords (fec/ does not include protocol
+    // headers — keep the values in lockstep manually).
+    return std::clamp(codeword_count, 1, 16);
 }
 
 int FrameInterleaver::totalFrameBits(int codeword_count, int bits_per_codeword) {

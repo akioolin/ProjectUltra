@@ -1050,7 +1050,16 @@ inline uint8_t getDataCodewordIndex(const Bytes& data) {
 
 // Fixed frame constants
 inline constexpr int kMinFixedFrameCodewords = 1;
-inline constexpr int kMaxFixedFrameCodewords = 8;
+// 8 -> 16 (2026-07-05, cw16 build — fable_analysis/09 §5 item 5): 16 CWs/frame gives
+// 16QAM the same ~1272 ms frame airtime as the proven QPSK cw8 geometry (same
+// coherence exposure, HALF the LTS/header overhead per bit; 16QAM ceiling 3.3k ->
+// ~3.9k). This cap is the wire/clamp LIMIT — actual selection stays per-mod/per-rate
+// in recommendCWCount* (QAM16 baseline 16 behind ULTRA_QAM16_CW16), and the
+// coherence walk in recommendCWCountForChannel still shrinks frames whenever frame
+// airtime would exceed the measured coherence time (adaptivity rule). The cw16
+// hardware gate (fable 09 §3b QAM16 acquisition collapse) was cleared 2026-07-05:
+// the collapse was the tone-lock + anchor-wait-disarm bugs, not PAPR.
+inline constexpr int kMaxFixedFrameCodewords = 16;
 inline constexpr int kDefaultFixedFrameCodewords = 4;
 inline constexpr int FIXED_FRAME_CODEWORDS = kDefaultFixedFrameCodewords;  // source compatibility
 constexpr uint16_t DISCONNECT_SEQ = 0xFFFF;  // Unique seq for DISCONNECT (won't collide with ARQ 0-based seqs)
