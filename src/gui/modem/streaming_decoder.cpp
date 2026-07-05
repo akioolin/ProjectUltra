@@ -1270,6 +1270,23 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
 
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
+    // ANCHOR-WAIT PRESERVE (ULTRA_PRESERVE_ANCHOR_WAIT, default OFF; F98 forensic
+    // 2026-07-05): this reset also runs on the TX echo-clear path (clearRxBuffer
+    // fallthrough) — wiping expect_full_ofdm_anchor_ here silently DISARMS an armed
+    // §16.4 / mode-hop full-anchor wait every time this station transmits a tone-ACK,
+    // so the peer's next burst-head chirp gets only the light search and the anchor is
+    // lost (F98: three consecutive full anchors missed on a calm 22 dB channel — a
+    // 54 s blackout; the §16.4 re-arm needs 4 light rejects, and the next ACK TX
+    // disarmed it again). The ring wipe itself is correct (the capture gap holds no
+    // audio); the ARMING must survive the turnaround.
+    static const bool kPreserveAnchorWait = [] {
+        const char* e = std::getenv("ULTRA_PRESERVE_ANCHOR_WAIT");
+        return e && e[0] == '1';
+    }();
+    const bool preserve_anchor_wait =
+        kPreserveAnchorWait && connected_ && protocol::isOFDMMode(mode_) &&
+        sync_controller_.expect_full_ofdm_anchor_;
+
     sync_controller_.ring_.write_pos_ = 0;
     sync_controller_.ring_.correlation_pos_ = 0;
     sync_position_ = 0;
@@ -1280,7 +1297,12 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     feed_iter_ = 0;
     overflow_events_ = 0;
     sync_controller_.clearRejectStreak();
-    sync_controller_.expect_full_ofdm_anchor_ = false;
+    sync_controller_.expect_full_ofdm_anchor_ = preserve_anchor_wait;
+    if (preserve_anchor_wait) {
+        LOG_MODEM(INFO,
+                  "[%s] ANCHOR-WAIT preserved across reset (connected-OFDM turnaround)",
+                  log_prefix_.c_str());
+    }
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
     state_ = DecoderState::SEARCHING;
