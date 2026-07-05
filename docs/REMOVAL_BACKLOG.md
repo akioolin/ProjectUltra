@@ -251,6 +251,21 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   `selectCoherentOFDM` is), and it is the last live picker of `CodeRate::R5_6` after R5/6 was
   retired from the real ladder (2026-06-17). KEEP-check: confirm no GUI control still calls it
   before deleting; the `R5_6` enum value itself stays (valid LDPC rate + forcible probe).
+- **R10. Sender-side mid-transfer rate drivers (superseded by RX-AUTHORITY)** — logged
+  2026-07-05, deletion HARD-GATED on `ULTRA_RX_RATE_AUTHORITY` graduating default-ON
+  (multi-seed faithful gate + rig campaign). Once the receiver commands the rung per group
+  ACK, these `connection.cpp` senders-side drivers are dead weight (already inert under the
+  knob): the `applyAdaptiveRateFeedback` EMA walk + `RateController` mid-transfer use
+  (entry-time use STAYS), `qam16_clean_streak_`/`qam16ClimbStreak` climb hop, the dense-branch
+  demote/crest walks (`qam16_bad_streak_`, `qam16_r34_clean_streak_`, the QAM8 upward step),
+  `noteQam16Demoted` re-climb cooldowns, trough amnesty (`maybeTroughAmnesty` +
+  `trough_episode_*`), `maybeApplyRxRateCommand` (the relative RX-RATE-CMD Phase 2 command —
+  superseded by the absolute command), ssthresh/`noteRungFailed` mid-transfer arm.
+  **KEEP (anti-footgun):** the ack-SILENCE safety rails — `executeEscapeDrop`,
+  `maybeCollapseEscape`, `maybeEscapeStuckFrame` (the receiver cannot command through a
+  blackout, these are the sender's only self-rescue); retx pacing; entry-time
+  `selectCoherentOFDM`/`selectLadderRung`; the whole MC-DPSK/narrow rate machinery (RX-AUTHORITY
+  is wideband-coherent-only); `RateController` itself if entry/fallback still consults it.
 
 ## Deprecate (divergent, not yet removed)
 

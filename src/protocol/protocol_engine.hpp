@@ -227,6 +227,13 @@ public:
     // verdict (connection_policy::RxLevelVerdict as int) + measurement seq. Call BEFORE
     // onBurstGroupReceived so the drive advisory rides that group's tone-burst ACK.
     void setRxLevelVerdict(int verdict, uint32_t seq);
+    // RX-AUTHORITY (2026-07-05): fresh per-group receiver channel measurements
+    // (broadband SNR EMA, fading index, coherence disc) from the decoder's lock-free
+    // atomics. Call BEFORE onBurstGroupReceived so the rung command rides that
+    // group's ACK.
+    void setBurstChannelObservation(float snr_db, float fading_index,
+                                    float coherence_score, bool coherence_valid,
+                                    float doppler_hz);
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
 

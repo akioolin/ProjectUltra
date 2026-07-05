@@ -249,6 +249,111 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
     return {Modulation::QPSK, CodeRate::R1_4};
 }
 
+// ═══════════ RX-AUTHORITY canonical rung index (2026-07-05) ═══════════
+// A WIRE-STABLE absolute index for every coherent wideband (mod, rate) rung —
+// knob-INDEPENDENT (unlike a ladder-array index, which reorders across the three
+// ladder variants) and NOT LadderRungId (a 3-bit waveform-level id; the whole
+// coherent family collapses to one value there). Carried in the tone-burst ACK's
+// reinterpreted [rate_hint|rung_cmd] bits under ULTRA_RX_RATE_AUTHORITY: the
+// RECEIVER measures the channel and commands the sender's next rung outright
+// (single decision-maker, sitting where the information is). 0 = no command
+// (keeps the all-zeros knob-OFF wire identity). Values fit 5 bits (1..31).
+enum : uint8_t {
+    kRungIdxNone = 0,
+    kRungIdxQpskR14 = 1,
+    kRungIdxQpskR12 = 2,
+    kRungIdxQpskR23 = 3,
+    kRungIdxQpskR34 = 4,
+    kRungIdxQam8R23 = 5,
+    kRungIdxQam8R34 = 6,
+    kRungIdxQam16R12 = 7,
+    kRungIdxQam16R23 = 8,
+    kRungIdxQam16R34 = 9,
+    kRungIdxCount = 10,  // first unassigned
+};
+
+// (mod, rate) -> canonical index; kRungIdxNone when the pair is not a coherent rung.
+inline uint8_t coherentRungIndexFor(Modulation mod, CodeRate rate) {
+    if (mod == Modulation::QPSK) {
+        switch (rate) {
+            case CodeRate::R1_4: return kRungIdxQpskR14;
+            case CodeRate::R1_2: return kRungIdxQpskR12;
+            case CodeRate::R2_3: return kRungIdxQpskR23;
+            case CodeRate::R3_4: return kRungIdxQpskR34;
+            default: return kRungIdxNone;
+        }
+    }
+    if (mod == Modulation::QAM8) {
+        if (rate == CodeRate::R2_3) return kRungIdxQam8R23;
+        if (rate == CodeRate::R3_4) return kRungIdxQam8R34;
+        return kRungIdxNone;
+    }
+    if (mod == Modulation::QAM16) {
+        if (rate == CodeRate::R1_2) return kRungIdxQam16R12;
+        if (rate == CodeRate::R2_3) return kRungIdxQam16R23;
+        if (rate == CodeRate::R3_4) return kRungIdxQam16R34;
+        return kRungIdxNone;
+    }
+    return kRungIdxNone;
+}
+
+// canonical index -> (mod, rate); QPSK R1/4 floor for anything unknown.
+inline CoherentPick coherentRungFromIndex(uint8_t idx) {
+    switch (idx) {
+        case kRungIdxQpskR14: return {Modulation::QPSK, CodeRate::R1_4};
+        case kRungIdxQpskR12: return {Modulation::QPSK, CodeRate::R1_2};
+        case kRungIdxQpskR23: return {Modulation::QPSK, CodeRate::R2_3};
+        case kRungIdxQpskR34: return {Modulation::QPSK, CodeRate::R3_4};
+        case kRungIdxQam8R23: return {Modulation::QAM8, CodeRate::R2_3};
+        case kRungIdxQam8R34: return {Modulation::QAM8, CodeRate::R3_4};
+        case kRungIdxQam16R12: return {Modulation::QAM16, CodeRate::R1_2};
+        case kRungIdxQam16R23: return {Modulation::QAM16, CodeRate::R2_3};
+        case kRungIdxQam16R34: return {Modulation::QAM16, CodeRate::R3_4};
+        default: return {Modulation::QPSK, CodeRate::R1_4};
+    }
+}
+
+// A commanded rung is obeyable only if the LOCAL ladder knows it (env knobs may
+// differ across ends): clamp defensively rather than transmit a rung the local
+// tables never validated.
+inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
+    const CoherentRung* rungs = kCoherentLadder;
+    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
+    if (psk8LadderEnabled()) {
+        rungs = kCoherentLadderPsk8Exp;
+        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
+    } else if (qam16LadderEnabled()) {
+        rungs = kCoherentLadderQAM16Exp;
+        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            for (int c = 0; c < 3; ++c) {
+                if (rungs[i].min_snr_db[c] < kRungDisabledDb) return true;
+            }
+            return false;  // fully-disabled row = placeholder, not selectable
+        }
+    }
+    return false;
+}
+
+// ULTRA_RX_RATE_AUTHORITY (2026-07-05, default OFF): receiver-commanded absolute
+// rung selection — the receiver maps ITS fresh per-group channel measurements
+// through selectCoherentOFDM and commands the sender's next rung on every group
+// ACK; the sender OBEYS (descriptor commit) and its own mid-transfer rate drivers
+// (EMA walk, climb streaks, crest walks, cooldowns, amnesty) go inert. Sender-side
+// ack-SILENCE escapes stay live (the receiver cannot command through a blackout).
+// BOTH ends must set it: it reinterprets the ACK's [rate_hint|rung_cmd] bits and
+// requires the widened CRC span (a knob-OFF peer CRC-rejects the ACKs — fails safe
+// as ack loss). Supersedes ULTRA_RX_RATE_CMD's demote-only command when on.
+inline bool rxRateAuthorityEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_RX_RATE_AUTHORITY");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return on;
+}
+
 // Highest GUI-validated code rate for a given coherent modulation — a per-modulation
 // ceiling for the adaptive RateController, which is otherwise modulation-BLIND (it walks
 // {R1/4..R3/4} at whatever modulation was fixed at CONNECT). Without this, a clean stretch

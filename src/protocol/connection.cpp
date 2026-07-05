@@ -291,6 +291,17 @@ Connection::Connection(const ConnectionConfig& config)
                     ? static_cast<uint8_t>(std::lround(
                           std::clamp(last_group_quality_, 0.0f, 1.0f) * 7.0f))
                     : 0;
+                // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): reinterpret the SAME five
+                // bits [rate_hint(3)|rung_cmd(2)] as the receiver's ABSOLUTE canonical
+                // rung command (waveform_selection.hpp kRungIdx*; 0 = no command).
+                // Overrides the hint/relative-cmd stamps above — under authority the
+                // sender's EMA has no consumer for the hint, and the demote-only
+                // relative command is superseded by the absolute one. The WAITING-
+                // REBASE voice is untouched (type=NACK path, emitted elsewhere).
+                if (rxRateAuthorityEnabled()) {
+                    tba.rate_hint = static_cast<uint8_t>(rx_authority_cmd_ & 0x7);
+                    tba.rung_cmd = static_cast<uint8_t>((rx_authority_cmd_ >> 3) & 0x3);
+                }
                 // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): stamp the drive advisory
                 // from the per-burst RX level verdict fed via setRxLevelVerdict just
                 // before this group's delivery. Down IMMEDIATELY on a clip signature
@@ -1812,11 +1823,27 @@ bool Connection::onToneBurstAck(
         // must not fire a second move (maybeApplyRxRateCommand compares against these).
         const Modulation mod_at_ack = data_modulation_;
         const CodeRate rate_at_ack = data_code_rate_;
-        const float fed_quality =
-            detection.payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
-                ? 0.0f
-                : static_cast<float>(detection.payload.rate_hint) / 7.0f;
-        applyAdaptiveRateFeedback(fed_quality);
+        // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): the receiver commands the rung
+        // outright — the ACK's [rate_hint|rung_cmd] bits are its ABSOLUTE canonical
+        // rung index, and the sender's own mid-transfer drivers (the EMA walk, the
+        // dense demote/crest walks, the climb hop, trough amnesty, the relative
+        // rung command) are INERT: one decision-maker, sitting where the channel is
+        // actually measured. Ack-SILENCE safety rails (collapse escape, stuck-frame
+        // escape, RTO machinery) stay live — no command crosses a blackout.
+        const bool rx_authority = rxRateAuthorityEnabled();
+        if (rx_authority) {
+            const uint8_t cmd_idx = static_cast<uint8_t>(
+                (detection.payload.rate_hint & 0x7) |
+                ((detection.payload.rung_cmd & 0x3) << 3));
+            maybeObeyAuthorityCommand(cmd_idx);
+        } else {
+            const float fed_quality =
+                detection.payload.type ==
+                        ultra::waveform::tone_burst_ack::AckType::Nack
+                    ? 0.0f
+                    : static_cast<float>(detection.payload.rate_hint) / 7.0f;
+            applyAdaptiveRateFeedback(fed_quality);
+        }
         // Software-ALC sender side (BUG-QAM16-RIG-LEVEL-BUDGET): the receiver's
         // drive advisory rides bits [30..31] of this ACK. Hand a non-hold advisory
         // to the host (the host owns tx_drive), which applies at most ONE step per
@@ -1836,8 +1863,13 @@ bool Connection::onToneBurstAck(
         // obey. Runs INSIDE the defer-refill bracket so a committed demote's refill
         // coalesces into the single outermost runDeferredArqRefill below (which then
         // sends the [holes]+[new] burst at the NEW rung). Hard no-op while OFF.
-        maybeApplyRxRateCommand(detection.payload.rung_cmd, detection.payload.group_seq,
-                                mod_at_ack, rate_at_ack);
+        // RX-AUTHORITY supersedes it: bits 42-43 are then command bits already
+        // consumed above, not a relative demote.
+        if (!rx_authority) {
+            maybeApplyRxRateCommand(detection.payload.rung_cmd,
+                                    detection.payload.group_seq,
+                                    mod_at_ack, rate_at_ack);
+        }
         if (outermost) {
             arq_callback_defer_refill_ = false;
             // §RETX-PACING §1.1 round boundary: every tone-burst ack ends a resend round.
@@ -1852,7 +1884,11 @@ bool Connection::onToneBurstAck(
             // TROUGH AMNESTY: progress after a zero-progress episode = the null ended;
             // restore the pre-episode rung (see maybeTroughAmnesty). Inside the same
             // defer-refill bracket, so the restored rung rides the very next refill.
-            maybeTroughAmnesty(round_progress, detection.payload.rung_cmd);
+            // RX-AUTHORITY: inert — the receiver re-commands the right rung on the
+            // first post-trough ACK; a second restorer would double-drive.
+            if (!rx_authority) {
+                maybeTroughAmnesty(round_progress, detection.payload.rung_cmd);
+            }
             // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
             // to send the next burst (resend remaining holes + new frames). Trigger the
             // refill even when the cumulative base did NOT advance: a SACK with a hole at
@@ -2216,6 +2252,161 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
         (data_code_rate_ == CodeRate::R3_4)
             ? ultra::waveform::tone_burst_ack::kRungCmdDownOne
             : kRungCmdDownHard;
+}
+
+// ═══════════ RX-AUTHORITY receiver verdict (ULTRA_RX_RATE_AUTHORITY) ═══════════
+// Called per delivered/failed burst group, BEFORE the group's ACK emits. Maps the
+// receiver's FRESH channel observation (broadband SNR EMA + coherence-adjusted
+// fading, fed via setBurstChannelObservation from the decoder's per-frame atomics)
+// through selectCoherentOFDM — the SAME anchor tables used at connect — into an
+// absolute canonical rung command. Multi-rung moves in both directions are the
+// point: the map's input is already alpha-smoothed, so stability lives in the
+// measurement, not in streak counters. Two decode-evidence overrides keep the
+// verdict honest when the meter and the decoder disagree:
+//   - CRATER (quality <= 0): never command AT or ABOVE the rung that just failed —
+//     clamp to one canonical step below the current rung, whatever the SNR map
+//     says (the map's fading class lags a fresh trough).
+//   - CLEAN group: never command BELOW the current rung (the rung is proven
+//     working THIS group; a stale-low SNR reading must not thrash it downward).
+void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
+    if (state_ != ConnectionState::CONNECTED ||
+        negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
+        rx_authority_cmd_ = kRungIdxNone;
+        return;
+    }
+    if (burst_obs_snr_db_ < 0.0f) {
+        // No fresh observation yet this connection — command nothing rather than
+        // steer on handshake-stale state.
+        rx_authority_cmd_ = kRungIdxNone;
+        return;
+    }
+    // FADE-AVERAGED verdict SNR (2026-07-05, first-probe finding): the per-frame
+    // broadband EMA swung 16.9..26.8 dB on a dial-20 Good channel — a fade
+    // snapshot. Commanding on it aliases the fade cycle (crest reading -> climb ->
+    // trough crater -> demote -> repeat; 12 moves/300 s measured). The rung anchors
+    // are calibrated on dial-equivalent SNR, so the verdict input is the dB mean of
+    // the last few group observations (~30 s ≈ many Tc). Decode-evidence overrides
+    // below keep the fast reactions (crater = instant clamp).
+    rx_auth_obs_db_[rx_auth_obs_next_] = burst_obs_snr_db_;
+    rx_auth_obs_age_ms_[rx_auth_obs_next_] = 0;
+    rx_auth_obs_next_ = (rx_auth_obs_next_ + 1) % kRxAuthObsRing;
+    if (rx_auth_obs_count_ < kRxAuthObsRing) ++rx_auth_obs_count_;
+    float snr_sum = 0.0f;
+    int snr_n = 0;
+    for (size_t i = 0; i < rx_auth_obs_count_; ++i) {
+        if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
+            snr_sum += rx_auth_obs_db_[i];
+            ++snr_n;
+        }
+    }
+    const float snr_avg = (snr_n > 0) ? (snr_sum / static_cast<float>(snr_n))
+                                      : burst_obs_snr_db_;
+    const float eff_fading = connection_policy::coherenceAdjustedFadingIndex(
+        (burst_obs_fading_ >= 0.0f) ? burst_obs_fading_ : fading_index_,
+        burst_obs_coh_score_, burst_obs_coh_valid_);
+    const CoherentPick mapped = selectCoherentOFDM(snr_avg, eff_fading);
+    uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
+    const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
+    // CRATER-MARGIN memory (posterior beats prior; second-probe finding: at avg
+    // 22 dB the map re-commanded 16QAM R2/3 after every crater — anchor 20 said
+    // yes, the decode said no every ~2.5 groups). A crater charges the CURRENT
+    // rung (+2 dB, cap 6); every clean group decays all penalties (0.25 dB) — the
+    // fade epoch ends, the evidence expires. Receiver-side ssthresh analogue.
+    if (cur != kRungIdxNone && cur < kRungIdxCount) {
+        if (quality <= 0.0f && !all_ok) {
+            rx_auth_rung_penalty_db_[cur] =
+                std::min(6.0f, rx_auth_rung_penalty_db_[cur] + 2.0f);
+        } else if (all_ok) {
+            for (size_t i = 0; i < kRungIdxCount; ++i) {
+                rx_auth_rung_penalty_db_[i] =
+                    std::max(0.0f, rx_auth_rung_penalty_db_[i] - 0.25f);
+            }
+        }
+    }
+    if (cur != kRungIdxNone) {
+        if (cmd > cur) {
+            // CLIMB HYSTERESIS + crater margin: an up-command must survive a
+            // haircut — the base 1.5 dB guards against slow swells; the target
+            // rung's crater penalty demands the channel PROVE headroom the anchors
+            // only assumed. Descents take the map directly (down is safe).
+            constexpr float kClimbMarginDb = 1.5f;
+            const float haircut = kClimbMarginDb +
+                ((cmd < kRungIdxCount) ? rx_auth_rung_penalty_db_[cmd] : 0.0f);
+            const CoherentPick guarded =
+                selectCoherentOFDM(snr_avg - haircut, eff_fading);
+            const uint8_t guarded_idx =
+                coherentRungIndexFor(guarded.mod, guarded.rate);
+            if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
+        }
+        if (quality <= 0.0f && !all_ok) {
+            // Crater override: the strongest evidence is the failure itself.
+            const uint8_t below = static_cast<uint8_t>(cur > 1 ? cur - 1 : 1);
+            if (cmd >= cur) cmd = below;
+        } else if (all_ok && cmd < cur) {
+            // Clean-group override: this rung just WORKED end to end.
+            cmd = cur;
+        }
+    }
+    // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
+    // (3) — the WAITING-REBASE voice encoding stays unambiguous (it is also
+    // type=NACK, but keep the value space disjoint regardless).
+    static_assert(kRungIdxCount <= 24, "rung index would alias the rebase voice");
+    rx_authority_cmd_ = cmd;
+    if (cmd != cur) {
+        LOG_MODEM(INFO,
+                  "Connection: RX-AUTHORITY verdict %s %s (idx %u -> %u) "
+                  "snr_avg=%.1f (inst=%.1f n=%d) fading=%.2f coh=%.2f q=%.2f",
+                  modulationToString(mapped.mod), codeRateToString(mapped.rate),
+                  cur, cmd, snr_avg, burst_obs_snr_db_, snr_n, eff_fading,
+                  burst_obs_coh_score_, quality);
+    }
+}
+
+// SENDER side of RX-AUTHORITY: obey a non-zero absolute rung command from the
+// receiver's ACK. Dedup by target (repeat ACK copies re-carry the same command);
+// clamp to the locally-enabled ladder (env knobs may differ across ends); commit
+// via the descriptor (mid-window era-safe) with the legacy MODE_CHANGE fallback.
+void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
+    if (cmd_idx == kRungIdxNone || cmd_idx >= kRungIdxCount) return;
+    if (state_ != ConnectionState::CONNECTED ||
+        negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
+    if (mode_change_pending_) return;  // a move is already in flight — obey later copies
+    const CoherentPick pick = coherentRungFromIndex(cmd_idx);
+    Modulation mod = pick.mod;
+    CodeRate rate = pick.rate;
+    if (!coherentRungLocallyEnabled(mod, rate)) {
+        // Local ladder doesn't know the rung (knob mismatch) — take the local map's
+        // pick for the receiver-reported situation instead of an unvalidated rung.
+        LOG_MODEM(WARN,
+                  "Connection: RX-AUTHORITY command idx=%u (%s %s) not locally "
+                  "enabled — holding current rung",
+                  cmd_idx, modulationToString(mod), codeRateToString(rate));
+        return;
+    }
+    if (mod == data_modulation_ && rate == data_code_rate_) {
+        tx_authority_last_obeyed_ = cmd_idx;  // already there — arm dedup anyway
+        return;
+    }
+    if (cmd_idx == tx_authority_last_obeyed_) {
+        // Same target as last obeyed but we're not there yet (descriptor commit
+        // still propagating / legacy exchange in flight) — don't re-fire on every
+        // repeated ACK copy carrying the same command.
+        return;
+    }
+    const bool faster = isFasterMode(mod, rate, data_modulation_, data_code_rate_);
+    const uint8_t reason = faster ? v2::ModeChangeReason::CHANNEL_IMPROVED
+                                  : v2::ModeChangeReason::CHANNEL_DEGRADED;
+    const char* old_mod = modulationToString(data_modulation_);
+    const char* old_rate = codeRateToString(data_code_rate_);
+    const bool desc_committed =
+        tryDescriptorModeSwitch(mod, rate, wireSnrDb(), reason);
+    if (!desc_committed) {
+        requestModeChange(mod, rate, wireSnrDb(), reason);
+    }
+    tx_authority_last_obeyed_ = cmd_idx;
+    LOG_MODEM(INFO, "Connection: RX-AUTHORITY obey %s %s -> %s %s via %s",
+              old_mod, old_rate, modulationToString(mod), codeRateToString(rate),
+              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
 }
 
 // SENDER side (called from onToneBurstAck, inside the defer-refill bracket, AFTER
@@ -3063,6 +3254,12 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         if (rx_rate_cmd_enabled_) {
             updateRxRateCommandFromGroup(all_ok, frame_mask);
         }
+        // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): compute the receiver's ABSOLUTE
+        // rung verdict for this group BEFORE its ACK emits — the command rides THIS
+        // ACK. Hard no-op while the knob is OFF.
+        if (rxRateAuthorityEnabled()) {
+            updateRxAuthorityCommand(all_ok, quality);
+        }
         // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
         // accumulated LOW-level streak — those readings were fade-trough artifacts,
         // not drive-starvation evidence (see the SACK-emit advisory gate).
@@ -3822,6 +4019,13 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
+            // RX-AUTHORITY: age the verdict-SNR ring (stale readings must not
+            // steer the rung after a quiet stretch).
+            for (size_t i = 0; i < kRxAuthObsRing; ++i) {
+                if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
+                    rx_auth_obs_age_ms_[i] += elapsed_ms;
+                }
+            }
             maybeEscapeStuckFrame();
             // §RETX-PACING §2: the collapse-conditioned escape is POLLED here (proven-safe
             // context, same as maybeEscapeStuckFrame) — rounds counted inside the ARQ
@@ -4790,6 +4994,11 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // (nothing changed) is NOT an adoption and keeps the latch.
     if (rate_changed || mod_changed) {
         rx_rate_cmd_pending_ = 0;
+        // RX-AUTHORITY: any real mode move (an obey, an ack-silence escape, a
+        // legacy exchange) starts a new era for the obey-dedup — without this, a
+        // safety escape that moved us OFF a previously-obeyed target would block
+        // re-obeying that same target when the receiver re-commands it.
+        tx_authority_last_obeyed_ = 0;
     }
     if (rate_changed || cw_changed || mod_changed) {
         soft_combine_harq_.clear();  // mod change => old-constellation LLRs would corrupt HARQ
@@ -5043,6 +5252,14 @@ void Connection::enterConnected() {
     rx_rate_cmd_pending_ = 0;
     rx_rate_cmd_seq_seen_ = -1;
     rx_rebase_voice_seq_seen_ = -1;
+    rx_authority_cmd_ = 0;
+    tx_authority_last_obeyed_ = 0;
+    rx_auth_obs_count_ = 0;
+    rx_auth_obs_next_ = 0;
+    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
+    burst_obs_snr_db_ = -1.0f;
+    burst_obs_fading_ = -1.0f;
+    burst_obs_coh_valid_ = false;
     qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     data_turn_tx_guard_ms_ = 0;
@@ -5098,6 +5315,14 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
     rx_rate_cmd_seq_seen_ = -1;
     rx_rebase_voice_seq_seen_ = -1;
+    rx_authority_cmd_ = 0;
+    tx_authority_last_obeyed_ = 0;
+    rx_auth_obs_count_ = 0;
+    rx_auth_obs_next_ = 0;
+    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
+    burst_obs_snr_db_ = -1.0f;
+    burst_obs_fading_ = -1.0f;
+    burst_obs_coh_valid_ = false;
     qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();

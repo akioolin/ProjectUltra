@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-05 — feat(rate): RX-AUTHORITY — receiver-commanded absolute rung selection (ULTRA_RX_RATE_AUTHORITY, default OFF)
+
+**What:** inverts rate-control authority: the RECEIVER — the only station that measures the
+post-channel signal — maps its fresh per-group observation (decoder per-frame broadband SNR
+EMA + coherence-adjusted fading, newly plumbed protocol-side via `setBurstChannelObservation`;
+the Connection's own copies were handshake-stale during burst transfers) through
+`selectCoherentOFDM` and stamps an ABSOLUTE canonical rung index into every group ACK. The
+sender obeys (descriptor commit, MODE_CHANGE fallback) and its own mid-transfer drivers (EMA
+walk, climb streaks, dense demote/crest walks, cooldowns, trough amnesty, relative RX-RATE-CMD)
+go inert under the knob — ONE decision-maker, no double-drive (the 2026-06-09 churn class).
+Multi-rung jumps both directions by design. Modeled on the burst-per-burst receiver-driven
+loop that lets commercial HF modems track the fade cycle at ~Tc.
+
+**Wire:** reuses the ACK's `[rate_hint(3)|rung_cmd(2)]` bits as the 5-bit command (airtime-
+neutral — 44 payload bits exactly fill the 4×11 Hamming grid; widening would change ACK
+airtime for every knob state). New canonical rung index (`waveform_selection.hpp kRungIdx*`,
+wire-stable, knob-independent; `LadderRungId` is waveform-level and unusable). Authority mode
+binds the widened CRC span (all 5 command bits protected; knob-OFF peer CRC-rejects = safe ack
+loss). WAITING-REBASE voice untouched (type=NACK path; index space kept disjoint from
+kRungCmdReserved).
+
+**Verdict honesty overrides:** crater → never command at/above the failed rung (clamp one
+canonical step below — the failure outranks a lagging meter); clean group → never command
+below the rung that just worked. No-observation → no command.
+
+**Keeps (sender safety rails):** ack-silence collapse/stuck-frame escapes (no command crosses
+a blackout), retx pacing, entry-time selection, all MC-DPSK/narrow machinery. Sender drivers
+logged for post-graduation deletion in REMOVAL_BACKLOG R10.
+
+**Verified:** new `tests/test_rx_authority.cpp` 6/6 (verdict mapping incl. the idx 4→8
+multi-rung jump, crater clamp, clean hold, no-observation, obey+dedup, garbage-inert); full
+ctest green minus the pre-existing UltraTncSimAudio red; knob-OFF byte-identity via the
+existing suites (they run without the env). Faithful-gate A/B: see ledger.
+
 ## 2026-07-05 — fix(arq/tone-ack): BUG-TONEACK-FABRICATION — phantom detection fabricated delivery, silent data loss (F116)
 
 **Broken:** F116 (rig, 50KB, first full-ladder run) failed with a silent 3744-byte hole

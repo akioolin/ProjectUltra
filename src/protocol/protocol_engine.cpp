@@ -751,6 +751,15 @@ void ProtocolEngine::setRxLevelVerdict(int verdict, uint32_t seq) {
     connection_.setRxLevelVerdict(verdict, seq);
 }
 
+void ProtocolEngine::setBurstChannelObservation(float snr_db, float fading_index,
+                                                float coherence_score,
+                                                bool coherence_valid,
+                                                float doppler_hz) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setBurstChannelObservation(snr_db, fading_index, coherence_score,
+                                           coherence_valid, doppler_hz);
+}
+
 bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     const auto header = v2::parseHeader(data);

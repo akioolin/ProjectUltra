@@ -499,6 +499,21 @@ public:
     // fresh measurements.
     void setRxLevelVerdict(int verdict, uint32_t seq);
 
+    // RX-AUTHORITY (2026-07-05): fresh per-group receiver channel observation from
+    // the decoder's lock-free atomics (broadband SNR EMA, per-frame fading index,
+    // coherence disc). Fed by the modem binding BEFORE onBurstGroupReceived so the
+    // rung command derived from it rides THIS group's ACK. No-op storage when the
+    // knob is off (cheap floats; verdict computation is knob-gated).
+    void setBurstChannelObservation(float snr_db, float fading_index,
+                                    float coherence_score, bool coherence_valid,
+                                    float doppler_hz) {
+        burst_obs_snr_db_ = snr_db;
+        burst_obs_fading_ = fading_index;
+        burst_obs_coh_score_ = coherence_score;
+        burst_obs_coh_valid_ = coherence_valid;
+        burst_obs_doppler_hz_ = doppler_hz;
+    }
+
     // Software-ALC sender side: fires when a decoded tone-burst ACK carries a
     // non-hold drive advisory (1=up, 2=down) while we have in-flight data. Runs
     // under the ProtocolEngine mutex — the host must NOT call back into the
@@ -981,6 +996,50 @@ private:
     void updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask);
     void maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
                                  Modulation mod_at_ack, CodeRate rate_at_ack);
+
+    // ── RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY, 2026-07-05) ──────────────────────
+    // The receiver measures, the receiver DECIDES: per burst group it maps its
+    // fresh channel observation (broadband SNR EMA + coherence-adjusted fading,
+    // fed by setBurstChannelObservation from the decoder's lock-free atomics)
+    // through selectCoherentOFDM and stamps the resulting CANONICAL RUNG INDEX
+    // (waveform_selection.hpp kRungIdx*) into the ACK's reinterpreted
+    // [rate_hint(3)|rung_cmd(2)] bits. The sender obeys (descriptor commit); its
+    // own mid-transfer drivers are inert under the knob. Sender ack-SILENCE
+    // escapes stay live (no command crosses a blackout).
+    // RECEIVER: fresh observation (never aged — each group overwrites).
+    float burst_obs_snr_db_ = -1.0f;      // <0 = never fed this connection
+    float burst_obs_fading_ = -1.0f;
+    float burst_obs_coh_score_ = 0.0f;
+    bool burst_obs_coh_valid_ = false;
+    float burst_obs_doppler_hz_ = -1.0f;
+    // RECEIVER: canonical rung this end commands (0 = none); re-stamped on every
+    // ACK emit until superseded by the next group's verdict.
+    uint8_t rx_authority_cmd_ = 0;
+    // RECEIVER: fade-averaging ring for the verdict SNR. The per-frame broadband
+    // EMA is a fade SNAPSHOT (measured ±5 dB swing on a dial-20 Good channel) —
+    // rate anchors are calibrated on dial-equivalent SNR, so the verdict input is
+    // the dB mean over the last few groups (~30 s ≈ many Tc), not the instant
+    // fade state. Entries age out via tick (stale channel must not steer).
+    static constexpr size_t kRxAuthObsRing = 4;
+    static constexpr uint32_t kRxAuthObsMaxAgeMs = 120000;
+    float rx_auth_obs_db_[kRxAuthObsRing] = {0, 0, 0, 0};
+    uint32_t rx_auth_obs_age_ms_[kRxAuthObsRing] = {0, 0, 0, 0};
+    size_t rx_auth_obs_count_ = 0;
+    size_t rx_auth_obs_next_ = 0;
+    // RECEIVER: per-rung crater-margin memory — the anchor map is a PRIOR; the
+    // observed crater rate at a rung is the POSTERIOR (second-probe finding: at
+    // avg 22 dB the map re-commanded 16QAM R2/3 after every crater — anchor 20
+    // said yes, the decode said no every ~2.5 groups). A crater AT a rung raises
+    // the extra dB margin needed to re-command it (+2, cap 6); every clean group
+    // decays all penalties (0.25) — the fade epoch ends, the evidence expires.
+    // Receiver-side analogue of the sender's ssthresh, measured where the
+    // channel actually is. Sized by kRungIdxCount (waveform_selection.hpp).
+    float rx_auth_rung_penalty_db_[16] = {0};
+    // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
+    // the same command; obey once per distinct target).
+    uint8_t tx_authority_last_obeyed_ = 0;
+    void updateRxAuthorityCommand(bool all_ok, float quality);
+    void maybeObeyAuthorityCommand(uint8_t cmd_idx);
     std::string last_adaptive_action_;      // GUI: short human-readable action
     // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON since 2026-07-02). See
     // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK

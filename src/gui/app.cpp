@@ -1090,14 +1090,25 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "protocol", "waveform.negotiated", diag_fields);
 
-        // Format display with waveform info and channel quality. The wire SNR
-        // byte can carry the -10 dB stale sentinel (no reading fresher than
-        // 3*Tc at the sender) — render it as n/a, never as a number.
-        char link_snr_text[16];
-        if (snr_db <= protocol::connection_policy::kConnectSnrStaleSentinelDb + 0.5f) {
+        // Format display with waveform info and channel quality. Prefer the LOCAL
+        // live OFDM LTS broadband reading (fresh per decoded frame — what the
+        // RX-AUTHORITY verdict actually uses) over the wire byte: the wire value is
+        // the PEER's snapshot and on several paths is frozen at the handshake-era
+        // connect reading (measured: "13 dB" all run on a dial-20 channel). Label
+        // the source so the operator knows which meter they are reading. The wire
+        // byte can also carry the -10 dB stale sentinel (no reading fresher than
+        // 3*Tc at the sender) — render that as n/a, never as a number.
+        char link_snr_text[24];
+        const auto mode_stats = modem_.getStats();
+        if (mode_stats.has_ofdm_broadband_snr_db &&
+            std::isfinite(mode_stats.ofdm_broadband_snr_db)) {
+            snprintf(link_snr_text, sizeof(link_snr_text), "%.1f dB (lts)",
+                     mode_stats.ofdm_broadband_snr_db);
+        } else if (snr_db <=
+                   protocol::connection_policy::kConnectSnrStaleSentinelDb + 0.5f) {
             snprintf(link_snr_text, sizeof(link_snr_text), "n/a");
         } else {
-            snprintf(link_snr_text, sizeof(link_snr_text), "%d dB",
+            snprintf(link_snr_text, sizeof(link_snr_text), "%d dB (wire)",
                      static_cast<int>(snr_db));
         }
         char buf[260];

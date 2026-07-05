@@ -322,6 +322,12 @@ add_executable(test_psk8_climb test_psk8_climb.cpp)
 target_link_libraries(test_psk8_climb PRIVATE ultra_core)
 add_test(NAME Psk8Climb COMMAND test_psk8_climb)
 
+# RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): receiver-commanded absolute rung loop;
+# own binary (env-latched statics)
+add_executable(test_rx_authority test_rx_authority.cpp)
+target_link_libraries(test_rx_authority PRIVATE ultra_core)
+add_test(NAME RxAuthority COMMAND test_rx_authority)
+
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
 add_executable(test_sync_detection test_sync_detection.cpp)

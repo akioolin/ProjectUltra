@@ -112,6 +112,18 @@ inline void wireModemToProtocol(ModemEngine& modem,
             // timed-out group re-delivering the previous measurement).
             protocol.setRxLevelVerdict(modem.getRxLevelVerdict(),
                                        modem.getRxLevelVerdictSeq());
+            // RX-AUTHORITY (2026-07-05): feed the receiver's FRESH per-group channel
+            // measurements BEFORE onBurstGroupReceived — that call computes the rung
+            // command this group's ACK will carry. The Connection's own copies
+            // (measured_snr_db_/fading_index_/coherence) are fed only by the CLASSIC
+            // frame path and are handshake-stale during burst transfers; the honest
+            // live sources are the decoder's lock-free per-frame atomics.
+            if (modem.hasLastOFDMBroadbandSNR()) {
+                protocol.setBurstChannelObservation(
+                    modem.getLastOFDMBroadbandSNR(), modem.getFadingIndex(),
+                    modem.getDopplerCoherenceScore(), modem.getDopplerCoherenceValid(),
+                    modem.getDopplerCoherenceDopplerHz());
+            }
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                           interleaved, group_size);
         });

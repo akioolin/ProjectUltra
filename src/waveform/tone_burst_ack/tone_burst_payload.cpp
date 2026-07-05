@@ -102,7 +102,14 @@ inline uint32_t crcMessageBits(bool cover_rung_cmd) {
 bool rungCmdCrcSpanEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_RX_RATE_CMD");
-        return e != nullptr && e[0] == '1';
+        if (e != nullptr && e[0] == '1') return true;
+        // RX-AUTHORITY (2026-07-05) reinterprets [rate_hint|rung_cmd] as a 5-bit
+        // absolute rung command — all five bits must sit inside the CRC span (a
+        // corrupted command = a wrong-rate burst). Same lockstep semantics as
+        // ULTRA_RX_RATE_CMD: a knob-OFF peer CRC-rejects these ACKs (fails safe
+        // as ack loss).
+        const char* a = std::getenv("ULTRA_RX_RATE_AUTHORITY");
+        return a != nullptr && std::atoi(a) != 0;
     }();
     return v;
 }

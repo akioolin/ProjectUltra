@@ -371,6 +371,17 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     default-ON, log a REMOVAL_BACKLOG candidate for the wideband-ladder MODE_CHANGE retry
     machinery ONLY after the §6.5 deaf-peer fallback proves unneeded (the frame type + handler
     stay for connect-time/USER_REQUEST/MC-DPSK/narrow regardless).
+9f. `ULTRA_RX_RATE_AUTHORITY` — 2026-07-05 🟡 EXPERIMENTAL, default-OFF. Receiver-commanded
+    ABSOLUTE rung selection: receiver maps its fresh per-group observation (broadband SNR EMA +
+    coherence-adjusted fading, `Connection::setBurstChannelObservation` fed by the modem binding)
+    through `selectCoherentOFDM` and stamps the canonical rung index
+    (`waveform_selection.hpp kRungIdx*`) into the ACK's reinterpreted `[rate_hint|rung_cmd]`
+    bits (5 bits, airtime-neutral); sender obeys via DESC-SWITCH/MODE_CHANGE
+    (`maybeObeyAuthorityCommand`, connection.cpp) and its mid-transfer drivers are inert under
+    the knob (REMOVAL_BACKLOG R10 lists the post-graduation deletions + the KEEP rails).
+    BOTH ends must set it (binds the widened tone-ACK CRC span — knob-OFF peer CRC-rejects,
+    fails safe as ack loss). Supersedes `ULTRA_RX_RATE_CMD` when on. Tests:
+    `tests/test_rx_authority.cpp`.
 10. `ULTRA_WIENER_*`, `ULTRA_REL_FADE_*`, `ULTRA_DD_FADING_MAX` — channel-adaptive params. NOTE
     (2026-05-30): their *defaults* are NOT derived today — `robustDelaySpreadS()`/`robustDopplerHz()`
     return hardcoded Moderate-HF constants (1e-3 s / 0.5 Hz) with no channel input; the comment in
