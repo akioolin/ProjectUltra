@@ -1356,6 +1356,15 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
         }();
         if (kQam16Cw16) return 16;
     }
+    // 8PSK revival (2026-07-05): cw12 normalizes coherent 8PSK (3 bits/sym) frames
+    // to the same ~1272 ms airtime as QPSK cw8 / 16QAM cw16 — the per-modulation
+    // frame-duration rule (12 × 648 coded bits / ~153 bits/sym ≈ 51 symbols).
+    // Gated on the ladder knob (one knob for the whole revival); the coherence
+    // walk in recommendCWCountForChannel still shrinks it past the measured Tc.
+    if (waveform == WaveformMode::OFDM_CHIRP && mod == Modulation::QAM8 &&
+        psk8LadderEnabled()) {
+        return 12;
+    }
     return recommendCWCount(rate, waveform);
 }
 

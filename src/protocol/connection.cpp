@@ -2016,7 +2016,14 @@ bool Connection::rateAdaptationActive() const {
 // channel is alive, and the ARQ abort inside commitLocalModeSwitch bumps the epoch
 // (setCodeRate rate-abort, or the abortPendingTx payload-drop bump for same-rate regrids — 2026-07-04 fix) for era safety.
 void Connection::executeEscapeDrop(const char* trigger) {
-    if (data_modulation_ == Modulation::QAM16) {
+    if (data_modulation_ == Modulation::QAM16 ||
+        data_modulation_ == Modulation::QAM8) {
+        // 8PSK revival (2026-07-05): QAM8 takes the same dense-constellation escape
+        // EXIT as QAM16 (never the rate walk — the probe measured the walk sliding
+        // QAM8 to the strictly-dominated R1/4). Differences handled below: no
+        // noteQam16Demoted (QAM8 has no climb-in cooldown to meter) and no midrung
+        // landing (that lever targets 16QAM R1/2).
+        const bool esc_is_qam16 = data_modulation_ == Modulation::QAM16;
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
         // NO tone-burst ack at all, so the ack-driven demote in applyAdaptiveRateFeedback never sees
         // it — this escape path is the only one that fires. Demote STRAIGHT to the robust QPSK R3/4
@@ -2028,13 +2035,13 @@ void Connection::executeEscapeDrop(const char* trigger) {
         // MID-RUNG landing (ULTRA_QAM16_DEMOTE_MIDRUNG): the escape lands at 16QAM
         // R1/2 (2x margin, stays on QAM16 ⇒ no reclimb cooldown) unless already
         // there — a second escape then takes the QPSK R3/4 exit below.
-        const bool midrung_exit =
+        const bool midrung_exit = esc_is_qam16 &&
             qam16DemoteMidrungEnabled() && data_code_rate_ != CodeRate::R1_2;
         const Modulation esc_mod =
             midrung_exit ? Modulation::QAM16 : Modulation::QPSK;
         const CodeRate esc_rate =
             midrung_exit ? CodeRate::R1_2 : CodeRate::R3_4;
-        if (!midrung_exit) noteQam16Demoted(2);
+        if (!midrung_exit && esc_is_qam16) noteQam16Demoted(2);
         // PHASE-3 (2026-07-04): the FIRST escape of a silent stretch commits via the
         // descriptor (mid-window era-safe under move-epoch; the wire self-describes,
         // so a briefly-deaf peer re-syncs on the first descriptor it decodes, and the
@@ -2053,7 +2060,9 @@ void Connection::executeEscapeDrop(const char* trigger) {
                 esc_mod, esc_rate, wireSnrDb(),
                 v2::ModeChangeReason::CHANNEL_DEGRADED);
         }
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop QAM16 %s -> %s %s (%s) via %s",
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop %s %s -> %s %s (%s) via %s",
+                  modulationToString(esc_is_qam16 ? Modulation::QAM16
+                                                  : Modulation::QAM8),
                   codeRateToString(data_code_rate_), modulationToString(esc_mod),
                   codeRateToString(esc_rate), trigger,
                   desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
@@ -2601,24 +2610,24 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         if (e == nullptr || e[0] == '\0') return true;
         return std::atoi(e) != 0;
     }();
-    if (data_modulation_ == Modulation::QAM16) {
-        // While on the QAM16 top-gear we do NOT walk the QPSK code-rate ladder (the RateController
-        // is QPSK-blind — its R2/3 index is a QPSK rung, not QAM16 R2/3). QAM16 is fragile on
-        // frequency-selective fading (the decodability cliff: 55-70% loss / link-death — fable_07),
-        // so the default transitions are HOLD or an asymmetric PROMPT demote straight back to the
-        // robust QPSK R3/4 home gear; the re-climb cooldown (noteQam16Demoted) bounds how often a
-        // fading channel can thrash QPSK<->QAM16 without forfeiting the next fade crest.
-        // ULTRA_QAM16_R34 (default OFF) adds the crest rung: a within-QAM16 R2/3 -> R3/4 walk
-        // gated on the same qam16ClimbStreak() clean-group streak as the modulation hop, with the
-        // asymmetric exit intact — ONE bad group / NACK at R3/4 steps back to R2/3 (the validated
-        // rung gets first refusal, not a straight QPSK drop), and maybeEscapeStuckFrame still
-        // drops STRAIGHT to QPSK R3/4 from EITHER QAM16 rate.
-        // We use RAW quality here (not the RateController EMA): a cliff demands a prompt reaction,
-        // not a smoothed one (the EMA is the right tool for a GRADUAL code-rate rung, not a dense
-        // constellation that fails abruptly). NOTE: when QAM16 craters so hard it emits NO ack, this
-        // ack-driven demote never runs and the bad_streak keeps resetting on partial-clean acks —
-        // maybeEscapeStuckFrame's QAM16->QPSK escape-drop (frame stuck stuckRetransmitEscape() retx)
-        // is the real backstop for that case; the prompt demote here handles a softer degrade.
+    if (data_modulation_ == Modulation::QAM16 ||
+        data_modulation_ == Modulation::QAM8) {
+        // While on a DENSE-constellation gear we do NOT walk the QPSK code-rate ladder
+        // (the RateController is QPSK-blind — its R2/3 index is a QPSK rung). QAM16 is
+        // fragile on frequency-selective fading (the decodability cliff: 55-70% loss /
+        // link-death — fable_07); QAM8's 45° boundaries fail the same way, just later
+        // (+3.6 dB margin). 8PSK revival probe (2026-07-05): letting the EMA walk QAM8
+        // down its own rate ladder slid R2/3 -> R1/2 -> R1/4 (a strictly-dominated
+        // rung: tight boundaries AND low rate) and finished at 990 vs the pinned-rate
+        // 2040 — dense mods need the EXIT semantics, not the walk. So: HOLD or a
+        // prompt asymmetric demote to the robust QPSK R3/4 home gear (QAM16's
+        // re-climb cooldown machinery applies to QAM16 only; QAM8 has no mid-stream
+        // climb-in yet — it is entry-selected — so no cooldown to meter).
+        // ULTRA_QAM16_R34 crest semantics generalize: a bad group at the mod's R3/4
+        // rung steps down ONE rung to its validated R2/3 and STAYS on the modulation;
+        // a further bad group takes the QPSK exit.
+        // RAW quality (not the EMA): a cliff demands a prompt reaction.
+        const bool is_qam16 = data_modulation_ == Modulation::QAM16;
         const float drop_below = rate_controller_.config().drop_below;
         const bool nack = quality <= 0.0f;  // group fully lost — the cliff signature
         if (quality < drop_below) ++qam16_bad_streak_; else qam16_bad_streak_ = 0;
@@ -2627,38 +2636,45 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             qam16_bad_streak_ = 0;
             qam16_r34_clean_streak_ = 0;  // a bad group also aborts any pending R3/4 walk
             // Crest-rung exit is one step at a time: R3/4 demotes to the validated R2/3, and
-            // STAYS on QAM16 — noteQam16Demoted meters the QPSK->QAM16 re-entry cooldown, which
-            // this is not. A further bad group at R2/3 takes the existing QPSK demote below.
+            // STAYS on the dense mod — noteQam16Demoted meters the QPSK->QAM16 re-entry
+            // cooldown, which this is not. A further bad group at R2/3 exits to QPSK below.
+            // (QAM8 R3/4 is a ladder rung when the psk8 ladder is on — same one-step-down.)
             const bool r34_step_down =
-                qam16R34Enabled() && data_code_rate_ == CodeRate::R3_4;
+                (is_qam16 ? qam16R34Enabled() : true) &&
+                data_code_rate_ == CodeRate::R3_4;
             const bool busy =
                 file_transfer_.getState() == FileTransferState::SENDING &&
                 (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
             if (busy) {
                 std::snprintf(buf, sizeof(buf),
-                              "hold QAM16 %s (demote->%s at clean boundary, q=%.2f)",
+                              "hold %s %s (demote->%s at clean boundary, q=%.2f)",
+                              modulationToString(data_modulation_),
                               codeRateToString(data_code_rate_),
-                              r34_step_down ? "QAM16 R2/3" : "QPSK R3/4", quality);
+                              r34_step_down ? "R2/3 (same mod)" : "QPSK R3/4", quality);
             } else if (r34_step_down) {
+                const Modulation step_mod = data_modulation_;  // stays on the dense mod
                 const bool desc_committed = tryDescriptorModeSwitch(
-                    Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                    step_mod, CodeRate::R2_3, wireSnrDb(),
                     v2::ModeChangeReason::CHANNEL_DEGRADED);
                 if (!desc_committed) {
-                    requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
+                    requestModeChange(step_mod, CodeRate::R2_3, wireSnrDb(),
                                       v2::ModeChangeReason::CHANNEL_DEGRADED);
                 }
                 std::snprintf(buf, sizeof(buf),
-                              "QAM16 R3/4 -> QAM16 R2/3 demote via %s (q=%.2f)",
+                              "%s R3/4 -> R2/3 demote via %s (q=%.2f)",
+                              modulationToString(step_mod),
                               desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
                 LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             } else {
                 // Count the demote + arm the re-climb cooldown only when the MODE_CHANGE actually
                 // fires (a busy-held decision re-asserts on the next bad group; counting the hold
-                // would double-charge the backoff for one logical demote).
-                noteQam16Demoted(1);
-                // Old-rate string captured BEFORE the commit: a descriptor commit applies
+                // would double-charge the backoff for one logical demote). QAM16 only: QAM8 has
+                // no mid-stream climb-in, so there is no re-entry cooldown to meter.
+                if (is_qam16) noteQam16Demoted(1);
+                // Old-mode strings captured BEFORE the commit: a descriptor commit applies
                 // the new mode immediately (data_code_rate_ mutates), unlike the pending
                 // MODE_CHANGE path which holds it until the ACK.
+                const char* old_mod_str = modulationToString(data_modulation_);
                 const char* old_rate_str = codeRateToString(data_code_rate_);
                 const bool desc_committed = tryDescriptorModeSwitch(
                     Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
@@ -2668,12 +2684,12 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                                       v2::ModeChangeReason::CHANNEL_DEGRADED);
                 }
                 std::snprintf(buf, sizeof(buf),
-                              "QAM16 %s -> QPSK R3/4 demote via %s (q=%.2f)",
-                              old_rate_str,
+                              "%s %s -> QPSK R3/4 demote via %s (q=%.2f)",
+                              old_mod_str, old_rate_str,
                               desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
                 LOG_MODEM(INFO, "Connection: adaptive %s", buf);
             }
-        } else if (qam16R34Enabled() && data_code_rate_ == CodeRate::R2_3) {
+        } else if (is_qam16 && qam16R34Enabled() && data_code_rate_ == CodeRate::R2_3) {
             // Crest-rung walk: QAM16 R2/3 -> R3/4 after qam16ClimbStreak() CONSECUTIVE clean
             // groups (quality >= climb_above; a sub-threshold group resets the streak — same
             // gate as the QPSK->QAM16 hop). Fires only at a clean send boundary; when the

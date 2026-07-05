@@ -179,6 +179,42 @@ inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
                                          kOFDMEntryFloorModerateDb}},
 };
 
+// ── 8PSK revival (2026-07-05): env-gated coherent QAM8 ladder ──────────────────
+// ULTRA_ENABLE_PSK8_LADDER=1 swaps in a ladder with the coherent 8PSK (QAM8) rungs
+// enabled ALONGSIDE the experimental QAM16 rungs. Case (handoff §7.7): constant
+// envelope (immune to the cheap-card compression that craters 16QAM above drive
+// ~0.70), +3.6 dB-over-QPSK margin (vs 16QAM's ~+7) = the sweet spot between
+// 16QAM R1/2 and R2/3; cw12 normalizes frames to the proven ~1272 ms.
+// BUG-8PSK-001 (DD corrupting the 8PSK estimate on fading) was FIXED 2026-05-29
+// (channel-adaptive DD gate) — re-probed 2026-07-05 on the modern stack: forced
+// QAM8 R2/3 good@20 s42 PASS 2040 bps, 0 craters, 0 RTOs (the May "too marginal
+// on Good" verdict is stale). Anchors: QAM8 = QPSK anchor + 3.6 dB (constellation
+// distance), ordered consistently with the measured 16QAM anchors
+// (QAM16 R2/3 G20 > QAM8 R2/3 G19 > QAM16 R1/2 G18); QAM8 R3/4 AWGN from the May
+// AWGN validation (2330 bps clean). PROBE anchors — refine by measurement.
+inline bool psk8LadderEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_ENABLE_PSK8_LADDER");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return on;
+}
+
+inline constexpr CoherentRung kCoherentLadderPsk8Exp[] = {
+    // mod              rate            AWGN             GOOD             MODERATE
+    {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, 20.0f,           kRungDisabledDb}},
+    {Modulation::QAM8,  CodeRate::R3_4, {18.0f,           kRungDisabledDb, kRungDisabledDb}},  // AWGN: May validation 2330 clean (QPSK R3/4 15 + 3.6); Good unmeasured (tight 45° boundaries on fading)
+    {Modulation::QAM8,  CodeRate::R2_3, {16.0f,           19.0f,           kRungDisabledDb}},  // 2026-07-05 probe: good@20 s42 PASS 2040, 0 craters (forced). QPSK R2/3 anchor +3.6 -> A16/G19
+    {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, 18.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           20.0f}},
+    {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},
+    {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,
+                                         kOFDMEntryFloorGoodDb,
+                                         kOFDMEntryFloorModerateDb}},
+};
+
 struct CoherentPick {
     Modulation mod;
     CodeRate rate;
@@ -197,7 +233,11 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
     // experimental ladder with the measured 16QAM R1/2 Good rung enabled — default OFF.
     const CoherentRung* rungs = kCoherentLadder;
     size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
-    if (qam16LadderEnabled()) {
+    if (psk8LadderEnabled()) {
+        // 8PSK revival ladder (includes the QAM16-exp rungs — see its comment).
+        rungs = kCoherentLadderPsk8Exp;
+        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
+    } else if (qam16LadderEnabled()) {
         rungs = kCoherentLadderQAM16Exp;
         n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
     }
@@ -231,6 +271,11 @@ inline CodeRate maxValidatedCoherentRate(Modulation mod) {
         // (ULTRA_QAM16_R34): reachable ONLY via the adaptive walk, one-bad-group demote to R2/3.
         case Modulation::QAM16:
             return qam16R34Enabled() ? CodeRate::R3_4 : CodeRate::R2_3;
+        // 8PSK revival (2026-07-05): R2/3 is the probe-validated ceiling (good@20
+        // PASS 2040, 0 craters). R3/4 is AWGN-validated only (May, 2330 clean) —
+        // its Good behavior (tight 45° boundaries on fading) is unmeasured on the
+        // modern stack; raise only after a GUI-gate validation.
+        case Modulation::QAM8:  return CodeRate::R2_3;
         default:                return CodeRate::R3_4;  // QPSK ceiling = top of the auto ladder
     }
 }
