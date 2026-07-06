@@ -2354,12 +2354,21 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     const bool crater_confirmed = crater && rx_auth_crater_streak_ >= 2;
     if (cur != kRungIdxNone && cur < kRungIdxCount) {
         if (crater_confirmed) {
+            // RATCHET (F126): the penalty DOUBLES per confirmed failure episode of
+            // the rung (2 -> 4 -> 8, cap 8) and decays 40x slower than before —
+            // "this rung does not work TODAY" must survive minutes, not one clean
+            // stretch. F125/F126 oscillated 16QAM<->QPSK every ~10 groups: +2dB
+            // penalties decayed within ~8 clean groups, the 24-25 dB average
+            // re-cleared anchor+margin, and every re-climb bought two dead groups
+            // and two anchors. Episode 2 now demands avg >= anchor+2.5+4 (~26.5),
+            // episode 3 pins the rung out until the channel genuinely improves.
+            const float p = rx_auth_rung_penalty_db_[cur];
             rx_auth_rung_penalty_db_[cur] =
-                std::min(6.0f, rx_auth_rung_penalty_db_[cur] + 2.0f);
+                std::min(8.0f, (p < 2.0f) ? 2.0f : p * 2.0f);
         } else if (all_ok) {
             for (size_t i = 0; i < kRungIdxCount; ++i) {
                 rx_auth_rung_penalty_db_[i] =
-                    std::max(0.0f, rx_auth_rung_penalty_db_[i] - 0.25f);
+                    std::max(0.0f, rx_auth_rung_penalty_db_[i] - 0.05f);
             }
         }
     }

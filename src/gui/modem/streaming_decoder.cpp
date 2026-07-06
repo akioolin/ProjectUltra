@@ -151,7 +151,14 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     // ULTRA_DESCRIPTOR_MODE_SWITCH, read once here — lockstep with the Connection-side
     // ctor read; default OFF = byte-identical). Gates the RX mode-hop warm-handoff
     // demotion + the decoder→protocol descriptor notification.
-    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); ds && ds[0] == '1') {
+    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); !(ds && ds[0] == '0')) {
+        // DEFAULT-ON 2026-07-05 — THE F126 STRAGGLER: the graduation sweep flipped
+        // the Connection-side read but not this decoder-side one, so the RECEIVER
+        // never surfaced descriptor mode-hops to the protocol. Its Connection-level
+        // data mode stayed frozen at the entry rung while the PHY decoded the new
+        // modes fine — every authority verdict then computed cur from the STALE
+        // rung, and the crater clamps/floors commanded from the wrong base
+        // (the F126 16QAM<->QPSK oscillation). Lockstep with connection.cpp ctor.
         descriptor_mode_switch_enabled_ = true;
     }
 
