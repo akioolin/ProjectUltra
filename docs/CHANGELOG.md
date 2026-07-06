@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(rate): F145 deadlock — rung-index arithmetic snaps to the ENABLED ladder (disabled-rung command pinned a cratering rung 50 s)
+
+**What was broken:** the QAM8 R3/4 auto-disable (below) punched a HOLE at canonical
+idx 6, and two consumers of rung-index arithmetic were blind to it:
+1. Receiver verdict: the confirmed-crater stride / down rate-limit compute `cur-2`
+   as RAW index math — from 16QAM R2/3 (idx 8) that names exactly the hole (idx 6).
+2. Sender obey guard: a command naming a locally-disabled rung was HELD ("not
+   locally enabled — holding current rung").
+Combination on the F145 rig run: 16QAM R2/3 cratered 6 consecutive groups (0/5
+each, ~7.6 s bursts), the receiver stood a correct DOWN verdict the whole time,
+the sender refused it 4×, and the link sat 50 s at the dying rung (the run still
+PASSed at 1.03 kbps — this stall is where the throughput went).
+
+**What changed:**
+- `waveform_selection.hpp`: `snapRungIndexDownToEnabled(idx)` — nearest enabled
+  rung at or below idx; ALL rung index arithmetic must snap through it.
+- `connection.cpp` `updateRxAuthorityCommand`: snap the final command (walk meets
+  `cur`, which is enabled, before ever inverting a climb into a descent).
+- `connection.cpp` `maybeObeyAuthorityCommand`: a not-locally-enabled command now
+  OBEYS the snapped rung (DOWN command must produce a DOWN move); holds only when
+  nothing at/below is enabled. Covers mixed-build peers too.
+- `test_rx_authority` two-crater test now pins: a confirmed crater must command an
+  ENABLED rung. Tone-ack logs print both conventions (`base=` wire highest-received
+  + `next=`) — the F144 "lost last frame" false alarm was this convention misread;
+  a new `test_selective_repeat` adoption-group pin keeps that path covered.
+
+**Verified:** test_rx_authority 7/7, test_selective_repeat 51/51, full ctest 83/84
+(known TNC red).
+
 ## 2026-07-06 — fix(rate/ack): F143 census — repeat-cancel evidence baseline; asymmetric class persistence; QAM8 R3/4 auto-disabled
 
 **What was broken (two defects, both root-caused from the F143 dual-log timeline):**

@@ -337,6 +337,23 @@ inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
     return false;
 }
 
+// Nearest locally-enabled rung at or below idx (canonical order is monotone in
+// speed), kRungIdxNone if nothing at/below is enabled. EVERY consumer of rung
+// INDEX ARITHMETIC must snap through this: raw index steps (cur-2 strides,
+// down-limits) are blind to anchor-table holes — F145 rig: with QAM8 R3/4
+// auto-disabled, a confirmed crater at idx 8 commanded the hole (idx 6 = cur-2),
+// the sender's enabled-guard refused it, and the link sat 50 s re-cratering
+// 16QAM R2/3 (6 whole-burst resends, 0/5 each) with a correct DOWN verdict
+// standing the whole time.
+inline uint8_t snapRungIndexDownToEnabled(uint8_t idx) {
+    if (idx >= kRungIdxCount) idx = kRungIdxCount - 1;
+    for (int i = static_cast<int>(idx); i >= kRungIdxQpskR14; --i) {
+        const CoherentPick p = coherentRungFromIndex(static_cast<uint8_t>(i));
+        if (coherentRungLocallyEnabled(p.mod, p.rate)) return static_cast<uint8_t>(i);
+    }
+    return kRungIdxNone;
+}
+
 // ULTRA_RX_RATE_AUTHORITY (2026-07-05, default OFF): receiver-commanded absolute
 // rung selection — the receiver maps ITS fresh per-group channel measurements
 // through selectCoherentOFDM and commands the sender's next rung on every group

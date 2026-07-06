@@ -1001,6 +1001,56 @@ bool test_move_epoch_unanchored_wait_for_rebase() {
     return true;
 }
 
+// Pins the ADOPTION-group window arithmetic (written as the F144/F145 "lost
+// last frame" repro; the repro came back GREEN and exposed a LOG-CONVENTION
+// misread instead: the ack wire value is highest-received = rx_base-1, while
+// the adoption log prints next-expected — ack base=9 after group 5..9 is
+// CORRECT). Kept as the regression pin: a rewound epoch group must deliver
+// every frame and advance rx_base past its last seq.
+bool test_move_epoch_adoption_group_advances_past_last_frame() {
+    TEST("MOVE-EPOCH: adoption group advances rx_base past its LAST frame");
+
+    ARQConfig config;
+    config.window_size = 8;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ rx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    rx.setCallsigns("RX1", "TX1");
+
+    std::vector<Bytes> delivered;
+    rx.setDataReceivedCallback([&](const Bytes& p) { delivered.push_back(p); });
+    rx.setTransmitCallback([](const Bytes&) {});
+
+    // Epoch-1 history: seqs 0..7 delivered in order, base -> 8 (the receiver's
+    // pre-switch state; F145 sat at base 8 when the rate change hit).
+    rx.beginGroupReceive();
+    for (uint16_t s = 0; s <= 7; ++s) {
+        rx.onFrameReceived(makeEpochData(s, Bytes{static_cast<uint8_t>(s)}, 1, s == 0));
+    }
+    rx.endGroupReceiveAndAck();
+    if (rx.getRxBaseSeq() != 8)
+        FAIL("Precondition: epoch-1 in-order group should leave rx_base at 8");
+    const size_t epoch1_delivered = delivered.size();
+
+    // The sender rewinds to 5 on the rate-change abort (epoch 2) and sends
+    // 5..9 as one group, EPOCH_REBASE on 5.
+    rx.beginGroupReceive();
+    for (uint16_t s = 5; s <= 9; ++s) {
+        rx.onFrameReceived(
+            makeEpochData(s, Bytes{static_cast<uint8_t>(0x50 + s)}, 2, s == 5));
+    }
+    rx.endGroupReceiveAndAck();
+
+    if (delivered.size() - epoch1_delivered != 5)
+        FAIL("All 5 epoch-2 frames must deliver (rig lost the last one)");
+    if (rx.getRxBaseSeq() != 10)
+        FAIL("Adoption group 5..9 must advance rx_base to 10 (rig acked 9)");
+
+    PASS();
+    return true;
+}
+
 // Knob OFF (default): flags bits 6-7 / EPOCH_REBASE stay zero, SACK bitmaps carry
 // no epoch bits, and a below-window TEXT re-send is dropped exactly as before —
 // byte-identical wire behavior.
@@ -2468,6 +2518,7 @@ int main() {
     test_move_epoch_regrid_resend_accepted();
     test_move_epoch_stale_ack_ignored();
     test_move_epoch_unanchored_wait_for_rebase();
+    test_move_epoch_adoption_group_advances_past_last_frame();
     test_move_epoch_knob_off_byte_identical();
 
     std::cout << "\nRetransmission Tests:\n";

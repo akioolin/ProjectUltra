@@ -1898,8 +1898,9 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
     // detection + retransmit + send-complete) behaves identically to a SACK frame.
     auto ack = v2::ControlFrame::makeNack(local_call_, remote_call_, base, bitmap);
     ack.type = v2::FrameType::ACK;
-    LOG_MODEM(INFO, "SR-ARQ: TONE-BURST ack RX group_seq6=%u -> base=%d bitmap=0x%08X",
-              group_seq6, base, bitmap);
+    LOG_MODEM(INFO,
+              "SR-ARQ: TONE-BURST ack RX group_seq6=%u -> base=%d (retires thru %d) bitmap=0x%08X",
+              group_seq6, base, base, bitmap);
     handleAckFrame(ack);
 }
 
@@ -2018,8 +2019,12 @@ void SelectiveRepeatARQ::sendSack() {
         rx_final_delivered_since_sack_ = false;
         last_sack_base_valid_ = true;
         last_sack_base_ = base_seq;
-        LOG_MODEM(INFO, "SR-ARQ: Sent TONE-BURST ack base=%d bitmap=0x%08X final=%d",
-                  base_seq, bitmap, sack_has_final ? 1 : 0);
+        // base= is the WIRE value = highest-received (rx_base-1); next= is the
+        // window's next-expected. Print BOTH — the mixed convention (adoption
+        // logs print next-expected) read as a lost frame in F144/F145 forensics.
+        LOG_MODEM(INFO,
+                  "SR-ARQ: Sent TONE-BURST ack base=%d (next=%u) bitmap=0x%08X final=%d",
+                  base_seq, rx_base_seq_, bitmap, sack_has_final ? 1 : 0);
         if (ultra::phyDiagnosticsEnabled()) {
             std::ostringstream oss;
             oss << "event=arq_ack_tx_toneburst"

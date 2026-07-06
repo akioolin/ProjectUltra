@@ -123,6 +123,17 @@ static bool test_two_crater_rule() {
     if (TA::rxCmd(c) >= cur)
         FAIL("confirmed crater verdict idx " + std::to_string(TA::rxCmd(c)) +
              " not below current " + std::to_string(cur));
+    // ENABLED-LADDER pin (F145 deadlock): the raw cur-2 stride from QAM16 R2/3
+    // (idx 8) lands on QAM8 R3/4 (idx 6) — a fully-disabled anchor row. The
+    // command must snap to an ENABLED rung (idx 5, QAM8 R2/3) or the sender's
+    // guard refuses it and the cratering rung pins forever (F145: 50 s, six
+    // 0/5 whole-burst resends, four refused DOWN commands).
+    {
+        const CoherentPick p = coherentRungFromIndex(TA::rxCmd(c));
+        if (!coherentRungLocallyEnabled(p.mod, p.rate))
+            FAIL("confirmed crater commanded a DISABLED rung (idx " +
+                 std::to_string(TA::rxCmd(c)) + ") — unobeyable, deadlocks the link");
+    }
 
     // A clean group resets the streak: the next single crater holds again.
     c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);

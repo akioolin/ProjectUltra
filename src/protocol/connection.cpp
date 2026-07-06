@@ -2430,6 +2430,16 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             const uint8_t floor_step = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
             if (cmd < floor_step) cmd = floor_step;
         }
+        if (cmd != cur && cmd != kRungIdxNone) {
+            // ENABLED-LADDER ARITHMETIC (F145 deadlock): the stride/limit math
+            // above is raw index arithmetic and can land on an anchor-table hole
+            // (QAM8 R3/4 disabled => idx 6). A command naming a disabled rung is
+            // unobeyable — the sender holds and a cratering rung pins forever.
+            // Snap DOWN to the nearest enabled rung; the walk meets cur (enabled,
+            // we are running it) before ever inverting a climb into a descent.
+            const uint8_t snapped = snapRungIndexDownToEnabled(cmd);
+            cmd = (snapped != kRungIdxNone) ? snapped : cur;
+        }
     }
     // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
     // (3) — the WAITING-REBASE voice encoding stays unambiguous (it is also
@@ -2455,17 +2465,32 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
     if (mode_change_pending_) return;  // a move is already in flight — obey later copies
-    const CoherentPick pick = coherentRungFromIndex(cmd_idx);
+    CoherentPick pick = coherentRungFromIndex(cmd_idx);
     Modulation mod = pick.mod;
     CodeRate rate = pick.rate;
     if (!coherentRungLocallyEnabled(mod, rate)) {
-        // Local ladder doesn't know the rung (knob mismatch) — take the local map's
-        // pick for the receiver-reported situation instead of an unvalidated rung.
+        // Command names a rung the local ladder disabled (knob/build mismatch, or
+        // a peer whose stride math predates the enabled-ladder snap). HOLDING here
+        // deadlocked F145: a DOWN command into the QAM8 R3/4 hole was refused 4×
+        // while 16QAM R2/3 re-cratered for 50 s. Obey the nearest enabled rung at
+        // or below the command instead — a DOWN command must produce a DOWN move.
+        const uint8_t snapped = snapRungIndexDownToEnabled(cmd_idx);
+        if (snapped == kRungIdxNone) {
+            LOG_MODEM(WARN,
+                      "Connection: RX-AUTHORITY command idx=%u (%s %s) has no "
+                      "enabled rung at or below it — holding current rung",
+                      cmd_idx, modulationToString(mod), codeRateToString(rate));
+            return;
+        }
+        pick = coherentRungFromIndex(snapped);
         LOG_MODEM(WARN,
                   "Connection: RX-AUTHORITY command idx=%u (%s %s) not locally "
-                  "enabled — holding current rung",
-                  cmd_idx, modulationToString(mod), codeRateToString(rate));
-        return;
+                  "enabled — snapping to idx=%u (%s %s)",
+                  cmd_idx, modulationToString(mod), codeRateToString(rate),
+                  snapped, modulationToString(pick.mod), codeRateToString(pick.rate));
+        cmd_idx = snapped;
+        mod = pick.mod;
+        rate = pick.rate;
     }
     if (mod == data_modulation_ && rate == data_code_rate_) {
         tx_authority_last_obeyed_ = cmd_idx;  // already there — arm dedup anyway
