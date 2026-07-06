@@ -5222,15 +5222,34 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
 void Connection::commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_count,
                                        float measured_snr, uint8_t reason) {
     (void)reason;  // decision telemetry only — nothing rides a control frame on this path
+    // FIXED-GRID BAND (2026-07-06): capture the pilot geometry BEFORE the switch.
+    const int old_spacing = ultra::ofdm_link_adaptation::recommendedPilotSpacing(
+        data_modulation_, data_code_rate_);
     applyDataMode(mod, rate, cw_count, currentLadderRungId());
+    const int new_spacing =
+        ultra::ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
-    // §2.6-arm-3 mitigation (MANDATORY, §5.1 step 2): the next burst group must carry a
-    // full chirp+LTS anchor so the receiver re-derives |H| under the NEW pilot/carrier
-    // geometry instead of equalizing with a stale warm-sync estimate (the 2026-06-09
-    // unilateral flip's 0/8-forever arm). One-shot; consumed by flushBurstBuffer →
-    // on_transmit_burst_(force_full_preamble=true). Same ~1.2 s the MODE_CHANGE ladder
-    // already paid per move (kWideOFDMFullAnchorExtraMs).
-    desc_switch_full_anchor_pending_ = true;
+    // §2.6-arm-3 mitigation, REFINED (2026-07-06): the full chirp+LTS re-anchor
+    // exists to re-derive |H| under a NEW pilot/carrier geometry (the 2026-06-09
+    // 0/8-forever arm). With the fixed-grid band (R1/2..R3/4 all sp8, every
+    // coherent mod, same FFT/carriers/frame cadence) a within-band switch changes
+    // ONLY the constellation — there is nothing to desync, warm sync/CFO/|H|
+    // carry, and the descriptor alone re-labels the next group (the commercial
+    // fixed-grid-band model: fast switching inside the band, anchors only at band
+    // crossings). Arm the anchor ONLY when the pilot grid actually changes
+    // (e.g. dropping to the dense-pilot R1/4 survival band).
+    if (new_spacing != old_spacing) {
+        desc_switch_full_anchor_pending_ = true;
+        LOG_MODEM(INFO,
+                  "Connection: DESC-SWITCH grid change (pilot sp %d -> %d) — full "
+                  "anchor armed",
+                  old_spacing, new_spacing);
+    } else {
+        LOG_MODEM(INFO,
+                  "Connection: DESC-SWITCH within fixed grid (sp %d) — warm state "
+                  "carries, no anchor",
+                  new_spacing);
+    }
 
     ++stats_.descriptor_mode_switches;
     // A/B grep line (§7.2 metric): the epoch is the ARQ TX move-epoch — 0 while

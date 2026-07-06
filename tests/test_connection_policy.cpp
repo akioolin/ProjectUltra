@@ -255,7 +255,9 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(d8psk.ack_symbols == 7, "D8PSK R1/2 wide OFDM ACK symbols");
 
     auto qam8 = wideOFDMFrameTiming(Modulation::QAM8, CodeRate::R1_2, 8);
-    CHECK(qam8.data_symbols == 39, "coherent 8PSK R1/2 8-CW wide OFDM data symbols");
+    // FIXED-GRID BAND (2026-07-06): R1/2 joined the sp8 grid -> 51 data carriers
+    // (was sp5/47). 8 CW x 648 bits / (3 b/sym x 51 carriers) = 34 data + 2 training = 36.
+    CHECK(qam8.data_symbols == 36, "coherent 8PSK R1/2 8-CW wide OFDM data symbols");
     CHECK(qam8.ack_symbols == 7, "coherent 8PSK R1/2 wide OFDM ACK symbols");
 }
 

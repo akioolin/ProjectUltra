@@ -59,11 +59,21 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
                 // worst-seed robustness payoff. ULTRA_R23_PILOT_SPACING still overrides.
                 return envSpacing("ULTRA_R23_PILOT_SPACING", 8);
             case CodeRate::R1_2:
+                // FIXED-GRID BAND (2026-07-06): R1/2 joins the sp8 grid shared by
+                // R2/3/R3/4 across ALL coherent modulations. The 16QAM R1/2 rung is
+                // crossed on every mid-ladder climb/descent; at sp5 it was a GRID
+                // CHANGE forcing the full chirp+LTS re-anchor (~1.4 s + warm-state
+                // loss) on every trip — the switch-airtime bleed. sp8 was measured
+                // >= sp5 even where dense pilots were assumed to matter (2026-06-14
+                // five-seed: +45% at 16QAM R2/3, no worst-seed regression). The
+                // whole QPSK-R2/3..16QAM-R2/3 ladder is now ONE grid — switches
+                // within it are descriptor-only (commercial fixed-grid-band model).
+                return envSpacing("ULTRA_R12_PILOT_SPACING", 8);
             case CodeRate::R1_4:
             case CodeRate::R1_3:
             default:
-                // Rate-adaptation fell to these because channel is rough — dense
-                // pilots are mandatory for robust tracking on the bumpy channel.
+                // Survival band (crossed rarely): dense pilots for robust tracking
+                // on the channels that drove the ladder to the floor.
                 return 5;
         }
     }
