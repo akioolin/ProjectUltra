@@ -2822,7 +2822,6 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
 // ack-listen window is ~18 s; the deadline also breaks mutual-defer cycles).
 void App::maybeFireDeferredAck() {
     std::vector<float> copy;
-    bool at_deadline = false;
     {
         std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
         if (!ack_defer_pending_) return;
@@ -2831,13 +2830,33 @@ void App::maybeFireDeferredAck() {
             ack_defer_pending_ = false;  // session ended — moot
             return;
         }
-        at_deadline = std::chrono::steady_clock::now() >= ack_defer_deadline_;
-        if (!at_deadline && modem_.channelBusyForTx()) return;  // keep waiting
+        if (modem_.channelBusyForTx()) {
+            ack_defer_quiet_ticks_ = 0;
+            // DEADLINE = DROP, never key over (F127, waterfall-proven: the 2.5 s
+            // deadline is shorter than an 8-10 s burst, so 'send regardless' keyed
+            // our tones over the sender's RESEND — blanking the very frames that
+            // would have ended the exchange, manufacturing craters at 24 dB). If
+            // the channel stayed busy the whole window, the sender has moved on
+            // and is transmitting; this ACK is stale. Dropping is plain ack loss
+            // — the RTO/dup-ack machinery covers it. Half-duplex rule, absolute:
+            // WE DO NOT TRANSMIT WHILE SIGNAL IS ARRIVING.
+            if (std::chrono::steady_clock::now() >= ack_defer_deadline_) {
+                ack_defer_pending_ = false;
+                ack_defer_samples_.clear();
+                guiLog("LISTEN-BEFORE-ACK: channel busy through the whole defer "
+                       "window — ACK DROPPED (sender is transmitting; RTO covers)");
+            }
+            return;
+        }
+        // QUIET CONFIRMATION (F127): one quiet sample races fade nulls inside an
+        // incoming burst — require 3 consecutive quiet ticks (~50-100 ms) before
+        // keying, mirroring the repeat path's continuous-quiet doctrine.
+        if (++ack_defer_quiet_ticks_ < 3) return;
         ack_defer_pending_ = false;
+        ack_defer_quiet_ticks_ = 0;
         copy.swap(ack_defer_samples_);
     }
-    guiLog(at_deadline ? "LISTEN-BEFORE-ACK: deadline reached — sending ACK regardless"
-                       : "LISTEN-BEFORE-ACK: channel clear — sending deferred ACK");
+    guiLog("LISTEN-BEFORE-ACK: channel clear (confirmed) — sending deferred ACK");
     submitToneAckSamples(copy);
 }
 

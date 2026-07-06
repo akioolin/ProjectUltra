@@ -306,6 +306,7 @@ private:
     std::vector<float> ack_defer_samples_;
     std::chrono::steady_clock::time_point ack_defer_deadline_{};
     bool ack_defer_pending_ = false;
+    int ack_defer_quiet_ticks_ = 0;
     void maybeFireDeferredAck();
     void submitToneAckSamples(const std::vector<float>& samples);
 
