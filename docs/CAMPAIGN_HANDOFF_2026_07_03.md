@@ -221,3 +221,39 @@ already 16). WORK: make the DD tracker constellation-generic (phase-only slicing
 8PSK is SIMPLER than 16QAM), ladder rungs + floor measurement, cw12 rule. EQUALIZER-CORE
 surgery — open it on a FRESH session, INVARIANTS first. Also queued: fade-predictive
 rate hints (path-A step 3), HARQ combine-then-standalone-retry (step 4).
+
+## §8 — 2026-07-05 EVENING SESSION (receiver authority day) — STATE + MORNING ARC
+
+**Commits (all pushed to feat/coherent-window-16):** 904a990 8PSK revival ·
+cfb3f82 BUG-TONEACK-FABRICATION 4-layer · a5d91c5 8PSK mid-stream climb ·
+7ff3041 RX-AUTHORITY · 4022d45 (lts) display · sticky-verdict commit ·
+a1d3104 BUG-ANCHOR-CFO-KILL v2.
+
+**⛔ RIG GATE: BUG-FILE-CRC-MISMATCH (P0, KNOWN_BUGS top).** One gate run
+assembled 51200/51200 with wrong CRC, all guards silent. Logs:
+/tmp/campaign_3000/PRESERVED_crc_mismatch_run/. NOTHING deploys to the rig
+until root-caused. Entry point: diff delivered file vs source, map wrong byte
+ranges -> chunk offsets/eras -> which transmission wrote them. Suspects:
+heterogeneous chunk sizes across rate moves + requeue-rewind overlap; HARQ
+cross-era combine coverage.
+
+**Morning arc (in order):**
+1. CRC-MISMATCH root-cause (blocks everything).
+2. Anchor-CFO completion: t=76 residual case (clean-at-R1/2 certifies a
+   0.29 Hz drift that kills R2/3) -> residual-quality-gated ingest or MMSE
+   chirp/warm blend; then multi-seed A/B to prove crater rate 25%->~13%.
+3. Rig F124+ with the full stack (authority + sticky verdict + anchor v2);
+   F117 1.60 / F119 1.09 / F122 1.45 are the pre-fix baselines to beat.
+4. Turnaround leaning (measured budget from F117/F119/F122 logs first):
+   early-ACK for frame-interleaved modes (~300-500 ms), conditional
+   ack-repeat (~500 ms), lead-in diet (~300 ms). THEN 4 s bursts become
+   profitable -> true fade-state tracking at ~Tc.
+5. Phase-2 verdict inputs: per-carrier SNR/EVM per burst; continuous anchor
+   interpolation (kill the 3-column class cliffs — the F123 lesson).
+
+**Key learnings the next session must not relearn:** the chirp CFO was
+accidentally load-bearing as tracker re-center (v1 lesson); burst pilot
+ingest is pre-verdict (certificates must be outcome-owned); the sender's
+one-decision-maker rule (receiver authority replaces EMA/streaks — R10);
+verdicts move at the slowest-confirmed input's rate; single craters are ARQ's
+job (two-crater rule); climbs defer to clean boundaries, demotes never.
