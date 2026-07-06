@@ -89,7 +89,7 @@ inline LLRQuality evaluatePreSyncLLR(const float* bits,
     // fraction > 0.30) so a truly degenerate stream still short-circuits pre-LDPC.
     static const bool kShapeGate = [] {
         const char* e = std::getenv("ULTRA_LLR_REJECT_SHAPE");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
     }();
     if (kShapeGate) {
         quality.reject_as_false_lock =

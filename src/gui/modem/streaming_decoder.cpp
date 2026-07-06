@@ -1284,7 +1284,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     // audio); the ARMING must survive the turnaround.
     static const bool kPreserveAnchorWait = [] {
         const char* e = std::getenv("ULTRA_PRESERVE_ANCHOR_WAIT");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
     }();
     const bool preserve_anchor_wait =
         kPreserveAnchorWait && connected_ && protocol::isOFDMMode(mode_) &&

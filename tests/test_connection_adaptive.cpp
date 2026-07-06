@@ -1056,10 +1056,13 @@ void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
     // The crater group's ACK arrives carrying DOWN-hard (epoch echo 0 = current era).
     c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
 
-    CHECK(c.getDataModulation() == Modulation::QPSK &&
-              c.getDataCodeRate() == CodeRate::R3_4,
-          "DOWN-hard at QAM16 must commit the escape target (QPSK R3/4) immediately");
-    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R3_4,
+    // ULTRA_QAM16_DEMOTE_MIDRUNG DEFAULT-ON (2026-07-05): the first DOWN-hard from
+    // 16QAM R2/3 lands at the 16QAM R1/2 midrung (2x margin, stays on the mod); a
+    // second escape takes the QPSK R3/4 exit.
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R1_2,
+          "DOWN-hard at QAM16 must commit the midrung landing (16QAM R1/2) immediately");
+    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_2,
           "the ARQ must be reconfigured to the committed rate");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "the descriptor commit must not arm the MODE_CHANGE stop-and-wait");
@@ -1083,8 +1086,10 @@ void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
     // crater) re-arriving before the receiver's adoption is deduped: no second
     // demote (QPSK R3/4 would otherwise step to R2/3), no new commit.
     c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
-    CHECK(c.getDataModulation() == Modulation::QPSK &&
-              c.getDataCodeRate() == CodeRate::R3_4,
+    // Midrung default (2026-07-05): the first DOWN-hard landed at 16QAM R1/2; the
+    // DUPLICATE (same group_seq) must not move it again.
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R1_2,
           "a duplicate command (same group_seq) before adoption must be a no-op");
     CHECK(c.getStats().descriptor_mode_switches == 1,
           "a duplicate command must not commit again");
@@ -1179,6 +1184,10 @@ int main() {
     // setenv-in-main pattern used by test_connection_policy.
     setenv("ULTRA_RETX_TROUGH_PACING", "0", 1);
     setenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS", "0", 1);
+    // RX-AUTHORITY is DEFAULT-ON since 2026-07-05 and supersedes the machinery this
+    // binary tests (EMA feedback, RX-RATE-CMD demotes, descriptor escapes on the
+    // legacy drivers) — pin it OFF so the legacy/fallback paths stay testable.
+    setenv("ULTRA_RX_RATE_AUTHORITY", "0", 1);
     // #58 increment 3: pin the connect-SNR-pool knobs to their disabled defaults so
     // every Connection built here deterministically runs the byte-identical scalar
     // path (rateSelectionSnrDb/wireSnrDb == measured_snr_db_, no pick defer).

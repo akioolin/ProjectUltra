@@ -41,9 +41,16 @@ void test_presync_llr_quality() {
     CHECK_CLOSE(good.mean_abs, 2.0f, 0.0001f, "strong LLR mean");
     CHECK(!good.reject_as_false_lock, "strong LLR should not reject");
 
+    // SHAPE gate DEFAULT-ON (2026-07-05): a low-mean but ZERO-FREE population is a
+    // weak-but-REAL signal (the F92 16QAM head-frame class) — NOT a false lock.
     std::vector<float> weak(648, 1.0f);
     auto weak_quality = evaluatePreSyncLLR(weak.data(), weak.size(), 648);
-    CHECK(weak_quality.reject_as_false_lock, "low mean LLR should reject");
+    CHECK(!weak_quality.reject_as_false_lock,
+          "weak-but-clean population must NOT reject (shape gate default)");
+    // Noise IS zero-dominated — that still rejects.
+    std::vector<float> noise(648, 0.05f);
+    auto noise_quality = evaluatePreSyncLLR(noise.data(), noise.size(), 648);
+    CHECK(noise_quality.reject_as_false_lock, "zero-dominated population must reject");
 
     std::vector<float> erased(648, 2.0f);
     for (size_t i = 0; i < 220; ++i) {

@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-05 — feat(config): the knob graduation — the validated campaign stack becomes the binary DEFAULTS
+
+**What:** 22 boolean knobs flipped DEFAULT-ON (`=0` opts out) and 6 value knobs got the
+campaign's standing values as defaults — the full validated stack (receiver authority,
+psk8-exp ladder, cw16, descriptor switches, move-epoch, anchor-CFO guard, early decode,
+listen-before-ACK, SNR pooling/median, ALC 0.70 cap, ...) now runs with an EMPTY
+environment. Launch scripts stripped to zero ULTRA_* vars. Full register (every knob,
+old→new): docs/MODEM_INFRASTRUCTURE_MAP.md §9g. NOT flipped: ULTRA_RATE_CLIMB_STREAK
+(env-only; controller default test-pinned, inert under authority).
+
+**Wire lockstep:** both ends must run a flipped build — authority binds the widened
+tone-ACK CRC span, and the CRC32 table repair changes file-CRC values vs old builds.
+
+**Test baselines updated:** waveform/connection policy suites now assert the psk8-exp
+ladder picks (AWGN tops at QAM8 R3/4, Good at 16QAM R2/3); shape-gate default semantics
+(weak-but-clean ≠ false lock); midrung DOWN-hard landing; knob-OFF tests pin `=0`
+explicitly (move-epoch wire identity, RX-RATE-CMD legacy machinery under authority=0).
+
+**Verified:** full ctest 83/84 (pre-existing UltraTncSimAudio red); EMPTY-ENV faithful
+gate PASS CRC-clean with every subsystem demonstrably active (robust entry 1, authority
+obeys 14, cw16 descriptors 10, warm-CFO keeps 26, listen-before-ACK defers 20).
+
 ## 2026-07-05 — feat(rate): RX-AUTHORITY — receiver-commanded absolute rung selection (ULTRA_RX_RATE_AUTHORITY, default OFF)
 
 **What:** inverts rate-control authority: the RECEIVER — the only station that measures the

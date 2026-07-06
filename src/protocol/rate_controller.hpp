@@ -114,7 +114,7 @@ public:
         // deterministic regardless of the latch; unset/=0 -> byte-identical policy.
         static const bool promote_carry_env = [] {
             const char* e = std::getenv("ULTRA_PROMOTE_EMA_CARRY");
-            return e != nullptr && std::atoi(e) != 0;
+            return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
         }();
         if (promote_carry_env) cfg_.promote_ema_carry = true;
         if (cfg_.ladder.empty()) {

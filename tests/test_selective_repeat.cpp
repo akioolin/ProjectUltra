@@ -1011,7 +1011,9 @@ bool test_move_epoch_knob_off_byte_identical() {
     config.window_size = 4;
     config.sack_delay_ms = 100;
 
-    SelectiveRepeatARQ tx(config);  // knob unset => OFF
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "0", 1);  // DEFAULT-ON since 2026-07-05; this
+                                             // test pins the OPT-OUT wire identity
+    SelectiveRepeatARQ tx(config);  // ctor-read: explicit =0 => OFF
     tx.setCallsigns("TX1", "RX1");
     std::vector<Bytes> transmitted;
     tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });

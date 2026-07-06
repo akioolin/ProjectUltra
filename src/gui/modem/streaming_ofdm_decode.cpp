@@ -1123,7 +1123,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             // data frame is not yet in the ring (the next member retries).
             static const bool kDescArmedAccum = [] {
                 const char* e = std::getenv("ULTRA_DESC_ARMED_ACCUM");
-                return e && e[0] == '1';
+                return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
             }();
             if (kDescArmedAccum && lateJoinBurstAccumulation(frame_sync_abs)) {
                 return;  // armed at this member; the slicer owns the rest of the group

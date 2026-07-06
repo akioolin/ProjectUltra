@@ -147,7 +147,7 @@ inline constexpr CoherentRung kCoherentLadder[] = {
 inline bool qam16LadderEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_ENABLE_QAM16_LADDER");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return on;
 }
@@ -161,7 +161,7 @@ inline bool qam16LadderEnabled() {
 inline bool qam16R34Enabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_QAM16_R34");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return on;
 }
@@ -195,7 +195,7 @@ inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
 inline bool psk8LadderEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_ENABLE_PSK8_LADDER");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return on;
 }
@@ -349,7 +349,7 @@ inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
 inline bool rxRateAuthorityEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_RX_RATE_AUTHORITY");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05 (both ends lockstep: widened tone-ACK CRC span)
     }();
     return on;
 }
@@ -499,7 +499,7 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
 inline bool entryCapR34Enabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_ENTRY_CAP_R34");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return on;
 }

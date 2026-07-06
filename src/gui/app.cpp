@@ -681,7 +681,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 // move a median-of-5; genuine decline still tracks in ~3 groups.
                 static const bool kAckSnrMedian = [] {
                     const char* e = std::getenv("ULTRA_ACK_SNR_MEDIAN");
-                    return e && e[0] == '1';
+                    return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05 (campaign flip)
                 }();
                 float staircase_snr =
                     cached_inband_snr_db_.load(std::memory_order_relaxed);
@@ -2804,7 +2804,7 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
             const long v = std::atol(e);
             if (v >= 300 && v <= 5000) return static_cast<uint32_t>(v);
         }
-        return 0u;  // OFF
+        return 4000u;  // DEFAULT-ON 2026-07-05 (campaign-validated; 0 opts out)
     }();
     if (kAckRepeatSilentMs > 0) {
         const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
@@ -3092,12 +3092,14 @@ void App::handleDriveAdvisory(uint8_t advisory, uint8_t group_seq) {
     // knee is a property of the attached card — ULTRA_ALC_MAX_DRIVE overrides the
     // 0.85 default (clamped [0.3, kSoftwareAlcMaxPeakTarget]).
     static const float kAlcCeiling = [] {
-        const float dflt = ultra::sim::kSoftwareAlcMaxPeakTarget;  // 0.85 abs digital
+        const float hard_max = ultra::sim::kSoftwareAlcMaxPeakTarget;  // 0.85 abs digital
         if (const char* e = std::getenv("ULTRA_ALC_MAX_DRIVE")) {
             const float v = std::strtof(e, nullptr);
-            if (v >= 0.3f && v <= dflt) return v;
+            if (v >= 0.3f && v <= hard_max) return v;
         }
-        return dflt;
+        return 0.70f;  // DEFAULT 2026-07-05: rig-validated cap (cheap-card TX
+                       // compression craters dense rungs above ~0.70; env may
+                       // raise toward the 0.85 hard max on clean hardware)
     }();
     const float ceiling = kAlcCeiling;
     const float floor = std::min(baseline, ceiling);  // never below configured drive

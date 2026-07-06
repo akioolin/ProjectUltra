@@ -191,7 +191,7 @@ Connection::Connection(const ConnectionConfig& config)
     // LOCALLY and ride the next BURST_HEADER descriptor instead of the MODE_CHANGE
     // stop-and-wait exchange. SEMANTICS-BREAKING lockstep when ON (both ends must be
     // built + enabled; same increment policy as move-epoch/tone-payload).
-    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); ds && ds[0] == '1') {
+    if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); !(ds && ds[0] == '0')) {  // DEFAULT-ON 2026-07-05
         descriptor_mode_switch_enabled_ = true;
     }
 
@@ -201,7 +201,7 @@ Connection::Connection(const ConnectionConfig& config)
     // SEMANTICS-BREAKING lockstep when ON; the descriptor-committed consume path
     // additionally needs ULTRA_DESCRIPTOR_MODE_SWITCH (+ ULTRA_ARQ_MOVE_EPOCH for
     // mid-window) — it falls back to the legacy MODE_CHANGE exchange without them.
-    if (const char* rc = std::getenv("ULTRA_RX_RATE_CMD"); rc && rc[0] == '1') {
+    if (const char* rc = std::getenv("ULTRA_RX_RATE_CMD"); !(rc && rc[0] == '0')) {  // DEFAULT-ON 2026-07-05 (voice; demote-cmd inert under authority)
         rx_rate_cmd_enabled_ = true;
     }
 
@@ -1936,7 +1936,7 @@ static int stuckRetransmitEscape() {
 static bool retxTroughPacingEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_RETX_TROUGH_PACING");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return v;
 }
@@ -1967,7 +1967,7 @@ static int collapseEscapeRounds() {
             const int n = std::atoi(e);
             if (n >= 2 && n <= 8) return n;
         }
-        return 0;
+        return 2;  // DEFAULT 2026-07-05 (campaign standing value; 0 opts out)
     }();
     return v;
 }
@@ -1995,7 +1995,7 @@ static bool qam16DemoteMidrungEnabled() {
     static const bool v = [] {
         const char* a = std::getenv("ULTRA_QAM16_DEMOTE_MIDRUNG");
         const char* b = std::getenv("ULTRA_ENABLE_QAM16_LADDER");
-        return a && a[0] == '1' && b && b[0] == '1';
+        return !(a && a[0] == '0') && !(b && b[0] == '0');  // DEFAULT-ON 2026-07-05
     }();
     return v;
 }
@@ -2006,7 +2006,7 @@ static int qam16ClimbStreak() {
             const int n = std::atoi(e);
             if (n >= 1 && n <= 64) return n;
         }
-        return 2;
+        return 1;  // DEFAULT 2026-07-05 (campaign standing value, was 2)
     }();
     return v;
 }
@@ -2022,7 +2022,7 @@ static int qam16ReclimbCooldownBase() {
             const int n = std::atoi(e);
             if (n >= 0 && n <= 64) return n;
         }
-        return 3;
+        return 1;  // DEFAULT 2026-07-05 (campaign standing value, was 3)
     }();
     return v;
 }
@@ -2624,7 +2624,7 @@ void Connection::maybeCollapseEscape() {
             const int n = std::atoi(e);
             if (n >= 1 && n <= 8) return n;
         }
-        return 0;  // OFF — today's unlimited cascade
+        return 1;  // DEFAULT 2026-07-05 (campaign standing value; 0 = unlimited cascade)
     }();
     if (kEscapeEpisodeCap > 0 && consecutive_escape_drops_ >= kEscapeEpisodeCap) {
         LOG_MODEM(INFO,
@@ -2737,7 +2737,7 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
     trough_episode_active_ = false;  // the episode is over either way
     static const bool kAmnestyOn = [] {
         const char* e = std::getenv("ULTRA_TROUGH_AMNESTY");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05 (inert under authority)
     }();
     if (!kAmnestyOn) return;
     if (rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdNone) return;
@@ -2982,7 +2982,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             // funds entry speed.
             static const bool kFastCrest = [] {
                 const char* e = std::getenv("ULTRA_R34_FAST_CREST");
-                return e && e[0] == '1';
+                return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
             }();
             const int walk_streak_needed =
                 (kFastCrest && quality >= 0.99f) ? 1 : qam16ClimbStreak();
@@ -3000,7 +3000,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             // Set the knob to a threshold (e.g. 0.30) to enable; absent = legacy.
             static const float kR34CalmFading = [] {
                 const char* e = std::getenv("ULTRA_R34_CALM_FADING");
-                return (e && e[0]) ? std::strtof(e, nullptr) : -1.0f;  // <0 = gate off
+                return (e && e[0]) ? std::strtof(e, nullptr) : 0.30f;  // DEFAULT 0.30 2026-07-05; <0 = off
             }();
             const bool calm_gate_ok =
                 kR34CalmFading < 0.0f ||

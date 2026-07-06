@@ -612,7 +612,7 @@ inline constexpr uint32_t kConnectWireSnrFreshTcMultiple = 3;
 inline bool connectSnrPoolEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_CONNECT_SNR_POOL");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return v;
 }
@@ -637,7 +637,7 @@ inline bool connectPickDeferEnabled() {
 inline bool wireSnrFreshEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_WIRE_SNR_FRESH");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return v;
 }
@@ -755,7 +755,7 @@ inline float connectSnrFadeBasisDb() {
 inline bool connectAffineBasisEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_CONNECT_AFFINE_BASIS");
-        return e != nullptr && std::atoi(e) != 0;
+        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
     }();
     return v;
 }
@@ -1352,7 +1352,7 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
     if (waveform == WaveformMode::OFDM_CHIRP && mod == Modulation::QAM16) {
         static const bool kQam16Cw16 = [] {
             const char* e = std::getenv("ULTRA_QAM16_CW16");
-            return e && e[0] == '1';
+            return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
         }();
         if (kQam16Cw16) return 16;
     }

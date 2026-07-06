@@ -485,10 +485,8 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QPSK, "GOOD fading SNR20 auto data mode selects coherent QPSK");
-    // COHERENT-ONLY LADDER (2026-06-02): QPSK R3/4 is DISABLED on auto. GOOD fading
-    // tops out at the QPSK R2/3 rung (>=15 dB), never R3/4.
-    CHECK(rate == CodeRate::R3_4, "GOOD fading SNR20 auto data mode promotes to QPSK R3/4 (measured 2026-06-02)");
+    CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto -> 16QAM (default ladder = psk8-exp 2026-07-05)");
+    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto -> 16QAM R2/3 (G20 anchor)");
 
     // fading 0.79 is MODERATE class (>= 0.65). R2/3 is now ENABLED on moderate at >= 20 dB
     // (measured 2026-06-09: genuine moderate R2/3 9/9 PASS @20-24 dB) — so a moderate-classified
@@ -499,8 +497,8 @@ void test_auto_data_mode_boundaries() {
           "moderate (fading 0.79) at SNR20 selects QPSK R2/3 — softened cliff (measured 2026-06-09)");
 
     recommendDataMode(19.8f, waveform, mod, rate, 0.50f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "GOOD fading one SNR quantum below SNR20 still selects QPSK R2/3");
+    CHECK(mod == Modulation::QAM8 && rate == CodeRate::R2_3,
+          "GOOD fading 19.8 -> QAM8 R2/3 (G19 anchor; default ladder = psk8-exp 2026-07-05)");
 
     recommendDataMode(15.0f, waveform, mod, rate, 0.50f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
@@ -536,10 +534,9 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    // COHERENT-ONLY LADDER: QAM16 is DISABLED on auto. AWGN R2/3/R3/4 enabled 2026-06-06
-    // (measure_ack_fer floors), so AWGN@20 -> QPSK R3/4 (top enabled rung), never QAM16.
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
-          "AWGN SNR20 selects coherent QPSK R3/4 (top enabled rung; QAM16 disabled)");
+    // DEFAULT ladder = psk8-exp (2026-07-05): AWGN top enabled rung is QAM8 R3/4 (A18).
+    CHECK(mod == Modulation::QAM8 && rate == CodeRate::R3_4,
+          "AWGN SNR20 selects QAM8 R3/4 (top enabled AWGN rung; 16QAM Good-only)");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,

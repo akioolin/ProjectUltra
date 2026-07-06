@@ -371,7 +371,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     default-ON, log a REMOVAL_BACKLOG candidate for the wideband-ladder MODE_CHANGE retry
     machinery ONLY after the §6.5 deaf-peer fallback proves unneeded (the frame type + handler
     stay for connect-time/USER_REQUEST/MC-DPSK/narrow regardless).
-9f. `ULTRA_RX_RATE_AUTHORITY` — 2026-07-05 🟡 EXPERIMENTAL, default-OFF. Receiver-commanded
+9f. `ULTRA_RX_RATE_AUTHORITY` — 2026-07-05 🟢 **DEFAULT-ON** (campaign flip, same day; `=0` opts out). Receiver-commanded
     ABSOLUTE rung selection: receiver maps its fresh per-group observation (broadband SNR EMA +
     coherence-adjusted fading, `Connection::setBurstChannelObservation` fed by the modem binding)
     through `selectCoherentOFDM` and stamps the canonical rung index
@@ -382,6 +382,30 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     BOTH ends must set it (binds the widened tone-ACK CRC span — knob-OFF peer CRC-rejects,
     fails safe as ack loss). Supersedes `ULTRA_RX_RATE_CMD` when on. Tests:
     `tests/test_rx_authority.cpp`.
+9g. **2026-07-05 CAMPAIGN DEFAULT-ON FLIP (the "quazillion knobs" graduation).** The
+    validated standing stack became the binary's defaults; every knob below now reads
+    DEFAULT-ON (or the listed default value) with `=0` (or an explicit value) opting out.
+    Booleans flipped ON: `ULTRA_ACK_SNR_MEDIAN`, `ULTRA_ARQ_MOVE_EPOCH`,
+    `ULTRA_CONNECT_AFFINE_BASIS`, `ULTRA_CONNECT_SNR_POOL`, `ULTRA_DESC_ARMED_ACCUM`,
+    `ULTRA_DESCRIPTOR_MODE_SWITCH`, `ULTRA_ENABLE_PSK8_LADDER`, `ULTRA_ENABLE_QAM16_LADDER`
+    (⇒ the DEFAULT auto ladder is now `kCoherentLadderPsk8Exp` — QAM8 + 16QAM rungs live),
+    `ULTRA_ENTRY_CAP_R34`, `ULTRA_ESCAPE_EPISODE_CAP` (value default 1), `ULTRA_LLR_REJECT_SHAPE`,
+    `ULTRA_PRESERVE_ANCHOR_WAIT`, `ULTRA_PROMOTE_EMA_CARRY`, `ULTRA_QAM16_CW16`,
+    `ULTRA_QAM16_DEMOTE_MIDRUNG`, `ULTRA_QAM16_R34`, `ULTRA_R34_FAST_CREST`,
+    `ULTRA_RETX_TROUGH_PACING`, `ULTRA_RX_RATE_AUTHORITY` (9f), `ULTRA_RX_RATE_CMD`
+    (voice-only under authority), `ULTRA_TROUGH_AMNESTY`, `ULTRA_EARLY_FRAME_DECODE`
+    (born default-ON), `ULTRA_ACK_CCA_DEFER_MS` (born default 2500).
+    Value defaults changed: `ULTRA_ACK_REPEAT_SILENT_MS` 0→4000,
+    `ULTRA_COLLAPSE_ESCAPE_ROUNDS` 0→2, `ULTRA_QAM16_CLIMB_STREAK` 2→1,
+    `ULTRA_QAM16_RECLIMB_COOLDOWN` 3→1, `ULTRA_R34_CALM_FADING` off→0.30,
+    `ULTRA_ALC_MAX_DRIVE` 0.85→0.70 (env may raise toward the 0.85 hard max).
+    NOT flipped: `ULTRA_RATE_CLIMB_STREAK` (env-only; RateController default 2 is
+    test-pinned and the controller is inert under authority). Wire lockstep: both ends
+    must run a flipped build (authority binds the widened tone-ACK CRC span; the CRC32
+    table repair changes file-CRC values vs old builds). Launch scripts stripped to
+    channel/radio-specific settings only. Test baselines updated the same day
+    (waveform/connection policy suites now assert the psk8-exp ladder picks; knob-OFF
+    tests pin `=0` explicitly).
 10. `ULTRA_WIENER_*`, `ULTRA_REL_FADE_*`, `ULTRA_DD_FADING_MAX` — channel-adaptive params. NOTE
     (2026-05-30): their *defaults* are NOT derived today — `robustDelaySpreadS()`/`robustDopplerHz()`
     return hardcoded Moderate-HF constants (1e-3 s / 0.5 Hz) with no channel input; the comment in

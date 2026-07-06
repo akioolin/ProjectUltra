@@ -48,7 +48,7 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     // SEMANTICS/WIRE-BREAKING when ON — BOTH stations must run it (lockstep, no
     // capability negotiation this increment). Full state machine: the MOVE-EPOCH
     // block comment in selective_repeat_arq.hpp. Rig-validation-pending.
-    if (const char* e = std::getenv("ULTRA_ARQ_MOVE_EPOCH"); e && e[0] == '1') {
+    if (const char* e = std::getenv("ULTRA_ARQ_MOVE_EPOCH"); !(e && e[0] == '0')) {  // DEFAULT-ON 2026-07-05
         move_epoch_enabled_ = true;
     }
 }
