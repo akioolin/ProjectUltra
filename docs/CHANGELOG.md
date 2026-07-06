@@ -29,7 +29,7 @@ sender to retire. New pin: test_epoch_adoption_salvages_buffered_file_frames.
 
 ## 2026-07-06 — experiment(llr): per-carrier notch calibration (Stage A unbias + Stage B raw-obs floor) — MEASURED MARGINAL on the sim cell; knobs default-OFF
 
-**Hypothesis** (F142/F165 signatures + 4-reader code map, brief /tmp/llr_notch_brief.md):
+**Hypothesis** (F142/F165 signatures + 4-reader code map, brief docs/LLR_NOTCH_CALIBRATION_2026_07_06.md):
 16QAM craters on parked notches because (D3) the MMSE-shrunken symbol is compared
 against unbiased ring thresholds and (D1) the Wiener smooths notches shallow so nv
 collapses. Implemented both correctives, modulation-adaptive, RX-only:
@@ -85,7 +85,7 @@ no crater verdict flowing.
 ## 2026-07-06 — fix(sync/arq/file): F163 time-budget fixes — full anchor on every switch; air-schedule RTOs; SACKed-byte salvage
 
 **Source:** full two-log forensic time budget of F163 (423.8 s / 0.97 kbps, every
-second attributed; report /tmp/F163_time_budget_report.md). Four stall episodes
+second attributed; report docs/F163_TIME_BUDGET_2026_07_06.md). Four stall episodes
 = 210 s (48%) for 3% of the data. Three code fixes, one correction:
 
 1. **Full anchor on EVERY DESC-SWITCH commit** (`commitLocalModeSwitch`): the

@@ -805,7 +805,7 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     }
 
     // ── STAGE A: ZF-consistent LLR unbias (ULTRA_ZF_LLR_UNBIAS, default OFF) ──
-    // F142/F165 notch forensics (docs: /tmp/llr_notch_brief.md, D3): the MMSE
+    // F142/F165 notch forensics (docs: docs/LLR_NOTCH_CALIBRATION_2026_07_06.md, D3): the MMSE
     // output eq = conj(H)·Y/(|H|²+σ²) is SHRUNK by β = |H|²/(|H|²+σ²), but the
     // demapper compares |eq| against UNBIASED amplitude thresholds (16QAM ring
     // 2/√10) — on a low-γ carrier outer points systematically read as inner:
