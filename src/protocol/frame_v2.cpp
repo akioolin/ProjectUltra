@@ -2364,199 +2364,21 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                 return DataFrame::deserialize(assembled).has_value();
             };
 
-            if (frame_data.empty()) {
-                // ===========================================================
-                // Case 1: Header CRC error in CW0
-                // ===========================================================
-                // Use direct magic + header CRC check (avoids parseHeader logging)
-                for (size_t byte_idx = 0; byte_idx < bytes_per_cw && !recovered; ++byte_idx) {
-                    for (int bit = 0; bit < 8 && !recovered; ++bit) {
-                        status.data[0][byte_idx] ^= (1 << bit);
-                        // Quick header validation without parseHeader
-                        uint16_t magic = (uint16_t(status.data[0][0]) << 8) | status.data[0][1];
-                        if (magic == MAGIC_V2) {
-                            uint16_t stored_hcrc = (uint16_t(status.data[0][15]) << 8) | status.data[0][16];
-                            uint16_t calc_hcrc = ControlFrame::calculateCRC(status.data[0].data(), 15);
-                            if (stored_hcrc == calc_hcrc) {
-                                auto trial = status.reassemble();
-                                if (verifyFrame(trial)) {
-                                    LOG_MODEM(INFO, "CW[0]: FALSE POSITIVE RECOVERED (1-bit flip byte %zu bit %d)", byte_idx, bit);
-                                    recovered = true;
-                                }
-                            }
-                        }
-                        if (!recovered) status.data[0][byte_idx] ^= (1 << bit);
-                    }
-                }
-
-                // Two-bit flip in CW0 (header + payload start)
-                if (!recovered) {
-                    size_t total_bits_cw0 = bytes_per_cw * 8;
-                    for (size_t b1 = 0; b1 < total_bits_cw0 && !recovered; ++b1) {
-                        status.data[0][b1/8] ^= (1 << (b1%8));
-                        for (size_t b2 = b1 + 1; b2 < total_bits_cw0 && !recovered; ++b2) {
-                            status.data[0][b2/8] ^= (1 << (b2%8));
-                            uint16_t magic = (uint16_t(status.data[0][0]) << 8) | status.data[0][1];
-                            if (magic == MAGIC_V2) {
-                                uint16_t stored_hcrc = (uint16_t(status.data[0][15]) << 8) | status.data[0][16];
-                                uint16_t calc_hcrc = ControlFrame::calculateCRC(status.data[0].data(), 15);
-                                if (stored_hcrc == calc_hcrc) {
-                                    auto trial = status.reassemble();
-                                    if (verifyFrame(trial)) {
-                                        LOG_MODEM(INFO, "CW[0]: FALSE POSITIVE RECOVERED (2-bit flip CW0 bits %zu,%zu)", b1, b2);
-                                        recovered = true;
-                                    }
-                                }
-                            }
-                            if (!recovered) status.data[0][b2/8] ^= (1 << (b2%8));
-                        }
-                        if (!recovered) status.data[0][b1/8] ^= (1 << (b1%8));
-                    }
-                }
-            } else {
-                // ===========================================================
-                // Case 2: Frame CRC error (header OK, payload corrupted)
-                // ===========================================================
-                // Work directly on assembled frame_data with CRC delta table
-                // for efficient 1-bit and cross-CW 2-bit search.
-                auto hdr = parseHeader(frame_data);
-                if (hdr.valid && !hdr.is_control) {
-                    size_t expected_size = DataFrame::HEADER_SIZE + hdr.payload_len + DataFrame::CRC_SIZE;
-                    if (frame_data.size() >= expected_size) {
-                        uint16_t stored_fcrc = (uint16_t(frame_data[expected_size-2]) << 8) |
-                                                frame_data[expected_size-1];
-                        size_t data_bytes = expected_size - 2;
-                        uint16_t orig_crc = ControlFrame::calculateCRC(frame_data.data(), data_bytes);
-                        uint16_t syndrome = stored_fcrc ^ orig_crc;
-                        LOG_MODEM(WARN, "Frame CRC syndrome=%04X (rx=%04X calc=%04X, %zu data bytes)",
-                                  syndrome, stored_fcrc, orig_crc, data_bytes);
-
-                        // Precompute CRC delta for each data bit position
-                        size_t data_bits = data_bytes * 8;
-                        std::vector<uint16_t> deltas(data_bits);
-                        for (size_t p = 0; p < data_bits; ++p) {
-                            frame_data[p/8] ^= (1 << (p%8));
-                            deltas[p] = orig_crc ^ ControlFrame::calculateCRC(frame_data.data(), data_bytes);
-                            frame_data[p/8] ^= (1 << (p%8));
-                        }
-
-                        // Single-bit search in data bytes
-                        for (size_t p = 0; p < data_bits && !recovered; ++p) {
-                            if (deltas[p] == syndrome) {
-                                size_t frame_byte = p / 8;
-                                int bit = p % 8;
-                                int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
-                                size_t cw_byte = frame_byte % bytes_per_cw;
-                                if (cw_idx < cw_count) {
-                                    status.data[cw_idx][cw_byte] ^= (1 << bit);
-                                    LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (1-bit flip frame byte %zu bit %d)",
-                                              cw_idx, frame_byte, bit);
-                                    recovered = true;
-                                }
-                            }
-                        }
-
-                        // Single-bit in CRC bytes (syndrome is a power of 2)
-                        if (!recovered) {
-                            for (int bit = 0; bit < 16 && !recovered; ++bit) {
-                                if (syndrome == (1u << bit)) {
-                                    // Error in stored CRC itself — data is correct!
-                                    size_t frame_byte = (bit >= 8) ? (expected_size - 2) : (expected_size - 1);
-                                    int actual_bit = bit % 8;
-                                    int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
-                                    size_t cw_byte = frame_byte % bytes_per_cw;
-                                    if (cw_idx < cw_count) {
-                                        status.data[cw_idx][cw_byte] ^= (1 << actual_bit);
-                                        LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (CRC bit %d)", cw_idx, bit);
-                                        recovered = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Helper to apply/undo a byte-order bit fix in status.data.
-                        // The CRC delta table indexes bits as byte bit positions
-                        // (bit 0 = LSB), while LDPC soft bits are MSB-first.
-                        auto fixBit = [&](size_t p) {
-                            size_t fb = p / 8;
-                            int cw = static_cast<int>(fb / bytes_per_cw);
-                            size_t cb = fb % bytes_per_cw;
-                            if (cw < cw_count)
-                                status.data[cw][cb] ^= (1 << (p % 8));
-                        };
-
-                        // -------------------------------------------------------
-                        // Build suspect set: LDPC-flipped info bits
-                        // Multi-bit searches MUST be restricted to suspects to
-                        // prevent false CRC matches. With 16-bit CRC, arbitrary
-                        // n-bit search has too many candidates:
-                        //   C(1280,2)/65536 ≈ 12.5 expected false matches
-                        //   C(1280,3)/65536 ≈ 5.3M expected false matches
-                        // Restricting to 30 suspects:
-                        //   C(30,2)/65536 ≈ 0.007 — safe
-                        //   C(30,3)/65536 ≈ 0.062 — acceptable
-                        //   C(15,4)/65536 ≈ 0.021 — safe (with LLR threshold)
-                        // -------------------------------------------------------
-                        struct SuspectBit { size_t crc_bit; float abs_llr; };
-                        std::vector<SuspectBit> suspects;
-
-                        for (int c = 0; c < cw_count; ++c) {
-                            const auto& soft = decoder_soft_bits[static_cast<size_t>(c)];
-                            for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
-                                size_t cw_byte = i / 8;
-                                int byte_bit = 7 - static_cast<int>(i % 8);
-                                size_t frame_byte = c * bytes_per_cw + cw_byte;
-                                if (frame_byte >= data_bytes) continue;
-                                size_t crc_bit = frame_byte * 8 + static_cast<size_t>(byte_bit);
-                                int ch_bit = (soft[i] < 0) ? 1 : 0;
-                                int dec_bit = (status.data[c][cw_byte] >> byte_bit) & 1;
-                                if (ch_bit != dec_bit) {
-                                    suspects.push_back({crc_bit, std::abs(soft[i])});
-                                }
-                            }
-                        }
-                        std::sort(suspects.begin(), suspects.end(),
-                                  [](const SuspectBit& a, const SuspectBit& b) { return a.abs_llr < b.abs_llr; });
-
-                        constexpr int MAX_S = 30;
-                        int ns = std::min(MAX_S, static_cast<int>(suspects.size()));
-
-                        std::vector<uint16_t> sd(ns);
-                        for (int i = 0; i < ns; ++i)
-                            sd[i] = deltas[suspects[i].crc_bit];
-
-                        // 2-bit among suspects: C(30,2) = 435 — safe
-                        if (!recovered) {
-                            for (int a = 0; a < ns && !recovered; ++a) {
-                                for (int b = a + 1; b < ns && !recovered; ++b) {
-                                    if ((sd[a] ^ sd[b]) == syndrome) {
-                                        fixBit(suspects[a].crc_bit);
-                                        fixBit(suspects[b].crc_bit);
-                                        auto trial = status.reassemble();
-                                        if (verifyFrame(trial)) {
-                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (2-bit suspects, bits %zu,%zu, |LLR|=%.2f,%.2f)",
-                                                      suspects[a].crc_bit, suspects[b].crc_bit,
-                                                      suspects[a].abs_llr, suspects[b].abs_llr);
-                                            recovered = true;
-                                        } else {
-                                            fixBit(suspects[a].crc_bit);
-                                            fixBit(suspects[b].crc_bit);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 3-bit and 4-bit suspect searches REMOVED (2026-03-15).
-                        // With 16-bit CRC, higher-order searches have unacceptable
-                        // false match rates that produce corrupted "recovered" frames:
-                        //   C(30,3)/65536 ≈ 6.2%  — caused file transfer corruption
-                        //   C(15,4)/65536 ≈ 2.1%  — also unsafe
-                        // Only 1-bit (exact) and 2-bit (C(30,2)/65536 ≈ 0.7%) are safe.
-                    }
-                }
-            }
-
+            // ═══ BIT-FLIP SALVAGE REMOVED (BUG-FILE-CRC-MISMATCH, 2026-07-05) ═══
+            // The 1-bit / CRC-bit / 2-bit-suspect searches (and the Case-1 CW0
+            // header search) are gone. This branch runs under status.allSuccess()
+            // — every CW is a VALID LDPC codeword — so the true error pattern is a
+            // codeword DIFFERENCE (>= d_min, tens of bits per CW). A small-bit-flip
+            // "repair" can never be genuine in this state; matching the 16-bit CRC
+            // syndrome across ~5k candidate positions is a ~7.8% collision lottery,
+            // and it paid out: a "FALSE POSITIVE RECOVERED (1-bit flip)" delivered
+            // a corrupted 616-byte chunk into a file that assembled 51200/51200
+            // with a wrong CRC (preserved run 2026-07-05; the 3/4-bit searches were
+            // already removed 2026-03-15 for the same corruption, with the 1-bit
+            // search wrongly exempted as "exact"). The min-sum re-decode fallback
+            // below is the only legitimate recovery — it can converge to the TRUE
+            // codeword and the full frame CRC gates it. Everything else fails the
+            // frame; ARQ resends.
             // ===========================================================
             // Fallback: LDPC re-decode with different min-sum factors
             // ===========================================================
