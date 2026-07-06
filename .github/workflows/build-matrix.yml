@@ -182,12 +182,17 @@ jobs:
           -DULTRA_BUILD_GUI=OFF
           -DULTRA_USE_FFTW=OFF
           -DULTRA_FETCH_GRPC=OFF
-          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g1"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g1"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
+      # -O1/-g1 + capped parallelism: the full-parallel -O0/-g ASan build of the
+      # large DSP TUs OOM-killed cc1plus on the 7 GB runner ("Killed signal
+      # terminated program cc1plus", runs 28613422376 / 28634356779). -O1 is the
+      # standard ASan operating point (halves cc1plus RSS and the test wall
+      # time); -j2 bounds concurrent peak.
       - name: Build ASAN/UBSAN Tests
-        run: cmake --build build-sanitizer --parallel
+        run: cmake --build build-sanitizer --parallel 2
 
       - name: Run ASAN/UBSAN CTest
         env:
