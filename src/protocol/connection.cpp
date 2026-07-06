@@ -2389,8 +2389,12 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
         }
         if (crater_confirmed) {
             // Confirmed-crater override: two in a row is the rung failing, not a
-            // null — command below whatever the (lagging) map says.
-            const uint8_t below = static_cast<uint8_t>(cur > 1 ? cur - 1 : 1);
+            // null — command TWO below (F129: 6/8 craters were 16QAM ground down
+            // one rung per ~20 s through a genuine fade episode, ~70 s stalled at
+            // dying rungs; zero-DELIVERY pairs are the strongest evidence we have
+            // and warrant the full down-limit stride). Still bounded by the
+            // 2-rung-per-verdict limit below.
+            const uint8_t below = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
             if (cmd >= cur) cmd = below;
         } else if (crater && cmd > cur) {
             // Single crater: hold the rung (the ARQ resends through the null) —

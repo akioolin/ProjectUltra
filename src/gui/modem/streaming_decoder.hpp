@@ -426,6 +426,20 @@ public:
     bool hasLastOFDMBroadbandSNREstimate() const {
         return last_ofdm_broadband_snr_db_valid_.load();
     }
+
+    // F129: decoder-evidence RX activity (see last_rx_signal_ms_).
+    bool rxSignalActiveWithin(int64_t within_ms) const {
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+        return (now - last_rx_signal_ms_.load()) <= within_ms;
+    }
+    void stampRxSignal() const {
+        last_rx_signal_ms_.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
     float getLastOFDMBroadbandSNREstimate() const {
         return last_ofdm_broadband_snr_db_.load();
     }
@@ -819,6 +833,14 @@ private:
     // Status (atomic for lock-free read from GUI)
     mutable std::atomic<float> last_snr_{0.0f};
     mutable std::atomic<bool> last_ofdm_broadband_snr_db_valid_{false};
+    // RX-SIGNAL ACTIVITY (F129): steady-clock ms of the last decoder EVIDENCE of an
+    // incoming transmission (sync detection / per-frame metrics). The F129 census
+    // proved the energy CCA lies in both directions on the rig (threshold learns
+    // burst body as floor -> idle DURING bursts; learns AGC dips as floor -> busy
+    // on ambient) while the DECODER had already synced before every self-TX
+    // collision. Level-independent processing-gain evidence; consumers ask
+    // rxSignalActiveWithin(~1600ms) — one frame interval plus slack.
+    mutable std::atomic<int64_t> last_rx_signal_ms_{-1000000};
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as

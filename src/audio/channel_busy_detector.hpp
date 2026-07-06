@@ -70,7 +70,12 @@ inline ChannelBusyDetectorConfig ratiometricHfCarrierSenseConfig() {
     config.noise_floor_estimate_rms_ceiling = 0.0f;
     // 13 s > kMaxBurstAirtimeMs ceiling (12 s): a real burst never trips relearn,
     // but a latched-low floor on a steady (e.g. WGN) band recovers within 13 s.
-    config.noise_floor_relearn_after_ms = 13000;
+    // 25 s (was 13): F129 falsified the "13 s > longest burst" premise two ways —
+    // a false-busy stretch CONCATENATES with a real burst, and the sender can queue
+    // back-to-back bursts (measured 16.4 s continuous TX). Mid-burst relearn seeds
+    // the floor from burst-body RMS -> CCA reads idle DURING bursts (the F129
+    // self-TX-crater enabler). 25 s > 2x the burst airtime cap.
+    config.noise_floor_relearn_after_ms = 25000;
     return config;
 }
 
@@ -128,6 +133,7 @@ private:
     std::deque<std::pair<TimePoint, float>> noise_floor_window_;
     double rms_window_sum_ = 0.0;
     float current_rms_ = 0.0f;
+    std::chrono::steady_clock::time_point agc_holdoff_until_{};  // F129 AGC-settle
     float cached_noise_floor_rms_ = 0.0f;
     bool cached_noise_floor_valid_ = false;
     TimePoint last_busy_at_{};

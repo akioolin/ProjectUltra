@@ -975,6 +975,10 @@ bool ModemEngine::getDopplerCoherenceValid() const {
     return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceValid() : false;
 }
 
+bool ModemEngine::rxSignalActive(int64_t within_ms) const {
+    return streaming_decoder_ && streaming_decoder_->rxSignalActiveWithin(within_ms);
+}
+
 float ModemEngine::getDopplerCoherenceDopplerHz() const {
     return streaming_decoder_ ? streaming_decoder_->getLastMeasuredDopplerHz() : 0.0f;
 }

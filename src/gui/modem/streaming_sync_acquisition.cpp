@@ -112,6 +112,7 @@ bool connectDataAidedSnrEnabled() {
 
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                              float residual_cfo_hz) const {
+    stampRxSignal();  // F129: decoder evidence of incoming signal (per-frame)
     result.sync_correlation = sync_correlation_;
     result.sync_quality_db = result.snr_db;
     const auto idle_snr = idle_noise_snr_estimator_.snapshot();
@@ -588,6 +589,7 @@ void StreamingDecoder::searchForSync() {
         sync_from_full_anchor_fallback_ = used_full_anchor_fallback;
 
         state_ = DecoderState::SYNC_FOUND;
+        stampRxSignal();  // F129: sync itself is RX evidence
 
         last_snr_.store(sync_snr_);
         cfo_tracker_.store(sync_cfo_);

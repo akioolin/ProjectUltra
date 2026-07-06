@@ -2777,6 +2777,17 @@ void App::maybeFireAckRepeatIfSilent() {
                    "copy 1 evidently heard)");
             return;
         }
+        // F129 DECODER-EVIDENCE cancel: the energy CCA lies on the rig (its
+        // adaptive threshold learned burst body as floor -> idle=1 DURING the
+        // sender's burst; both F129 self-TX craters fired with the decoder
+        // ALREADY SYNCED to the inbound burst). Sync/frame evidence within the
+        // window = copy 1 was heard, the next burst is arriving — cancel.
+        if (modem_.rxSignalActive(1600)) {
+            ack_repeat_pending_ = false;
+            guiLog("ACK-REPEAT-SILENT: canceled (decoder RX evidence — "
+                   "inbound transmission in progress)");
+            return;
+        }
         if (std::chrono::steady_clock::now() < ack_repeat_fire_time_) return;
     }
     std::vector<float> copy;
@@ -2822,6 +2833,7 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
 // ack-listen window is ~18 s; the deadline also breaks mutual-defer cycles).
 void App::maybeFireDeferredAck() {
     std::vector<float> copy;
+    std::vector<float> deadline_send;
     {
         std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
         if (!ack_defer_pending_) return;
@@ -2830,7 +2842,8 @@ void App::maybeFireDeferredAck() {
             ack_defer_pending_ = false;  // session ended — moot
             return;
         }
-        if (modem_.channelBusyForTx()) {
+        const bool rx_evidence = modem_.rxSignalActive(1600);
+        if (modem_.channelBusyForTx() || rx_evidence) {
             ack_defer_quiet_ticks_ = 0;
             // DEADLINE = DROP, never key over (F127, waterfall-proven: the 2.5 s
             // deadline is shorter than an 8-10 s burst, so 'send regardless' keyed
@@ -2841,12 +2854,22 @@ void App::maybeFireDeferredAck() {
             // — the RTO/dup-ack machinery covers it. Half-duplex rule, absolute:
             // WE DO NOT TRANSMIT WHILE SIGNAL IS ARRIVING.
             if (std::chrono::steady_clock::now() >= ack_defer_deadline_) {
+                // F129: DROP only on DECODER evidence of a real inbound signal.
+                // Energy-only "busy" with no sync/frame evidence is the broken
+                // adaptive threshold reading ambient noise (both F129 drops:
+                // sender verifiably silent, floor had latched below the noise
+                // floor) — SEND in that case; dropping cost two full RTO cycles
+                // (~19 s each).
                 ack_defer_pending_ = false;
-                ack_defer_samples_.clear();
-                guiLog("LISTEN-BEFORE-ACK: channel busy through the whole defer "
-                       "window — ACK DROPPED (sender is transmitting; RTO covers)");
+                if (rx_evidence) {
+                    ack_defer_samples_.clear();
+                    guiLog("LISTEN-BEFORE-ACK: inbound signal (decoder evidence) "
+                           "through the defer window — ACK DROPPED (RTO covers)");
+                } else {
+                    deadline_send.swap(ack_defer_samples_);  // sent after unlock
+                }
             }
-            return;
+            goto after_lock;
         }
         // QUIET CONFIRMATION (F127): one quiet sample races fade nulls inside an
         // incoming burst — require 3 consecutive quiet ticks (~50-100 ms) before
@@ -2858,6 +2881,13 @@ void App::maybeFireDeferredAck() {
     }
     guiLog("LISTEN-BEFORE-ACK: channel clear (confirmed) — sending deferred ACK");
     submitToneAckSamples(copy);
+    return;
+after_lock:
+    if (!deadline_send.empty()) {
+        guiLog("LISTEN-BEFORE-ACK: deadline with energy-only busy "
+               "(no decoder evidence = ambient noise) — sending ACK");
+        submitToneAckSamples(deadline_send);
+    }
 }
 
 void App::tickScenario() {

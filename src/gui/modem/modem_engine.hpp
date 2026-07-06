@@ -148,6 +148,8 @@ public:
     // nominal cadence), 0 when not estimable. Rides the coherence feed into the protocol
     // for the retx trough-pacing deferral only (docs/RETX_PACING_DESIGN_2026_07_03.md).
     float getDopplerCoherenceDopplerHz() const;
+    // F129: decoder-evidence RX activity (sync/frame metrics within `within_ms`).
+    bool rxSignalActive(int64_t within_ms = 1600) const;
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,
