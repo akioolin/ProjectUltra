@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(rate): F149 ladder stability — one-rung margin-proof climbs + post-crater dwell (11 switches / 5.5 min → structural)
+
+**What was broken (operator-watched msgbox timeline, F149):** the ladder ran the
+SAME loop four times — climb to 16QAM R2/3, crater, demote twice, climb straight
+back ~60 s later — 11 mode switches in a 5.5-minute 51 KB transfer, each costing
+a switch commit and usually a doomed queued burst (1.21 kbps delivered). Two
+holes fueled it:
+1. **Crest jumps:** the climb haircut only proved "SOME climb is margin-worthy",
+   then commanded the RAW map target — QPSK R2/3 → 16QAM R2/3 (idx 3 → 8) in one
+   verdict off a 32 dB fade-crest read.
+2. **Survivor bias:** failed groups contribute NO SNR observation, so the ring
+   rides fade crests (26–32 dB reads on a 20 dB channel) and re-clears any fixed
+   penalty (cap 8 dB) roughly one minute after every demote.
+
+**What changed (`connection.cpp` updateRxAuthorityCommand):**
+- **One-rung climbs (mirror of the 2-rung down-limit):** an up-command walks UP
+  to the FIRST enabled rung above cur (holes skipped upward — snap-DOWN would
+  strand everything above a disabled row), never past the map's pick, and each
+  step must itself clear anchor + 2.5 dB + penalty. Wrong bet now costs one
+  adjacent-rung episode, not a full crater-demote loop. Descents unchanged.
+- **Post-crater climb dwell (`rx_auth_climb_dwell_`):** a confirmed crater arms
+  a dwell of kRxAuthObsRing (6) clean groups — no up-command until the
+  survivor-biased ring has fully turned over with post-episode reality.
+- Session-reset in enterConnected/enterDisconnected like the rest of the state.
+
+**Tests:** test_rx_authority 8/8 — climb ladder pinned one-rung with the
+enabled-hole skip (21 dB tops out at 16QAM R1/2; 16QAM R2/3 is not margin-proof
+there — exactly the F149 cratering rung), new dwell test (crest reads after a
+confirmed crater stay blocked 6 clean groups, then one-rung climb), plus a
+TA::adoptCmd harness helper (verdict tests must simulate the obey/adopt loop).
+Full ctest 83/84 (known TNC red).
+
 ## 2026-07-06 — fix(ack/sync/rate): F147 tail cascade — substantive RX evidence for repeat-cancel; expected-anchor immunity; escape log-truth + no-op guard
 
 **What was broken (F147 tail, watched live by the operator):** a climb to 16QAM

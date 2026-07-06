@@ -73,6 +73,16 @@ struct ConnectionAdaptiveTestAccess {
     static void fillArq(Connection& c) {
         c.arq_.sendData(Bytes{0x01, 0x02, 0x03});  // one frame in flight = busy
     }
+    static constexpr size_t obsRing() { return Connection::kRxAuthObsRing; }
+    // Simulate the sender obeying + the receiver adopting the standing command
+    // (the real loop moves `cur`; without this every verdict re-climbs from the
+    // same rung and dwell/one-rung assertions measure the wrong thing).
+    static void adoptCmd(Connection& c) {
+        if (c.rx_authority_cmd_ == kRungIdxNone) return;
+        const CoherentPick p = coherentRungFromIndex(c.rx_authority_cmd_);
+        c.data_modulation_ = p.mod;
+        c.data_code_rate_ = p.rate;
+    }
 };
 
 }  // namespace protocol
@@ -80,18 +90,37 @@ struct ConnectionAdaptiveTestAccess {
 
 using TA = ConnectionAdaptiveTestAccess;
 
-// Receiver verdict: strong calm channel maps to the top enabled rung; the command
-// index is the canonical one.
+// Receiver verdict: a strong calm channel climbs ONE enabled rung per clean
+// verdict (F149: multi-rung crest jumps fueled the climb-crater-demote cycle —
+// 11 switches / 5.5 min; each rung must now prove itself with a delivered
+// group), and repeated clean verdicts still reach the map's top pick. Descents
+// keep taking the map directly (bounded by the 2-rung down-limit).
 static bool test_verdict_maps_snr_to_rung() {
-    TEST("verdict maps 21 dB calm to 16QAM R2/3, 13 dB to QPSK R1/2");
+    TEST("verdict climbs one rung per clean verdict; 13 dB maps straight down");
 
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);
     c.setBurstChannelObservation(21.0f, 0.30f, 0.8f, true, 0.2f);
     TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-    if (TA::rxCmd(c) != kRungIdxQam16R23)
-        FAIL("21 dB Good verdict was idx " + std::to_string(TA::rxCmd(c)) +
-             " (want QAM16 R2/3 = " + std::to_string(kRungIdxQam16R23) + ")");
+    if (TA::rxCmd(c) != kRungIdxQam8R23)
+        FAIL("first clean 21 dB verdict from QPSK R3/4 was idx " +
+             std::to_string(TA::rxCmd(c)) +
+             " (want ONE enabled rung up = QAM8 R2/3 = " +
+             std::to_string(kRungIdxQam8R23) + ")");
+    // Each further step must ITSELF clear anchor + 2.5 dB margin (the old code
+    // proved "some climb" then jumped to the raw map target — the crest-jump
+    // hole). At 21 dB the ladder tops out at 16QAM R1/2: 16QAM R2/3 (the F149
+    // cratering rung) is not margin-proof there and must NOT be commanded.
+    TA::adoptCmd(c);
+    TA::verdict(c, true, 0.9f);  // idx 5 -> 7 (16QAM R1/2; idx 6 disabled)
+    if (TA::rxCmd(c) != kRungIdxQam16R12)
+        FAIL("second step was idx " + std::to_string(TA::rxCmd(c)) +
+             " (want 16QAM R1/2 = " + std::to_string(kRungIdxQam16R12) + ")");
+    TA::adoptCmd(c);
+    TA::verdict(c, true, 0.9f);  // idx 7: 16QAM R2/3 not margin-proof at 21 dB
+    if (TA::rxCmd(c) != kRungIdxQam16R12)
+        FAIL("21 dB over-climbed past 16QAM R1/2 to idx " +
+             std::to_string(TA::rxCmd(c)) + " (margin-proof ladder must hold)");
 
     Connection d;
     TA::makeConnectedOFDM(d, CodeRate::R1_2, 13.0f, 0.05f, Modulation::QPSK);
@@ -100,6 +129,43 @@ static bool test_verdict_maps_snr_to_rung() {
     if (TA::rxCmd(d) != kRungIdxQpskR12)
         FAIL("13 dB Good verdict was idx " + std::to_string(TA::rxCmd(d)) +
              " (want QPSK R1/2)");
+    PASS();
+    return true;
+}
+
+// F149 CLIMB DWELL: after a confirmed crater episode the survivor-biased ring
+// must turn over (kRxAuthObsRing clean groups) before ANY up-command — a fade
+// crest read right after the demote must not re-arm the loop.
+static bool test_confirmed_crater_arms_climb_dwell() {
+    TEST("confirmed crater blocks re-climb until the ring turns over");
+
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+    c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+    TA::verdict(c, false, 0.0f);  // crater #1 — hold
+    TA::verdict(c, false, 0.0f);  // crater #2 — confirmed: demote + dwell armed
+    const uint8_t demoted = TA::rxCmd(c);
+    if (demoted >= kRungIdxQam16R23)
+        FAIL("confirmed crater did not demote");
+    TA::adoptCmd(c);  // sender obeys the demote
+
+    // Fade-crest reads right after the demote: climbs must stay blocked for a
+    // full ring turnover even though the map screams UP.
+    for (size_t i = 0; i + 1 < TA::obsRing(); ++i) {
+        c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdict(c, true, 0.95f);
+        if (TA::rxCmd(c) > demoted)
+            FAIL("climb re-armed after only " + std::to_string(i + 1) +
+                 " clean groups (dwell must hold " +
+                 std::to_string(TA::obsRing()) + ")");
+    }
+    // Ring turned over: the next clean verdict may climb (one rung).
+    c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
+    TA::verdict(c, true, 0.95f);
+    if (TA::rxCmd(c) <= demoted)
+        FAIL("climb still blocked after the dwell expired");
+    if (TA::rxCmd(c) > demoted + 2)
+        FAIL("post-dwell climb jumped more than one enabled rung");
     PASS();
     return true;
 }
@@ -238,6 +304,7 @@ int main() {
     bool ok = true;
     ok &= test_verdict_maps_snr_to_rung();
     ok &= test_two_crater_rule();
+    ok &= test_confirmed_crater_arms_climb_dwell();
     ok &= test_busy_defers_up_not_down();
     ok &= test_clean_never_commands_down();
     ok &= test_no_observation_no_command();

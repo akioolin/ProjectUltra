@@ -1060,6 +1060,10 @@ private:
     int rx_auth_class_sticky_ = 1;      // FadingClass::GOOD — sane starting column
     int rx_auth_class_streak_ = 0;
     float rx_auth_fading_passed_ = 0.3f;  // last fading fed to the map (in-class)
+    // F149: clean groups remaining before up-commands unlock after a confirmed
+    // crater (the survivor-biased SNR ring must turn over with post-episode
+    // reality; see updateRxAuthorityCommand).
+    int rx_auth_climb_dwell_ = 0;
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;

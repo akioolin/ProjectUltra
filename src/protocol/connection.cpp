@@ -2405,14 +2405,30 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             const float p = rx_auth_rung_penalty_db_[cur];
             rx_auth_rung_penalty_db_[cur] =
                 std::min(8.0f, (p < 2.0f) ? 2.0f : p * 2.0f);
+            // F149 CLIMB DWELL: a confirmed episode also arms a dwell — no
+            // up-command until the observation ring has fully turned over with
+            // post-episode reality (kRxAuthObsRing clean groups). The penalty
+            // prices the FAILED rung; the dwell fixes the SURVIVOR BIAS that
+            // fueled the F149 cycle: failed groups contribute NO SNR
+            // observation, so the ring rides fade crests (26-32 dB reads on a
+            // 20 dB channel) and re-clears any fixed haircut ~60 s after every
+            // demote — 11 mode switches in 5.5 min, 4 identical
+            // climb-crater-demote loops.
+            rx_auth_climb_dwell_ = static_cast<int>(kRxAuthObsRing);
         } else if (all_ok) {
             for (size_t i = 0; i < kRungIdxCount; ++i) {
                 rx_auth_rung_penalty_db_[i] =
                     std::max(0.0f, rx_auth_rung_penalty_db_[i] - 0.05f);
             }
+            if (rx_auth_climb_dwell_ > 0) --rx_auth_climb_dwell_;
         }
     }
     if (cur != kRungIdxNone) {
+        if (cmd > cur && rx_auth_climb_dwell_ > 0) {
+            // F149: post-episode dwell — the ring is still crest-biased from
+            // the last confirmed crater; hold until it turns over.
+            cmd = cur;
+        }
         if (cmd > cur) {
             // CLIMB HYSTERESIS + crater margin: an up-command must survive a
             // haircut — the base 2.5 dB guards against slow swells; the target
@@ -2426,6 +2442,28 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             const uint8_t guarded_idx =
                 coherentRungIndexFor(guarded.mod, guarded.rate);
             if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
+        }
+        if (cmd > cur) {
+            // F149 ONE-RUNG CLIMB (mirror of the down rate-limit): a climb is a
+            // bet on headroom no delivered group has proven — bet the minimum
+            // stake. The map jumped QPSK R2/3 -> 16QAM R2/3 (idx 3 -> 8) in one
+            // verdict off a fade-crest read; a wrong 1-rung climb costs one
+            // cheap episode at an adjacent rung, a wrong 4-rung climb costs the
+            // full crater-demote loop. Walk UP to the first enabled rung above
+            // cur (holes skipped upward — snap-DOWN would land back on cur and
+            // make everything above a disabled row unreachable), never past the
+            // map's own pick. Repeated honest verdicts still reach any height,
+            // one proven rung at a time.
+            uint8_t step = kRungIdxNone;
+            for (uint8_t i = static_cast<uint8_t>(cur + 1);
+                 i <= cmd && i < kRungIdxCount; ++i) {
+                const CoherentPick p = coherentRungFromIndex(i);
+                if (coherentRungLocallyEnabled(p.mod, p.rate)) {
+                    step = i;
+                    break;
+                }
+            }
+            cmd = (step != kRungIdxNone) ? step : cur;
         }
         if (crater_confirmed) {
             // Confirmed-crater override: two in a row is the rung failing, not a
@@ -5456,6 +5494,7 @@ void Connection::enterConnected() {
     rx_auth_class_sticky_ = 1;
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;
+    rx_auth_climb_dwell_ = 0;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
@@ -5524,6 +5563,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_auth_class_sticky_ = 1;
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;
+    rx_auth_climb_dwell_ = 0;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
