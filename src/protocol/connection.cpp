@@ -2814,6 +2814,20 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
         return;
     }
 
+    // RX-AUTHORITY double-driver fix (F128): under receiver authority, a RECEIVED
+    // ack is the receiver's living verdict — a zero-progress dup-ack during crater
+    // recovery is the receiver SPEAKING ("resend those"), not evidence it can't
+    // reach us. Counting it toward the collapse escape let the sender unilaterally
+    // demote mid-recovery (F128 t=151: ESCAPE-drop fired on '2 zero-progress
+    // rounds' that were both decoded dup-acks — while the receiver's verdict was
+    // simultaneously commanding UP; the two drivers fought and the ladder sawed).
+    // The escape's charter is ack-SILENCE self-rescue: only RTO rounds (no ack
+    // decoded at all) count while authority is on. Without authority the old
+    // accounting stands (the sender is the only driver there).
+    if (rxRateAuthorityEnabled() && std::strcmp(origin, "rto") != 0) {
+        return;
+    }
+
     ++zero_progress_rounds_;
     // TROUGH AMNESTY: snapshot the rung active as the episode BEGINS. Runs after
     // maybeApplyRxRateCommand in the ack path, so a crater rung-command landing on
