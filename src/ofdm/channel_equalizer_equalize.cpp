@@ -559,7 +559,40 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                     static_cast<size_t>(idx) < per_carrier_h_error_var_.size()) {
                     h_err_var = kHerrLlrK * per_carrier_h_error_var_[idx] * h_power;
                 }
-                carrier_noise_var[i] = (noise_variance + h_err_var) / mmse_denom;
+                // ── STAGE B: notch reliability floor (ULTRA_NOTCH_NV, default
+                // OFF) ── D1: the Wiener smooths a parked notch SHALLOW, |H_est|²
+                // over-reads, nv collapses, and the carrier emits confident-wrong
+                // LLRs (F142: |LLR| 8-14 where erasures belong). The raw direct
+                // LS pilot observation is the one signal that sees the notch
+                // (E[O_k] = P_true + σ²): the reliability power may never exceed
+                // what was directly OBSERVED plus its own noise allowance,
+                //   P_rel = min(|H_est|², O_k + σ²).
+                // The equalizer TAP stays on the smoothed estimate (phase
+                // quality); only the noise-variance denominator uses P_rel. On
+                // AWGN/flat channels O_k ≈ P_est → min() is a no-op — no
+                // clean-channel regression by construction. Age bound = 3
+                // scattered-pattern revisit cycles (≪ the seconds a notch parks).
+                static const bool kNotchNv = []() {
+                    const char* e = std::getenv("ULTRA_NOTCH_NV");
+                    return e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0');
+                }();
+                float nv_denom = mmse_denom;
+                if (kNotchNv &&
+                    static_cast<size_t>(idx) < per_carrier_raw_obs_power_.size() &&
+                    per_carrier_raw_obs_symbol_[idx] >= 0) {
+                    const int64_t obs_age =
+                        static_cast<int64_t>(current_data_symbol_index_) -
+                        per_carrier_raw_obs_symbol_[idx];
+                    const int64_t max_age =
+                        3 * static_cast<int64_t>(std::max(1u, config.pilot_spacing));
+                    if (obs_age >= 0 && obs_age <= max_age) {
+                        const float p_rel = std::min(
+                            h_power,
+                            per_carrier_raw_obs_power_[idx] + noise_variance);
+                        nv_denom = p_rel + noise_variance;
+                    }
+                }
+                carrier_noise_var[i] = (noise_variance + h_err_var) / nv_denom;
                 carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
             }
         }
@@ -767,6 +800,53 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                 dd_phase_corrections[i] = -phase_err;
             } else {
                 dd_phase_corrections[i] = 0.0f;
+            }
+        }
+    }
+
+    // ── STAGE A: ZF-consistent LLR unbias (ULTRA_ZF_LLR_UNBIAS, default OFF) ──
+    // F142/F165 notch forensics (docs: /tmp/llr_notch_brief.md, D3): the MMSE
+    // output eq = conj(H)·Y/(|H|²+σ²) is SHRUNK by β = |H|²/(|H|²+σ²), but the
+    // demapper compares |eq| against UNBIASED amplitude thresholds (16QAM ring
+    // 2/√10) — on a low-γ carrier outer points systematically read as inner:
+    // deterministic wrong-sign ring bits with confident magnitude. Dividing the
+    // (eq, nv) pair by β restores the unbiased statistic:
+    //   eq' = conj(H)·Y/|H|²   nv' = σ²_eff/|H|²
+    // Sign-bit LLRs (QPSK/BPSK, and every sign bit of QAM) are ∝ eq/nv —
+    // bit-identical under the common scale — while amplitude-bit scale 2/nv'
+    // → 0 as the true notch deepens: near-erasure with no gate, no cap, no
+    // modulation branch. Runs LAST so every in-function DD/EVM/chi-sq consumer
+    // above sees today's MMSE statistics unchanged.
+    // PAIRING GUARD (mandatory): nv' beyond MAX_CARRIER_NOISE_VAR cannot ride
+    // the clamp (eq' would keep growing while nv' saturates — manufacturing the
+    // exact confident-wrong failure this fixes): that deep (γ < −20 dB) is a
+    // declared erasure.
+    static const bool kZfLlrUnbias = []() {
+        const char* e = std::getenv("ULTRA_ZF_LLR_UNBIAS");
+        return e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0');
+    }();
+    if (kZfLlrUnbias) {
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            const int idx = data_carrier_indices[i];
+            const Complex h_used =
+                use_adaptive ? lms_weights[idx] : channel_estimate[idx];
+            const float p = std::norm(h_used);
+            const float denom = p + noise_variance;
+            if (p <= 1e-10f || denom <= 1e-10f) {
+                if (i < carrier_erasure_flags_.size()) carrier_erasure_flags_[i] = 1;
+                equalized[i] = Complex(0, 0);
+                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
+                continue;
+            }
+            const float inv_beta = denom / p;  // ≥ 1 by construction
+            const float nv_unbiased = carrier_noise_var[i] * inv_beta;
+            if (nv_unbiased >= MAX_CARRIER_NOISE_VAR) {
+                if (i < carrier_erasure_flags_.size()) carrier_erasure_flags_[i] = 1;
+                equalized[i] = Complex(0, 0);
+                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
+            } else {
+                equalized[i] *= inv_beta;
+                carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, nv_unbiased);
             }
         }
     }

@@ -678,6 +678,19 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                                   static_cast<int64_t>(current_data_symbol_index_),
                                   h_ls_all[i],
                                   wiener_noise_norm);
+        // F166 Stage B: persist the RAW observation power (pre-Wiener) — the
+        // interpolator's sinc prior + diagonal loading smooths parked notches
+        // SHALLOW (its own comment: "may smooth THROUGH deep nulls"), which is
+        // the D1 confident-wrong mechanism. Always written; consumers gate.
+        if (i < pilot_carrier_indices.size()) {
+            const int fft_idx = pilot_carrier_indices[i];
+            if (fft_idx >= 0 &&
+                static_cast<size_t>(fft_idx) < per_carrier_raw_obs_power_.size()) {
+                per_carrier_raw_obs_power_[fft_idx] = std::norm(h_ls_all[i]);
+                per_carrier_raw_obs_symbol_[fft_idx] =
+                    static_cast<int64_t>(current_data_symbol_index_);
+            }
+        }
     }
 
     // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading).

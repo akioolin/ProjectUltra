@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — experiment(llr): per-carrier notch calibration (Stage A unbias + Stage B raw-obs floor) — MEASURED MARGINAL on the sim cell; knobs default-OFF
+
+**Hypothesis** (F142/F165 signatures + 4-reader code map, brief /tmp/llr_notch_brief.md):
+16QAM craters on parked notches because (D3) the MMSE-shrunken symbol is compared
+against unbiased ring thresholds and (D1) the Wiener smooths notches shallow so nv
+collapses. Implemented both correctives, modulation-adaptive, RX-only:
+- **Stage A** `ULTRA_ZF_LLR_UNBIAS` (default OFF): unbias (eq,nv) by 1/β at the very
+  end of equalize() (post-DD/EVM consumers) with the mandatory erasure pairing guard
+  at the nv clamp. Sign bits provably invariant.
+- **Stage B** `ULTRA_NOTCH_NV` (default OFF): per-carrier reliability floor
+  P_rel = min(|H_est|², O_k + σ²) from the RAW LS pilot observation
+  (`per_carrier_raw_obs_power_`, writer in channel_equalizer_pilot.cpp; age ≤ 3
+  revisit cycles). Equalizer tap unchanged; nv denominator only.
+
+**Measured (paired A/B, measure_ack_fer data4_full good@20 qam16 R2/3, n=200 ×
+seeds 42/43/44, decode_fail):** base 88/103/86 → Stage A 82/102/84 → A+B 87/108/88.
+**Marginal-to-nothing.** Controls EXACT as theory predicts: QPSK 5→5 (sign-bit
+invariance), AWGN 16QAM 1→1 (β≈1). Genie-H decomposition inconclusive in this
+harness (FIFO alignment needs 1-CW frames; the cell is 4-CW).
+
+**Interpretation:** the sim cell's 43-51% FER at 16QAM R2/3 good@20 is not
+estimation- or calibration-dominated at the margins these stages address — the
+rung is close to physics-limited on this channel (R2/3's ~15% correction budget
+vs per-carrier outage at 20 dB mean). The ladder's avoidance of 16QAM R2/3 under
+fading is CORRECT behavior, not a defect to fix at the demapper. Knobs stay
+default-OFF (safe: controls invariant); re-evaluate on the rig's MPG parked-notch
+statistics only if rig evidence diverges from the sim cell. Path to >2.5 kbps at
+MPG@20 runs through turnaround amortization (21% of wall clock; bigger groups) and
+time-interleaving depth, not LLR rescue of R2/3.
+
 ## 2026-07-06 — fix(sync/ack): F165 — expected-anchor immunity covers the CW0-peek gate; ANCHORED-BURST ACK BACKSTOP
 
 **What was broken (operator watched a strong burst go unacked, again):** the F147

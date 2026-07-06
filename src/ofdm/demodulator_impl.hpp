@@ -72,6 +72,12 @@ struct OFDMDemodulator::Impl {
     // populated in updateChannelEstimate, consumed in equalize() as the eps_H LLR term
     // (ULTRA_HERR_LLR_K). Indexed by fft carrier, parallel to channel_estimate.
     std::vector<float> per_carrier_h_error_var_;
+    // F166 Stage B (ULTRA_NOTCH_NV): most recent RAW direct LS pilot observation
+    // power per FFT carrier + the data-symbol index it was taken at. The one
+    // signal that sees through Wiener notch-smoothing (the scattered pattern
+    // revisits every carrier each `spacing` symbols).
+    std::vector<float> per_carrier_raw_obs_power_;
+    std::vector<int64_t> per_carrier_raw_obs_symbol_;
     // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): a frozen copy of the full-band LTS
     // channel estimate, re-applied to every data symbol to bypass sparse-pilot
     // re-interpolation. On a frozen/noiseless channel the LTS H is the exact true H
