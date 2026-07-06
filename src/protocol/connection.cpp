@@ -2402,19 +2402,24 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             // re-cleared anchor+margin, and every re-climb bought two dead groups
             // and two anchors. Episode 2 now demands avg >= anchor+2.5+4 (~26.5),
             // episode 3 pins the rung out until the channel genuinely improves.
+            // F160: first confirmed episode prices at 4 dB (was 2) — with
+            // one-rung climbs a toxic rung's second visit already costs a full
+            // ladder walk, so the first episode must push the re-try bar to
+            // anchor+6.5 (locks the rung out for the transfer at the ~24 dB
+            // ring averages this bench produces; a genuinely improved channel
+            // still clears it).
             const float p = rx_auth_rung_penalty_db_[cur];
             rx_auth_rung_penalty_db_[cur] =
-                std::min(8.0f, (p < 2.0f) ? 2.0f : p * 2.0f);
-            // F149 CLIMB DWELL: a confirmed episode also arms a dwell — no
-            // up-command until the observation ring has fully turned over with
-            // post-episode reality (kRxAuthObsRing clean groups). The penalty
-            // prices the FAILED rung; the dwell fixes the SURVIVOR BIAS that
-            // fueled the F149 cycle: failed groups contribute NO SNR
-            // observation, so the ring rides fade crests (26-32 dB reads on a
-            // 20 dB channel) and re-clears any fixed haircut ~60 s after every
-            // demote — 11 mode switches in 5.5 min, 4 identical
-            // climb-crater-demote loops.
-            rx_auth_climb_dwell_ = static_cast<int>(kRxAuthObsRing);
+                std::min(8.0f, (p < 4.0f) ? 4.0f : p * 2.0f);
+            // F149 CLIMB DWELL, F160-rebalanced: a confirmed episode arms a
+            // dwell — no up-command until post-episode reality displaces the
+            // survivor-biased crest reads (failed groups contribute NO SNR
+            // observation; the ring read 26-32 dB on a 20 dB channel and
+            // re-cleared any fixed haircut ~60 s after every demote). THREE
+            // clean groups, not a full ring turnover: F160 parked 61 s at
+            // QPSK R1/4 on a 22 dB channel waiting out dwell=6 — the dwell
+            // gates RE-BETTING, it must not tax the recovery.
+            rx_auth_climb_dwell_ = kRxAuthClimbDwellGroups;
         } else if (all_ok) {
             for (size_t i = 0; i < kRungIdxCount; ++i) {
                 rx_auth_rung_penalty_db_[i] =
@@ -2467,12 +2472,22 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
         }
         if (crater_confirmed) {
             // Confirmed-crater override: two in a row is the rung failing, not a
-            // null — command TWO below (F129: 6/8 craters were 16QAM ground down
-            // one rung per ~20 s through a genuine fade episode, ~70 s stalled at
-            // dying rungs; zero-DELIVERY pairs are the strongest evidence we have
-            // and warrant the full down-limit stride). Still bounded by the
-            // 2-rung-per-verdict limit below.
-            const uint8_t below = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
+            // null — command the FIRST ENABLED rung below it. F160 rebalance: the
+            // old cur-2 stride, snapped down THROUGH the QAM8 R3/4 hole, turned
+            // every 16QAM R2/3 episode into a 3-rung collapse (8 -> 5) that the
+            // one-rung climb then repaid across 3 switches — fast-down/slow-up
+            // parked the run below the sustainable rung (F160: 0.89 kbps, 17
+            // switches). One enabled rung down lands exactly on the rung the
+            // ladder just PROVED on the way up (16QAM R1/2 here); the crater
+            // penalty + dwell — not collapse depth — do the recidivism work.
+            // (F129's ~70 s grind predates both; honest sustained failure still
+            // descends verdict by verdict.)
+            uint8_t below = kRungIdxQpskR14;
+            if (cur > kRungIdxQpskR14) {
+                const uint8_t b =
+                    snapRungIndexDownToEnabled(static_cast<uint8_t>(cur - 1));
+                if (b != kRungIdxNone) below = b;
+            }
             if (cmd >= cur) cmd = below;
         } else if (crater && cmd > cur) {
             // Single crater: hold the rung (the ARQ resends through the null) —

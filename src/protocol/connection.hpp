@@ -1060,9 +1060,10 @@ private:
     int rx_auth_class_sticky_ = 1;      // FadingClass::GOOD — sane starting column
     int rx_auth_class_streak_ = 0;
     float rx_auth_fading_passed_ = 0.3f;  // last fading fed to the map (in-class)
-    // F149: clean groups remaining before up-commands unlock after a confirmed
-    // crater (the survivor-biased SNR ring must turn over with post-episode
-    // reality; see updateRxAuthorityCommand).
+    // F149/F160: clean groups required before up-commands unlock after a
+    // confirmed crater (post-episode reality must displace the survivor-biased
+    // crest reads; 3 = gate re-betting without taxing recovery at slow rungs).
+    static constexpr int kRxAuthClimbDwellGroups = 3;
     int rx_auth_climb_dwell_ = 0;
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).

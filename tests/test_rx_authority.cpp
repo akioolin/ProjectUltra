@@ -74,6 +74,7 @@ struct ConnectionAdaptiveTestAccess {
         c.arq_.sendData(Bytes{0x01, 0x02, 0x03});  // one frame in flight = busy
     }
     static constexpr size_t obsRing() { return Connection::kRxAuthObsRing; }
+    static constexpr int climbDwell() { return Connection::kRxAuthClimbDwellGroups; }
     // Simulate the sender obeying + the receiver adopting the standing command
     // (the real loop moves `cur`; without this every verdict re-climbs from the
     // same rung and dwell/one-rung assertions measure the wrong thing).
@@ -133,8 +134,9 @@ static bool test_verdict_maps_snr_to_rung() {
     return true;
 }
 
-// F149 CLIMB DWELL: after a confirmed crater episode the survivor-biased ring
-// must turn over (kRxAuthObsRing clean groups) before ANY up-command — a fade
+// F149/F160 CLIMB DWELL: after a confirmed crater episode, post-episode reality
+// must displace the crest-biased reads (kRxAuthClimbDwellGroups clean groups)
+// before ANY up-command — a fade
 // crest read right after the demote must not re-arm the loop.
 static bool test_confirmed_crater_arms_climb_dwell() {
     TEST("confirmed crater blocks re-climb until the ring turns over");
@@ -151,13 +153,13 @@ static bool test_confirmed_crater_arms_climb_dwell() {
 
     // Fade-crest reads right after the demote: climbs must stay blocked for a
     // full ring turnover even though the map screams UP.
-    for (size_t i = 0; i + 1 < TA::obsRing(); ++i) {
+    for (int i = 0; i + 1 < TA::climbDwell(); ++i) {
         c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, true, 0.95f);
         if (TA::rxCmd(c) > demoted)
             FAIL("climb re-armed after only " + std::to_string(i + 1) +
                  " clean groups (dwell must hold " +
-                 std::to_string(TA::obsRing()) + ")");
+                 std::to_string(TA::climbDwell()) + ")");
     }
     // Ring turned over: the next clean verdict may climb (one rung).
     c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
@@ -189,6 +191,14 @@ static bool test_two_crater_rule() {
     if (TA::rxCmd(c) >= cur)
         FAIL("confirmed crater verdict idx " + std::to_string(TA::rxCmd(c)) +
              " not below current " + std::to_string(cur));
+    // F160: demote lands on the FIRST ENABLED rung below — 16QAM R1/2 (idx 7),
+    // the rung the ladder proved on the way up. The old cur-2 stride snapped
+    // through the QAM8 R3/4 hole to idx 5 = a 3-rung collapse the one-rung
+    // climb repaid across 3 switches.
+    if (TA::rxCmd(c) != kRungIdxQam16R12)
+        FAIL("confirmed crater demoted to idx " + std::to_string(TA::rxCmd(c)) +
+             " (want first enabled below = 16QAM R1/2 = " +
+             std::to_string(kRungIdxQam16R12) + ")");
     // ENABLED-LADDER pin (F145 deadlock): the raw cur-2 stride from QAM16 R2/3
     // (idx 8) lands on QAM8 R3/4 (idx 6) — a fully-disabled anchor row. The
     // command must snap to an ENABLED rung (idx 5, QAM8 R2/3) or the sender's

@@ -10,6 +10,22 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(rate): F160 rebalance — symmetric ladder (demote = first enabled below; dwell 3; first episode +4 dB)
+
+**What was broken:** the F149 stability pass over-corrected — F160 delivered
+0.89 kbps with SEVENTEEN switches: fast 2-rung demotes (snapping THROUGH the
+QAM8 R3/4 hole = 3-rung collapses, 8 -> 5, twice to QPSK R1/4) paired with
+one-rung climbs meant every episode cost a 5-switch ladder walk back, and the
+6-group dwell parked the run 61 s at QPSK R1/4 on a 22 dB channel.
+
+**What changed (updateRxAuthorityCommand):** confirmed-crater demote = the
+FIRST ENABLED rung below (8 -> 7 — the rung the ladder just proved on the way
+up); dwell = kRxAuthClimbDwellGroups (3, named constant); first confirmed
+episode prices at 4 dB (re-try bar anchor+6.5 — locks a proven-toxic rung out
+for the transfer at this bench's ring averages). Recidivism is now priced by
+penalty+dwell, not by collapse depth. test_rx_authority 8/8 (demote-target and
+dwell pins updated).
+
 ## 2026-07-06 — fix(rate): F149 ladder stability — one-rung margin-proof climbs + post-crater dwell (11 switches / 5.5 min → structural)
 
 **What was broken (operator-watched msgbox timeline, F149):** the ladder ran the
