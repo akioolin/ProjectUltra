@@ -2319,6 +2319,15 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     if (raw_class == rx_auth_class_sticky_) {
         rx_auth_class_streak_ = 0;
         rx_auth_fading_passed_ = fading_avg;
+    } else if (raw_class > rx_auth_class_sticky_ && rx_auth_clean_streak_ >= 2) {
+        // DECODE-EVIDENCE VETO (F125): the classifier says the channel got WORSE
+        // while the last 2+ groups decoded clean — the decode record refutes it
+        // (measured: fading walked 0.26->0.77 into MODERATE while 16QAM R2/3 ran
+        // q=0.9-0.98 at 24-25 dB; the Moderate column has no dense rungs, so the
+        // flip commanded a delivering link into the QPSK basement). Hold the
+        // class; a genuine degradation craters within a couple of groups, the
+        // clean streak dies, and the switch proceeds.
+        rx_auth_class_streak_ = 0;
     } else if (++rx_auth_class_streak_ >= 2) {
         rx_auth_class_sticky_ = raw_class;
         rx_auth_class_streak_ = 0;
@@ -2340,6 +2349,8 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     const bool crater = (quality <= 0.0f && !all_ok);
     if (crater) ++rx_auth_crater_streak_;
     else if (all_ok) rx_auth_crater_streak_ = 0;
+    if (all_ok) ++rx_auth_clean_streak_;
+    else rx_auth_clean_streak_ = 0;
     const bool crater_confirmed = crater && rx_auth_crater_streak_ >= 2;
     if (cur != kRungIdxNone && cur < kRungIdxCount) {
         if (crater_confirmed) {
@@ -2380,13 +2391,14 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             // Clean-group override: this rung just WORKED end to end.
             cmd = cur;
         }
-        if (!crater_confirmed && cmd < cur) {
-            // DOWN RATE-LIMIT (F123): a map-driven demote without confirmed decode
-            // failure steps at most 2 canonical rungs per verdict — a residual
-            // input swing must never crash the ladder to the basement in one
-            // command (measured: QPSK R1/2 commanded at a steady 24 dB when a
-            // fading-class flap switched anchor columns). Confirmed craters and
-            // repeated verdicts still reach any depth, one bounded step at a time.
+        if (cmd < cur) {
+            // DOWN RATE-LIMIT (F123, made UNCONDITIONAL after F125): any single
+            // verdict steps at most 2 canonical rungs down — confirmed craters
+            // included (F125: a confirmed pair let the class-cliff map pick
+            // through unclamped, 16QAM R2/3 -> QPSK R2/3 in ONE command on a
+            // 23 dB channel). The confirmed-crater clamp above already guarantees
+            // at least one step below the failed rung; repeated honest verdicts
+            // still reach any depth, bounded step by bounded step.
             const uint8_t floor_step = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
             if (cmd < floor_step) cmd = floor_step;
         }
@@ -5321,6 +5333,7 @@ void Connection::enterConnected() {
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
     rx_auth_crater_streak_ = 0;
+    rx_auth_clean_streak_ = 0;
     rx_auth_class_sticky_ = 1;
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;
@@ -5388,6 +5401,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
     rx_auth_crater_streak_ = 0;
+    rx_auth_clean_streak_ = 0;
     rx_auth_class_sticky_ = 1;
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;

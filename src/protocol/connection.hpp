@@ -1040,6 +1040,14 @@ private:
     // crater is an irreducible deep null — the ARQ's job, not the ladder's.
     // Only CONSECUTIVE craters demote (and charge the crater margin).
     int rx_auth_crater_streak_ = 0;
+    // DECODE-EVIDENCE class veto (F125): consecutive clean (all_ok) verdicts. A
+    // fading-class DEGRADATION is vetoed while decodes stay clean — the rig's
+    // fading/coherence estimators carry hardware artifacts and their class
+    // thresholds are sim-calibrated (documented 2026-06-17: "[MODERATE] on
+    // everything"); a rung delivering q>=0.9 at 24 dB REFUTES "Moderate". The
+    // posterior (decode record) vetoes the prior (classifier) — a genuinely
+    // degrading channel fails within a couple of groups and lifts the veto.
+    int rx_auth_clean_streak_ = 0;
     // FADING input conditioning (F123 finding: the SNR was averaged but the
     // fading/coherence input was a raw per-frame snapshot flapping 0.15<->0.30 —
     // and the anchor table quantizes it into three CLIFF-EDGED columns, so class
