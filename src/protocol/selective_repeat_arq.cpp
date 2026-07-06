@@ -555,21 +555,26 @@ void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
         return;
     }
 
+    // Drop gates below log at WARN (were TRACE/silent): on a healthy link they fire
+    // ~never, and when they DO fire they eat an LDPC-clean frame invisibly — F144
+    // lost the last frame of a 5/5 group with zero log evidence at any gate.
     uint16_t magic = (static_cast<uint16_t>(frame_data[0]) << 8) | frame_data[1];
     if (magic != v2::MAGIC_V2) {
-        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame with wrong magic");
+        LOG_MODEM(WARN, "SR-ARQ: DROP frame with wrong magic 0x%04X (len=%zu)", magic,
+                  frame_data.size());
         return;
     }
 
     auto header = v2::parseHeader(frame_data);
     if (!header.valid) {
-        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame with invalid header");
+        LOG_MODEM(WARN, "SR-ARQ: DROP frame with invalid header (len=%zu)", frame_data.size());
         return;
     }
 
     uint32_t our_hash = v2::hashCallsign(local_call_);
     if (header.dst_hash != our_hash && header.dst_hash != 0xFFFFFF) {
-        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame for different station");
+        LOG_MODEM(WARN, "SR-ARQ: DROP %s seq=%u for different station (dst=%06X us=%06X)",
+                  v2::frameTypeToString(header.type), header.seq, header.dst_hash, our_hash);
         return;
     }
 
@@ -595,11 +600,17 @@ void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
             auto repair = v2::DataRepairFrame::deserialize(frame_data);
             if (repair) {
                 handleDataRepairFrame(*repair);
+            } else {
+                LOG_MODEM(WARN, "SR-ARQ: DROP DATA_REPAIR seq=%u — deserialize failed (len=%zu)",
+                          header.seq, frame_data.size());
             }
         } else {
             auto data_frame = v2::DataFrame::deserialize(frame_data);
             if (data_frame) {
                 handleDataFrame(*data_frame);
+            } else {
+                LOG_MODEM(WARN, "SR-ARQ: DROP %s seq=%u — deserialize failed (len=%zu)",
+                          v2::frameTypeToString(header.type), header.seq, frame_data.size());
             }
         }
     }

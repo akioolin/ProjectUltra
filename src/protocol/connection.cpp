@@ -3419,7 +3419,15 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         arq_.beginGroupReceive();
         for (const auto& frame : frames) {
             auto hdr = v2::parseHeader(frame);
+            // F144 forensics: a clean 5/5 group acked one frame short with ZERO drop
+            // evidence — every gate between here and the ARQ window was silent. Name
+            // each frame on its way in (bounded: <= group_size lines per group).
+            LOG_MODEM(INFO, "Connection: burst->arq %s seq=%u hdr_valid=%d len=%zu",
+                      hdr.valid ? v2::frameTypeToString(hdr.type) : "?", hdr.valid ? hdr.seq : 0,
+                      hdr.valid ? 1 : 0, frame.size());
             if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
+                LOG_MODEM(WARN, "Connection: burst frame seq=%u SKIPPED by pad/callsign filter (dst_hash=%06X)",
+                          hdr.seq, hdr.dst_hash);
                 continue;  // burst pad — addressed to the pad callsign
             }
             processArqFrame(frame);  // a file-completing frame clears burst_activity_ (wins)
