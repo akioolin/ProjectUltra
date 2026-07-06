@@ -1050,6 +1050,10 @@ void StreamingDecoder::finalizeBurstGroup() {
             else stats_.frames_failed++;
         }
         if (result.success) {
+            // F147: substantive peer-TX evidence (see stampRxSubstantive).
+            stampRxSubstantive();
+        }
+        if (result.success) {
             ++logical_ok;
             // Mask width = the tone-burst wire mask width (16 as of 2026-07-02);
             // frames past it can't be selectively acked (window/group sizing keeps

@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(ack/sync/rate): F147 tail cascade — substantive RX evidence for repeat-cancel; expected-anchor immunity; escape log-truth + no-op guard
+
+**What was broken (F147 tail, watched live by the operator):** a climb to 16QAM
+R2/3 cratered 0/8, and three defects turned one bad group into a 40 s deaf spiral:
+1. **Repeat-cancel on noise (3rd iteration of this gate):** the receiver's ACK
+   faded one-way; the ACK-repeat armed to save it was canceled by "decoder RX
+   evidence" that was actually false-chirp-lock REJECTS ON IDLE NOISE — every
+   decode attempt stamps the broad rx-signal, so a silent gap reads as "inbound
+   transmission in progress".
+2. **False-lock gate killed genuine anchors:** the sender's RTO resends carried
+   full chirp+LTS; the receiver FOUND them (corr 0.76) but the pre-LDPC LLR gate
+   rejected the locks on faded first-frame LLRs and re-searched — no accepted
+   anchor → no group boundary → `endGroupReceiveAndAck` never fires → ZERO acks
+   by construction. Two 8-frame bursts lost whole.
+3. **Escape lied and raced:** "ESCAPE-drop 16QAM R1/2 -> 16QAM R1/2" printed
+   post-commit state (the real move was R2/3 -> R1/2), and escapes racing an
+   authority obey could re-commit an already-landed rung (epoch bump + re-encode
+   for nothing).
+
+**What changed:**
+- `streaming_decoder.hpp/.cpp` sites: new `stampRxSubstantive()` (accepted
+  descriptor consume, decoded codewords, delivered burst frames) alongside the
+  broad stamp; `ModemEngine::lastRxSubstantiveMs()`. `app.cpp` repeat-cancel and
+  its arm baseline use the SUBSTANTIVE stamp; listen-before-ACK keeps the broad
+  one (conservative deferral is correct there).
+- `streaming_sync_acquisition.cpp` + `streaming_ofdm_decode.cpp`:
+  `last_sync_expected_full_anchor_` marks a lock found by the ARMED connected
+  full-anchor search; the LLR false-lock gate HOLDS such locks at corr ≥ 0.60
+  (logs "faded group, not a false lock") — frames may fail LDPC individually,
+  the group/erasure/ARQ machinery owns that, and the group ack always emits.
+- `connection.cpp` escape: snapshot current rung BEFORE the commit (log truth);
+  skip when the target equals the current rung; snap fixed escape landings
+  through `snapRungIndexDownToEnabled`.
+
+**Known residual (logged, not fixed tonight):** a rate-change abort does not
+cancel already-queued TX burst audio — every mid-flight switch airs one doomed
+burst (F144/F147 double key-downs up to 17 s). TX-queue surgery, needs daylight.
+
+**Verified:** full ctest 83/84 (known TNC red); faithful gate + rig run below.
+
 ## 2026-07-06 — fix(rate): F145 deadlock — rung-index arithmetic snaps to the ENABLED ladder (disabled-rung command pinned a cratering rung 50 s)
 
 **What was broken:** the QAM8 R3/4 auto-disable (below) punched a HOLE at canonical

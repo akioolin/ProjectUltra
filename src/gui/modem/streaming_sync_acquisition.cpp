@@ -319,6 +319,9 @@ void StreamingDecoder::searchForSync() {
     bool use_full_ofdm_anchor_search =
         connected_data_preamble && sync_controller_.expect_full_ofdm_anchor_ &&
         mode_ == protocol::WaveformMode::OFDM_CHIRP;
+    // F147: each search attempt re-derives the expected-anchor mark; only the
+    // connected full-anchor accept below sets it.
+    last_sync_expected_full_anchor_ = false;
     bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     bool used_full_anchor_fallback = false;
     // (R4: the adaptive short-chirp re-anchor was removed — superseded by warm-handoff,
@@ -439,6 +442,12 @@ void StreamingDecoder::searchForSync() {
         if (found && use_full_ofdm_anchor_search) {
             LOG_MODEM(INFO, "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
                       log_prefix_.c_str(), sync_result.correlation);
+            // F147: mark this lock as an EXPECTED connected full anchor — the
+            // false-lock LLR gate must not bounce it back to re-search (a
+            // strong chirp match at an armed resend boundary is near-certain
+            // genuine; mush LLRs there mean a faded/cold-CFO group, and the
+            // group/erasure machinery — not re-search — owns that failure).
+            last_sync_expected_full_anchor_ = true;
             if (data_sync_accepted_callback_) {
                 data_sync_accepted_callback_(sync_result.correlation);
             }

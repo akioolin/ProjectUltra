@@ -2092,10 +2092,36 @@ void Connection::executeEscapeDrop(const char* trigger) {
         // there — a second escape then takes the QPSK R3/4 exit below.
         const bool midrung_exit = esc_is_qam16 &&
             qam16DemoteMidrungEnabled() && data_code_rate_ != CodeRate::R1_2;
-        const Modulation esc_mod =
+        Modulation esc_mod =
             midrung_exit ? Modulation::QAM16 : Modulation::QPSK;
-        const CodeRate esc_rate =
+        CodeRate esc_rate =
             midrung_exit ? CodeRate::R1_2 : CodeRate::R3_4;
+        // F145/F147 ENABLED-LADDER: escape landings are fixed rungs — snap them
+        // through the enabled table like every other rung-index consumer.
+        {
+            const uint8_t esc_snapped = snapRungIndexDownToEnabled(
+                coherentRungIndexFor(esc_mod, esc_rate));
+            if (esc_snapped != kRungIdxNone) {
+                const CoherentPick p = coherentRungFromIndex(esc_snapped);
+                esc_mod = p.mod;
+                esc_rate = p.rate;
+            }
+        }
+        // F147 log-truth + no-op guard: snapshot the CURRENT rung BEFORE the
+        // descriptor commit mutates data_modulation_/data_code_rate_ — the old
+        // log read the post-commit state and printed "16QAM R1/2 -> 16QAM R1/2"
+        // for a real R2/3 -> R1/2 drop. And if the escape target IS the current
+        // rung (e.g. it raced an authority obey that already landed there),
+        // skip: re-committing burns an epoch bump + re-encode for nothing.
+        const Modulation esc_from_mod = data_modulation_;
+        const CodeRate esc_from_rate = data_code_rate_;
+        if (esc_mod == esc_from_mod && esc_rate == esc_from_rate) {
+            LOG_MODEM(WARN,
+                      "Connection: ESCAPE-drop target %s %s == current rung (%s) — "
+                      "already landed (authority/escape race), skipping",
+                      modulationToString(esc_mod), codeRateToString(esc_rate), trigger);
+            return;
+        }
         if (!midrung_exit && esc_is_qam16) noteQam16Demoted(2);
         // PHASE-3 (2026-07-04): the FIRST escape of a silent stretch commits via the
         // descriptor (mid-window era-safe under move-epoch; the wire self-describes,
@@ -2116,9 +2142,8 @@ void Connection::executeEscapeDrop(const char* trigger) {
                 v2::ModeChangeReason::CHANNEL_DEGRADED);
         }
         LOG_MODEM(WARN, "Connection: ESCAPE-drop %s %s -> %s %s (%s) via %s",
-                  modulationToString(esc_is_qam16 ? Modulation::QAM16
-                                                  : Modulation::QAM8),
-                  codeRateToString(data_code_rate_), modulationToString(esc_mod),
+                  modulationToString(esc_from_mod),
+                  codeRateToString(esc_from_rate), modulationToString(esc_mod),
                   codeRateToString(esc_rate), trigger,
                   desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
         if (!desc_committed) {

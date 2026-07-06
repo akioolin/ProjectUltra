@@ -151,6 +151,7 @@ public:
     // F129: decoder-evidence RX activity (sync/frame metrics within `within_ms`).
     bool rxSignalActive(int64_t within_ms = 1600) const;
     int64_t lastRxSignalMs() const;
+    int64_t lastRxSubstantiveMs() const;  // F147: accepted-decode evidence only
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,

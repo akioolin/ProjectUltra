@@ -895,6 +895,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // Airtime overhead from the per-group full chirp is acceptable
                             // until the warm-sync hand-off across the gap is hardened.
                             //
+                            // F147: a consumed BURST_HEADER is SUBSTANTIVE peer-TX
+                            // evidence (a decoded descriptor cannot come from noise).
+                            stampRxSubstantive();
                             // §16.8 step 1: BURST_HEADER-consume snapshot (instrumentation).
                             // Logs the warm-sync state we held when the next group's
                             // BURST_HEADER arrived (just before we throw it away with
@@ -1386,7 +1389,30 @@ void StreamingDecoder::decodeCurrentFrame() {
                               "fixed-frame wait", log_prefix_.c_str(), reject_ping.ratio);
                 }
             }
-            if (!data_bearing_mcdpsk) {
+            // F147 EXPECTED-ANCHOR IMMUNITY: this gate exists to kill false
+            // chirp locks during IDLE search. A strong chirp match found by the
+            // full-anchor search WE ARMED (sender resend expected at exactly
+            // this boundary) is a different prior — mush LLRs there mean a
+            // faded or cold-CFO group, and bouncing to re-search forfeits the
+            // whole group AND its ack (F147: corr=0.76 genuine anchors rejected
+            // twice; 2 bursts + 40 s + the ack channel lost). HOLD the lock and
+            // let the frames fail LDPC individually — the group/erasure/ARQ
+            // machinery owns that failure mode and the group ack still emits.
+            // 0.60 sits well above the chirp accept floor; noise does not
+            // produce 0.6+ chirp correlations inside an armed window.
+            constexpr float kExpectedAnchorHoldCorr = 0.60f;
+            const bool hold_expected_anchor =
+                is_ofdm && connected_ && last_sync_expected_full_anchor_ &&
+                sync_correlation_ >= kExpectedAnchorHoldCorr;
+            if (hold_expected_anchor) {
+                LOG_MODEM(WARN,
+                          "[%s] Weak LLRs on EXPECTED full anchor (corr=%.2f, "
+                          "|llr|_avg=%.2f, near_zero=%.1f%%) — holding lock "
+                          "(faded group, not a false lock)",
+                          log_prefix_.c_str(), sync_correlation_,
+                          llr_quality.mean_abs,
+                          llr_quality.near_zero_fraction * 100.0f);
+            } else if (!data_bearing_mcdpsk) {
                 if (allow_ping_detection &&
                     tryEmitPingByChirpLock("pre_ldpc_llr_reject", false)) {
                     return;
@@ -2027,6 +2053,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         !result.success && mode_ == protocol::WaveformMode::MC_DPSK &&
         result.has_partial_codewords;
     if (result.success || result.codewords_ok > 0) {
+        // F147: decoded codewords are SUBSTANTIVE peer-TX evidence (noise
+        // candidates never survive LDPC) — feeds the ack-repeat cancel gate.
+        stampRxSubstantive();
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);

@@ -444,6 +444,22 @@ public:
                 std::chrono::steady_clock::now().time_since_epoch())
                 .count());
     }
+    // F147: SUBSTANTIVE evidence — proof a peer transmission is genuinely
+    // arriving (accepted sync, consumed descriptor, codewords decoding), as
+    // opposed to the broad stamp above, which fires on every decode ATTEMPT
+    // including false-lock rejects on idle noise. The ack-repeat cancel must
+    // use THIS one: in F147 the repeat (armed to save a one-way-faded ack) was
+    // canceled by the decoder rejecting noise candidates in a silent gap —
+    // "inbound transmission in progress" with nothing on the air. The broad
+    // stamp stays for listen-before-ACK, where conservative deferral is right.
+    int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    void stampRxSubstantive() const {
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+        last_rx_substantive_ms_.store(now);
+        last_rx_signal_ms_.store(now);  // substantive implies signal
+    }
     float getLastOFDMBroadbandSNREstimate() const {
         return last_ofdm_broadband_snr_db_.load();
     }
@@ -845,6 +861,14 @@ private:
     // collision. Level-independent processing-gain evidence; consumers ask
     // rxSignalActiveWithin(~1600ms) — one frame interval plus slack.
     mutable std::atomic<int64_t> last_rx_signal_ms_{-1000000};
+    mutable std::atomic<int64_t> last_rx_substantive_ms_{-1000000};  // F147
+    // F147: the current lock came from the connected full-anchor search the
+    // receiver ARMED (a sender resend was expected). The pre-LDPC false-lock
+    // LLR gate must hold this lock instead of bouncing to re-search: rejecting
+    // a genuine armed anchor forfeits the whole group AND its ack (F147: two
+    // 8-frame bursts + 40 s lost after corr=0.76 anchors were rejected on
+    // faded first-frame LLRs).
+    bool last_sync_expected_full_anchor_ = false;
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as
