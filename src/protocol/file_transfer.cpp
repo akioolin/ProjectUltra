@@ -205,6 +205,34 @@ bool FileTransferController::hasMoreChunks() const {
     return !tx_metadata_sent_ || tx_offset_ < tx_data_.size();
 }
 
+void FileTransferController::noteRangeDelivered(uint32_t offset, uint32_t len) {
+    if (state_ != FileTransferState::SENDING || len == 0) {
+        return;
+    }
+    tx_delivered_ranges_.emplace_back(offset, len);
+    LOG_MODEM(INFO,
+              "FileTransfer: range [%u, %u) peer-confirmed across abort — will "
+              "skip on requeue",
+              offset, offset + len);
+}
+
+// F163 FIX-4: advance tx_offset_ past any peer-confirmed range it sits inside.
+void FileTransferController::skipDeliveredRanges() {
+    bool moved = true;
+    while (moved) {
+        moved = false;
+        for (const auto& r : tx_delivered_ranges_) {
+            if (tx_offset_ >= r.first && tx_offset_ < r.first + r.second) {
+                tx_offset_ = r.first + r.second;
+                moved = true;
+            }
+        }
+    }
+    if (tx_offset_ > tx_data_.size()) {
+        tx_offset_ = static_cast<uint32_t>(tx_data_.size());
+    }
+}
+
 void FileTransferController::requeuePendingChunks() {
     if (state_ != FileTransferState::SENDING) {
         return;
@@ -229,6 +257,7 @@ void FileTransferController::requeuePendingChunks() {
 
     tx_pending_ledger_.clear();
     chunks_sent_ = chunks_acked_;
+    skipDeliveredRanges();  // F163 FIX-4: don't re-send peer-confirmed bytes
 
     LOG_MODEM(WARN,
               "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, resume_offset=%u)",
@@ -401,12 +430,20 @@ Bytes FileTransferController::buildDataPayload() {
     // Data chunk
     size_t remaining = tx_data_.size() - tx_offset_;
     size_t chunk_size = std::min(remaining, chunk_size_);
+    // F163 FIX-4: never slice INTO a peer-confirmed range — cap at its start
+    // (the skip below then jumps the offset past it on the next chunk).
+    for (const auto& r : tx_delivered_ranges_) {
+        if (r.first > tx_offset_ && r.first < tx_offset_ + chunk_size) {
+            chunk_size = r.first - tx_offset_;
+        }
+    }
 
     payload.insert(payload.end(),
                    tx_data_.begin() + tx_offset_,
                    tx_data_.begin() + tx_offset_ + chunk_size);
 
     tx_offset_ += static_cast<uint32_t>(chunk_size);
+    skipDeliveredRanges();  // F163 FIX-4
 
     return payload;
 }
@@ -838,6 +875,7 @@ uint32_t FileTransferController::calculateCRC32File(const std::string& filepath)
 }
 
 void FileTransferController::resetTxState() {
+    tx_delivered_ranges_.clear();  // F163 FIX-4: per-file
     tx_filepath_.clear();
     tx_filename_.clear();
     tx_data_.clear();

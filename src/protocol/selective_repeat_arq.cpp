@@ -194,6 +194,12 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
 
         if (slot.acked) {
             cleared_acked++;
+            // F163 FIX-4: the peer confirmed this frame (SACK) — salvage its
+            // payload identity so the file layer skips those bytes on requeue
+            // (13 receiver-confirmed frames were re-sent across F163).
+            if (on_sacked_frame_discarded_ && !slot.frame_data.empty()) {
+                on_sacked_frame_discarded_(slot.frame_data);
+            }
         } else {
             aborted_unacked++;
         }
@@ -2347,6 +2353,11 @@ void SelectiveRepeatARQ::abortPendingTx() {
         }
     }
     for (auto& slot : tx_window_) {
+        // F163 FIX-4 (same salvage as setCodeRate): SACKed = peer-confirmed.
+        if (slot.active && slot.acked && on_sacked_frame_discarded_ &&
+            !slot.frame_data.empty()) {
+            on_sacked_frame_discarded_(slot.frame_data);
+        }
         slot.active = false;
         slot.acked = false;
         slot.frame_data.clear();

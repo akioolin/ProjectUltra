@@ -302,6 +302,14 @@ public:
         on_tx_base_advanced_ = std::move(cb);
     }
     using TxFrameFailedCallback = std::function<void(uint16_t seq)>;
+
+    // F163 FIX-4: fired for each SACKED (receiver-confirmed) TX slot that a
+    // rate/CW-change abort is about to discard — the peer HAS these bytes; the
+    // file layer must not re-send them. Carries the slot's serialized frame.
+    using SackedFrameDiscardedCallback = std::function<void(const Bytes& frame_data)>;
+    void setSackedFrameDiscardedCallback(SackedFrameDiscardedCallback cb) {
+        on_sacked_frame_discarded_ = std::move(cb);
+    }
     void setTxFrameFailedCallback(TxFrameFailedCallback cb) {
         on_tx_frame_failed_ = std::move(cb);
     }
@@ -526,6 +534,7 @@ private:
     TxBaseAdvancedCallback on_tx_base_advanced_;
     TxFrameFailedCallback on_tx_frame_failed_;
     TurnRequestCallback should_request_turn_;
+    SackedFrameDiscardedCallback on_sacked_frame_discarded_;
 
     // Internal helpers
     size_t seqToSlot(uint16_t seq) const;

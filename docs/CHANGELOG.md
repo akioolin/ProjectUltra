@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(sync/arq/file): F163 time-budget fixes — full anchor on every switch; air-schedule RTOs; SACKed-byte salvage
+
+**Source:** full two-log forensic time budget of F163 (423.8 s / 0.97 kbps, every
+second attributed; report /tmp/F163_time_budget_report.md). Four stall episodes
+= 210 s (48%) for 3% of the data. Three code fixes, one correction:
+
+1. **Full anchor on EVERY DESC-SWITCH commit** (`commitLocalModeSwitch`): the
+   fixed-grid "descriptor alone re-labels the group" theory failed on fading —
+   three light-descriptor switches were MISSED, whole groups decoded at the
+   stale config (cw_fail=8 vs a 12-cw burst), adoption waited ~25 s for a
+   full-anchor RTO resend (~130 s of the run). Warm state still carries; the
+   switch descriptor rides chirp+LTS (+1.2 s per switch = cheapest insurance in
+   the budget). ConnectionAdaptive anchor pins inverted back.
+2. **Play-head carry + air-schedule RTOs** (`noteDataBurstKeydown`): a burst
+   submitted while the previous is still airing queues BEHIND it; the modeled
+   end now carries, and pending slot RTOs are deferred by the queue delay
+   (deferPendingRetransmits) so timers run on the AIR schedule — F163's t=346
+   RTO fired while its own burst was still on air and doomed a duplicate.
+3. **SACKed-byte salvage across rate aborts** (new
+   `SackedFrameDiscardedCallback` in both abort sites + FileTransfer
+   `noteRangeDelivered`/`skipDeliveredRanges`): a rate-change abort discarded 13
+   receiver-CONFIRMED frames in F163 and re-sent their bytes; the file layer now
+   skips peer-confirmed ranges on requeue (receiver reassembly is
+   offset-idempotent — never unsafe, now also not wasteful).
+4. **Correction — "re-chunk on rate change" is a NON-BUG:** wire frame lengths
+   scale with the rung (432/648/864 B verified in the F163 logs); the chunker
+   re-slices lazily at current capacity. The workflow's "flat 478.5 B/frame" was
+   a mix-average artifact. Ladder byte-math is sound; the losses were the stalls.
+
+**Verified:** test_selective_repeat 52/52 (new salvage pin), ConnectionAdaptive
+150/150 (anchor pins inverted), full ctest 83/84 (known TNC red).
+
 ## 2026-07-06 — fix(rate): F160 rebalance — symmetric ladder (demote = first enabled below; dwell 3; first episode +4 dB)
 
 **What was broken:** the F149 stability pass over-corrected — F160 delivered

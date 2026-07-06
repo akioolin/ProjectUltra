@@ -1051,6 +1051,44 @@ bool test_move_epoch_adoption_group_advances_past_last_frame() {
     return true;
 }
 
+// F163 FIX-4: a rate-change abort must SALVAGE SACKed slots (peer-confirmed
+// frames) via the discard callback before clearing them — the file layer skips
+// those byte ranges on requeue instead of re-sending bytes the receiver holds.
+bool test_rate_abort_salvages_sacked_frames() {
+    TEST("rate-change abort fires salvage callback for SACKed slots only");
+
+    ARQConfig config;
+    config.window_size = 4;
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setTransmitCallback([](const Bytes&) {});
+
+    std::vector<Bytes> salvaged;
+    tx.setSackedFrameDiscardedCallback(
+        [&](const Bytes& f) { salvaged.push_back(f); });
+
+    // Send 3 frames; SACK the MIDDLE one (seq 1) via an ack with a hole at 0.
+    tx.sendData(Bytes{0x10});
+    tx.sendData(Bytes{0x11});
+    tx.sendData(Bytes{0x12});
+    auto sack = v2::ControlFrame::makeNack("RX1", "TX1", /*seq=*/0xFFFF,
+                                           /*bitmap=*/0x2);  // base-1, bit->seq 1
+    sack.type = v2::FrameType::ACK;
+    tx.onFrameReceived(sack.serialize());
+
+    tx.setCodeRate(CodeRate::R1_2);  // abort: clears slots, salvages SACKed
+
+    if (salvaged.size() != 1)
+        FAIL("expected exactly 1 salvaged frame (the SACKed seq 1), got " +
+             std::to_string(salvaged.size()));
+    auto f = v2::DataFrame::deserialize(salvaged[0]);
+    if (!f || f->seq != 1)
+        FAIL("salvaged frame was not seq 1");
+
+    PASS();
+    return true;
+}
+
 // Knob OFF (default): flags bits 6-7 / EPOCH_REBASE stay zero, SACK bitmaps carry
 // no epoch bits, and a below-window TEXT re-send is dropped exactly as before —
 // byte-identical wire behavior.
@@ -2519,6 +2557,7 @@ int main() {
     test_move_epoch_stale_ack_ignored();
     test_move_epoch_unanchored_wait_for_rebase();
     test_move_epoch_adoption_group_advances_past_last_frame();
+    test_rate_abort_salvages_sacked_frames();
     test_move_epoch_knob_off_byte_identical();
 
     std::cout << "\nRetransmission Tests:\n";

@@ -253,6 +253,25 @@ Connection::Connection(const ConnectionConfig& config)
     arq_.setTurnRequestCallback([this]() {
         return noteTurnRequestOnAckIfNeeded();
     });
+    // F163 FIX-4: a rate/CW-change abort discards SACKed (peer-confirmed) TX
+    // slots — salvage their FILE byte-ranges so the requeue does not re-send
+    // bytes the receiver already holds (13 confirmed frames re-sent in F163).
+    arq_.setSackedFrameDiscardedCallback([this](const Bytes& frame_data) {
+        auto frame = v2::DataFrame::deserialize(frame_data);
+        if (!frame || frame->payload.size() <= FileTransferController::FILE_DATA_OVERHEAD) {
+            return;
+        }
+        if (frame->payload[0] != static_cast<uint8_t>(PayloadType::FILE_DATA)) {
+            return;  // FILE_START/TEXT: metadata or seq-deduped — never salvage
+        }
+        const uint32_t offset = (static_cast<uint32_t>(frame->payload[1]) << 24) |
+                                (static_cast<uint32_t>(frame->payload[2]) << 16) |
+                                (static_cast<uint32_t>(frame->payload[3]) << 8) |
+                                static_cast<uint32_t>(frame->payload[4]);
+        const uint32_t len = static_cast<uint32_t>(
+            frame->payload.size() - FileTransferController::FILE_DATA_OVERHEAD);
+        file_transfer_.noteRangeDelivered(offset, len);
+    });
 
     // TRANSPORT MERGE (step 1, env ULTRA_TONE_ACK_INTERACTIVE): route the interactive
     // SACK through the same tone-burst transport the burst path uses. When enabled, the
@@ -2828,9 +2847,32 @@ void Connection::noteDataBurstKeydown(size_t frame_count) {
     const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
         data_modulation_, data_code_rate_, frame_count, data_frame_cw_count_,
         reanchor_ms, selectBurstLiftingZ());
-    last_data_burst_end_ =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(airtime_ms);
+    // F163 PLAY-HEAD CARRY: the audio device serializes — a burst submitted while
+    // the previous one is still (modeled as) airing QUEUES BEHIND it and starts
+    // at the previous modeled end, not now. Without the carry, back-to-back
+    // flushes (RTO resend + escape re-encode 66 ms apart = 16.4 s continuous
+    // keydown in F163) under-model the second burst's end and the ARQ slot RTO
+    // — armed from SUBMIT time — can fire while its own burst is still ON AIR
+    // (observed at t=346: a whole doomed duplicate burst).
+    const auto now = std::chrono::steady_clock::now();
+    const auto start = (last_data_burst_end_valid_ && last_data_burst_end_ > now)
+                           ? last_data_burst_end_
+                           : now;
+    const uint32_t queue_delay_ms = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(start - now).count());
+    last_data_burst_end_ = start + std::chrono::milliseconds(airtime_ms);
     last_data_burst_end_valid_ = true;
+    if (queue_delay_ms > 0) {
+        // Shift every pending slot's RTO by the queue delay so timers run on the
+        // AIR schedule, not the submit schedule. Pure extension — resending
+        // later than RTO is always protocol-legal; the dangerous direction
+        // (resend while the previous copy is still airing) is what this removes.
+        arq_.deferPendingRetransmits(queue_delay_ms);
+        LOG_MODEM(INFO,
+                  "Connection: TX queue-behind %u ms — slot RTOs deferred to the "
+                  "air schedule (burst airtime %u ms)",
+                  queue_delay_ms, airtime_ms);
+    }
 }
 
 uint32_t Connection::elapsedSinceLastDataBurstEndMs() const {
@@ -5355,17 +5397,20 @@ void Connection::commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_cou
     const int new_spacing =
         ultra::ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
-    // §2.6-arm-3 mitigation, REFINED (2026-07-06): the full chirp+LTS re-anchor
-    // exists to re-derive |H| under a NEW pilot/carrier geometry (the 2026-06-09
-    // 0/8-forever arm). With the fixed-grid band (R1/2..R3/4 all sp8, every
-    // coherent mod, same FFT/carriers/frame cadence) a within-band switch changes
-    // ONLY the constellation — there is nothing to desync, warm sync/CFO/|H|
-    // carry, and the descriptor alone re-labels the next group (the commercial
-    // fixed-grid-band model: fast switching inside the band, anchors only at band
-    // crossings). Arm the anchor ONLY when the pilot grid actually changes
-    // (e.g. dropping to the dense-pilot R1/4 survival band).
+    // §2.6-arm-3 mitigation, RE-REFINED (F163 2026-07-06): the fixed-grid theory
+    // ("within-band switch changes only the constellation — nothing to desync,
+    // the descriptor alone re-labels the next group") was HALF right: warm
+    // sync/CFO/|H| do carry, but the DESCRIPTOR still has to be FOUND, and on
+    // fading a light-preamble descriptor at a MODE BOUNDARY is exactly the one
+    // that cannot afford to be missed. F163: three up-switches rode light
+    // descriptors into fades, the receiver decoded whole groups at the STALE
+    // config (cw_fail=8 vs a 12-cw burst), and adoption waited 25 s for a
+    // full-anchor RTO resend — ~130 s of the 424 s transfer. A missed descriptor
+    // between SAME-mode groups is harmless (warm frame path, same geometry);
+    // across a switch it is total loss. So: FULL anchor on EVERY commit — the
+    // +1.2 s of chirp+LTS is the cheapest insurance in the whole budget.
+    desc_switch_full_anchor_pending_ = true;
     if (new_spacing != old_spacing) {
-        desc_switch_full_anchor_pending_ = true;
         LOG_MODEM(INFO,
                   "Connection: DESC-SWITCH grid change (pilot sp %d -> %d) — full "
                   "anchor armed",
@@ -5373,7 +5418,7 @@ void Connection::commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_cou
     } else {
         LOG_MODEM(INFO,
                   "Connection: DESC-SWITCH within fixed grid (sp %d) — warm state "
-                  "carries, no anchor",
+                  "carries; full anchor armed for the switch descriptor (F163)",
                   new_spacing);
     }
 

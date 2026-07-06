@@ -825,10 +825,10 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
           "commit must count in descriptor_mode_switches");
     CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == epoch_before,
           "clean-boundary commit: EMPTY window -> no ARQ abort -> no epoch bump");
-    // FIXED-GRID BAND (2026-07-06): a WITHIN-GRID switch (pilot spacing unchanged
-    // — the whole R1/2..R3/4 coherent ladder is one sp8 grid) carries NO full
-    // anchor; warm state is valid by construction and the descriptor alone
-    // re-labels the group. The anchor arms only on real grid changes (R1/4).
+    // F163 REVERSAL (2026-07-06): warm state still carries within-grid, but the
+    // switch DESCRIPTOR itself must ride a full anchor — three light-descriptor
+    // switches were missed on fading (25 s adoption latency each, ~130 s of the
+    // 424 s transfer). Every commit now arms the full anchor.
     bool full_anchor_armed_or_consumed =
         ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
     for (size_t i = 0; i < burst_full_anchor.size(); ++i) {
@@ -836,8 +836,9 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
             full_anchor_armed_or_consumed = true;
         }
     }
-    CHECK(!full_anchor_armed_or_consumed,
-          "a within-grid switch must NOT arm/carry the full anchor (fixed-grid band)");
+    CHECK(full_anchor_armed_or_consumed,
+          "every DESC-SWITCH commit must arm the full anchor (F163: missed "
+          "light switch descriptors cost 25 s each)");
 }
 
 // Knob-ON receiver adopt: a mode-hop descriptor notification runs the RX-relevant
@@ -1081,10 +1082,10 @@ void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
             full_anchor_armed_or_consumed = true;
         }
     }
-    // FIXED-GRID BAND (2026-07-06): 16QAM R2/3 -> 16QAM R1/2 midrung landing is
-    // now a WITHIN-GRID switch (R1/2 joined the sp8 grid) — no anchor.
-    CHECK(!full_anchor_armed_or_consumed,
-          "a within-grid switch must NOT arm/carry the full anchor (fixed-grid band)");
+    // F163 REVERSAL (2026-07-06): every commit arms the full anchor — the
+    // midrung landing included (see the first-switch comment above).
+    CHECK(full_anchor_armed_or_consumed,
+          "every DESC-SWITCH commit must arm the full anchor (F163)");
 
     // Rate-limit: the SAME command (same group_seq — the base was frozen by the
     // crater) re-arriving before the receiver's adoption is deduped: no second

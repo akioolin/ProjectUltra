@@ -5,6 +5,8 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 #include <map>
 #include <cstdint>
 
@@ -170,11 +172,21 @@ public:
     void setReceivedCallback(ReceivedCallback cb) { on_received_ = cb; }
     void setSentCallback(SentCallback cb) { on_sent_ = cb; }
 
+    // F163 FIX-4: mark [offset, offset+len) as PEER-CONFIRMED delivered (a SACKed
+    // frame a rate-change abort discarded). getNextChunkPayload skips these
+    // ranges instead of re-sending bytes the receiver already holds; the
+    // receiver's offset-idempotent reassembly makes over-sending harmless but
+    // wasteful. Ranges live for the current TX file only.
+    void noteRangeDelivered(uint32_t offset, uint32_t len);
+
 private:
     FileTransferState state_ = FileTransferState::IDLE;
     size_t chunk_size_ = DEFAULT_CHUNK_SIZE;
 
+    void skipDeliveredRanges();  // F163 FIX-4
+
     // TX state
+    std::vector<std::pair<uint32_t, uint32_t>> tx_delivered_ranges_;  // F163 FIX-4 (offset,len)
     std::string tx_filepath_;
     std::string tx_filename_;  // Just the filename, no path
     Bytes tx_data_;            // File data (possibly compressed)
