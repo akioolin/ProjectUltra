@@ -76,7 +76,8 @@ void checkMatchingOFDMGeometry(Modulation mod,
 // geometry expectations (spacing 10/15/8) no longer describe a live path. The
 // coherent cases below validate the geometry helper on the modes the ladder selects.
 void test_coherent_ofdm_config_match() {
-    checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R1_2, 5, 47, 94);
+    // FIXED-GRID BAND (2026-07-06): R1/2 rides the sp8 grid -> 8 pilots, 51 data.
+    checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R1_2, 8, 51, 102);
     checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R3_4, 8, 51, 102);
 }
 

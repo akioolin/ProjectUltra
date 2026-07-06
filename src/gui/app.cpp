@@ -2777,12 +2777,14 @@ void App::maybeFireAckRepeatIfSilent() {
                    "copy 1 evidently heard)");
             return;
         }
-        // F129 DECODER-EVIDENCE cancel: the energy CCA lies on the rig (its
-        // adaptive threshold learned burst body as floor -> idle=1 DURING the
-        // sender's burst; both F129 self-TX craters fired with the decoder
-        // ALREADY SYNCED to the inbound burst). Sync/frame evidence within the
-        // window = copy 1 was heard, the next burst is arriving — cancel.
-        if (modem_.rxSignalActive(1600)) {
+        // F129 DECODER-EVIDENCE cancel, F143-corrected: count only evidence
+        // NEWER than the arm — the arm itself was triggered by decoding a group
+        // (evidence always <1.6 s old), so the original within-window check
+        // canceled EVERY repeat at stash time and silently killed the tone-fade
+        // diversity feature (F143: sender re-sent whole bursts when ack copy 1
+        // faded and no repeat saved it). NEW inbound signal after the arm = copy
+        // 1 was heard and the next burst is arriving — that is the cancel case.
+        if (modem_.lastRxSignalMs() > ack_repeat_armed_rx_ms_ + 500) {
             ack_repeat_pending_ = false;
             guiLog("ACK-REPEAT-SILENT: canceled (decoder RX evidence — "
                    "inbound transmission in progress)");
@@ -2823,6 +2825,7 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
         ack_repeat_samples_ = samples;
         ack_repeat_fire_time_ = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
+        ack_repeat_armed_rx_ms_ = modem_.lastRxSignalMs();  // F143: baseline stamp
         ack_repeat_pending_ = true;
     }
     queueRealTxSamples(samples, "TX tone-burst ACK audio", /*in_qso_data=*/false);

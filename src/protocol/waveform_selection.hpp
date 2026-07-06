@@ -204,7 +204,7 @@ inline constexpr CoherentRung kCoherentLadderPsk8Exp[] = {
     // mod              rate            AWGN             GOOD             MODERATE
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, 20.0f,           kRungDisabledDb}},
-    {Modulation::QAM8,  CodeRate::R3_4, {18.0f,           kRungDisabledDb, kRungDisabledDb}},  // AWGN: May validation 2330 clean (QPSK R3/4 15 + 3.6); Good unmeasured (tight 45° boundaries on fading)
+    {Modulation::QAM8,  CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},  // AUTO-DISABLED 2026-07-06: the A18 anchor was validated on TRUE AWGN only; on the Watterson bench a 60-90 s calm stretch legitimately classifies AWGN, unlocks this rung, and it craters when fading returns (F141/F143/F143-probe: 3 runs poisoned). Re-enable only after a FADING validation. Forceable for measurement.
     {Modulation::QAM8,  CodeRate::R2_3, {16.0f,           19.0f,           kRungDisabledDb}},  // 2026-07-05 probe: good@20 s42 PASS 2040, 0 craters (forced). QPSK R2/3 anchor +3.6 -> A16/G19
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, 18.0f,           kRungDisabledDb}},
     {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},

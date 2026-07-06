@@ -2324,6 +2324,16 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     if (raw_class == rx_auth_class_sticky_) {
         rx_auth_class_streak_ = 0;
         rx_auth_fading_passed_ = fading_avg;
+    } else if (raw_class < rx_auth_class_sticky_ && rx_auth_class_streak_ < 4) {
+        // ASYMMETRIC PERSISTENCE (F143): class IMPROVEMENTS (e.g. Good -> AWGN)
+        // adopt only after ~4 consecutive verdicts (vs 2 for degradations) — a
+        // calm dip in the fading average unlocked the AWGN-only 8PSK R3/4 rung
+        // on a fading channel TWICE in one run, cratering on arrival each time.
+        // Optimism is earned at half the speed of caution. While unconfirmed,
+        // the map keeps seeing the last IN-CLASS fading value (passing the
+        // improved reading would classify itself and bypass this hold).
+        ++rx_auth_class_streak_;
+        eff_fading = rx_auth_fading_passed_;
     } else if (raw_class > rx_auth_class_sticky_ && rx_auth_clean_streak_ >= 2) {
         // DECODE-EVIDENCE VETO (F125): the classifier says the channel got WORSE
         // while the last 2+ groups decoded clean — the decode record refutes it

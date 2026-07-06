@@ -434,6 +434,10 @@ public:
                              .count();
         return (now - last_rx_signal_ms_.load()) <= within_ms;
     }
+    // F143: raw stamp accessor — consumers comparing against an ARM time (repeat
+    // cancel must count only evidence NEWER than the arm, not the decode of the
+    // very group whose ack armed it).
+    int64_t lastRxSignalMs() const { return last_rx_signal_ms_.load(); }
     void stampRxSignal() const {
         last_rx_signal_ms_.store(
             std::chrono::duration_cast<std::chrono::milliseconds>(

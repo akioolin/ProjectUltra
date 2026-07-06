@@ -536,9 +536,9 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    // DEFAULT ladder = psk8-exp (2026-07-05): AWGN top enabled rung is QAM8 R3/4 (A18).
-    CHECK(mod == Modulation::QAM8 && rate == CodeRate::R3_4,
-          "AWGN SNR20 selects QAM8 R3/4 (top enabled AWGN rung; 16QAM Good-only)");
+    // QAM8 R3/4 auto-disabled 2026-07-06 (AWGN-only anchor, fading-poisonous).
+    CHECK(mod == Modulation::QAM8 && rate == CodeRate::R2_3,
+          "AWGN SNR20 selects QAM8 R2/3 (top enabled AWGN rung)");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,

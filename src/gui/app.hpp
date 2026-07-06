@@ -294,6 +294,7 @@ private:
     std::vector<float> ack_repeat_samples_;
     std::chrono::steady_clock::time_point ack_repeat_fire_time_{};
     bool ack_repeat_pending_ = false;
+    int64_t ack_repeat_armed_rx_ms_ = 0;  // F143: decoder stamp AT arm; cancel only on NEWER evidence
     void maybeFireAckRepeatIfSilent();
     // LISTEN-BEFORE-ACK (2026-07-05, F124 finding: 4 tone-ACKs keyed while the
     // sender's audio was actively arriving — a half-duplex violation that blanks

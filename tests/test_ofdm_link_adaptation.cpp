@@ -28,8 +28,12 @@ void test_pilot_spacing_policy() {
           "DQPSK R3/4 should reduce pilot overhead");
     CHECK(recommendedPilotSpacing(Modulation::D8PSK, CodeRate::R1_2) == 8,
           "D8PSK R1/2 should use denser pilots than DQPSK");
-    CHECK(recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_2) == 5,
-          "Coherent QPSK should use dense pilots");
+    // FIXED-GRID BAND (2026-07-06): R1/2 joined the sp8 grid (see
+    // ofdm_link_adaptation.hpp); only R1/4 keeps the dense survival grid.
+    CHECK(recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_2) == 8,
+          "Coherent QPSK R1/2 rides the fixed sp8 grid");
+    CHECK(recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_4) == 5,
+          "Coherent QPSK R1/4 keeps the dense survival grid");
     CHECK(recommendedPilotSpacing(Modulation::QAM16, CodeRate::R3_4) == 8,
           "High-rate coherent modes should reduce pilot overhead");
     CHECK(recommendedPilotSpacing(Modulation::QAM32, CodeRate::R3_4) == 5,
