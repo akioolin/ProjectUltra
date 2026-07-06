@@ -1405,6 +1405,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         // Initialize accumulation state with first frame's soft bits
         burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
         burst_soft_buffer_.push_back(std::move(soft_bits));

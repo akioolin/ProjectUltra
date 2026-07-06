@@ -485,6 +485,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
             pending_total_cw_ = 0;
             burst_blocks_decoded_ = 0;
             burst_soft_buffer_.clear();
+            burst_predecoded_.clear();
             descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             mc_burst_pending_frame_ = false;
@@ -774,6 +775,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
+    burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
@@ -1004,6 +1006,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     // the full reset — there the cursor jump is harmless by construction.
     if (!descriptor_group_size_locked_) {
         burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
         burst_metric_templates_.clear();
         sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
         sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
@@ -1309,6 +1312,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
+    burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;

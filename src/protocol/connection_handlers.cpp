@@ -380,6 +380,28 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
+        // RX-AUTHORITY ROBUST ENTRY (2026-07-05): under receiver authority, cap the
+        // ENTRY at QPSK R3/4 whatever the connect snapshot says. The connect-time
+        // SNR is a single fade snapshot (±3 dB) and group 0 always rides a full
+        // anchor — entering dense puts the most fragile group of the transfer on
+        // the least-proven CFO at the most-overconfident rung (group 0 partially
+        // failed in 4/4 gate runs). QPSK R3/4 survives the opening groups, the
+        // verdict measures the real channel, and the authority's multi-rung climb
+        // reaches the right rung within ~2 acks (the standard robust-entry /
+        // fast-start shape). Costs ~2 groups of modest rate; removes the
+        // entry-crater + penalty-poisoning failure mode.
+        if (rxRateAuthorityEnabled()) {
+            const uint8_t entry_idx = coherentRungIndexFor(rec_mod, rec_rate);
+            if (entry_idx > kRungIdxQpskR34) {
+                LOG_MODEM(INFO,
+                          "Connection: RX-AUTHORITY robust entry %s %s -> QPSK R3/4 "
+                          "(authority climbs from measurements)",
+                          modulationToString(rec_mod), codeRateToString(rec_rate));
+                rec_mod = Modulation::QPSK;
+                rec_rate = CodeRate::R3_4;
+            }
+        }
+
         // Override with forced values if specified
         if (forced_mod != Modulation::AUTO) {
             rec_mod = forced_mod;

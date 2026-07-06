@@ -217,6 +217,7 @@ void StreamingDecoder::accumulateBurstFrames() {
                       frame_ms, burst_soft_buffer_.size());
             finalizeBurstGroup();
             burst_soft_buffer_.clear();
+            burst_predecoded_.clear();
             descriptor_group_size_locked_ = false;
             burst_metric_templates_.clear();
             clearBurstDiagnostics();
@@ -256,6 +257,7 @@ void StreamingDecoder::accumulateBurstFrames() {
             stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
         clearBurstDiagnostics();
@@ -293,6 +295,7 @@ void StreamingDecoder::accumulateBurstFrames() {
                 stats_.frames_failed += burst_group_size;
             }
             burst_soft_buffer_.clear();
+            burst_predecoded_.clear();
             descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             clearBurstDiagnostics();
@@ -314,6 +317,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
             finalizeBurstGroup();
             burst_soft_buffer_.clear();
+            burst_predecoded_.clear();
             descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
             burst_metric_templates_.clear();
             clearBurstDiagnostics();
@@ -386,6 +390,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     // in-place erasure — the join itself still buys the REST of the group).
     pending_total_cw_ = 0;
     burst_soft_buffer_.clear();
+    burst_predecoded_.clear();
     burst_metric_templates_.clear();
     descriptor_group_size_locked_ = false;
     burst_min_block_ = data_block;
@@ -405,6 +410,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
             pre_cfo, residual, tracked_cfo, /*clamp_drift=*/true);
         burst_cfo_ = cfo_update.accepted_cfo;
         burst_soft_buffer_.push_back(std::move(soft));
+        burst_predecoded_.emplace_back();  // group-start frame: finalize decodes it
         DecodeResult m;
         populateDecodeMetrics(m, protocol::isOFDMMode(mode_), residual);
         burst_metric_templates_.push_back(m);
@@ -414,6 +420,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        burst_predecoded_.emplace_back();  // erasure: no pre-decode
         DecodeResult m;
         populateDecodeMetrics(m, protocol::isOFDMMode(mode_), 0.0f);
         burst_metric_templates_.push_back(m);
@@ -565,6 +572,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(0.0f);
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        0.0f, 0.0f, burst_cfo_,
@@ -608,6 +616,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(0.0f);
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        burst_pre_cfo, 0.0f, burst_cfo_,
@@ -690,6 +699,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        burst_pre_cfo,
@@ -708,6 +718,32 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));
+    // EARLY-FRAME-DECODE (2026-07-05, ULTRA_EARLY_FRAME_DECODE, default ON): for a
+    // NON-interleaved group this physical frame IS one logical frame — LDPC it NOW,
+    // in the inter-frame idle, so finalize only decodes the group-start + erasure
+    // frames before the ACK emits (decode-tail off the turnaround; also smooths RX
+    // CPU — no LDPC burst at group end). Decoded with the CURRENT burst_cfo_
+    // (per-frame-fresh; finalize would use the end-of-group value). Same HARQ
+    // index/save-restore discipline as the finalize loop; frame stats are counted
+    // at finalize only (once per frame).
+    static const bool kEarlyFrameDecode = [] {
+        const char* e = std::getenv("ULTRA_EARLY_FRAME_DECODE");
+        return !(e && e[0] == '0');
+    }();
+    if (kEarlyFrameDecode && !use_burst_interleave_ && burst_transport_rx_) {
+        const int idx = static_cast<int>(burst_soft_buffer_.size()) - 1;
+        const int saved_pending_total_cw = pending_total_cw_;
+        pending_total_cw_ = fixed_frame_codewords_;
+        burst_logical_index_ = idx;
+        PredecodedFrame pre;
+        pre.result = decodeFrame(burst_soft_buffer_.back(), burst_snr_, burst_cfo_);
+        pre.valid = true;
+        burst_logical_index_ = -1;
+        pending_total_cw_ = saved_pending_total_cw;
+        burst_predecoded_.push_back(std::move(pre));
+    } else {
+        burst_predecoded_.emplace_back();  // finalize decodes it
+    }
     pushMetricTemplate(residual_cfo);
     appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                    burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
@@ -916,6 +952,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         // controller resends. Without this catch the thread dies silently
         // and the entire RX side stops responding.
         burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         return;
     } catch (...) {
@@ -923,6 +960,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "[%s] BurstInterleaver::deinterleave threw UNKNOWN exception — group dropped",
                   log_prefix_.c_str());
         burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         return;
     }
@@ -964,16 +1002,31 @@ void StreamingDecoder::finalizeBurstGroup() {
         min_physical_llr = 0.0f;
     }
 
+    // EARLY-FRAME-DECODE consumption: FAIL-SAFE — the pre-decode cache is used
+    // ONLY when the group is non-interleaved AND the cache exactly mirrors the
+    // logical frame list (size match; late-join head insertion grows the buffer
+    // without the cache, so it mismatches and falls back to the full decode by
+    // construction). A missed invalidation degrades to old behavior, never a
+    // wrong decode.
+    const bool predecode_ok =
+        !use_burst_interleave_ &&
+        burst_predecoded_.size() == logical_soft.size() &&
+        static_cast<int>(logical_soft.size()) == burst_group_size;
     for (int i = 0; i < burst_group_size; i++) {
-        const int saved_pending_total_cw = pending_total_cw_;
-        pending_total_cw_ = fixed_frame_codewords_;
-        // HARQ provisional keys: expose the logical position to buildHarqKey
-        // (same save/set/restore pattern as pending_total_cw_); -1 outside the
-        // burst finalize loop doubles as the burst-path-only gate.
-        burst_logical_index_ = i;
-        DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
-        burst_logical_index_ = -1;
-        pending_total_cw_ = saved_pending_total_cw;
+        DecodeResult result;
+        if (predecode_ok && burst_predecoded_[static_cast<size_t>(i)].valid) {
+            result = std::move(burst_predecoded_[static_cast<size_t>(i)].result);
+        } else {
+            const int saved_pending_total_cw = pending_total_cw_;
+            pending_total_cw_ = fixed_frame_codewords_;
+            // HARQ provisional keys: expose the logical position to buildHarqKey
+            // (same save/set/restore pattern as pending_total_cw_); -1 outside the
+            // burst finalize loop doubles as the burst-path-only gate.
+            burst_logical_index_ = i;
+            result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
+            burst_logical_index_ = -1;
+            pending_total_cw_ = saved_pending_total_cw;
+        }
         if (i < static_cast<int>(burst_metric_templates_.size())) {
             const auto& metrics = burst_metric_templates_[static_cast<size_t>(i)];
             result.snr_db = metrics.snr_db;

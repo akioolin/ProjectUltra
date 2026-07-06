@@ -884,6 +884,21 @@ private:
     uint64_t last_descriptor_abs_sample_ = 0;  // sample-clock gap gate (D2)
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
+    // EARLY-FRAME-DECODE (2026-07-05, turnaround lever): for NON-interleaved groups
+    // (QPSK/8PSK — each physical frame IS one logical frame) LDPC-decode each frame
+    // as it ARRIVES, in the inter-frame idle, so finalize only decodes the last
+    // frame before the ACK emits (~(N-1) frames of LDPC off the decode tail; also
+    // smooths RX CPU — no LDPC burst at group end). FAIL-SAFE INVARIANT: the cache
+    // is consulted ONLY when burst_predecoded_.size() == burst_soft_buffer_.size()
+    // AND the entry is marked valid AND the group is non-interleaved AND no
+    // late-join head insertion happened — any mismatch falls back to the full
+    // group-end decode (a missed invalidation degrades to old behavior, never a
+    // wrong decode). Cleared at every burst_soft_buffer_ clear site.
+    struct PredecodedFrame {
+        bool valid = false;
+        DecodeResult result;
+    };
+    std::vector<PredecodedFrame> burst_predecoded_;
     std::vector<BurstPhysicalDiag> burst_physical_diag_;
     uint64_t burst_diag_next_group_index_ = 0;
     uint64_t burst_diag_group_index_ = 0;
