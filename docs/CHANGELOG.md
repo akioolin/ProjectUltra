@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(rate/ack): F143 census — repeat-cancel evidence baseline; asymmetric class persistence; QAM8 R3/4 auto-disabled
+
+**What was broken (two defects, both root-caused from the F143 dual-log timeline):**
+1. **ACK-repeat silently dead** — the F129 decoder-evidence cancel counted the decode of
+   the very group whose ACK armed the repeat (that evidence is always <1.6 s old), so every
+   armed repeat canceled at stash time. When ACK copy 1 faded, nothing re-sent it and the
+   sender re-transmitted whole delivered bursts (the observed "failed to ack" events).
+2. **AWGN-only rung trap** — a legitimate 60–90 s calm stretch classifies AWGN, unlocks
+   QAM8 R3/4 (whose A18 anchor was validated on TRUE AWGN only), and the rung craters when
+   fading returns. Poisoned F141/F143/probe — 3 runs. The class was also willing to improve
+   as fast as it degrades (2 verdicts), amplifying the trap.
+
+**What changed:**
+- `src/gui/app.cpp` — repeat cancel fires only on decoder evidence NEWER than the arm
+  baseline +500 ms (`ack_repeat_armed_rx_ms_` stashed at arm): a NEW inbound transmission
+  proves copy 1 landed; the triggering decode does not.
+- `src/protocol/connection.cpp` — class IMPROVEMENTS need ~4 consecutive verdicts
+  (degradations keep 2) and while unconfirmed the map keeps seeing the last in-class
+  fading value (`rx_auth_fading_passed_`), so optimism is earned at half the speed of caution.
+- `src/protocol/waveform_selection.hpp` — QAM8 R3/4 anchor row disabled in ALL columns
+  (`kRungDisabledDb`); re-enable only after a FADING validation; still forceable.
+- Test baselines: AWGN ≥16 top rung → QAM8 R2/3; R1/2 sp8 geometry pins in
+  OFDMLinkAdaptation/StreamingConfig (missed by the fixed-grid commit).
+
+**Verified:** full ctest 83/84 (known TNC red); pure-defaults faithful gate s42 PASS
+CRC-clean, 0 trap-rung visits, repeats armed with 0 instant-cancels. Commit `94a84d1`.
+
 ## 2026-07-05 — feat(config): the knob graduation — the validated campaign stack becomes the binary DEFAULTS
 
 **What:** 22 boolean knobs flipped DEFAULT-ON (`=0` opts out) and 6 value knobs got the
