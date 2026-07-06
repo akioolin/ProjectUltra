@@ -945,25 +945,22 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // unilateral-flip 0/8-forever arm). The reset path below arms
                             // expect_full_ofdm_anchor_, matching the full chirp+LTS the
                             // sender's commit one-shot guarantees on a mode-hop group.
-                            // FIXED-GRID (2026-07-06): a mode-hop demotes warm-handoff
-                            // ONLY when the pilot grid actually changes — the sender's
-                            // commit one-shot mirrors this exact condition, so a
-                            // within-grid hop carries NO full anchor and the warm state
-                            // is valid by construction (F142: the old unconditional
-                            // demote cold-searched every switch, waiting for an anchor
-                            // that correctly never came).
-                            const bool descriptor_hop_grid_change =
-                                descriptor_mode_hop &&
-                                ofdm_link_adaptation::recommendedPilotSpacing(
-                                    descriptor_hop_mod, descriptor_hop_rate) !=
-                                    ofdm_link_adaptation::recommendedPilotSpacing(
-                                        current_modulation_, code_rate_);
+                            // F164 CONTRACT SYMMETRY (reverts the F142 fixed-grid
+                            // relaxation): the SENDER now arms a full chirp+LTS anchor
+                            // on EVERY mode commit (F163: missed light switch
+                            // descriptors cost 25 s each), so a mode-hop descriptor
+                            // means a FULL anchor is coming — the receiver MUST demote
+                            // warm-handoff and expect it. F164 proved the asymmetry
+                            // fatal the other way: receiver kept warm-light expectation,
+                            // the unexpected 1.2 s chirp shifted the group start, and
+                            // warm-predicted frame positions decoded garbage — 13
+                            // craters, 20-minute timeout. Same-mode headers (no hop)
+                            // still ride the warm path.
                             const bool warm_handoff_eligible =
                                 sync_controller_.derivePhase() ==
                                     arrival_policy::WarmSyncPhase::WARM &&
                                 sync_controller_.frameArrivalConfidence() > 0.0f &&
-                                !(descriptor_mode_switch_enabled_ && descriptor_mode_hop &&
-                                  descriptor_hop_grid_change);
+                                !(descriptor_mode_switch_enabled_ && descriptor_mode_hop);
                             {
                                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                                 if (warm_handoff_eligible) {
