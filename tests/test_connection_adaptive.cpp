@@ -825,8 +825,10 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
           "commit must count in descriptor_mode_switches");
     CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == epoch_before,
           "clean-boundary commit: EMPTY window -> no ARQ abort -> no epoch bump");
-    // The §2.6-arm-3 full-anchor one-shot: either still armed, or already consumed by
-    // the refill's burst flush (which must then have carried force_full_preamble).
+    // FIXED-GRID BAND (2026-07-06): a WITHIN-GRID switch (pilot spacing unchanged
+    // — the whole R1/2..R3/4 coherent ladder is one sp8 grid) carries NO full
+    // anchor; warm state is valid by construction and the descriptor alone
+    // re-labels the group. The anchor arms only on real grid changes (R1/4).
     bool full_anchor_armed_or_consumed =
         ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
     for (size_t i = 0; i < burst_full_anchor.size(); ++i) {
@@ -834,8 +836,8 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
             full_anchor_armed_or_consumed = true;
         }
     }
-    CHECK(full_anchor_armed_or_consumed,
-          "the first post-switch burst group must carry the full chirp+LTS anchor");
+    CHECK(!full_anchor_armed_or_consumed,
+          "a within-grid switch must NOT arm/carry the full anchor (fixed-grid band)");
 }
 
 // Knob-ON receiver adopt: a mode-hop descriptor notification runs the RX-relevant
@@ -1079,8 +1081,10 @@ void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
             full_anchor_armed_or_consumed = true;
         }
     }
-    CHECK(full_anchor_armed_or_consumed,
-          "the first post-switch burst group must carry the full chirp+LTS anchor");
+    // FIXED-GRID BAND (2026-07-06): 16QAM R2/3 -> 16QAM R1/2 midrung landing is
+    // now a WITHIN-GRID switch (R1/2 joined the sp8 grid) — no anchor.
+    CHECK(!full_anchor_armed_or_consumed,
+          "a within-grid switch must NOT arm/carry the full anchor (fixed-grid band)");
 
     // Rate-limit: the SAME command (same group_seq — the base was frozen by the
     // crater) re-arriving before the receiver's adoption is deduped: no second

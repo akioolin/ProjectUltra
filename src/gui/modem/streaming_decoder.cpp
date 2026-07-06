@@ -951,8 +951,19 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     const Modulation mod = pending_connected_ofdm_mod_;
     const CodeRate rate = pending_connected_ofdm_rate_;
 
-    const bool preserve_full_anchor =
-        sync_controller_.expect_full_ofdm_anchor_ || mode == protocol::WaveformMode::OFDM_CHIRP;
+    // FIXED-GRID (2026-07-06): a connected same-grid OFDM reconfig (mode-hop that
+    // keeps FFT/carriers/pilot spacing) must NOT force the full-anchor expectation —
+    // the sender sends no anchor for it. Preserve whatever expectation already
+    // stood; non-same-grid (initial connect, real grid change) keeps the old arm.
+    const bool same_grid_reconfig =
+        connected_ && mode == mode_ &&
+        ofdm_carriers_ == static_cast<int>(config.num_carriers) &&
+        waveform_ && waveform_->getPilotSpacing() ==
+                         static_cast<int>(config.pilot_spacing);
+    const bool preserve_full_anchor = same_grid_reconfig
+        ? sync_controller_.expect_full_ofdm_anchor_
+        : (sync_controller_.expect_full_ofdm_anchor_ ||
+           mode == protocol::WaveformMode::OFDM_CHIRP);
 
     mode_ = mode;
     connected_ = true;

@@ -136,7 +136,15 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         // (~1-2 s) — the lag at which Good (slow fading) and Moderate (fast) diverge. Hosting it
         // here (not in the demodulator) survives the per-group demodulator recreation.
         const float lts_mag = waveform_->getLastLTSChannelMagnitude();
-        if (std::isfinite(lts_mag) && lts_mag > 0.0f) {
+        // ESTIMATOR HYGIENE (F142): feed the coherence estimator ONLY from
+        // successful decodes. Failed/false-lock attempts (noise windows, our own
+        // deferred-ACK echo) contributed |H| snapshots of TONES (across-carrier
+        // CV ~3) — four such snapshots poisoned the cumulative lag-1 score below
+        // the Moderate threshold, coherenceAdjustedFadingIndex then PINNED
+        // effective fading at 0.85 while the real channel read 0.15-0.5, and the
+        // ladder ground to the R1/4 basement on a 24 dB link. The decode verdict
+        // is the admission ticket for channel-statistics evidence.
+        if (result.success && std::isfinite(lts_mag) && lts_mag > 0.0f) {
             doppler_coherence_.addSnapshot(lts_mag * lts_mag);
             // COH-DIAG (read-only diagnostic, env ULTRA_COH_DIAG=1, default OFF): per-frame
             // raw disc inputs for the noise-floor / Doppler-discriminator investigation —

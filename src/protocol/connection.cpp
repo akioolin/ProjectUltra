@@ -2287,9 +2287,14 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     // are calibrated on dial-equivalent SNR, so the verdict input is the dB mean of
     // the last few group observations (~30 s ≈ many Tc). Decode-evidence overrides
     // below keep the fast reactions (crater = instant clamp).
-    const float inst_fading = connection_policy::coherenceAdjustedFadingIndex(
+    float inst_fading = connection_policy::coherenceAdjustedFadingIndex(
         (burst_obs_fading_ >= 0.0f) ? burst_obs_fading_ : fading_index_,
         burst_obs_coh_score_, burst_obs_coh_valid_);
+    // ESTIMATOR HYGIENE (F142): a fading index > 1.5 is not a channel — it is the
+    // across-carrier CV of a tone/noise snapshot (measured 2.9-3.1 on our own ACK
+    // echo). One such sample in a 6-ring lifts the average by ~+0.45 and flips
+    // the class. Reject absurd readings; reuse the last sane value.
+    if (inst_fading > 1.5f) inst_fading = rx_auth_fading_passed_;
     rx_auth_obs_db_[rx_auth_obs_next_] = burst_obs_snr_db_;
     rx_auth_fading_ring_[rx_auth_obs_next_] = inst_fading;
     rx_auth_obs_age_ms_[rx_auth_obs_next_] = 0;
