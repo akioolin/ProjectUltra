@@ -12,6 +12,7 @@
 #include "protocol/arq_interface.hpp"
 #include "protocol/selective_repeat_arq.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/file_transfer.hpp"
 #include <iostream>
 #include <cassert>
 #include <cstdlib>
@@ -1084,6 +1085,60 @@ bool test_rate_abort_salvages_sacked_frames() {
     auto f = v2::DataFrame::deserialize(salvaged[0]);
     if (!f || f->seq != 1)
         FAIL("salvaged frame was not seq 1");
+
+    PASS();
+    return true;
+}
+
+// F168 SACKED-BYTES DURABILITY: buffered out-of-order FILE frames (SACKed —
+// the peer may retire them via the F163 sender salvage and NEVER resend) must
+// be DELIVERED to the file layer when an epoch adoption discards the RX
+// window, or the bytes are gone forever (F168: sender "complete" at 100%,
+// receiver stranded at 50%, 640 s wedge).
+bool test_epoch_adoption_salvages_buffered_file_frames() {
+    TEST("epoch adoption delivers buffered FILE frames before discarding");
+
+    ARQConfig config;
+    config.window_size = 8;
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ rx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    rx.setCallsigns("RX1", "TX1");
+    rx.setTransmitCallback([](const Bytes&) {});
+    std::vector<Bytes> delivered;
+    rx.setDataReceivedCallback([&](const Bytes& p) { delivered.push_back(p); });
+
+    auto filePayload = [](uint8_t tag) {
+        Bytes p{static_cast<uint8_t>(PayloadType::FILE_DATA), 0, 0, 0, tag};
+        p.push_back(0xA0);
+        p.push_back(tag);
+        return p;
+    };
+
+    // In-order 0..2 (epoch 1, rebase on 0), then OUT-OF-ORDER 4 and 5 (hole at
+    // 3) — 4/5 are buffered + SACKed, never delivered in-order.
+    rx.beginGroupReceive();
+    for (uint16_t q = 0; q <= 2; ++q) {
+        rx.onFrameReceived(makeEpochData(q, filePayload(static_cast<uint8_t>(q)), 1, q == 0));
+    }
+    rx.onFrameReceived(makeEpochData(4, filePayload(4), 1, false));
+    rx.onFrameReceived(makeEpochData(5, filePayload(5), 1, false));
+    rx.endGroupReceiveAndAck();
+    const size_t before = delivered.size();
+    if (before != 3) FAIL("precondition: 3 in-order deliveries expected");
+
+    // Epoch-2 rebase (sender rate-change abort rewound to 3): adoption discards
+    // the buffered slots — the FILE payloads of 4 and 5 must be delivered first.
+    rx.onFrameReceived(makeEpochData(3, filePayload(0x33), 2, /*rebase=*/true));
+
+    bool got4 = false, got5 = false;
+    for (size_t i = before; i < delivered.size(); ++i) {
+        if (delivered[i].size() >= 5 && delivered[i][4] == 4) got4 = true;
+        if (delivered[i].size() >= 5 && delivered[i][4] == 5) got5 = true;
+    }
+    if (!got4 || !got5)
+        FAIL("buffered SACKed FILE frames were discarded without delivery "
+             "(got4=" + std::to_string(got4) + " got5=" + std::to_string(got5) + ")");
 
     PASS();
     return true;
@@ -2558,6 +2613,7 @@ int main() {
     test_move_epoch_unanchored_wait_for_rebase();
     test_move_epoch_adoption_group_advances_past_last_frame();
     test_rate_abort_salvages_sacked_frames();
+    test_epoch_adoption_salvages_buffered_file_frames();
     test_move_epoch_knob_off_byte_identical();
 
     std::cout << "\nRetransmission Tests:\n";

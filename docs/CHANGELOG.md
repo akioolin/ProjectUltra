@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(arq): F168 — SACKed-bytes DURABILITY: buffered FILE frames deliver before every RX-window discard
+
+**What was broken (P0-class, introduced by the F163 FIX-4 salvage):** the
+sender-side salvage skips re-sending SACKed FILE ranges across a rate abort —
+but on the RECEIVER, "SACKed" only means buffered out-of-order in the ARQ
+window, and BOTH RX-discard sites (epoch adoption + receiver-side setCodeRate)
+threw those buffers away before they ever reached the file layer. Sender
+retires the bytes ⇒ PERMANENT hole. F168: sender "Transfer complete 1.54 kbps"
+at 100%; receiver stranded at ~50% (bytes 31064–32744 unrecoverable), 640 s
+wedge until the scenario timeout.
+
+**Fix:** both discard sites now DELIVER buffered FILE_START/FILE_DATA payloads
+via on_data_received_ before clearing (offset-idempotent file layer — the same
+contract the unanchored-interregnum salvage uses; TEXT stays dropped). The
+invariant is now explicit: **SACKed FILE bytes are durable** — safe for the
+sender to retire. New pin: test_epoch_adoption_salvages_buffered_file_frames.
+
 ## 2026-07-06 — experiment(llr): per-carrier notch calibration (Stage A unbias + Stage B raw-obs floor) — MEASURED MARGINAL on the sim cell; knobs default-OFF
 
 **Hypothesis** (F142/F165 signatures + 4-reader code map, brief /tmp/llr_notch_brief.md):

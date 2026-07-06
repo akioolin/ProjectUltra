@@ -77,15 +77,42 @@ uint8_t SelectiveRepeatARQ::stampMoveEpochFlags(uint8_t flags, uint16_t seq) con
 
 void SelectiveRepeatARQ::discardRxStateForEpochAdoption(const char* reason) {
     size_t discarded = 0;
+    size_t file_salvaged = 0;
     for (auto& slot : rx_window_) {
         if (slot.received || slot.partial) {
             ++discarded;
+        }
+        // F168 SACKED-BYTES DURABILITY: a buffered (SACKed) slot holds bytes
+        // the peer may consider DELIVERED — the sender-side salvage (F163
+        // FIX-4) skips re-sending SACKed FILE ranges across a rate abort.
+        // Discarding the buffer WITHOUT delivering it makes that a PERMANENT
+        // hole (F168: sender completed at 1.54 kbps believing 51200/51200;
+        // receiver stranded at ~50%, bytes 31064-32744 gone forever, 640 s
+        // wedge). FILE payloads are offset-idempotent at the file layer (the
+        // unanchored-interregnum salvage uses the same contract) — deliver
+        // them BEFORE the discard. TEXT stays dropped (seq-deduped only; the
+        // sender resends it normally post-rebase).
+        if (slot.received && !slot.payload.empty() &&
+            slot.type == v2::FrameType::DATA &&
+            (slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_START) ||
+             slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA))) {
+            ++file_salvaged;
+            last_rx_frame_type_ = slot.type;
+            if (on_data_received_) {
+                on_data_received_(slot.payload);
+            }
         }
         slot.received = false;
         clearPartialRXSlot(slot);
         slot.payload.clear();
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;
+    }
+    if (file_salvaged > 0) {
+        LOG_MODEM(WARN,
+                  "SR-ARQ: MOVE-EPOCH %s — salvaged %zu buffered FILE frame(s) "
+                  "to the file layer before discard (SACKed bytes stay durable)",
+                  reason, file_salvaged);
     }
     // Old-era ack state must not fire post-adoption (mirrors setCodeRate's
     // receiver-side discard): queued repeats hold old-era serialized SACKs, and a
@@ -251,7 +278,18 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         if (!slot.received && !slot.partial) {
             continue;
         }
-
+        // F168 SACKED-BYTES DURABILITY — same salvage as
+        // discardRxStateForEpochAdoption (see that comment): buffered FILE
+        // bytes may be sender-retired; deliver before discarding.
+        if (slot.received && !slot.payload.empty() &&
+            slot.type == v2::FrameType::DATA &&
+            (slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_START) ||
+             slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA))) {
+            last_rx_frame_type_ = slot.type;
+            if (on_data_received_) {
+                on_data_received_(slot.payload);
+            }
+        }
         slot.received = false;
         clearPartialRXSlot(slot);
         slot.payload.clear();
