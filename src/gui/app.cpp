@@ -705,38 +705,35 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                       cached_fading_index_.load(std::memory_order_relaxed));
             auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
-                // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default 0 = off;
-                // BUG-TONE-FADE residual, handoff §7.6): ~2 ACKs/run die to genuine
-                // tone fades (captured at healthy RMS, gaplessly scanned, undecodable
-                // — F76/F99), and the built-in close repeat sits inside the same fade
-                // null (Tc ~2-4 s >> 376 ms). Stash this ACK; the GUI tick retransmits
-                // it once, +knob ms after the copy-1 airtime ends, ONLY if the channel
-                // is then quiet (modem_.channelBusyForTx() == false). Self-gating: if
-                // copy 1 survived, the peer's next burst is already arriving (CCA
-                // busy) and the repeat is skipped — a BLIND timed repeat would blank
-                // that burst's anchor with our own TX and reintroduce the head-null
-                // class. If copy 1 died, the peer waits silently and the repeat rides
-                // a decorrelated fade draw (p^2 loss instead of p).
-                static const uint32_t kAckRepeatSilentMs = [] {
-                    if (const char* e = std::getenv("ULTRA_ACK_REPEAT_SILENT_MS")) {
+                // LISTEN-BEFORE-ACK (2026-07-05, F124: 4 ACKs keyed over the
+                // sender's incoming audio — the primary ACK path had NO channel
+                // sense; keying blanks our own RX of the incoming group head and
+                // manufactures craters). If CCA reads busy, DEFER to the GUI tick:
+                // send on first quiet, or at the hard deadline regardless (the
+                // sender's ack-listen window is ~18 s — a bounded defer never
+                // strands it, and the deadline breaks any mutual-defer cycle).
+                // ULTRA_ACK_CCA_DEFER_MS=0 opts out (old immediate-key behavior).
+                static const uint32_t kAckCcaDeferMs = [] {
+                    if (const char* e = std::getenv("ULTRA_ACK_CCA_DEFER_MS")) {
                         const long v = std::atol(e);
-                        if (v >= 300 && v <= 5000) return static_cast<uint32_t>(v);
+                        if (v >= 0 && v <= 10000) return static_cast<uint32_t>(v);
                     }
-                    return 0u;  // OFF
+                    return 2500u;  // default ON
                 }();
-                if (kAckRepeatSilentMs > 0) {
-                    const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
+                if (kAckCcaDeferMs > 0 && modem_.channelBusyForTx()) {
+                    LOG_MODEM(INFO,
+                              "ToneBurstAck: channel busy at ACK time — deferring "
+                              "up to %u ms (listen-before-transmit)",
+                              kAckCcaDeferMs);
                     std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
-                    ack_repeat_samples_ = samples;  // copy (samples also queued below)
-                    ack_repeat_fire_time_ =
+                    ack_defer_samples_ = std::move(samples);
+                    ack_defer_deadline_ =
                         std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
-                    ack_repeat_pending_ = true;
+                        std::chrono::milliseconds(kAckCcaDeferMs);
+                    ack_defer_pending_ = true;
+                } else {
+                    submitToneAckSamples(samples);
                 }
-                // Carry the same in_qso_data flag as the OFDM ACK (false —
-                // ACKs are control frames, not in-QSO data).
-                queueRealTxSamples(samples, "TX tone-burst ACK audio",
-                                   /*in_qso_data=*/false);
             }
         });
 
@@ -2295,6 +2292,7 @@ void App::render() {
     // ACK repeat-if-silent (handoff §7.6): fire the decorrelated tone-ACK copy
     // if its window elapsed AND the channel is quiet (see the stash site).
     maybeFireAckRepeatIfSilent();
+    maybeFireDeferredAck();
 
     // Drain bounded modem/protocol UI events on the GUI thread after protocol
     // work for this frame. Formatting and log-file flushes happen here, never
@@ -2791,6 +2789,56 @@ void App::maybeFireAckRepeatIfSilent() {
     guiLog("ACK-REPEAT-SILENT: firing (unbroken quiet window — copy 1 likely lost)");
     queueRealTxSamples(copy, "TX tone-burst ACK repeat (silent-gated)",
                        /*in_qso_data=*/false);
+}
+
+// LISTEN-BEFORE-ACK submission tail: stash the repeat-if-silent copy (timed from
+// the ACTUAL send, not the protocol event) and queue the audio. Factored so the
+// immediate path and the CCA-deferred path share it exactly.
+void App::submitToneAckSamples(const std::vector<float>& samples) {
+    // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default 0 = off;
+    // BUG-TONE-FADE residual, handoff §7.6): stash a decorrelated copy; the GUI
+    // tick fires it only after an UNBROKEN quiet window (see
+    // maybeFireAckRepeatIfSilent).
+    static const uint32_t kAckRepeatSilentMs = [] {
+        if (const char* e = std::getenv("ULTRA_ACK_REPEAT_SILENT_MS")) {
+            const long v = std::atol(e);
+            if (v >= 300 && v <= 5000) return static_cast<uint32_t>(v);
+        }
+        return 0u;  // OFF
+    }();
+    if (kAckRepeatSilentMs > 0) {
+        const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
+        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        ack_repeat_samples_ = samples;
+        ack_repeat_fire_time_ = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
+        ack_repeat_pending_ = true;
+    }
+    queueRealTxSamples(samples, "TX tone-burst ACK audio", /*in_qso_data=*/false);
+}
+
+// LISTEN-BEFORE-ACK tick poll (F124): a deferred ACK sends on the FIRST quiet
+// reading, or at the hard deadline regardless (never strands the sender — its
+// ack-listen window is ~18 s; the deadline also breaks mutual-defer cycles).
+void App::maybeFireDeferredAck() {
+    std::vector<float> copy;
+    bool at_deadline = false;
+    {
+        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        if (!ack_defer_pending_) return;
+        if (conn_state_cached_.load(std::memory_order_relaxed) !=
+            protocol::ConnectionState::CONNECTED) {
+            ack_defer_pending_ = false;  // session ended — moot
+            return;
+        }
+        at_deadline = std::chrono::steady_clock::now() >= ack_defer_deadline_;
+        if (!at_deadline && modem_.channelBusyForTx()) return;  // keep waiting
+        ack_defer_pending_ = false;
+        copy.swap(ack_defer_samples_);
+    }
+    guiLog(at_deadline ? "LISTEN-BEFORE-ACK: deadline reached — sending ACK regardless"
+                       : "LISTEN-BEFORE-ACK: channel clear — sending deferred ACK");
+    submitToneAckSamples(copy);
 }
 
 void App::tickScenario() {

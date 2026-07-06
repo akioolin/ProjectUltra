@@ -295,6 +295,19 @@ private:
     std::chrono::steady_clock::time_point ack_repeat_fire_time_{};
     bool ack_repeat_pending_ = false;
     void maybeFireAckRepeatIfSilent();
+    // LISTEN-BEFORE-ACK (2026-07-05, F124 finding: 4 tone-ACKs keyed while the
+    // sender's audio was actively arriving — a half-duplex violation that blanks
+    // our own RX of the incoming group head and manufactures craters; the primary
+    // ACK path had no channel sense at all, only the repeat did). If CCA reads
+    // busy at ACK time, defer submission to the GUI tick: send on first quiet, or
+    // at the hard deadline regardless (bounded — the sender's ACK-listen window is
+    // ~18 s, so a <=2.5 s defer never strands it; the deadline also breaks any
+    // mutual-defer cycle). Same mutex discipline as the repeat stash.
+    std::vector<float> ack_defer_samples_;
+    std::chrono::steady_clock::time_point ack_defer_deadline_{};
+    bool ack_defer_pending_ = false;
+    void maybeFireDeferredAck();
+    void submitToneAckSamples(const std::vector<float>& samples);
 
     // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
     // Closed-loop TX-drive: the peer's per-burst level verdict rides back on the
