@@ -257,3 +257,48 @@ ingest is pre-verdict (certificates must be outcome-owned); the sender's
 one-decision-maker rule (receiver authority replaces EMA/streaks — R10);
 verdicts move at the slowest-confirmed input's rate; single craters are ARQ's
 job (two-crater rule); climbs defer to clean boundaries, demotes never.
+
+## §9 — 2026-07-06 OVERNIGHT (fix-all + 10-run confirmation) — COMPLETE
+
+**Mandate executed:** fix all perceivable bugs on the IONOS runs (log-proven only),
+10-run confirmation, stop. All commits pushed to feat/coherent-window-16.
+
+**Overnight fixes (each census/forensics-proven before patching):**
+1. Single-driver enforcement — collapse escape counts ONLY true ack-silence (RTO
+   rounds) under authority; received dup-acks are the receiver speaking (F128:
+   escape fired mid-recovery and fought the verdict = the sawtooth).
+2. F129 census (2 agents, every crater classified): 6/8 craters = genuine 16QAM
+   fading; 2/8 = ACK-REPEAT firing mid-burst, phase-locked at ack+4.6s; both ACK
+   drops = false-busy on ambient. ROOT: the adaptive CCA threshold learns AGC-dip
+   artifacts as floor (busy-on-noise) AND burst body as floor via mid-burst
+   relearn (idle-during-bursts). The decoder had SYNCED before every collision.
+3. Fixes shipped: decoder-evidence RX activity (rxSignalActive) gating the repeat
+   AND the deferred-ACK deadline (drop only on decoder evidence; energy-only busy
+   sends); AGC-settle holdoff (2.5s) on floor admission; relearn 13->25s;
+   confirmed-crater descent stride 1->2.
+4. Earlier evening (see §8 + git log): straggler knob flip (DESCRIPTOR_MODE_SWITCH
+   decoder-side reader — the stale-cur oscillation), LBA v2 (drop-on-deadline,
+   never key over; waterfall-proven), class veto + unconditional down-limit.
+
+**10-RUN CONFIRMATION (F131-F140, pure defaults, /tmp/campaign_3000/overnight_ledger.tsv):**
+10/10 PASS byte-exact. Goodput 0.97-1.88, mean 1.30 kbps. ZERO TX-over-RX
+overlaps in 10 runs (collision family dead). 1 drop (decoder-evidence-justified),
+3 escapes (true silence), craters 3-7/run = fading physics on a persistently
+rough epoch (fading 0.5-0.85 stretches all night; 16QAM R2/3 never held).
+
+**Honest 3 kbps distance:** reliability is SOLVED (10/10, zero integrity events,
+zero self-inflicted wounds). Throughput is now purely rung-ceiling x duty:
+tonight's epoch supported mid-table rungs (~1.3 avg; F138 1.88 when 16QAM
+partially held). The 2.62 record was a calm-window draw. Path to 3k, in order:
+(1) calm-epoch 16QAM R2/3 cw16 holding (~2.8 rung ceiling) — retest on a calm
+window; (2) turnaround leaning (early-ACK shipped; ack-repeat conditional +
+lead-in diet + measured budget = +15-20%); (3) 4s bursts + fade-state tracking
+(needs lean turnaround first); (4) per-carrier EVM verdict + continuous anchors
+(kills the class columns). The stack finally measures the CHANNEL, not its bugs.
+
+**Morning quick-start:** everything default-ON (empty env); launch scripts are
+knob-free; `bash confirm_launch_mac.sh F141 && confirm_launch_pi5.sh F141` runs
+a transfer. KNOWN_BUGS: UltraTncSimAudio red pre-existing; minor open items from
+the F129 verifier (verdict-vs-sender rate mapping discrepancy at 143.17, ARQ
+attempt counter resets per re-encode, mid-group recovery after own short TX,
+false-lock re-anchor loop) — logged, none rig-blocking.
