@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-06 — fix(sync/ack): F165 — expected-anchor immunity covers the CW0-peek gate; ANCHORED-BURST ACK BACKSTOP
+
+**What was broken (operator watched a strong burst go unacked, again):** the F147
+immunity held the expected anchor at the false-lock LLR gate — and 1 ms later a
+THIRD gate ("OFDM CW0 peek: |llr|_avg too low — skipping fixed-frame escalation")
+abandoned the held lock anyway: no descriptor attempt, no group, no ack. And even
+with every gate bypassed, a descriptor unreadable in a deep fade cannot frame a
+group — the ack contract had a structural hole: no group boundary ⇒
+endGroupReceiveAndAck never fires ⇒ the sender RTO-starves at a pinned rung with
+no crater verdict flowing.
+
+**What changed:**
+- `streaming_ofdm_decode.cpp`: the CW0-peek escalation skip is bypassed when the
+  lock is an EXPECTED full anchor — the decode runs all the way; LDPC arbitrates.
+- **ANCHORED-BURST ACK BACKSTOP** (decoder → ModemEngine → binding →
+  ProtocolEngine → `Connection::noteAnchoredBurstNoGroup`): armed when an
+  expected full anchor is accepted; disarmed by a consumed BURST_HEADER or a
+  delivered group (the standard ack path owns it from there); fires ONCE when
+  the sample clock passes ~12.5 s (descriptor + anchor + 8-frame group) with
+  nothing framed — the Connection emits a re-confirm ack + crater verdict
+  (all_ok=0, q=0). Beats the sender RTO (~anchor+21 s) comfortably; the
+  authority demote flows even when a whole burst is fade-unreadable.
+
+**Verified:** full ctest 83/84 (known TNC red); faithful gate + rig below.
+
 ## 2026-07-06 — fix(sync/arq/file): F163 time-budget fixes — full anchor on every switch; air-schedule RTOs; SACKed-byte salvage
 
 **Source:** full two-log forensic time budget of F163 (423.8 s / 0.97 kbps, every

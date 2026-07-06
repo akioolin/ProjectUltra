@@ -134,6 +134,8 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // The decoder only emits this when the knob is ON, and Connection re-gates it —
     // byte-identical while OFF. Same decoder-thread -> engine-mutex class as the
     // burst-group forwarding above.
+    modem.setAnchoredBurstNoGroupCallback(
+        [&protocol]() { protocol.onAnchoredBurstNoGroup(); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

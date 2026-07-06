@@ -133,6 +133,7 @@ public:
     // protocol layer follows it (RX-side applyDataMode; no MODE_CHANGE ACK
     // machinery). Delegates to Connection::onDescriptorModeChange; no-op while
     // the knob is OFF.
+    void onAnchoredBurstNoGroup();
     void onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame);
 
     // §15 step 4d-ii: hand a tone-burst ACK detection from the receiver's

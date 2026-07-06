@@ -1146,6 +1146,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         } else if (logical_ok == 0) {
             cfo_tracker_.revokeWarm();
         }
+        anchored_burst_backstop_armed_ = false;  // F165: standard ack path ran
         // HARQ key telemetry (cumulative since start) — the provisional-key
         // default-ON decision rides on mismatch staying ~0 (design review).
         {

@@ -898,6 +898,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // F147: a consumed BURST_HEADER is SUBSTANTIVE peer-TX
                             // evidence (a decoded descriptor cannot come from noise).
                             stampRxSubstantive();
+                            // F165: the standard group/ack path owns this burst now.
+                            anchored_burst_backstop_armed_ = false;
                             // §16.8 step 1: BURST_HEADER-consume snapshot (instrumentation).
                             // Logs the warm-sync state we held when the next group's
                             // BURST_HEADER arrived (just before we throw it away with
@@ -1649,13 +1651,27 @@ void StreamingDecoder::decodeCurrentFrame() {
         const size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
         const float llr_abs_avg = signal_policy::meanAbsLLR(soft_bits.data(), llr_count);
         if (llr_abs_avg < signal_policy::kMinLLRForEscalation) {
-            ultra::timing::globalDecoderProfile()
-                .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
-            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping fixed-frame escalation (likely false sync)",
+            // F165: EXPECTED-ANCHOR IMMUNITY covers this gate too — the F147
+            // fix held the lock at the LLR reject, then THIS peek gate dropped
+            // the held anchor anyway ("holding lock" at 143.9, peek-skip at
+            // 143.915, burst lost, no ack). With an armed expected anchor the
+            // decode must run ALL the way (LDPC is the arbiter; the group /
+            // erasure / backstop-ack machinery owns the failure).
+            const bool hold_expected =
+                connected_ && last_sync_expected_full_anchor_;
+            if (!hold_expected) {
+                ultra::timing::globalDecoderProfile()
+                    .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
+                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping fixed-frame escalation (likely false sync)",
+                          log_prefix_.c_str(), llr_abs_avg);
+                advancePastFalseOFDMLock();
+                state_ = DecoderState::SEARCHING;
+                return;
+            }
+            LOG_MODEM(WARN,
+                      "[%s] OFDM CW0 peek weak (|llr|_avg=%.1f) on EXPECTED full "
+                      "anchor — escalating anyway (LDPC arbitrates)",
                       log_prefix_.c_str(), llr_abs_avg);
-            advancePastFalseOFDMLock();
-            state_ = DecoderState::SEARCHING;
-            return;
         }
 
         pending_total_cw_ = fixed_frame_codewords_;

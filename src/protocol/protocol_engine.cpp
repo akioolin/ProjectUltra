@@ -349,6 +349,11 @@ void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                      interleaved, group_size);
 }
 
+void ProtocolEngine::onAnchoredBurstNoGroup() {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteAnchoredBurstNoGroup();
+}
+
 void ProtocolEngine::onDescriptorModeChange(Modulation mod, CodeRate rate,
                                             int cw_per_frame) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);

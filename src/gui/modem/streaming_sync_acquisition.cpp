@@ -314,6 +314,31 @@ void StreamingDecoder::searchForSync() {
     constexpr size_t CHIRP_MAX_SEARCH = 120000;   // ~2.5s for dual chirp detection
     constexpr size_t LIGHT_SEARCH_SIZE = 9600;    // ~0.20s for connected LTS-only detection
 
+    // F165 ANCHORED-BURST ACK BACKSTOP: fire once when the sample clock passes
+    // the max group window since an accepted expected anchor with nothing
+    // framed (descriptor unreadable in a deep fade -> no group -> no ack -> the
+    // sender RTO-starves at a pinned rung). ~12.5 s covers descriptor + anchor
+    // + an 8-frame group; the sender's RTO fires ~11 s AFTER its burst ends
+    // (~anchor+21 s), so the backstop ack beats it comfortably.
+    if (anchored_burst_backstop_armed_) {
+        size_t fed_now;
+        {
+            std::lock_guard<std::mutex> abl(sync_controller_.ring_.buffer_mutex_);
+            fed_now = sync_controller_.ring_.total_fed_;
+        }
+        constexpr size_t kBackstopWindowSamples = 600000;  // ~12.5 s @48k
+        if (fed_now > anchored_burst_backstop_arm_abs_ + kBackstopWindowSamples) {
+            anchored_burst_backstop_armed_ = false;
+            LOG_MODEM(WARN,
+                      "[%s] ANCHORED-BURST BACKSTOP: expected anchor framed no "
+                      "group within the window — requesting re-confirm ack + "
+                      "crater verdict",
+                      log_prefix_.c_str());
+            if (anchored_burst_no_group_callback_) {
+                anchored_burst_no_group_callback_();
+            }
+        }
+    }
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
     bool connected_data_preamble = connected_ && waveform_->supportsDataPreamble();
     bool use_full_ofdm_anchor_search =
@@ -448,6 +473,13 @@ void StreamingDecoder::searchForSync() {
             // genuine; mush LLRs there mean a faded/cold-CFO group, and the
             // group/erasure machinery — not re-search — owns that failure).
             last_sync_expected_full_anchor_ = true;
+            // F165: arm the anchored-burst ack backstop — if this anchor's
+            // burst frames nothing, the Connection still acks after the window.
+            anchored_burst_backstop_armed_ = true;
+            {
+                std::lock_guard<std::mutex> abl(sync_controller_.ring_.buffer_mutex_);
+                anchored_burst_backstop_arm_abs_ = sync_controller_.ring_.total_fed_;
+            }
             if (data_sync_accepted_callback_) {
                 data_sync_accepted_callback_(sync_result.correlation);
             }

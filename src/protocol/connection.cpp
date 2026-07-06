@@ -3854,6 +3854,22 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     }
 }
 
+void Connection::noteAnchoredBurstNoGroup() {
+    if (state_ != ConnectionState::CONNECTED || !use_burst_transport_ ||
+        !kUnifiedSeqEnabled()) {
+        return;
+    }
+    LOG_MODEM(WARN,
+              "Connection: ANCHORED-BURST BACKSTOP — re-confirm ack + crater "
+              "verdict for an anchored burst that framed no group");
+    // Crater verdict BEFORE the ack so the command rides it (same ordering as
+    // onBurstGroupReceived).
+    if (rxRateAuthorityEnabled()) {
+        updateRxAuthorityCommand(/*all_ok=*/false, /*quality=*/0.0f);
+    }
+    arq_.endGroupReceiveAndAck();
+}
+
 void Connection::processArqFrame(const Bytes& frame_data) {
     // TEST HOOK (env ULTRA_DROP_RX_SEQ=N): drop the FIRST receipt of the DATA frame with
     // seq=N to prove SELECTIVE repeat — the ack bitmap must then show only that hole and

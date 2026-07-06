@@ -453,6 +453,9 @@ public:
     // "inbound transmission in progress" with nothing on the air. The broad
     // stamp stays for listen-before-ACK, where conservative deferral is right.
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    void setAnchoredBurstNoGroupCallback(std::function<void()> cb) {
+        anchored_burst_no_group_callback_ = std::move(cb);
+    }
     void stampRxSubstantive() const {
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
@@ -869,6 +872,16 @@ private:
     // 8-frame bursts + 40 s lost after corr=0.76 anchors were rejected on
     // faded first-frame LLRs).
     bool last_sync_expected_full_anchor_ = false;
+    // F165 ANCHORED-BURST ACK BACKSTOP: an ACCEPTED expected full anchor whose
+    // burst produces NO group (descriptor unreadable in a deep fade) leaves the
+    // sender ack-starved — no group boundary, no endGroupReceiveAndAck, pure
+    // RTO dead-air, no crater verdict, rung pins. Arm at the accept; disarm on
+    // BURST_HEADER consume (the standard group/ack path owns it from there);
+    // fire ONCE when the sample clock passes the max group window with nothing
+    // framed — the Connection then emits a re-confirm ack + crater verdict.
+    bool anchored_burst_backstop_armed_ = false;
+    size_t anchored_burst_backstop_arm_abs_ = 0;
+    std::function<void()> anchored_burst_no_group_callback_;
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as

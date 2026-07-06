@@ -1069,6 +1069,15 @@ private:
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
     void updateRxAuthorityCommand(bool all_ok, float quality);
+
+public:
+    // F165 ANCHORED-BURST ACK BACKSTOP: the decoder accepted an expected full
+    // anchor but the burst framed NO group (descriptor unreadable in a deep
+    // fade). Emit exactly one re-confirm ack + crater verdict so the sender is
+    // never ack-starved by an anchored burst.
+    void noteAnchoredBurstNoGroup();
+
+private:
     void maybeObeyAuthorityCommand(uint8_t cmd_idx);
     std::string last_adaptive_action_;      // GUI: short human-readable action
     // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON since 2026-07-02). See
