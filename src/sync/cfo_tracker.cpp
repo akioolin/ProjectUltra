@@ -36,7 +36,28 @@ signal_policy::PilotCFOUpdate CFOTracker::ingestPilotResidual(
     float pre_correction, float residual, float current, bool clamp_drift) {
     const auto update = signal_policy::combinePilotCFO(pre_correction, residual, current, clamp_drift);
     cfo_.store(update.accepted_cfo);
+    // NOTE (BUG-ANCHOR-CFO-KILL): ingest does NOT certify the warm value — burst
+    // frames ingest residuals BEFORE any LDPC verdict exists, so a crater feeds
+    // noise here. Certification is owned by decode OUTCOMES (certifyWarm on a
+    // delivered group / classic decode success; revokeWarm on a 0/N group).
     return update;
+}
+
+// BUG-ANCHOR-CFO-KILL (2026-07-05): connected full-anchor seed — the chirp is
+// timing-only once the tracker is pilot-refined; the warm value wins (see
+// signal_policy::connectedAnchorCFOSeed for the measured evidence: 25% of
+// full-anchor groups killed at 16QAM vs 0% of warm-LTS groups over 4 gate runs).
+float CFOTracker::seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
+                                               const char* log_prefix) const {
+    const float known = cfo_.load();
+    const auto seed = signal_policy::connectedAnchorCFOSeed(
+        measured_cfo, known, correlation, pilot_seeded_.load());
+    if (seed.used_warm) {
+        LOG_MODEM(INFO,
+                  "[%s] Full-anchor CFO: warm %.2f Hz kept (chirp read %.2f Hz, corr=%.2f)",
+                  log_prefix, known, measured_cfo, correlation);
+    }
+    return seed.accepted_cfo;
 }
 
 }  // namespace sync

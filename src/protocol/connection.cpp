@@ -2287,23 +2287,47 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     // are calibrated on dial-equivalent SNR, so the verdict input is the dB mean of
     // the last few group observations (~30 s ≈ many Tc). Decode-evidence overrides
     // below keep the fast reactions (crater = instant clamp).
+    const float inst_fading = connection_policy::coherenceAdjustedFadingIndex(
+        (burst_obs_fading_ >= 0.0f) ? burst_obs_fading_ : fading_index_,
+        burst_obs_coh_score_, burst_obs_coh_valid_);
     rx_auth_obs_db_[rx_auth_obs_next_] = burst_obs_snr_db_;
+    rx_auth_fading_ring_[rx_auth_obs_next_] = inst_fading;
     rx_auth_obs_age_ms_[rx_auth_obs_next_] = 0;
     rx_auth_obs_next_ = (rx_auth_obs_next_ + 1) % kRxAuthObsRing;
     if (rx_auth_obs_count_ < kRxAuthObsRing) ++rx_auth_obs_count_;
     float snr_sum = 0.0f;
+    float fading_sum = 0.0f;
     int snr_n = 0;
     for (size_t i = 0; i < rx_auth_obs_count_; ++i) {
         if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
             snr_sum += rx_auth_obs_db_[i];
+            fading_sum += rx_auth_fading_ring_[i];
             ++snr_n;
         }
     }
     const float snr_avg = (snr_n > 0) ? (snr_sum / static_cast<float>(snr_n))
                                       : burst_obs_snr_db_;
-    const float eff_fading = connection_policy::coherenceAdjustedFadingIndex(
-        (burst_obs_fading_ >= 0.0f) ? burst_obs_fading_ : fading_index_,
-        burst_obs_coh_score_, burst_obs_coh_valid_);
+    const float fading_avg = (snr_n > 0)
+        ? (fading_sum / static_cast<float>(snr_n)) : inst_fading;
+    // STICKY CLASS (F123): the anchor table's three fading columns are cliffs and
+    // the class boundary is intrinsically fuzzy — a column switch must be an epoch
+    // verdict, not a snapshot. Adopt a new class only when the SMOOTHED fading's
+    // class persists 2 consecutive group verdicts; until then keep feeding the map
+    // the last in-class fading value.
+    const int raw_class = static_cast<int>(classifyFading(fading_avg));
+    float eff_fading = fading_avg;
+    if (raw_class == rx_auth_class_sticky_) {
+        rx_auth_class_streak_ = 0;
+        rx_auth_fading_passed_ = fading_avg;
+    } else if (++rx_auth_class_streak_ >= 2) {
+        rx_auth_class_sticky_ = raw_class;
+        rx_auth_class_streak_ = 0;
+        rx_auth_fading_passed_ = fading_avg;
+        LOG_MODEM(INFO, "Connection: RX-AUTHORITY fading class -> %d (fading=%.2f)",
+                  raw_class, fading_avg);
+    } else {
+        eff_fading = rx_auth_fading_passed_;  // unconfirmed flap: hold the column
+    }
     const CoherentPick mapped = selectCoherentOFDM(snr_avg, eff_fading);
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
@@ -2355,6 +2379,16 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
         } else if (all_ok && cmd < cur) {
             // Clean-group override: this rung just WORKED end to end.
             cmd = cur;
+        }
+        if (!crater_confirmed && cmd < cur) {
+            // DOWN RATE-LIMIT (F123): a map-driven demote without confirmed decode
+            // failure steps at most 2 canonical rungs per verdict — a residual
+            // input swing must never crash the ladder to the basement in one
+            // command (measured: QPSK R1/2 commanded at a steady 24 dB when a
+            // fading-class flap switched anchor columns). Confirmed craters and
+            // repeated verdicts still reach any depth, one bounded step at a time.
+            const uint8_t floor_step = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
+            if (cmd < floor_step) cmd = floor_step;
         }
     }
     // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
@@ -5287,6 +5321,9 @@ void Connection::enterConnected() {
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
     rx_auth_crater_streak_ = 0;
+    rx_auth_class_sticky_ = 1;
+    rx_auth_class_streak_ = 0;
+    rx_auth_fading_passed_ = 0.3f;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
@@ -5351,6 +5388,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_auth_obs_count_ = 0;
     rx_auth_obs_next_ = 0;
     rx_auth_crater_streak_ = 0;
+    rx_auth_class_sticky_ = 1;
+    rx_auth_class_streak_ = 0;
+    rx_auth_fading_passed_ = 0.3f;
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;

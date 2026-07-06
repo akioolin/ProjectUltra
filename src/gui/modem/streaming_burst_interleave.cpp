@@ -1077,6 +1077,18 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "max_iters=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
+        // BUG-ANCHOR-CFO-KILL: group outcome owns the warm-CFO certificate. A
+        // delivered group PROVES the tracked CFO (its frames decoded with it); a
+        // 0/N group revokes it — the per-frame pilot residuals were ingested
+        // before any LDPC verdict and may have walked the tracker (measured
+        // -0.10 -> +0.29 across a crater stretch), so the next full anchor must
+        // re-center from the chirp (cold arm) instead of keeping a poisoned warm
+        // value. Partial groups leave the certificate untouched.
+        if (all_ok) {
+            cfo_tracker_.certifyWarm();
+        } else if (logical_ok == 0) {
+            cfo_tracker_.revokeWarm();
+        }
         // HARQ key telemetry (cumulative since start) — the provisional-key
         // default-ON decision rides on mismatch staying ~0 (design review).
         {

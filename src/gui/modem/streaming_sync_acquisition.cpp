@@ -559,8 +559,18 @@ void StreamingDecoder::searchForSync() {
         // §7 C-CFO-2: the chirp-CFO drift clamp now lives on the tracker — it reads its own tracked
         // value as `known` and logs the clamp. On fading a multipath-distorted chirp can read a false
         // CFO, so the per-frame drift is clamped to the established estimate.
-        float new_cfo = cfo_tracker_.seedFromChirp(sync_result.cfo_hz, sync_result.correlation,
-                                                   connected_, log_prefix_.c_str());
+        // BUG-ANCHOR-CFO-KILL (2026-07-05): the CONNECTED full-anchor re-anchor is a
+        // TIMING event — once the tracker is pilot-refined, its warm CFO (<0.1 Hz)
+        // beats the fade-jittered chirp gap estimate (sigma 0.3-1.15 Hz), whose
+        // sub-clamp phantoms killed 25% of full-anchor groups at 16QAM (0/N, all
+        // frames, confident-but-rotated LLRs) vs 0% on the warm-LTS path. Cold /
+        // idle / PING / MC-DPSK / narrow keep full chirp trust (other arm + the
+        // pilot_seeded fallback inside).
+        float new_cfo = use_full_ofdm_anchor_search
+            ? cfo_tracker_.seedFromChirpConnectedAnchor(
+                  sync_result.cfo_hz, sync_result.correlation, log_prefix_.c_str())
+            : cfo_tracker_.seedFromChirp(sync_result.cfo_hz, sync_result.correlation,
+                                         connected_, log_prefix_.c_str());
         if (timing_cfo_genie) {
             LOG_MODEM(WARN,
                       "[%s] DIAG genie-timing-cfo: forcing sync CFO %.2f Hz -> 0.00 Hz",

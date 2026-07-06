@@ -320,6 +320,38 @@ inline CFODriftDecision limitConnectedCFODrift(bool connected,
     return decision;
 }
 
+// ═══ BUG-ANCHOR-CFO-KILL (2026-07-05): connected full-anchor CFO seed ═══
+// On a CONNECTED OFDM link the full dual-chirp re-anchor is a TIMING event — its
+// gap-derived CFO estimate has sigma ~0.3-1.15 Hz under fading (differential
+// up/down peak jitter manufactures phantoms on a ~0 Hz channel), while the warm
+// pilot-tracked CFO was refined to <0.1 Hz on the previous group seconds ago
+// (oscillator drift ~mHz/s). Inverse-variance combining puts <5% weight on the
+// chirp — the principled limit is: keep the warm value. The drift clamp above
+// cannot catch this (sub-1 Hz phantoms pass unconditionally; >1 Hz passes at
+// high corr while tracked ~= 0), the per-frame LTS refine is gated off on
+// fading (channel_equalizer_lts cv >= 0.20), and the poisoned seed propagates
+// to every frame of the group (burst_cfo_) — measured 0/N group kills at 16QAM
+// (~10 deg phase margin) at 17-24 dB min-frame SNR: 25% of full-anchor groups
+// failed vs 0% of warm-LTS groups over 4 gate runs. Cold acquisition (no
+// pilot-refined estimate since reset) keeps full chirp trust via the fallback.
+struct ConnectedAnchorCFOSeed {
+    float accepted_cfo = 0.0f;
+    bool used_warm = false;
+};
+inline ConnectedAnchorCFOSeed connectedAnchorCFOSeed(float measured_cfo,
+                                                     float known_cfo,
+                                                     float correlation,
+                                                     bool pilot_seeded) {
+    if (!pilot_seeded) {
+        // No pilot-refined estimate since reset — cold rules apply (chirp
+        // trusted, subject to the standard drift clamp).
+        const auto d =
+            limitConnectedCFODrift(true, measured_cfo, known_cfo, correlation);
+        return {d.accepted_cfo, false};
+    }
+    return {known_cfo, true};  // warm prior sigma <0.1 Hz >> fading-chirp sigma
+}
+
 struct PilotCFOUpdate {
     float residual_cfo = 0.0f;
     float unclamped_cfo = 0.0f;

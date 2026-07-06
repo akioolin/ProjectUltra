@@ -8,6 +8,18 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-FILE-CRC-MISMATCH: complete 51200/51200 file assembled with WRONG CONTENT (P0 — corrupted delivery, worse than any stall)
+- Status: **OPEN 2026-07-05, evening.** One occurrence; MUST be root-caused before any rig deployment of the current stack.
+- Evidence preserved: `/tmp/campaign_3000/PRESERVED_crc_mismatch_run/` (gate run good@20 s42, RX-AUTHORITY + anchor-CFO-fix v1 build). `FileTransfer: CRC mismatch (got=CC1983F9 expected=BFD6400B, size=51200/51200)` at t=268.7 — full size, wrong bytes, every fabrication guard silent.
+- Run context (suspect factors, unproven): 5 authority mode moves + 8 crater'd groups + requeue-rewinds; heterogeneous chunk sizes across rate changes writing overlapping offsets is the prime suspect class (BUG-FILE-REQUEUE-OFFSET's sibling: content, not resume-point). Frame-CRC-passing constellation corruption is considered implausible (would need many simultaneous CRC collisions). HARQ cross-era combining is second suspect (soft_combine_harq_.clear() coverage on descriptor-committed moves).
+- Investigation entry point: reconstruct the file's wrong byte ranges (diff against qam16_50KB.bin), map to chunk offsets/eras, find which transmission wrote them.
+
+### BUG-ANCHOR-CFO-KILL: connected full-chirp re-anchor CFO seeding killed 25% of full-anchor groups at 16QAM (0/N, all frames)
+- Status: **FIX v2 IN TREE 2026-07-05 (uncommitted), gate validation in progress.** Root-caused by 3-agent forensics over 4 gate runs (61 FULL groups: 15 fail vs 19 LIGHT: 0 fail; causal A/B sticky-G13 vs climb-G13 same trough; the one LTS-refine firing flipped a failing group to 5/5 iters=1).
+- Mechanism: the full-anchor path seeds the whole group's CFO from the chirp gap estimate (sigma 0.3-1.15 Hz phantoms under fading) instead of the warm pilot-tracked value (<0.1 Hz); the drift clamp has a sub-1 Hz blind spot; the LTS residual refine is structurally gated off on fading (cv>=0.20); the poisoned burst_cfo_ rotates every frame -> 16QAM (~10 deg margin) dies group-wide with confident-but-rotated LLRs.
+- Fix v1 (warm-keep alone) FAILED its gate run: the noisy chirp was accidentally load-bearing as the tracker's re-center — burst-frame pilot ingest runs BEFORE any LDPC verdict, so crater stretches walk the tracker (measured -0.10 -> +0.29) and v1 removed the only correction. Fix v2 adds outcome-owned certification: a delivered group certifies the warm value (certifyWarm), a 0/N group revokes it (revokeWarm) -> next full anchor re-centers from the chirp. Cold/idle/PING/MC-DPSK/narrow unchanged.
+- Residual (separate lever): ~13% of full-anchor groups die to genuine deep nulls under cross-frame interleave (class A) — no CFO fix touches those.
+
 ### BUG-TONEACK-FABRICATION: phantom tone-ACK detection fabricated cumulative delivery of 6 undelivered frames — silent 3.7KB file hole + 9.5-min zombie stall (F116)
 - Status: **FIXED 2026-07-05 (4-layer, unconditional — data integrity, no knob).** Root-caused from F116 rig forensics + 5-agent adversarial verification (workflow wf_1e79fe9e).
 - Failure shape: rig 50KB transfer died with receiver FileTransfer stuck at `expected=34944` while BOTH ARQ ends stayed "consistent" — sender fully ACKed → "payload drained" → 900s-grace auto-disconnect; receiver kept ACKing everything it saw. Bytes 34944..38688 (exactly the crater'd 8PSK group) were never retransmitted by anyone. No error surfaced anywhere.

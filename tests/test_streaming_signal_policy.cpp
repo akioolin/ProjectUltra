@@ -186,6 +186,33 @@ void test_cfo_drift_limit() {
     CHECK_CLOSE(real_acq.accepted_cfo, 30.0f, 0.0001f, "real dial offset acquired");
 }
 
+void test_connected_anchor_cfo_seed() {
+    // BUG-ANCHOR-CFO-KILL: once pilot-refined, the connected full-anchor keeps the
+    // warm CFO whatever the chirp reads.
+    // (1) The sticky-G13 sub-clamp phantom: known +0.20, chirp -0.20, corr 0.94 —
+    //     the drift clamp passes it (diff 0.4 < 1.0); the seed must reject it.
+    auto g13 = connectedAnchorCFOSeed(-0.20f, 0.20f, 0.94f, /*pilot_seeded=*/true);
+    CHECK(g13.used_warm, "seeded anchor must keep warm CFO");
+    CHECK_CLOSE(g13.accepted_cfo, 0.20f, 0.0001f, "sub-clamp phantom rejected to warm");
+
+    // (2) The >1 Hz high-corr blind spot: known ~0 (unestablished), chirp -1.15,
+    //     corr 0.90 — the drift clamp accepts it (no established CFO); the seed must not.
+    auto blind = connectedAnchorCFOSeed(-1.15f, 0.0f, 0.90f, true);
+    CHECK(blind.used_warm, "seeded anchor rejects the high-corr unestablished phantom");
+    CHECK_CLOSE(blind.accepted_cfo, 0.0f, 0.0001f, "phantom rejected to warm 0");
+
+    // (3) NOT pilot-seeded: cold rules — a trusted large real CFO is accepted.
+    auto cold = connectedAnchorCFOSeed(3.0f, 0.0f, 0.95f, /*pilot_seeded=*/false);
+    CHECK(!cold.used_warm, "unseeded anchor keeps cold chirp trust");
+    CHECK_CLOSE(cold.accepted_cfo, 3.0f, 0.0001f, "cold acquisition CFO accepted");
+
+    // (4) NOT pilot-seeded + low-confidence phantom: the standard clamp still bites.
+    auto cold_phantom = connectedAnchorCFOSeed(-1.25f, 0.0f, 0.73f, false);
+    CHECK(!cold_phantom.used_warm, "unseeded path is the cold arm");
+    CHECK_CLOSE(cold_phantom.accepted_cfo, 0.0f, 0.0001f,
+                "low-corr phantom clamped on the cold arm");
+}
+
 void test_pilot_cfo_update() {
     auto residual_only = combinePilotCFO(0.0f, 0.25f, 0.0f, false);
     CHECK_CLOSE(residual_only.unclamped_cfo, 0.25f, 0.0001f,
@@ -221,6 +248,7 @@ int main() {
     test_light_sync_thresholds();
     test_light_sync_decision();
     test_cfo_drift_limit();
+    test_connected_anchor_cfo_seed();
     test_pilot_cfo_update();
 
     if (tests_failed != 0) {

@@ -1341,7 +1341,10 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);
-    cfo_tracker_.store(0.0f);
+    // BUG-ANCHOR-CFO-KILL: reset() (same stored value as store(0.0f)) also clears
+    // the pilot-refined mark, so the first anchor after a decoder reset keeps cold
+    // chirp trust.
+    cfo_tracker_.reset();
     last_fading_index_.store(0.0f);
     // Doppler-coherence disc: SLOW per-connection channel-state estimator (needs ~31 per-frame
     // |H|^2 snapshots to validate). It MUST survive the pre-TX clearRxBuffer() reset (called

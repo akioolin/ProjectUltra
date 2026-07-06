@@ -40,6 +40,30 @@ public:
     float seedFromChirp(float measured_cfo, float correlation, bool connected,
                         const char* log_prefix) const;
 
+    // BUG-ANCHOR-CFO-KILL (2026-07-05): seed for a full dual-chirp re-anchor on a
+    // CONNECTED OFDM link. Once the tracker has been pilot-refined since the last
+    // reset, the chirp is a TIMING event only — the warm tracked CFO (<0.1 Hz) is
+    // kept and the fade-jittered gap estimate (sigma ~0.3-1.15 Hz) discarded
+    // (signal_policy::connectedAnchorCFOSeed). Before the first pilot refine the
+    // cold rules apply. Does NOT store (caller applies diag overrides, then
+    // stores — a warm-kept seed stores tracked->tracked, a no-op, so the CFO
+    // feedback invariant is untouched).
+    float seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
+                                       const char* log_prefix) const;
+
+    // True once ingestPilotResidual refined the estimate since the last reset.
+    bool pilotSeeded() const { return pilot_seeded_.load(); }
+
+    // BUG-ANCHOR-CFO-KILL completion: the warm-keep is only safe while the warm
+    // value is PROVEN — burst-frame pilot residuals are ingested before any LDPC
+    // verdict exists (cross-frame interleave decodes at group end), so a crater
+    // stretch feeds the tracker noise and it random-walks (measured -0.10 ->
+    // +0.29 across a crater run once the chirp stopped re-centering it). A
+    // DELIVERED group certifies the warm estimate; a 0/N group revokes the
+    // certificate, so the next full anchor takes the chirp again and re-centers.
+    void certifyWarm() { pilot_seeded_.store(true); }
+    void revokeWarm() { pilot_seeded_.store(false); }
+
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
     // was applied to the demod) with `current` via signal_policy::combinePilotCFO, then STORE the
     // accepted result as the new tracked CFO (this IS the feedback invariant — centralized here so a
@@ -52,11 +76,15 @@ public:
     // ATOMIC: touched by the RX + control threads, exactly like the former SyncController::last_cfo_.
     void store(float cfo_hz) { cfo_.store(cfo_hz); }
 
-    // Reset to 0 for a new connection / mode change.
-    void reset() { cfo_.store(0.0f); }
+    // Reset to 0 for a new connection / mode change (clears the pilot-refined mark).
+    void reset() {
+        cfo_.store(0.0f);
+        pilot_seeded_.store(false);
+    }
 
 private:
     std::atomic<float> cfo_{0.0f};
+    std::atomic<bool> pilot_seeded_{false};
 };
 
 }  // namespace sync

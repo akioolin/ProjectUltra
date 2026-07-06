@@ -1040,6 +1040,18 @@ private:
     // crater is an irreducible deep null — the ARQ's job, not the ladder's.
     // Only CONSECUTIVE craters demote (and charge the crater margin).
     int rx_auth_crater_streak_ = 0;
+    // FADING input conditioning (F123 finding: the SNR was averaged but the
+    // fading/coherence input was a raw per-frame snapshot flapping 0.15<->0.30 —
+    // and the anchor table quantizes it into three CLIFF-EDGED columns, so class
+    // flaps swung the verdict across whole columns at rock-steady 24 dB SNR:
+    // AWGN-snapshot -> 8PSK R3/4, Moderate-snapshot -> QPSK R1/2). Ring-average
+    // the coherence-adjusted fading like the SNR, and make the CLASS sticky:
+    // a column switch needs the smoothed value's class to persist 2 consecutive
+    // verdicts (the Good/Moderate boundary is documented intrinsically fuzzy).
+    float rx_auth_fading_ring_[kRxAuthObsRing] = {0};
+    int rx_auth_class_sticky_ = 1;      // FadingClass::GOOD — sane starting column
+    int rx_auth_class_streak_ = 0;
+    float rx_auth_fading_passed_ = 0.3f;  // last fading fed to the map (in-class)
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
