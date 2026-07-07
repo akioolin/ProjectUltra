@@ -2846,11 +2846,21 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
     if (kAckRepeatSilentMs > 0) {
         const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
         std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        // F222 (MPG@10): one repeat per DISTINCT ack. Backstop re-confirms of
+        // the same window state arrive every ~15 s while the sender's
+        // undecodable bursts are invisible to every sensor — arming a repeat
+        // for each doubled the blind key-ups (ack+repeat pairs marching
+        // through the peer's resends). An identical ack already has the RTO
+        // and the backstop as its fallback; only NEW window state earns the
+        // tone-fade echo.
+        if (samples != ack_repeat_last_armed_samples_) {
+        ack_repeat_last_armed_samples_ = samples;
         ack_repeat_samples_ = samples;
         ack_repeat_fire_time_ = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
         ack_repeat_armed_rx_ms_ = modem_.lastRxSubstantiveMs();  // F143/F147 baseline
         ack_repeat_pending_ = true;
+        }
     }
     queueRealTxSamples(samples, "TX tone-burst ACK audio", /*in_qso_data=*/false);
 }

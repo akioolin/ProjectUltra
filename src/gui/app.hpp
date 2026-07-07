@@ -310,6 +310,7 @@ private:
     int ack_defer_quiet_ticks_ = 0;
     void maybeFireDeferredAck();
     void submitToneAckSamples(const std::vector<float>& samples);
+    std::vector<float> ack_repeat_last_armed_samples_;  // F222: one repeat per distinct ack
 
     // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
     // Closed-loop TX-drive: the peer's per-burst level verdict rides back on the
