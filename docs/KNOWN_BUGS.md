@@ -37,6 +37,22 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Regression: `tests/test_arq_toneburst_fabrication.cpp` (4/4: exact F116 repro, 64-value property sweep, control-path fabrication, legit-ack preservation).
 - Residual: a corrupt control-frame SACK could still phantom-retire WITHIN the sent window (needs an LDPC+frame-CRC fluke — astronomically rarer than the tone path).
 
+### BUG-FALSE-COMPLETION-FAMILY (STRUCTURALLY CLOSED 2026-07-07 — F218 completion gate): chunk-count completion drifted three separate ways; the ARQ is now the ground truth
+- Status: **BELT LANDED (F218, third family member).** F218: sender declared
+  "Transfer complete (1.43 kbps)" on an ack that retired only thru seq 89 with
+  **10 frames in flight** (salvage OFF — a different count leak than F181),
+  went idle, receiver stranded at 93 % rcvd / 88 % assembled. Evidence:
+  ~/Documents/ultra_forensics/F218_{mac,pi5}.log.
+- **Structural fix:** `FileTransferController::maybeCompleteSend()` +
+  completion gate injected by the Connection (`arq_.getTxInFlightBytes()==0`).
+  The chunk ledger can say done, but completion DEFERS while any frame is in
+  flight — state stays SENDING, RTOs keep retransmitting the holes, and the
+  gate re-checks on every retiring ack (handleArqTxBaseAdvanced). Every count
+  drift in this family is now non-fatal by construction.
+- **Open (low prio):** the specific F218 count leak (which path over-counted
+  chunks_acked_ / under-counted sent across the 16QAM re-encodes) — forensic
+  from the preserved logs; the gate contains it regardless.
+
 ### BUG-SACK-DURABILITY-RESIDUAL (DEFUSED 2026-07-07; root-cause narrowed): F181 reproduced the sender-complete/receiver-stranded wedge WITH the F168 deliver-before-discard fix active — a third loss path exists
 - Status: **OPEN — observed 2026-07-07 F181 (final batch, MPG@20).** Sender
   "Transfer complete 1.37 kbps" (salvaged ranges [1824,3048) at t=82); receiver

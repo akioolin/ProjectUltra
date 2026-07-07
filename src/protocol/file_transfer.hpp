@@ -179,9 +179,22 @@ public:
     // wasteful. Ranges live for the current TX file only.
     void noteRangeDelivered(uint32_t offset, uint32_t len);
 
+    // F218 COMPLETION GATE: chunk-count completion has produced THREE false
+    // "Transfer complete" wedges (F168 receiver stranded at 50 %, F181 phantom
+    // -SACK first-chunk skip, F218 complete with 10 frames in flight — sender
+    // idle, receiver stuck 93 %/88 %). Counts drift across re-encodes; the
+    // ground truth is the ARQ: NOTHING in flight. The host injects the gate;
+    // completion defers until it returns true and is re-checked via
+    // maybeCompleteSend() on ack/base-advance events.
+    void setCompletionGate(std::function<bool()> gate) {
+        completion_gate_ = std::move(gate);
+    }
+    void maybeCompleteSend();
+
 private:
     FileTransferState state_ = FileTransferState::IDLE;
     size_t chunk_size_ = DEFAULT_CHUNK_SIZE;
+    std::function<bool()> completion_gate_;  // F218: ARQ-idle required
 
     void skipDeliveredRanges();  // F163 FIX-4
 

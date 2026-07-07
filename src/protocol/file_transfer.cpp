@@ -277,16 +277,39 @@ void FileTransferController::onChunkAcked() {
     }
 
     notifyProgress();
+    maybeCompleteSend();
+}
 
-    if (!hasMoreChunks() && !hasPendingChunks()) {
-        state_ = FileTransferState::COMPLETE;
-
-        if (on_sent_) {
-            on_sent_(true, "");
-        }
-
-        resetTxState();
+void FileTransferController::maybeCompleteSend() {
+    if (state_ != FileTransferState::SENDING) {
+        return;
     }
+    if (hasMoreChunks() || hasPendingChunks()) {
+        return;
+    }
+    // F218 COMPLETION GATE: the chunk ledger says done, but the ARQ is the
+    // ground truth — never declare complete while frames are in flight (the
+    // ledger has drifted three separate ways across re-encodes; each time the
+    // sender went idle and stranded the receiver's holes). Deferring keeps
+    // state SENDING, so ARQ RTOs keep retransmitting the outstanding frames;
+    // the host re-invokes this on ack/base-advance events until the flight
+    // drains.
+    if (completion_gate_ && !completion_gate_()) {
+        static int defer_log = 0;
+        if (++defer_log % 5 == 1) {
+            LOG_MODEM(WARN,
+                      "FileTransfer: chunk ledger complete but ARQ still has "
+                      "frames in flight — completion DEFERRED (F218 gate)");
+        }
+        return;
+    }
+    state_ = FileTransferState::COMPLETE;
+
+    if (on_sent_) {
+        on_sent_(true, "");
+    }
+
+    resetTxState();
 }
 
 void FileTransferController::onSendFailed() {

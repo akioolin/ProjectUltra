@@ -256,6 +256,9 @@ Connection::Connection(const ConnectionConfig& config)
     // F163 FIX-4: a rate/CW-change abort discards SACKed (peer-confirmed) TX
     // slots — salvage their FILE byte-ranges so the requeue does not re-send
     // bytes the receiver already holds (13 confirmed frames re-sent in F163).
+    // F218 COMPLETION GATE: the ARQ is the completion ground truth.
+    file_transfer_.setCompletionGate(
+        [this]() { return arq_.getTxInFlightBytes() == 0; });
     arq_.setSackedFrameDiscardedCallback([this](const Bytes& frame_data) {
         // F181 (BUG-SACK-DURABILITY-RESIDUAL): the skip trusts slot.acked, and
         // F181 proved a SACK mark can be era-corrupted — the sender skipped
@@ -934,6 +937,9 @@ void Connection::handleArqFrameSubmitted(uint16_t seq) {
 }
 
 void Connection::handleArqTxBaseAdvanced(uint16_t base_seq) {
+    // F218: every retiring ack re-checks the deferred completion — the gate
+    // (ARQ idle) opens exactly when the last outstanding frame retires.
+    file_transfer_.maybeCompleteSend();
     for (auto& record : outbound_message_tx_records_) {
         if (record.terminal_reported ||
             !record.first_seq_valid ||
