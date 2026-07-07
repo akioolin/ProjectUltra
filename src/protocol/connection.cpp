@@ -651,8 +651,13 @@ void Connection::acceptCall() {
     Bytes ack_data = ack.serialize();
     connect_ack_frame_ = ack_data;
     connect_ack_retransmit_ms_ = connectAckRetransmitMs();
-    connect_ack_retx_remaining_ =
-        negotiated_mode_ == WaveformMode::OFDM_CHIRP ? connectAckRetxBudget() : 0;
+    // F225: budget for ALL modes — the rescue exists precisely because a single
+    // MC-DPSK CONNECT_ACK dies on faded seeds, and MC-DPSK is negotiated exactly
+    // at the low SNRs where that loss is most likely. The old OFDM_CHIRP-only
+    // gate left one un-rescued shot through a fading channel -> guaranteed
+    // half-open (rig F225: Mac ACK faded at the Pi5, 0 retries, 240 s timeout).
+    // Interval/budget are already airtime-/config-derived, mode-agnostic.
+    connect_ack_retx_remaining_ = connectAckRetxBudget();
     const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",

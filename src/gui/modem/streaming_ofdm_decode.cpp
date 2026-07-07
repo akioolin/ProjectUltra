@@ -534,7 +534,18 @@ void StreamingDecoder::decodeCurrentFrame() {
         // disables the noise arm inside evaluatePingFrame.
         float idle_noise_rms = 0.0f;
         float data_inband_rms = 0.0f;
-        if (robust_idle_ping) {
+        // #27 PROTOCOL-STATE GATE (rig F225 regression fix): the noise-relative
+        // chirp-lock arm may only classify PING when a bare chirp is PLAUSIBLE
+        // (idle / probing — bare_chirp_expected_). While CONNECTING the only
+        // chirp-locked frame we expect is the CONNECT_ACK; a deep fade makes its
+        // payload read at the noise floor, and PONGing it away destroys the
+        // handshake the peer is retrying (F225: Pi5 PONG'd the Mac's faded
+        // CONNECT_ACK -> 10 CONNECT retries -> half-open). With the arm off the
+        // frame is a plain decode failure -> retries/HARQ do their job. The old
+        // pre-unification emit had exactly this gate; restore it at the single
+        // choke point (idle_noise_rms=0 disables the arm in evaluatePingFrame).
+        if (robust_idle_ping &&
+            bare_chirp_expected_.load(std::memory_order_relaxed)) {
             // Reference preference: (1) THIS frame's inter-chirp-gap RMS —
             // burst-time, same channel-noise state and fade state as the frame
             // (S:N-holding channel sims scale idle noise differently from

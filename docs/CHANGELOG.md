@@ -10,6 +10,34 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(handshake): F225 rig half-open — CONNECT_ACK rescue was OFDM-only (0 retries on MC-DPSK) + the #27 state gate was bypassed by the unified PING arm
+
+**What was broken (rig F225, MPG@10 — the first-ever dial-10 rig connect, then
+half-open):** (1) `connect_ack_retx_remaining_` was granted ONLY for
+OFDM_CHIRP; an MC-DPSK-negotiated session (exactly the low-SNR case where
+CONNECT_ACK loss is most likely) got ZERO rescue retries — one faded ACK =
+guaranteed 240 s half-open. The rescue's own comment says it exists because
+"ALPHA can fail to decode the single MC-DPSK CONNECT_ACK on faded seeds" — it
+was built for MC-DPSK and then mode-gated off it (the classic `if (mode==X)`
+adaptivity smell). (2) The Pi5 (initiator, CONNECTING) classified the Mac's
+deep-faded CONNECT_ACK as a PING and PONG'd it away: the stage-1.5 unified
+noise arm bypassed the old `bare_chirp_expected_` protocol-state gate (#27) —
+the flag had become write-only.
+
+**What changed:** (1) both CONNECT_ACK arm sites grant `connectAckRetxBudget()`
+for ALL modes (interval/budget were already airtime-/config-derived and
+mode-agnostic — F225's "armed in 17.04 s" was the correct MC-DPSK interval).
+(2) `evaluatePingDecision` consumes `bare_chirp_expected_` again: the
+noise-relative chirp-lock arm only runs when a bare chirp is plausible
+(idle/probing); while CONNECTING an undecodable chirp-lock is a plain frame
+failure -> the peer's rescue retries + HARQ do their job.
+
+**Verification:** ctest 84/84; UltraTncSimAudio PASS 62 s; sim good@10 PASS
+(connect + deliver, 170 bps — fade luck; the gate is delivery-based); sim
+good@20 PASS 2250 bps. Rig MPG@10 (F226) is the decisive test.
+
+---
+
 ## 2026-07-07 — fix(handshake): #70 stage 1.5c — BURST-TIME noise reference from the frame's own inter-chirp gap (IONOS: noise level tracks the signal, so idle floor != burst floor)
 
 **What was broken (rig F224, right after 1.5b):** the min-statistics idle floor
