@@ -468,12 +468,17 @@ SearchWindowResult SyncController::acquireSearchWindow(
         // it is an old chirp, and the sender's RTO covers anything real).
         // Frame ASSEMBLY for an already-anchored group is untouched (it reads
         // ring positions independently of the search cursor).
-        constexpr size_t kMaxSearchBacklogSamples = 96000;  // 2 s @ 48 kHz
-        if (real_time_audio_ && unsearched > kMaxSearchBacklogSamples) {
-            const size_t shed = unsearched - kMaxSearchBacklogSamples;
+        // Cap must NEVER trim below what the search itself requires (min_search
+        // can be 2.5 s for the full chirp window; the first cut of this shed
+        // capped at 2 s flat and starved the search into total deafness — the
+        // faithful gate caught it with a hard failure before it reached the rig).
+        const size_t backlog_cap =
+            std::max<size_t>(96000, min_search + correlation_step);
+        if (real_time_audio_ && unsearched > backlog_cap) {
+            const size_t shed = unsearched - backlog_cap;
             ring_.correlation_pos_ =
                 ring_.wrapRingIndexLocked(ring_.correlation_pos_ + shed);
-            unsearched = kMaxSearchBacklogSamples;
+            unsearched = backlog_cap;
             static int shed_log_count = 0;
             if (++shed_log_count % 5 == 1) {
                 LOG_MODEM(WARN,
@@ -481,7 +486,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
                           "search fell behind live; staying within %.1f s of the "
                           "antenna (x%d)",
                           log_prefix_.c_str(), shed, shed / 48000.0f,
-                          kMaxSearchBacklogSamples / 48000.0f, shed_log_count);
+                          backlog_cap / 48000.0f, shed_log_count);
             }
         }
 
