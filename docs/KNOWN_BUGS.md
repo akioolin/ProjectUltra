@@ -37,6 +37,25 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Regression: `tests/test_arq_toneburst_fabrication.cpp` (4/4: exact F116 repro, 64-value property sweep, control-path fabrication, legit-ack preservation).
 - Residual: a corrupt control-frame SACK could still phantom-retire WITHIN the sent window (needs an LDPC+frame-CRC fluke — astronomically rarer than the tone path).
 
+### BUG-SACK-DURABILITY-RESIDUAL: F181 reproduced the sender-complete/receiver-stranded wedge WITH the F168 deliver-before-discard fix active — a third loss path exists
+- Status: **OPEN — observed 2026-07-07 F181 (final batch, MPG@20).** Sender
+  "Transfer complete 1.37 kbps" (salvaged ranges [1824,3048) at t=82); receiver
+  logged ZERO file-progress marks in 900+ s (contiguous prefix stuck < 25 %)
+  and died on the scenario timeout. The two patched discard sites (epoch
+  adoption + RX setCodeRate) log salvages — 13 epoch/salvage-class lines
+  present — yet the low-offset bytes never reached the receiver's file prefix.
+- **Suspects (unverified):** (a) a THIRD RX-slot discard path (full arq reset?
+  partial-slot clear?) that drops buffered FILE payloads unlogged; (b) sender
+  slots marked `acked` by a STALE-EPOCH SACK (epoch-echo gating hole) so the
+  salvage skipped ranges the receiver NEVER confirmed in the new era; (c) the
+  salvage delivered but FILE_START/offset bookkeeping rejected the write.
+- **Evidence preserved:** ~/Documents/ultra_forensics/F181_{mac,pi5}.log.
+- **Action (next session, FIRST):** replay the F181 timeline (sender salvage
+  events vs receiver salvage/delivery lines vs file-layer writes at those
+  offsets). Until root-caused, consider `ULTRA_SACK_SALVAGE=0` opt-out wiring
+  for the sender-side skip (re-sending SACKed ranges is only ~1 s/transfer —
+  the optimization is NOT worth a stranded-file class).
+
 ### BUG-DECODE-BACKLOG-COLLISIONS: under deep-fade search thrash the decoder falls 10-20 s behind LIVE audio — every receiver response (ACK, backstop, adopt) leaves stale, colliding with the sender's already-airing recovery bursts
 - Status: **OPEN — pinned 2026-07-07 (F176 rig, MPG@20).** Hard evidence: a burst
   AIRED at t≈218, its anchor was ACCEPTED by the decoder at t≈239 (**~20 s of
