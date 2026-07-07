@@ -1451,12 +1451,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_min_block_ = static_cast<size_t>(
             waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
-        // F176: publish the group's declared air extent for the ack gate.
-        burst_air_end_abs_.store(
-            static_cast<uint64_t>(frame_sync_abs) +
-                static_cast<uint64_t>(std::max(2, burst_group_size_)) *
-                    static_cast<uint64_t>(frame_len),
-            std::memory_order_relaxed);
+        // F176/F221: data frames begin just past this header; the air-end is
+        // published by refreshBurstAirEnd() once the group's ACTUAL per-frame
+        // sample count is live (frame_len here is the HEADER's length — using
+        // it declared a 30 s R1/4 burst as 1.7 s and gutted the gate).
+        burst_data_start_abs_ =
+            static_cast<uint64_t>(frame_sync_abs) + static_cast<uint64_t>(frame_len);
+        burst_air_end_abs_.store(0, std::memory_order_relaxed);
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
         burst_start_time_ = std::chrono::steady_clock::now();

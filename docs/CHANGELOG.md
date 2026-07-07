@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(ack): F221 — geometric ack gate was computing air-end from the HEADER's frame length (operator-caught at MPG@10)
+
+The F176 gate published `air_end = frame_sync_abs + N × frame_len` at the
+BURST_HEADER consume — where `frame_len` is the HEADER frame's own 10,080
+samples, not the data frames'. A 30 s QPSK R1/4 group declared as 1.7 s of
+air: the gate opened immediately and every repeat/hole ack keyed into the
+sender's resend. MPG@20 masked it (delivery-time acks land after burst end
+anyway); MPG@10's repeat-heavy crater cycles exposed it — the operator's
+hypothesis ("our timing is not code-rate/mod aware") was exactly right.
+Fix: `refreshBurstAirEnd()` — air-end = data-start (just past the header) +
+N × the group's ACTUAL per-frame sample count (`burst_min_block_`, the same
+quantity that advances the demod cursor), refreshed at every frame advance,
+so it is geometry-true across every rung/pilot-grid by construction.
+
 ## 2026-07-07 — fix(arq): F218 COMPLETION GATE — a transfer cannot complete while the ARQ holds frames in flight
 
 Third false-completion wedge (F168/F181/F218 — each a different chunk-count

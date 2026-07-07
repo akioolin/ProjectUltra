@@ -432,7 +432,9 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     headnull_resync_drop_count_ = 0;
     burst_next_pos_ =
         sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + data_block);
-    // F176 ack gate (late-join: head unknown — conservative full-group extent).
+    // F176/F221 ack gate (late-join: head unknown — conservative full-group
+    // extent from THIS member's actual frame length; refreshed per frame).
+    burst_data_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
     burst_air_end_abs_.store(
         static_cast<uint64_t>(frame_sync_abs) +
             static_cast<uint64_t>(std::max(2, burst_group_size_)) *
@@ -445,6 +447,18 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
               std::max(2, burst_group_size_));
     state_ = DecoderState::BURST_ACCUMULATING;
     return true;
+}
+
+void StreamingDecoder::refreshBurstAirEnd() {
+    // F221: geometry-true ack gate — N x the group's actual per-frame samples.
+    if (burst_data_start_abs_ == 0 || burst_min_block_ == 0) {
+        return;
+    }
+    burst_air_end_abs_.store(
+        burst_data_start_abs_ +
+            static_cast<uint64_t>(std::max(2, burst_group_size_)) *
+                static_cast<uint64_t>(burst_min_block_),
+        std::memory_order_relaxed);
 }
 
 void StreamingDecoder::accumulateBurstCarrierGamma() {
@@ -640,6 +654,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                                        0.0f, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
 
@@ -684,6 +699,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                                        burst_pre_cfo, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
     captureConstellationSnapshot();
@@ -770,6 +786,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                                        burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/true);
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
 
@@ -1182,6 +1199,7 @@ void StreamingDecoder::finalizeBurstGroup() {
 
     finalizeGroupCarrierGammas();  // ready BEFORE the group callback reads it
     burst_air_end_abs_.store(0, std::memory_order_relaxed);  // F176: group over
+    burst_data_start_abs_ = 0;
     if (burst_transport_rx_ && burst_group_callback_) {
         // Deliver the whole interleaved burst as a unit. all_ok requires every
         // logical frame of the group to have decoded — a partial group is

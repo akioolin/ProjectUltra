@@ -994,6 +994,15 @@ private:
     // tail of the burst it is acking, regardless of what the (fade-fragile)
     // energy CCA thinks. 0 = no group in flight.
     std::atomic<uint64_t> burst_air_end_abs_{0};
+    // F221: absolute sample where the group's DATA frames begin (just past the
+    // consumed BURST_HEADER). The air-end derives from this + N x the group's
+    // ACTUAL per-frame sample count (burst_min_block_) — the first cut used the
+    // header frame's own length (10,080) and declared a 30 s R1/4 burst as
+    // 1.7 s of air: the gate opened immediately and every repeat/hole ack keyed
+    // into the sender's resend (operator-caught at MPG@10, where rung geometry
+    // diverges from the sp8 slot the gate was built on).
+    uint64_t burst_data_start_abs_ = 0;
+    void refreshBurstAirEnd();
     std::vector<BurstPhysicalDiag> burst_physical_diag_;
     uint64_t burst_diag_next_group_index_ = 0;
     uint64_t burst_diag_group_index_ = 0;
