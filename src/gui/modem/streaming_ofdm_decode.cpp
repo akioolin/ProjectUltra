@@ -535,11 +535,16 @@ void StreamingDecoder::decodeCurrentFrame() {
         float idle_noise_rms = 0.0f;
         float data_inband_rms = 0.0f;
         if (robust_idle_ping) {
-            const auto ns = idle_noise_snr_estimator_.snapshot();
-            // floor (min-statistics), NOT the last window: real-channel idle
-            // audio is bursty and the last window over-reads the floor by dBs
-            // (F223 rig: 0.067-0.077 vs true 0.048 → all CONNECTs "noise").
-            if (ns.valid) idle_noise_rms = ns.floor_noise_rms;
+            // Reference preference: (1) THIS frame's inter-chirp-gap RMS —
+            // burst-time, same channel-noise state and fade state as the frame
+            // (S:N-holding channel sims scale idle noise differently from
+            // burst noise — F224); (2) fallback: idle min-statistics floor.
+            if (sync_noise_ref_rms_ > frame_policy::kMinIdleNoiseRMSForPingGap) {
+                idle_noise_rms = sync_noise_ref_rms_;
+            } else {
+                const auto ns = idle_noise_snr_estimator_.snapshot();
+                if (ns.valid) idle_noise_rms = ns.floor_noise_rms;
+            }
             if (idle_noise_rms > 0.0f && !frame_buffer.empty()) {
                 // Same design as IdleNoiseSNREstimator's reference filter.
                 FIRFilter gap_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);

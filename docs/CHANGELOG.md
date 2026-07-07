@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(handshake): #70 stage 1.5c — BURST-TIME noise reference from the frame's own inter-chirp gap (IONOS: noise level tracks the signal, so idle floor != burst floor)
+
+**What was broken (rig F224, right after 1.5b):** the min-statistics idle floor
+is still a TEMPORALLY DISTANT reference. The IONOS hardware channel simulator
+is an S:N machine — it measures the input signal RMS and sizes its noise
+against it (manual Rev 2.03 §Fig 1/2: `rms meas → S:N Mixer`; now archived at
+docs/references/teensy_ionos_hf_manual_rev_2.03.pdf). Its noise level therefore
+TRACKS the signal: during long idle the noise decays (measured floor 0.029),
+during bursts it rides at signal/S:N (0.06+). Real radios and OTASim have
+constant band noise — the gate was correct there and only wrong on IONOS.
+Also retired: the "rig runs 6-7 dB below dial" theory (F224-era) — WRONG; the
+manual + a WGN@10 ping-loop measurement (delivered 9.3±0.5 dB through the full
+physical chain) prove the dial is honest and self-calibrating.
+
+**What changed:** `SyncResult` gains `interchirp_gap_start_sample/len` (set by
+mc_dpsk_waveform on dual-chirp detect); at sync-found the decoder measures the
+in-band RMS of the CENTER 60% of THIS frame's silent up↔down chirp gap
+(leading skip doubles as FIR priming and dodges chirp ringing/multipath tails)
+into `sync_noise_ref_rms_`; the PING gate prefers it over the idle floor.
+Burst-time, same channel-noise state, same fade state as the frame — correct
+on real radios, OTASim, AND IONOS. PING detection always follows a full dual
+chirp (invariant), so the reference is always available where the gate runs;
+LTS/warm syncs leave it 0 and fall back to the min-stat idle floor.
+
+**Verification:** ctest 84/84; UltraTncSimAudio PASS 63 s; sim good@10
+handshake connects (CONNECT decoded; the run's transfer-phase FAIL is the
+pre-existing @10 entry-cliff, ~50/50 today); sim good@20 PASS 1510 bps,
+0 spurious path2; IONOS WGN@10 ping-loop: all pings classify on PATH1
+(ratio 0.31-0.38, corr 0.96) with delivered SNR 9.3±0.5 dB. Rig MPG@10 next.
+
+**Also logged from the audit:** OFDM LTS/broadband SNR estimators read
++2.5-3 dB HIGH on awgn@10 sim (12.3-13.4 vs true 10.0 while idle reads dead-on
+10.0) — OFDM_BROADBAND feeds rate selection, so this optimistic bias is a
+suspect for hot entries/climbs. Filed as a follow-up audit.
+
+---
+
 ## 2026-07-07 — fix(handshake): #70 stage 1.5b — PING-gate floor reference is now a MIN-STATISTICS floor (rig F223 regression: last-window floor over-read +4 dB → every CONNECT classified as noise)
 
 **What was broken (caught on the rig, first MPG@10 run after stage 1.5):** the

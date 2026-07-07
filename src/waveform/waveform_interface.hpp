@@ -41,6 +41,13 @@ struct SyncResult {
                                     // this point is ambient — usable as an
                                     // idle-noise observation. -1 = unknown
                                     // (e.g. warm-LTS syncs with no chirp).
+    int interchirp_gap_start_sample = -1; // Silent gap between up- and down-chirp:
+    int interchirp_gap_len = 0;     // noise-only audio AT BURST TIME — the
+                                    // per-frame noise reference (same channel
+                                    // noise state + fade state as the frame;
+                                    // S:N-tracking channel sims scale idle
+                                    // noise differently from burst noise).
+                                    // -1/0 = unavailable (single chirp, LTS).
     float correlation = 0.0f;       // Peak correlation value (0-1)
     float cfo_hz = 0.0f;            // Estimated carrier frequency offset
     float gap_error_samples = 0.0f; // Dual-chirp actual_gap - expected_gap

@@ -139,6 +139,16 @@ bool MCDPSKWaveform::detectSync(SampleSpan samples, SyncResult& result, float th
             // Training starts after down chirp + gap
             result.start_sample = chirp_result.down_chirp_start +
                                   chirp_samples + gap_samples;
+            // Silent inter-chirp gap [up_end, down_start): the frame's own
+            // noise-only region, used as the burst-time noise reference for
+            // the PING payload-absence gate.
+            const int gap_start = chirp_result.up_chirp_start +
+                                  static_cast<int>(chirp_samples);
+            const int gap_len = chirp_result.down_chirp_start - gap_start;
+            if (gap_len > 0) {
+                result.interchirp_gap_start_sample = gap_start;
+                result.interchirp_gap_len = gap_len;
+            }
         } else {
             // Single chirp
             result.start_sample = chirp_result.up_chirp_start +

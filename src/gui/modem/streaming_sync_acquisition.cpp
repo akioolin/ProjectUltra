@@ -585,6 +585,39 @@ void StreamingDecoder::searchForSync() {
                 search_buffer.data() + (chirp_off - prefix), prefix);
         }
 
+        // Burst-time noise reference: in-band RMS of the silent inter-chirp gap
+        // of THIS frame. Correct on constant-noise channels (real radio, OTASim)
+        // AND on S:N-holding channel sims whose noise level tracks the signal
+        // (idle floor != burst floor there — F224). Center 60% of the gap only:
+        // the skipped leading edge doubles as FIR-transient priming and dodges
+        // chirp ringing + multipath tails; the trailing edge dodges timing error.
+        sync_noise_ref_rms_ = 0.0f;
+        if (sync_result.interchirp_gap_len > 0 &&
+            sync_result.interchirp_gap_start_sample >= 0) {
+            const size_t gs = std::min(
+                static_cast<size_t>(sync_result.interchirp_gap_start_sample),
+                search_buffer.size());
+            const size_t glen = std::min(
+                static_cast<size_t>(sync_result.interchirp_gap_len),
+                search_buffer.size() - gs);
+            const size_t skip = glen / 5;
+            if (glen > 2 * skip + 480) {  // >=10 ms usable
+                FIRFilter ref_filter =
+                    FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+                for (size_t i = gs; i < gs + skip; ++i) {
+                    ref_filter.process(search_buffer[i]);
+                }
+                double sum_sq = 0.0;
+                const size_t meas_end = gs + glen - skip;
+                for (size_t i = gs + skip; i < meas_end; ++i) {
+                    const float y = ref_filter.process(search_buffer[i]);
+                    sum_sq += static_cast<double>(y) * static_cast<double>(y);
+                }
+                sync_noise_ref_rms_ = static_cast<float>(
+                    std::sqrt(sum_sq / static_cast<double>(meas_end - gs - skip)));
+            }
+        }
+
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
         sync_position_ = sync_controller_.ring_.wrapRingIndexLocked(search_start + sync_result.start_sample);

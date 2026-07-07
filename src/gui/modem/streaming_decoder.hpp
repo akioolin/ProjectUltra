@@ -758,6 +758,11 @@ private:
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // Chirp sync-quality score
     float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
+    // In-band RMS of the current frame's silent inter-chirp gap — the frame's
+    // own BURST-TIME noise reference for the PING payload-absence gate.
+    // 0 = unavailable (LTS/warm sync, single chirp). Set at sync-found,
+    // consumed by the same frame's decode on the same thread.
+    float sync_noise_ref_rms_ = 0.0f;
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
