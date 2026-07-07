@@ -1,3 +1,4 @@
+#include "env_compat.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/waveform_factory.hpp"

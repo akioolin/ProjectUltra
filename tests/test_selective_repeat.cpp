@@ -9,6 +9,7 @@
  * - Window advancement
  */
 
+#include "env_compat.hpp"
 #include "protocol/arq_interface.hpp"
 #include "protocol/selective_repeat_arq.hpp"
 #include "protocol/frame_v2.hpp"

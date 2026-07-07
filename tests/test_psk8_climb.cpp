@@ -12,6 +12,7 @@
  * main() before any Connection is constructed.
  */
 
+#include "env_compat.hpp"
 #include "protocol/connection.hpp"
 #include "protocol/frame_v2.hpp"
 #include <cstdlib>

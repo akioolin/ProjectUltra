@@ -6,6 +6,7 @@
 // fix. The pre-smoothing policy dropped a rung on EVERY bad sample, so on a fading
 // channel it ratcheted monotonically to R1/4 and never climbed back.
 
+#include "env_compat.hpp"
 #include "protocol/rate_controller.hpp"
 #include "ultra/types.hpp"
 

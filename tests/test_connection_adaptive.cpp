@@ -15,6 +15,7 @@
 // RateController (tests/test_rate_controller.cpp) and lands via the
 // synchronized requestModeChange() MODE_CHANGE handshake exercised below. The
 // dead test accessors for that machinery were removed with it.
+#include "env_compat.hpp"
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
