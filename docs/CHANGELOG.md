@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — SHIPPED on the interleaved same-epoch rig A/B: +24 %
+
+Deciding measurement (F208-F217, alternating ULTRA_BURST_ESCALATION on/off,
+identical binary, same hour/channel — the epoch confound of the F198-F207
+cross-epoch batch removed by construction): **ON 1.74 kbps mean vs OFF 1.40 —
++24 %, 4/5 adjacent pairs positive, 10/10 PASS both arms.** The rough-epoch
+pair (F214/F215, 7/9 craters) still favored ON (+0.40) — the streak-reset
+containment works. Final shipped form: streak 2 + dense-rung gate +
+climb-carry (a rung climb preserves the streak — it was earned by the same
+clean rounds; down/lateral moves and any holey/zero-progress round reset).
+Measured trail for the record: streak-2 alone won calm epochs (+15 % paired
+gate) but re-escalated between craters cross-epoch; streak-6 fired too late to
+pay; the interleaved A/B settled it. Escalation stays DEFAULT-ON.
+
 ## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — gate A/B addendum: RUNG GATE + escalation opt-out
 
 Gate A/B found the streak alone over-escalates at Moderate (clean pairs happen
