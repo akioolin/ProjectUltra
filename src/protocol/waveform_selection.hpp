@@ -27,7 +27,14 @@ namespace protocol {
 // reference these, so the OFDM-vs-MC-DPSK entry decision cannot drift between the
 // two call sites. Classification thresholds: <0.15 AWGN, <0.65 Good, <1.10 Moderate.
 inline constexpr float kOFDMEntryFloorAwgnDb = 8.0f;    // 2026-06-02: lowered 10->8 (R1/4 clean @ AWGN 8, 0% dmg; floor likely lower)
-inline constexpr float kOFDMEntryFloorGoodDb = 10.0f;   // 2026-06-02: lowered 12->10 (R1/2 reliable @ Good 10; R1/4 @ Good 8 marginal/cliff)
+inline constexpr float kOFDMEntryFloorGoodDb = 8.0f;    // 2026-07-07: lowered 10->8 — measured floor sweep (measure_ack_fer data4_full, 2 seeds x 150):
+                                                        // QPSK R1/4 Good@8 FER 17%/17% (ARQ-viable, ~8x MC-DPSK's delivered rate in this band);
+                                                        // Good@6 29/35% = marginal, stays out. SAFE NOW vs the 2026-06 cliff: entry lands on the
+                                                        // R1/4 floor rung and the PREDICTIVE CLIMB promotes only on measured per-carrier snapshots
+                                                        // (no blind R1/2 pick off a stale connect snapshot). NOTE: standalone CONNECT at Good<=12
+                                                        // still gated on the handshake floor (#70 ULTRA_ROBUST_IDLE_PING) — this band primarily
+                                                        // rescues connected sessions that fade down. QAM8/8PSK R1/4 measured DOMINATED by QPSK
+                                                        // R1/2 (equal FER, -33% capacity) — do not add low-rate dense rungs.
 inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // Poor HF (fading >= 1.10: fast Doppler / heavy multipath) routes to MC-DPSK, NEVER
 // OFDM (thread A, 2026-05-31). Coherent OFDM phase tracking breaks on fast fading and

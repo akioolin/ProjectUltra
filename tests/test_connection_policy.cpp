@@ -116,12 +116,12 @@ void test_ladder_rung_selection() {
     CHECK(selectLadderRung(7.0f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST,
           "Good at DQPSK floor selects Robust (DQPSK) — rig-validated clean @MPG9");
-    CHECK(selectLadderRung(9.9f, ChannelClassification::GOOD).id ==
+    CHECK(selectLadderRung(7.9f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST,
-          "Good fading below OFDM floor selects Robust (DQPSK)");
-    CHECK(selectLadderRung(10.0f, ChannelClassification::GOOD).id ==
+          "Good fading below OFDM floor (8, 2026-07-07 sweep) selects Robust (DQPSK)");
+    CHECK(selectLadderRung(8.0f, ChannelClassification::GOOD).id ==
               LadderRungId::OFDM_CHIRP,
-          "Good fading in-band 10 dB boundary selects OFDM_CHIRP");
+          "Good fading in-band 8 dB boundary selects OFDM_CHIRP");
     CHECK(selectLadderRung(16.9f, ChannelClassification::POOR).id ==
               LadderRungId::ROBUST_MID,
           "Poor fading keeps extra margin before Robust");
@@ -524,9 +524,9 @@ void test_auto_data_mode_boundaries() {
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
-        9.9f, 0.30f);
+        7.9f, 0.30f);
     CHECK(waveform == WaveformMode::MC_DPSK,
-          "GOOD fading below the OFDM floor (10) keeps MC-DPSK");
+          "GOOD fading below the OFDM floor (8) keeps MC-DPSK");
     recommendDataMode(9.9f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::DQPSK && rate == CodeRate::R1_4,
           "MC-DPSK floor still uses DQPSK R1/4");
