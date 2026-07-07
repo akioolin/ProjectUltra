@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(ack): F176 GEOMETRIC ACK GATE — never key an ack before the burst finishes ARRIVING (sample-clock, descriptor-declared)
+
+**What was broken (operator waterfall, 4th energy-CCA failure tonight):** an ACK
+keyed over a live inbound burst tail. Live log: CCA rms 0.06–0.13 against a
+mislearned quiet_thresh ~0.15 → idle=1 straight through burst audio (true
+ambient is ~0.03; faded-burst samples teach the floor upward). Energy detection
+is structurally fade-fragile — every threshold repair moves the failure point.
+
+**Fix — use the wire's own geometry instead:** the decoder publishes the
+group's declared air-end (`burst_air_end_abs_` = frame_sync_abs + group_size ×
+frame_len, set at header consume and late-join, cleared at finalize);
+`burstAirSamplesRemaining()` compares against the ring's fed counter on the
+SAME sample clock. All ACK paths share the gate: the primary path defers with a
+deadline sized to the remaining airtime + 500 ms (bounded 12 s), the deferred
+firer holds while declared airtime remains and DROPS (not keys) if still inside
+it at deadline, the repeat holds (without canceling — an inbound burst says
+nothing about copy 1). CCA remains as a second opinion; the geometry is
+authoritative.
+
 ## 2026-07-07 — feat(rate): RX-AUTHORITY PREDICTIVE — per-carrier virtual rung evaluation, direct multi-rung climbs (ULTRA_RX_PREDICTIVE_CLIMB, default ON)
 
 **Design:** docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md. The one-rung ladder and

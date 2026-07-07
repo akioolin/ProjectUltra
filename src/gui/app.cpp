@@ -720,16 +720,33 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     }
                     return 2500u;  // default ON
                 }();
-                if (kAckCcaDeferMs > 0 && modem_.channelBusyForTx()) {
+                // F176 GEOMETRIC ACK GATE: the decoder publishes the declared
+                // air-end of the group being received (descriptor geometry, on
+                // the sample clock). Never key an ack before the burst we are
+                // acking has finished ARRIVING — the energy CCA alone proved
+                // fade-fragile four times tonight (mislearned floor read a live
+                // 0.06-0.13 RMS burst tail as idle=1 and keyed over it). The
+                // deadline covers the remaining airtime + margin, so the gate
+                // is bounded by the wire's own geometry, never open-ended.
+                const uint64_t air_rem = modem_.burstAirSamplesRemaining();
+                if ((kAckCcaDeferMs > 0 && modem_.channelBusyForTx()) ||
+                    air_rem > 0) {
+                    const uint32_t air_rem_ms =
+                        static_cast<uint32_t>(air_rem / 48);  // 48 kHz
+                    const uint32_t defer_ms = std::min<uint32_t>(
+                        12000, std::max(kAckCcaDeferMs, air_rem_ms + 500));
                     LOG_MODEM(INFO,
-                              "ToneBurstAck: channel busy at ACK time — deferring "
-                              "up to %u ms (listen-before-transmit)",
-                              kAckCcaDeferMs);
+                              "ToneBurstAck: deferring up to %u ms (%s%s%u ms of "
+                              "burst still arriving)",
+                              defer_ms,
+                              modem_.channelBusyForTx() ? "channel busy; " : "",
+                              air_rem > 0 ? "" : "no ",
+                              air_rem_ms);
                     std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
                     ack_defer_samples_ = std::move(samples);
                     ack_defer_deadline_ =
                         std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(kAckCcaDeferMs);
+                        std::chrono::milliseconds(defer_ms);
                     ack_defer_pending_ = true;
                 } else {
                     submitToneAckSamples(samples);
@@ -2777,6 +2794,12 @@ void App::maybeFireAckRepeatIfSilent() {
                    "copy 1 evidently heard)");
             return;
         }
+        // F176 GEOMETRIC gate: declared burst airtime still arriving — hold the
+        // repeat (do NOT cancel: an in-flight inbound burst says nothing about
+        // whether ack copy 1 was heard; substantive evidence below decides).
+        if (modem_.burstAirSamplesRemaining() > 0) {
+            return;
+        }
         // F129 DECODER-EVIDENCE cancel, F143-corrected, F147-corrected again:
         // count only SUBSTANTIVE evidence (accepted sync / consumed descriptor /
         // decoded codewords) NEWER than the arm. The F143 broad-stamp version
@@ -2847,7 +2870,8 @@ void App::maybeFireDeferredAck() {
             return;
         }
         const bool rx_evidence = modem_.rxSignalActive(1600);
-        if (modem_.channelBusyForTx() || rx_evidence) {
+        const bool air_arriving = modem_.burstAirSamplesRemaining() > 0;  // F176
+        if (modem_.channelBusyForTx() || rx_evidence || air_arriving) {
             ack_defer_quiet_ticks_ = 0;
             // DEADLINE = DROP, never key over (F127, waterfall-proven: the 2.5 s
             // deadline is shorter than an 8-10 s burst, so 'send regardless' keyed
@@ -2865,10 +2889,11 @@ void App::maybeFireDeferredAck() {
                 // floor) — SEND in that case; dropping cost two full RTO cycles
                 // (~19 s each).
                 ack_defer_pending_ = false;
-                if (rx_evidence) {
+                if (rx_evidence || air_arriving) {
                     ack_defer_samples_.clear();
-                    guiLog("LISTEN-BEFORE-ACK: inbound signal (decoder evidence) "
-                           "through the defer window — ACK DROPPED (RTO covers)");
+                    guiLog("LISTEN-BEFORE-ACK: inbound signal (decoder evidence/"
+                           "declared airtime) through the defer window — ACK "
+                           "DROPPED (RTO covers)");
                 } else {
                     deadline_send.swap(ack_defer_samples_);  // sent after unlock
                 }

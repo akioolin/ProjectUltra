@@ -453,6 +453,16 @@ public:
     // "inbound transmission in progress" with nothing on the air. The broad
     // stamp stays for listen-before-ACK, where conservative deferral is right.
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    uint64_t burstAirSamplesRemaining() {
+        const uint64_t end = burst_air_end_abs_.load(std::memory_order_relaxed);
+        if (end == 0) return 0;
+        uint64_t fed;
+        {
+            std::lock_guard<std::mutex> lk(sync_controller_.ring_.buffer_mutex_);
+            fed = sync_controller_.ring_.total_fed_;
+        }
+        return end > fed ? end - fed : 0;
+    }
     const std::vector<float>& getLastGroupCarrierGammas() const {
         return last_group_carrier_gammas_;  // decode-thread only (group callback)
     }
@@ -976,6 +986,13 @@ private:
     std::vector<float> last_group_carrier_gammas_;
     void accumulateBurstCarrierGamma();
     void finalizeGroupCarrierGammas();
+    // F176 GEOMETRIC ACK GATE: absolute sample at which the group currently
+    // being received stops ARRIVING (descriptor-declared geometry:
+    // frame_sync_abs + group_size × frame_len). The ack paths defer until the
+    // ring's fed counter passes it — the receiver never keys an ack into the
+    // tail of the burst it is acking, regardless of what the (fade-fragile)
+    // energy CCA thinks. 0 = no group in flight.
+    std::atomic<uint64_t> burst_air_end_abs_{0};
     std::vector<BurstPhysicalDiag> burst_physical_diag_;
     uint64_t burst_diag_next_group_index_ = 0;
     uint64_t burst_diag_group_index_ = 0;

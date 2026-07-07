@@ -432,6 +432,12 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     headnull_resync_drop_count_ = 0;
     burst_next_pos_ =
         sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + data_block);
+    // F176 ack gate (late-join: head unknown — conservative full-group extent).
+    burst_air_end_abs_.store(
+        static_cast<uint64_t>(frame_sync_abs) +
+            static_cast<uint64_t>(std::max(2, burst_group_size_)) *
+                static_cast<uint64_t>(data_block),
+        std::memory_order_relaxed);
     LOG_MODEM(WARN,
               "[%s] [LATE-JOIN] descriptor-armed accumulation from mid-group member "
               "(member_decode=%d cw=%d declared_group=%d) — head erasure-filled at finalize",
@@ -1175,6 +1181,7 @@ void StreamingDecoder::finalizeBurstGroup() {
     }
 
     finalizeGroupCarrierGammas();  // ready BEFORE the group callback reads it
+    burst_air_end_abs_.store(0, std::memory_order_relaxed);  // F176: group over
     if (burst_transport_rx_ && burst_group_callback_) {
         // Deliver the whole interleaved burst as a unit. all_ok requires every
         // logical frame of the group to have decoded — a partial group is
