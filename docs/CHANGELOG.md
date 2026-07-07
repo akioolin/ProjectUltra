@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(arq): F218 COMPLETION GATE — a transfer cannot complete while the ARQ holds frames in flight
+
+Third false-completion wedge (F168/F181/F218 — each a different chunk-count
+drift; F218: "Transfer complete" on an ack retiring thru 89 with 10 frames in
+flight, sender idle, receiver stranded 93 %/88 %; evidence
+~/Documents/ultra_forensics/F218_*). Structural belt:
+`FileTransferController::maybeCompleteSend()` + Connection-injected gate
+(`arq_.getTxInFlightBytes()==0`) — completion defers while anything is in
+flight, state stays SENDING (RTOs keep repairing the holes), re-checked per
+retiring ack. The specific count leak stays open low-prio — non-fatal by
+construction now.
+
+## 2026-07-07 — feat(rate): OFDM Good entry floor 10 → 8 (measured sweep)
+
+measure_ack_fer data4_full 2 seeds × 150/cell good@{6,8,10,12}: QPSK R1/4
+17 %/17 % FER @8 (ARQ-viable, ~8× MC-DPSK delivered in-band); @6 29/35 %
+stays out. R1/2 Good floor 10 re-confirmed (19 %/19 %). QAM8/8PSK R1/4
+measured DOMINATED by QPSK R1/2 (equal FER, −33 % capacity) — low-rate dense
+rungs rejected. Safe vs the June cliff: entry lands on the R1/4 floor rung,
+promotion owned by the predictive climb. Standalone CONNECT at Good ≤12 still
+gated on #70. Boundary tests updated.
+
 ## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — SHIPPED on the interleaved same-epoch rig A/B: +24 %
 
 Deciding measurement (F208-F217, alternating ULTRA_BURST_ESCALATION on/off,
