@@ -414,6 +414,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
         DecodeResult m;
         populateDecodeMetrics(m, protocol::isOFDMMode(mode_), residual);
         burst_metric_templates_.push_back(m);
+        accumulateBurstCarrierGamma();
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(), join_rms,
                                    pre_cfo, residual, burst_cfo_);
     } else {
@@ -438,6 +439,61 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
               std::max(2, burst_group_size_));
     state_ = DecoderState::BURST_ACCUMULATING;
     return true;
+}
+
+void StreamingDecoder::accumulateBurstCarrierGamma() {
+    if (!waveform_) return;
+    auto g = waveform_->getCarrierGammaSnapshot();
+    if (g.empty()) return;
+    // A group's FIRST frame (buffer holds one entry) resets the accumulator —
+    // self-managing across aborted/failed groups without touching every clear
+    // site.
+    if (burst_soft_buffer_.size() <= 1 || burst_gamma_sum_.size() != g.size()) {
+        burst_gamma_sum_.assign(g.size(), 0.0);
+        burst_gamma_frames_ = 0;
+    }
+    for (size_t i = 0; i < g.size(); ++i) {
+        burst_gamma_sum_[i] += static_cast<double>(g[i]);
+    }
+    ++burst_gamma_frames_;
+}
+
+void StreamingDecoder::finalizeGroupCarrierGammas() {
+    last_group_carrier_gammas_.clear();
+    if (burst_gamma_frames_ == 0 || burst_gamma_sum_.empty()) {
+        return;
+    }
+    std::vector<float> mean(burst_gamma_sum_.size());
+    double sum_all = 0.0;
+    for (size_t i = 0; i < mean.size(); ++i) {
+        mean[i] = static_cast<float>(burst_gamma_sum_[i] /
+                                     static_cast<double>(burst_gamma_frames_));
+        sum_all += mean[i];
+    }
+    // SCALE ANCHORING (brief §3): the demod gamma lives on the FFT-bin scale;
+    // the anchor table on the receiver in-band scale. Normalize so the group's
+    // mean gamma equals its measured OFDM broadband SNR — the flat-channel
+    // identity then holds on the anchor table's own scale, per group, with no
+    // calibration constant. Median across the group's per-frame estimates.
+    std::vector<float> bb;
+    for (const auto& m : burst_metric_templates_) {
+        if (m.has_ofdm_broadband_snr_db && std::isfinite(m.ofdm_broadband_snr_db)) {
+            bb.push_back(m.ofdm_broadband_snr_db);
+        }
+    }
+    if (!bb.empty() && sum_all > 0.0) {
+        std::nth_element(bb.begin(), bb.begin() + bb.size() / 2, bb.end());
+        const float med_db = bb[bb.size() / 2];
+        const double target = std::pow(10.0, static_cast<double>(med_db) / 10.0);
+        const double mean_lin = sum_all / static_cast<double>(mean.size());
+        if (mean_lin > 1e-12) {
+            const float scale = static_cast<float>(target / mean_lin);
+            for (auto& v : mean) v *= scale;
+        }
+    }
+    last_group_carrier_gammas_ = std::move(mean);
+    burst_gamma_sum_.clear();
+    burst_gamma_frames_ = 0;
 }
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
@@ -701,6 +757,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             0.0f);
         burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
+        accumulateBurstCarrierGamma();
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        burst_pre_cfo,
                                        waveform_ ? waveform_->estimatedCFO() : 0.0f,
@@ -745,6 +802,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_predecoded_.emplace_back();  // finalize decodes it
     }
     pushMetricTemplate(residual_cfo);
+    accumulateBurstCarrierGamma();
     appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                    burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
                                    /*erasure=*/false, /*process_ok=*/true);
@@ -1116,6 +1174,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         }
     }
 
+    finalizeGroupCarrierGammas();  // ready BEFORE the group callback reads it
     if (burst_transport_rx_ && burst_group_callback_) {
         // Deliver the whole interleaved burst as a unit. all_ok requires every
         // logical frame of the group to have decoded — a partial group is

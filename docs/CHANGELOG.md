@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — feat(rate): RX-AUTHORITY PREDICTIVE — per-carrier virtual rung evaluation, direct multi-rung climbs (ULTRA_RX_PREDICTIVE_CLIMB, default ON)
+
+**Design:** docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md. The one-rung ladder and
+its dwell/penalty stack were workarounds for information starvation: the verdict
+saw one crest-biased scalar and could only prove a rung by betting a group on
+it. The channel measurement is constellation-independent — every ANCHORED group
+(delivered AND cratered) yields per-carrier gamma_k = |H_k|^2/sigma^2 — so the
+receiver now evaluates ANY rung's decodability on the channel AS MEASURED.
+
+**Mechanism:**
+- Demod/waveform: `getCarrierGammaSnapshot()` (per-data-carrier linear SNR).
+- StreamingDecoder: per-group mean accumulated across demodulated frames
+  (craters included — the survivor-bias kill), normalized so the group mean
+  matches its measured broadband SNR (anchor-table scale, no calibration
+  constant), exposed via `getLastGroupCarrierGammas()`.
+- Binding→ProtocolEngine→Connection: `setBurstCarrierGammas` before
+  onBurstGroupReceived; ring of 4 snapshots, 180 s expiry.
+- `waveform_selection.hpp`: EESM predictor `rungPredictedSustainable` with
+  per-rung alpha SELF-CALIBRATED from the rung's own min-enabled-column anchor
+  via 1−exp(−A/alpha)=c (flat channel reproduces the anchor table exactly; zero
+  new tuned constants; fading-column-only rungs get conservative alpha).
+- `updateRxAuthorityCommand`: with ≥2 fresh snapshots, the climb target is the
+  highest enabled rung passing prediction on ALL of them (margin = 2.5 dB +
+  crater penalty) — a DIRECT multi-rung jump backed by measurement. The scalar
+  haircut + one-rung walk remain the fallback; dwell/penalties/two-crater/
+  down-limits/enabled-snap all unchanged as posterior correctors.
+
+**Tests:** test_rx_authority 11/11 — EESM flat identity vs the anchor table,
+notched-channel rejection (the F149 crest trap: 20 % carriers at −10 dB rejects
+16QAM R2/3 while QPSK passes), direct jump idx 3→8 in one verdict with 2 calm
+snapshots, notch-snapshot veto. Full ctest 83/84 (known TNC red).
+
 ## 2026-07-06 — fix(arq): F168 — SACKed-bytes DURABILITY: buffered FILE frames deliver before every RX-window discard
 
 **What was broken (P0-class, introduced by the F163 FIX-4 salvage):** the

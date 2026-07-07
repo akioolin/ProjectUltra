@@ -1108,6 +1108,13 @@ float OFDMChirpWaveform::getLastLTSChannelMagnitude() const {
     return 1.0f;
 }
 
+std::vector<float> OFDMChirpWaveform::getCarrierGammaSnapshot() const {
+    if (demodulator_) {
+        return demodulator_->getCarrierGammaSnapshot();
+    }
+    return {};
+}
+
 float OFDMChirpWaveform::getLastLTSNoiseVariance() const {
     if (demodulator_) {
         return demodulator_->getLastLTSNoiseVariance();

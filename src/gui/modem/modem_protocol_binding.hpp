@@ -124,6 +124,11 @@ inline void wireModemToProtocol(ModemEngine& modem,
                     modem.getDopplerCoherenceScore(), modem.getDopplerCoherenceValid(),
                     modem.getDopplerCoherenceDopplerHz());
             }
+            // RX-AUTHORITY PREDICTIVE: the group's per-carrier SNR snapshot —
+            // delivered AND cratered groups alike (constellation-independent;
+            // the survivor-bias kill). Must land BEFORE onBurstGroupReceived:
+            // the verdict this group's ACK carries consumes it.
+            protocol.setBurstCarrierGammas(modem.getLastGroupCarrierGammas());
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                           interleaved, group_size);
         });

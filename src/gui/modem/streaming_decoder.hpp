@@ -453,6 +453,9 @@ public:
     // "inbound transmission in progress" with nothing on the air. The broad
     // stamp stays for listen-before-ACK, where conservative deferral is right.
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    const std::vector<float>& getLastGroupCarrierGammas() const {
+        return last_group_carrier_gammas_;  // decode-thread only (group callback)
+    }
     void setAnchoredBurstNoGroupCallback(std::function<void()> cb) {
         anchored_burst_no_group_callback_ = std::move(cb);
     }
@@ -962,6 +965,17 @@ private:
         DecodeResult result;
     };
     std::vector<PredecodedFrame> burst_predecoded_;
+    // RX-AUTHORITY PREDICTIVE (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md):
+    // per-carrier linear-SNR accumulator across the current group's successfully
+    // demodulated frames (constellation-independent — craters contribute too;
+    // hosted here because the demodulator is recreated per group). Consumed into
+    // last_group_carrier_gammas_ (normalized to the in-band scale) just before
+    // the group callback fires; the binding forwards it to the Connection.
+    std::vector<double> burst_gamma_sum_;
+    size_t burst_gamma_frames_ = 0;
+    std::vector<float> last_group_carrier_gammas_;
+    void accumulateBurstCarrierGamma();
+    void finalizeGroupCarrierGammas();
     std::vector<BurstPhysicalDiag> burst_physical_diag_;
     uint64_t burst_diag_next_group_index_ = 0;
     uint64_t burst_diag_group_index_ = 0;

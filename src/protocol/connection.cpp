@@ -2453,7 +2453,72 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             // the last confirmed crater; hold until it turns over.
             cmd = cur;
         }
-        if (cmd > cur) {
+        // ── RX-AUTHORITY PREDICTIVE CLIMB (ULTRA_RX_PREDICTIVE_CLIMB, opt-out
+        // =0; docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ── when fresh
+        // per-carrier snapshots exist (>=2, delivered AND cratered groups —
+        // the survivor-bias kill), the climb target is the highest enabled
+        // rung whose EESM prediction passes on ALL of them: a DIRECT
+        // multi-rung jump backed by measurement, not a bet. The scalar
+        // haircut + one-rung walk below remain the FALLBACK (no snapshots /
+        // MC-DPSK / knob off). The post-crater dwell above and the crater
+        // penalties (ride the margin here) stay as posterior correctors.
+        static const bool kPredictiveClimb = []() {
+            const char* e = std::getenv("ULTRA_RX_PREDICTIVE_CLIMB");
+            return !(e && e[0] == '0' && e[1] == '\0');
+        }();
+        bool predictive_climb_ran = false;
+        if (kPredictiveClimb && cmd > cur && rx_auth_gamma_count_ >= 2) {
+            // Freshness is a property of the SNAPSHOTS, not of any rung —
+            // collect the usable ones once, then walk the ladder top-down.
+            const auto now_tp = std::chrono::steady_clock::now();
+            size_t fresh_idx[kRxAuthGammaRing];
+            size_t fresh = 0;
+            for (size_t k = 0; k < rx_auth_gamma_count_; ++k) {
+                const auto age_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now_tp - rx_auth_gamma_time_[k]).count();
+                if (age_ms <= kRxAuthGammaMaxAgeMs &&
+                    !rx_auth_gamma_ring_[k].empty()) {
+                    fresh_idx[fresh++] = k;
+                }
+            }
+            if (fresh >= 2) {
+                predictive_climb_ran = true;
+                constexpr float kClimbMarginDbP = 2.5f;
+                uint8_t best = kRungIdxNone;
+                for (uint8_t r = kRungIdxCount - 1; r > cur; --r) {
+                    const CoherentPick p = coherentRungFromIndex(r);
+                    if (!coherentRungLocallyEnabled(p.mod, p.rate)) continue;
+                    const float margin =
+                        kClimbMarginDbP + rx_auth_rung_penalty_db_[r];
+                    bool all_pass = true;
+                    for (size_t f = 0; f < fresh; ++f) {
+                        const auto& g = rx_auth_gamma_ring_[fresh_idx[f]];
+                        if (!rungPredictedSustainable(g.data(), g.size(), p.mod,
+                                                      p.rate, margin)) {
+                            all_pass = false;
+                            break;
+                        }
+                    }
+                    if (all_pass) {
+                        best = r;
+                        break;
+                    }
+                }
+                if (best != kRungIdxNone && best > cur) {
+                    if (best != cmd) {
+                        LOG_MODEM(INFO,
+                                  "Connection: RX-AUTHORITY predictive climb -> idx %u "
+                                  "(map said %u; %zu snapshots all pass)",
+                                  best, cmd, fresh);
+                    }
+                    cmd = best;
+                } else {
+                    cmd = cur;  // nothing above proven on measurement: hold
+                }
+            }
+        }
+        if (!predictive_climb_ran && cmd > cur) {
             // CLIMB HYSTERESIS + crater margin: an up-command must survive a
             // haircut — the base 2.5 dB guards against slow swells; the target
             // rung's crater penalty demands the channel PROVE headroom the anchors
@@ -2467,17 +2532,12 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
                 coherentRungIndexFor(guarded.mod, guarded.rate);
             if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
         }
-        if (cmd > cur) {
-            // F149 ONE-RUNG CLIMB (mirror of the down rate-limit): a climb is a
-            // bet on headroom no delivered group has proven — bet the minimum
-            // stake. The map jumped QPSK R2/3 -> 16QAM R2/3 (idx 3 -> 8) in one
-            // verdict off a fade-crest read; a wrong 1-rung climb costs one
-            // cheap episode at an adjacent rung, a wrong 4-rung climb costs the
-            // full crater-demote loop. Walk UP to the first enabled rung above
-            // cur (holes skipped upward — snap-DOWN would land back on cur and
-            // make everything above a disabled row unreachable), never past the
-            // map's own pick. Repeated honest verdicts still reach any height,
-            // one proven rung at a time.
+        if (!predictive_climb_ran && cmd > cur) {
+            // F149 ONE-RUNG CLIMB (FALLBACK path — the predictive climb above
+            // replaces it whenever measurements exist): a climb is a bet on
+            // headroom no delivered group has proven — bet the minimum stake.
+            // Walk UP to the first enabled rung above cur (holes skipped
+            // upward), never past the map's own pick.
             uint8_t step = kRungIdxNone;
             for (uint8_t i = static_cast<uint8_t>(cur + 1);
                  i <= cmd && i < kRungIdxCount; ++i) {
@@ -5571,6 +5631,9 @@ void Connection::enterConnected() {
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;
     rx_auth_climb_dwell_ = 0;
+    rx_auth_gamma_count_ = 0;
+    rx_auth_gamma_next_ = 0;
+    for (auto& v : rx_auth_gamma_ring_) v.clear();
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
@@ -5640,6 +5703,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_auth_class_streak_ = 0;
     rx_auth_fading_passed_ = 0.3f;
     rx_auth_climb_dwell_ = 0;
+    rx_auth_gamma_count_ = 0;
+    rx_auth_gamma_next_ = 0;
+    for (auto& v : rx_auth_gamma_ring_) v.clear();
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;

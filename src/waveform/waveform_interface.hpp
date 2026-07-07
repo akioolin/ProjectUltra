@@ -206,6 +206,8 @@ public:
     // Last OFDM LTS channel metrics. Non-OFDM waveforms return safe defaults.
     virtual float getLastLTSSignalPower() const { return 1.0f; }
     virtual float getLastLTSChannelMagnitude() const { return 1.0f; }
+    // RX-AUTHORITY PREDICTIVE: per-data-carrier linear SNR snapshot (OFDM only).
+    virtual std::vector<float> getCarrierGammaSnapshot() const { return {}; }
     virtual float getLastLTSNoiseVariance() const { return 0.0f; }
     virtual float getLastLTSResidualCFOHz() const { return 0.0f; }
 

@@ -337,6 +337,67 @@ inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
     return false;
 }
 
+// ── RX-AUTHORITY PREDICTIVE (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ──
+// Calibration anchor for a rung: the MINIMUM enabled column, honoring the
+// active ladder variant. The AWGN column is the flat-channel physics floor and
+// wins when present; several rungs (16QAM R2/3, 16QAM R1/2) are enabled ONLY
+// in fading columns — their column value carries scalar-fading margin, which
+// makes the derived EESM alpha CONSERVATIVE (under-predicts capacity): the
+// safe direction for a climb decision. kRungDisabledDb if fully disabled.
+inline float calibrationAnchorDbFor(Modulation mod, CodeRate rate) {
+    const CoherentRung* rungs = kCoherentLadder;
+    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
+    if (psk8LadderEnabled()) {
+        rungs = kCoherentLadderPsk8Exp;
+        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
+    } else if (qam16LadderEnabled()) {
+        rungs = kCoherentLadderQAM16Exp;
+        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            float best = kRungDisabledDb;
+            for (int c = 0; c < 3; ++c) {
+                if (rungs[i].min_snr_db[c] < best) best = rungs[i].min_snr_db[c];
+            }
+            return best;
+        }
+    }
+    return kRungDisabledDb;
+}
+
+// EESM virtual rung evaluation: is rung (mod, rate) predicted decodable on the
+// measured per-carrier SNR snapshot {gamma_k} (LINEAR, normalized to the
+// in-band scale)? Per-carrier capacity fraction f(γ) = 1 − exp(−γ/α) with α
+// SELF-CALIBRATED from the rung's own AWGN anchor A via the flat-channel
+// identity 1 − exp(−A/α) = c  ⇒  α = −A/ln(1−c): on a flat channel this
+// reproduces the anchor table EXACTLY (zero new tuned constants), on a
+// selective channel strong carriers' surplus compensates weak ones up to the
+// code budget — which is what LDPC + the channel interleaver physically do —
+// and a parked notch exceeding the budget FAILS the prediction even when the
+// mean SNR reads generous (the F149 crest trap, the F163/F165 16QAM craters).
+// margin_db shifts every carrier down (climb hysteresis + crater penalty ride
+// here). Modulation-adaptive by construction: no per-mod branches; geometry
+// enters only through the rung's own measured anchor.
+inline bool rungPredictedSustainable(const float* gamma_lin, size_t n,
+                                     Modulation mod, CodeRate rate,
+                                     float margin_db) {
+    if (gamma_lin == nullptr || n == 0) return false;
+    const float anchor_db = calibrationAnchorDbFor(mod, rate);
+    if (anchor_db >= kRungDisabledDb) return false;
+    const float c = getCodeRateValue(rate);
+    if (c <= 0.0f || c >= 1.0f) return false;
+    const float A = std::pow(10.0f, anchor_db / 10.0f);
+    const float alpha = -A / std::log(1.0f - c);
+    const float shift = std::pow(10.0f, -margin_db / 10.0f);
+    double cap = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const float g = gamma_lin[i] > 0.0f ? gamma_lin[i] * shift : 0.0f;
+        cap += 1.0 - std::exp(-static_cast<double>(g) / alpha);
+    }
+    return cap / static_cast<double>(n) >= static_cast<double>(c);
+}
+
 // Nearest locally-enabled rung at or below idx (canonical order is monotone in
 // speed), kRungIdxNone if nothing at/below is enabled. EVERY consumer of rung
 // INDEX ARITHMETIC must snap through this: raw index steps (cur-2 strides,

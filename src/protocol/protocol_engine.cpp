@@ -349,6 +349,11 @@ void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                      interleaved, group_size);
 }
 
+void ProtocolEngine::setBurstCarrierGammas(const std::vector<float>& gammas) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setBurstCarrierGammas(gammas);
+}
+
 void ProtocolEngine::onAnchoredBurstNoGroup() {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteAnchoredBurstNoGroup();

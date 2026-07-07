@@ -189,6 +189,11 @@ public:
     // mode-hop BURST_HEADER notification (streaming_decoder.hpp typedef) to the
     // protocol layer — wired by wireModemToProtocol like the tone-burst ACK path.
     // Only fires when the knob is ON (decoder-gated); byte-identical OFF.
+    const std::vector<float>& getLastGroupCarrierGammas() const {
+        static const std::vector<float> kEmpty;
+        return streaming_decoder_ ? streaming_decoder_->getLastGroupCarrierGammas()
+                                  : kEmpty;
+    }
     void setAnchoredBurstNoGroupCallback(std::function<void()> callback) {
         if (streaming_decoder_) {
             streaming_decoder_->setAnchoredBurstNoGroupCallback(std::move(callback));

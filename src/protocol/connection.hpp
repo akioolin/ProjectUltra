@@ -10,6 +10,7 @@
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
 #include <cmath>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -512,6 +513,18 @@ public:
         burst_obs_coh_score_ = coherence_score;
         burst_obs_coh_valid_ = coherence_valid;
         burst_obs_doppler_hz_ = doppler_hz;
+    }
+
+    // RX-AUTHORITY PREDICTIVE: the group's per-carrier linear-SNR snapshot
+    // (in-band-normalized), delivered AND cratered groups (survivor-bias kill).
+    // Ring of the last kRxAuthGammaRing snapshots; an up-jump target must pass
+    // EESM prediction on ALL fresh ones (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md).
+    void setBurstCarrierGammas(const std::vector<float>& gammas) {
+        if (gammas.empty()) return;
+        rx_auth_gamma_ring_[rx_auth_gamma_next_] = gammas;
+        rx_auth_gamma_time_[rx_auth_gamma_next_] = std::chrono::steady_clock::now();
+        rx_auth_gamma_next_ = (rx_auth_gamma_next_ + 1) % kRxAuthGammaRing;
+        if (rx_auth_gamma_count_ < kRxAuthGammaRing) ++rx_auth_gamma_count_;
     }
 
     // Software-ALC sender side: fires when a decoded tone-burst ACK carries a
@@ -1060,6 +1073,13 @@ private:
     int rx_auth_class_sticky_ = 1;      // FadingClass::GOOD — sane starting column
     int rx_auth_class_streak_ = 0;
     float rx_auth_fading_passed_ = 0.3f;  // last fading fed to the map (in-class)
+    // RX-AUTHORITY PREDICTIVE state (see setBurstCarrierGammas).
+    static constexpr size_t kRxAuthGammaRing = 4;
+    static constexpr int64_t kRxAuthGammaMaxAgeMs = 180000;
+    std::array<std::vector<float>, kRxAuthGammaRing> rx_auth_gamma_ring_;
+    std::array<std::chrono::steady_clock::time_point, kRxAuthGammaRing> rx_auth_gamma_time_;
+    size_t rx_auth_gamma_next_ = 0;
+    size_t rx_auth_gamma_count_ = 0;
     // F149/F160: clean groups required before up-commands unlock after a
     // confirmed crater (post-episode reality must displace the survivor-biased
     // crest reads; 3 = gate re-betting without taxing recovery at slow rungs).

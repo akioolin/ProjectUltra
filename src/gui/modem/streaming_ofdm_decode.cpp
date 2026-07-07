@@ -1460,6 +1460,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         DecodeResult first_metrics;
         populateDecodeMetrics(first_metrics, is_ofdm, residual_cfo);
         burst_metric_templates_.push_back(first_metrics);
+        accumulateBurstCarrierGamma();
         const float current_cfo = cfo_tracker_.tracked();
         const auto cfo_update = cfo_tracker_.ingestPilotResidual(
             frame_demodulator_.preCorrectionCfo(), residual_cfo, current_cfo, /*clamp_drift=*/true);

@@ -172,6 +172,10 @@ public:
     // Last LTS channel-estimation metrics from processPresynced().
     float getLastLTSSignalPower() const;
     float getLastLTSChannelMagnitude() const;
+    // RX-AUTHORITY PREDICTIVE: per-data-carrier linear SNR snapshot
+    // |H_k|^2 / sigma^2 from the current channel estimate — constellation-
+    // independent (valid on delivered AND LDPC-failed frames once anchored).
+    std::vector<float> getCarrierGammaSnapshot() const;
     // Per-frame LTS channel-estimation NOISE variance (E|H1-H0|^2/4 from the two-LTS
     // difference, per data carrier). Hardware-measured per frame; feeds the Doppler-
     // coherence disc's noise-floor de-bias (read-only diagnostic for now).

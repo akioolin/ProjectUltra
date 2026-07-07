@@ -688,6 +688,19 @@ float OFDMDemodulator::getLastLTSChannelMagnitude() const {
     return impl_->last_lts_channel_magnitude;
 }
 
+std::vector<float> OFDMDemodulator::getCarrierGammaSnapshot() const {
+    std::vector<float> gammas;
+    const float nv = std::max(impl_->noise_variance, 1e-12f);
+    gammas.reserve(impl_->data_carrier_indices.size());
+    for (int idx : impl_->data_carrier_indices) {
+        if (idx >= 0 &&
+            static_cast<size_t>(idx) < impl_->channel_estimate.size()) {
+            gammas.push_back(std::norm(impl_->channel_estimate[idx]) / nv);
+        }
+    }
+    return gammas;
+}
+
 float OFDMDemodulator::getLastLTSNoiseVariance() const {
     return impl_->noise_variance;
 }

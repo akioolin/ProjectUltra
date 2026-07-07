@@ -372,6 +372,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     machinery ONLY after the §6.5 deaf-peer fallback proves unneeded (the frame type + handler
     stay for connect-time/USER_REQUEST/MC-DPSK/narrow regardless).
 9f. `ULTRA_RX_RATE_AUTHORITY` — 2026-07-05 🟢 **DEFAULT-ON** (campaign flip, same day; `=0` opts out). Receiver-commanded
+| `ULTRA_RX_PREDICTIVE_CLIMB` | 🟢 ACTIVE (default ON, `=0` opt-out) | connection.cpp updateRxAuthorityCommand | EESM per-carrier virtual rung evaluation — direct multi-rung climbs from measured gamma snapshots (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md); fallback = one-rung ladder |
     ABSOLUTE rung selection: receiver maps its fresh per-group observation (broadband SNR EMA +
     coherence-adjusted fading, `Connection::setBurstChannelObservation` fed by the modem binding)
     through `selectCoherentOFDM` and stamps the canonical rung index

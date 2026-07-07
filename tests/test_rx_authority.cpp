@@ -173,6 +173,85 @@ static bool test_confirmed_crater_arms_climb_dwell() {
     return true;
 }
 
+// ── RX-AUTHORITY PREDICTIVE (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ──
+
+// EESM self-calibration identity: on a FLAT channel the predictor must
+// reproduce the anchor table exactly — pass at the anchor, fail below it.
+static bool test_prediction_flat_identity() {
+    TEST("EESM flat-channel identity vs the anchor table");
+    const Modulation m = Modulation::QAM16;
+    const CodeRate c = CodeRate::R2_3;
+    const float A_db = calibrationAnchorDbFor(m, c);
+    if (A_db >= kRungDisabledDb) FAIL("16QAM R2/3 unexpectedly disabled");
+    std::vector<float> flat(51, std::pow(10.0f, (A_db + 0.1f) / 10.0f));
+    if (!rungPredictedSustainable(flat.data(), flat.size(), m, c, 0.0f))
+        FAIL("flat channel 0.1 dB above the anchor must pass at margin 0");
+    std::vector<float> below(51, std::pow(10.0f, (A_db - 0.5f) / 10.0f));
+    if (rungPredictedSustainable(below.data(), below.size(), m, c, 0.0f))
+        FAIL("flat channel 0.5 dB below the anchor must fail");
+    // Margin shifts the bar: at-anchor fails once any margin applies.
+    std::vector<float> at(51, std::pow(10.0f, A_db / 10.0f));
+    if (rungPredictedSustainable(at.data(), at.size(), m, c, 2.5f))
+        FAIL("at-anchor flat channel must fail with a 2.5 dB margin");
+    PASS();
+    return true;
+}
+
+// The F149 crest trap: mean SNR reads generous while a parked notch has 20 %
+// of carriers dead — dense rungs must FAIL prediction; QPSK must survive.
+static bool test_prediction_rejects_notched_channel() {
+    TEST("notched channel rejects 16QAM R2/3 while QPSK R2/3 passes");
+    std::vector<float> g(51);
+    for (size_t i = 0; i < g.size(); ++i) {
+        g[i] = (i % 5 == 0) ? std::pow(10.0f, -10.0f / 10.0f)   // 20% at -10 dB
+                            : std::pow(10.0f, 24.0f / 10.0f);   // rest at 24 dB
+    }
+    if (rungPredictedSustainable(g.data(), g.size(), Modulation::QAM16,
+                                 CodeRate::R2_3, 2.5f))
+        FAIL("16QAM R2/3 must fail on a 20%-notched channel (the crest trap)");
+    if (!rungPredictedSustainable(g.data(), g.size(), Modulation::QPSK,
+                                  CodeRate::R2_3, 2.5f))
+        FAIL("QPSK R2/3 must survive the same notched channel");
+    PASS();
+    return true;
+}
+
+// DIRECT MULTI-RUNG JUMP: with >=2 fresh calm flat snapshots, one clean verdict
+// commands the measured-sustainable rung outright (idx 3 -> 8), no laddering.
+static bool test_predictive_direct_jump() {
+    TEST("2 calm snapshots let one verdict jump QPSK R2/3 -> 16QAM R2/3");
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 24.0f, 0.05f, Modulation::QPSK);
+    std::vector<float> calm(51, std::pow(10.0f, 26.0f / 10.0f));  // 26 dB flat
+    c.setBurstCarrierGammas(calm);
+    c.setBurstCarrierGammas(calm);
+    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    TA::verdict(c, true, 0.95f);
+    if (TA::rxCmd(c) != kRungIdxQam16R23)
+        FAIL("verdict was idx " + std::to_string(TA::rxCmd(c)) +
+             " (want direct jump to 16QAM R2/3 = " +
+             std::to_string(kRungIdxQam16R23) + ")");
+
+    // Same scalar picture but ONE snapshot is notched: the jump must not fire
+    // past what every snapshot proves — 16QAM R2/3 rejected.
+    Connection d;
+    TA::makeConnectedOFDM(d, CodeRate::R2_3, 24.0f, 0.05f, Modulation::QPSK);
+    std::vector<float> notch(51);
+    for (size_t i = 0; i < notch.size(); ++i) {
+        notch[i] = (i % 5 == 0) ? std::pow(10.0f, -10.0f / 10.0f)
+                                : std::pow(10.0f, 24.0f / 10.0f);
+    }
+    d.setBurstCarrierGammas(calm);
+    d.setBurstCarrierGammas(notch);
+    d.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    TA::verdict(d, true, 0.95f);
+    if (TA::rxCmd(d) >= kRungIdxQam16R23)
+        FAIL("a notched snapshot in the window must veto the 16QAM R2/3 jump "
+             "(got idx " + std::to_string(TA::rxCmd(d)) + ")");
+    PASS();
+    return true;
+}
+
 // TWO-CRATER rule: a single crater holds the rung (irreducible null — the ARQ's
 // job); the SECOND consecutive crater clamps below it whatever the map says.
 static bool test_two_crater_rule() {
@@ -314,6 +393,9 @@ int main() {
     std::cout << "RX-AUTHORITY suite\n";
     bool ok = true;
     ok &= test_verdict_maps_snr_to_rung();
+    ok &= test_prediction_flat_identity();
+    ok &= test_prediction_rejects_notched_channel();
+    ok &= test_predictive_direct_jump();
     ok &= test_two_crater_rule();
     ok &= test_confirmed_crater_arms_climb_dwell();
     ok &= test_busy_defers_up_not_down();
