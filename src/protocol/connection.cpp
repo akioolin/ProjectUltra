@@ -5118,8 +5118,24 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // gap. Same evidence doctrine as the predictive climb: prove it, then
     // spend it.
     constexpr uint32_t kEscalatedBurstAirtimeMs = 11500;
+    static const bool kEscalationEnabled = []() {
+        const char* e = std::getenv("ULTRA_BURST_ESCALATION");
+        return !(e && e[0] == '0' && e[1] == '\0');  // default ON; =0 opts out (A/B)
+    }();
+    // RUNG GATE (gate A/B 2026-07-07): the streak alone over-escalates at
+    // Moderate — clean pairs happen between fades there, and 11 s key-downs
+    // then eat the next fade (moderate@16 s42: escalation ON = FAIL 690 bps
+    // with twelve 8-frame groups; OFF = PASS 1030, 0 craters). The ACTIVE RUNG
+    // is the receiver's measured channel verdict (authority-commanded, anchor
+    // columns encode fading class): Moderate-class operation lives at QPSK
+    // rungs by construction, so requiring a dense rung (>= QAM8 R2/3) makes
+    // long key-downs reachable exactly when the receiver's own measurement
+    // rates the channel calm — no new estimator, no new threshold.
+    const bool dense_rung =
+        coherentRungIndexFor(data_modulation_, data_code_rate_) >=
+        kRungIdxQam8R23;
     const uint32_t ceiling_ms =
-        (burst_clean_group_streak_ >= 2)
+        (kEscalationEnabled && dense_rung && burst_clean_group_streak_ >= 2)
             ? std::max(kMaxBurstAirtimeMs, kEscalatedBurstAirtimeMs)
             : kMaxBurstAirtimeMs;
     const uint32_t reanchor_ms =

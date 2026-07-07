@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — gate A/B addendum: RUNG GATE + escalation opt-out
+
+Gate A/B found the streak alone over-escalates at Moderate (clean pairs happen
+between fades there): moderate@16 s42 escalation ON = FAIL 690 (12 8-frame
+groups) vs OFF = PASS 1030. Fix: escalation additionally requires a DENSE rung
+(>= QAM8 R2/3) — the active rung IS the receiver's measured channel verdict
+(authority-commanded; anchor columns encode fading class), so Moderate-class
+operation (QPSK rungs) structurally never escalates (verified g8=0) — no new
+estimator or threshold. `ULTRA_BURST_ESCALATION=0` opt-out added for A/B.
+good@20 s42 with the lever: 2110/2140 bps paired runs vs 1760-1920 recent
+same-seed probes (~+15 %), 0 craters, 2 escalations. moderate@16 is a
+coin-flip cell at this SNR (PASS 1030 / FAIL 0 on identical configs, zero
+escalations both) — noted, not lever-attributable.
+
 ## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — phantom re-anchor charge retired; streak-gated burst ceiling 8600→11500 ms (N 5→8)
 
 **Design:** docs/GROUP_SIZE_LEVER_2026_07_07.md (4-reader workflow). Measured
