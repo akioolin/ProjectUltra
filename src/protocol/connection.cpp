@@ -5134,6 +5134,12 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     const bool dense_rung =
         coherentRungIndexFor(data_modulation_, data_code_rate_) >=
         kRungIdxQam8R23;
+    // STREAK = 2 with rung gate + climb-carry. Measured trail: streak-2 alone
+    // won +15 % paired in calm epochs but re-escalated between craters in rough
+    // ones (F198-F207 cross-epoch mean 1.42 vs 1.57 — confounded by a 23 %
+    // rougher epoch); streak-6 fired too late to pay on normal transfers.
+    // The 2026-07-07 interleaved same-epoch A/B is the deciding measurement —
+    // see docs/GROUP_SIZE_LEVER_2026_07_07.md addendum.
     const uint32_t ceiling_ms =
         (kEscalationEnabled && dense_rung && burst_clean_group_streak_ >= 2)
             ? std::max(kMaxBurstAirtimeMs, kEscalatedBurstAirtimeMs)
@@ -5364,6 +5370,8 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // there. The per-CW BYTE capacity is rate/CW-derived (LDPC K x cw_count), not
     // modulation-derived, so in-flight frame bytes stay geometry-valid and the requeue+HARQ flush
     // above still fire; validate that transition on the faithful gate before the knob graduates.
+    const Modulation old_mod_for_streak = data_modulation_;
+    const CodeRate old_rate_for_streak = data_code_rate_;
     const bool mod_changed = mod != data_modulation_;
     // Pending chunks must be re-encoded if rate OR CW OR modulation changed: the ARQ payload
     // capacity depends on all three, and chunks queued under the old geometry will
@@ -5397,7 +5405,19 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     zero_progress_rounds_ = 0;
     trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
-    burst_clean_group_streak_ = 0;  // GROUP-SIZE: new rung must re-prove the streak
+    // GROUP-SIZE: the clean streak is CHANNEL evidence (fade cadence), not rung
+    // evidence — an UP-move was itself earned by clean rounds, so it carries the
+    // streak (resetting on climbs made escalation unreachable on short
+    // transfers: the ladder's own ramp consumed the window). DOWN/lateral moves
+    // mean the channel got worse — reset; a crater at the new rung resets via
+    // the round accounting regardless.
+    {
+        const uint8_t old_idx = coherentRungIndexFor(old_mod_for_streak, old_rate_for_streak);
+        const uint8_t new_idx = coherentRungIndexFor(mod, rate);
+        if (new_idx <= old_idx || old_idx == kRungIdxNone) {
+            burst_clean_group_streak_ = 0;
+        }
+    }
     // RX-RATE-CMD Phase 2: an APPLIED mod/rate change is exactly the adoption the
     // receiver's standing rung command was waiting for (descriptor adopt and legacy
     // MODE_CHANGE both funnel through here) — clear the once-per-committed-move latch
