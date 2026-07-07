@@ -90,17 +90,18 @@ inline constexpr size_t kToneBurstAckWindowCapFrames = 16;
 // not from this. (The Good interleave-OFF SR burst sizes itself by airtime/window — it does
 // not use this constant.) 6 <= the 16-bit mask, so every group frame is still addressable.
 // A group larger than the mask width leaves trailing frames un-ACKable; keep it <= 16.
-// Overridable for the interleave-ON path via ULTRA_BURST_GROUP_FRAMES (clamped [2,32]).
+// Overridable for the interleave-ON path via ULTRA_BURST_GROUP_FRAMES (clamped [2,16]).
 inline constexpr size_t kBurstInterleaveGroupFrames = 6;
 
 // Runtime burst group size. Read at the chunk/pad/config sites so TX file-chunking,
 // padding, and the encoder's declared group_size all agree (the RX self-describes
-// from the descriptor). Overridable via ULTRA_BURST_GROUP_FRAMES, clamped [2,32].
+// from the descriptor). Overridable via ULTRA_BURST_GROUP_FRAMES, clamped [2,16]
+// (values past the 16-bit tone-ack mask leave trailing frames un-ACKable).
 inline size_t burstInterleaveGroupFrames() {
     if (const char* env = std::getenv("ULTRA_BURST_GROUP_FRAMES")) {
         const int v = std::atoi(env);
         if (v >= 2) {
-            return static_cast<size_t>(std::clamp(v, 2, 32));
+            return static_cast<size_t>(std::clamp(v, 2, 16));
         }
     }
     return kBurstInterleaveGroupFrames;
@@ -1121,13 +1122,21 @@ inline uint32_t wideOFDMShortReanchorChirpDurationMs() {
 inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
                                            Modulation modulation,
                                            float fading_index) {
-    if (waveform != WaveformMode::OFDM_CHIRP ||
-        !ofdm_link_adaptation::isCoherentModulation(modulation) ||
-        !std::isfinite(fading_index)) {
-        return false;
-    }
-
-    return fading_index >= kFadingAwgnMax;
+    // RETIRED 2026-07-07 (GROUP-SIZE LEVER, docs/GROUP_SIZE_LEVER_2026_07_07.md
+    // §2.1): the encoder's adaptive short-chirp continuation re-anchor was
+    // REMOVED in May (R4 — superseded by warm-handoff; streaming_encoder.cpp
+    // "the adaptive short-chirp re-anchor was removed"), but this predicate
+    // kept charging a PHANTOM 100 ms/frame in every airtime budget/timeout
+    // model — the F163 sample-exact wire model (S(N) = N×59,360 + 67,680)
+    // proves nothing rides between frames. The phantom pinned Good-era groups
+    // at N=5 (5×1272+4×100+1200 = 7960 ≤ 8600; a 6th "cost" 9332) and made
+    // N=8 unreachable even via the env ceiling. Always false now; the charge
+    // sites all derive 0. Function kept so call sites need no churn; delete
+    // with the R4 sweep (REMOVAL_BACKLOG).
+    (void)waveform;
+    (void)modulation;
+    (void)fading_index;
+    return false;
 }
 
 // Channel gate for the Phase 2a warm SHORT-DUAL descriptor anchor

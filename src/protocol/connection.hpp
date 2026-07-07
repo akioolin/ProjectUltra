@@ -1085,6 +1085,9 @@ private:
     // crest reads; 3 = gate re-betting without taxing recovery at slow rungs).
     static constexpr int kRxAuthClimbDwellGroups = 3;
     int rx_auth_climb_dwell_ = 0;
+    // GROUP-SIZE LEVER: consecutive clean (full-retire, no-hole) ack rounds at
+    // the current rung; >=2 unlocks the escalated burst-airtime ceiling.
+    int burst_clean_group_streak_ = 0;
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;

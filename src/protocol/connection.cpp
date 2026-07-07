@@ -3040,11 +3040,26 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
         zero_progress_rounds_ = 0;
         retx_pace_hold_ms_ = 0;
         consecutive_escape_drops_ = 0;  // PHASE-3: channel proved alive — descriptor escapes re-enabled
+        // GROUP-SIZE LEVER: a CLEAN round = full retire, nothing left in flight
+        // (an ack with holes leaves retransmits in flight). Two in a row unlock
+        // the escalated 11.5 s ceiling (burstAirtimeBudgetFrames); anything
+        // less resets to the 8.6 s base.
+        if (arq_.getTxInFlightBytes() == 0) {
+            ++burst_clean_group_streak_;
+            if (burst_clean_group_streak_ == 2) {
+                LOG_MODEM(INFO,
+                          "Connection: GROUP-SIZE streak proven (2 clean rounds) — "
+                          "burst ceiling escalates 8600 -> 11500 ms (N≈8)");
+            }
+        } else {
+            burst_clean_group_streak_ = 0;  // holey round: keep short key-downs
+        }
         return;
     }
     if (progress_frames < 0) {
         return;  // duplicate/stale ack — never a phantom round (§1.1 dedup)
     }
+    burst_clean_group_streak_ = 0;  // zero-progress round: back to the base ceiling
     if (!retxPacingScopeActive()) {
         // Out of scope (MC-DPSK / OFDM_NARROW / no file in flight): never accumulate
         // rounds or holds here — their timers must never see this machinery (§6.2).
@@ -5090,6 +5105,23 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
         }
         return v;
     }();
+    // GROUP-SIZE LEVER (2026-07-07, docs/GROUP_SIZE_LEVER_2026_07_07.md §2.3):
+    // STREAK-GATED ceiling escalation. After 2 consecutive CLEAN groups at the
+    // current rung (full retire, no holes — burst_clean_group_streak_), the
+    // ceiling rises to 11,500 ms → N=8 at the duration-normalized rungs
+    // (1200 + 8×1272 = 11,376 ≤ 11,500 < 12,648 for the 9th). Economics
+    // (measured constants): cycle efficiency 64.7 % → 74.6 %, fade-taxed
+    // ≈ +11.6 %; N=8 never loses across the observed 5-20 % group-loss range.
+    // Any crater / holey round resets to the 8,600 base — rough epochs (knee
+    // ≈ N 6.7) keep short key-downs. Duty: 11.10 s key-down ≈ 77 % inside the
+    // deliberate [5000,12000] PA clamp; the ~2 s turnaround stays the cooling
+    // gap. Same evidence doctrine as the predictive climb: prove it, then
+    // spend it.
+    constexpr uint32_t kEscalatedBurstAirtimeMs = 11500;
+    const uint32_t ceiling_ms =
+        (burst_clean_group_streak_ >= 2)
+            ? std::max(kMaxBurstAirtimeMs, kEscalatedBurstAirtimeMs)
+            : kMaxBurstAirtimeMs;
     const uint32_t reanchor_ms =
         connection_policy::shouldUseWideOFDMShortReanchor(
             negotiated_mode_, data_modulation_, fading_index_)
@@ -5102,7 +5134,7 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
         const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
             data_modulation_, data_code_rate_, n + 1, data_frame_cw_count_,
             reanchor_ms, selectBurstLiftingZ());
-        if (airtime_ms > kMaxBurstAirtimeMs) {
+        if (airtime_ms > ceiling_ms) {
             break;
         }
         ++n;
@@ -5349,6 +5381,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     zero_progress_rounds_ = 0;
     trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
+    burst_clean_group_streak_ = 0;  // GROUP-SIZE: new rung must re-prove the streak
     // RX-RATE-CMD Phase 2: an APPLIED mod/rate change is exactly the adoption the
     // receiver's standing rung command was waiting for (descriptor adopt and legacy
     // MODE_CHANGE both funnel through here) — clear the once-per-committed-move latch

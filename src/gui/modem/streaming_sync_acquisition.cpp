@@ -326,7 +326,12 @@ void StreamingDecoder::searchForSync() {
             std::lock_guard<std::mutex> abl(sync_controller_.ring_.buffer_mutex_);
             fed_now = sync_controller_.ring_.total_fed_;
         }
-        constexpr size_t kBackstopWindowSamples = 600000;  // ~12.5 s @48k
+        // DERIVED from the burst policy (GROUP-SIZE co-fix #1): the ceiling
+        // clamp maxes at 12,000 ms of group air + 1,410 ms full descriptor +
+        // ~1.2 s margin ≈ 14.6 s. A fixed 600k (12.5 s) fired MID-BURST once
+        // groups exceed ~10 frames — the adaptivity-bug class. Still beats the
+        // sender RTO (~air-end + 11.4 s) by ~9 s.
+        constexpr size_t kBackstopWindowSamples = 48 * (12000 + 1410 + 1200);
         if (fed_now > anchored_burst_backstop_arm_abs_ + kBackstopWindowSamples) {
             anchored_burst_backstop_armed_ = false;
             LOG_MODEM(WARN,

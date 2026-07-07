@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — feat(arq): GROUP-SIZE LEVER — phantom re-anchor charge retired; streak-gated burst ceiling 8600→11500 ms (N 5→8)
+
+**Design:** docs/GROUP_SIZE_LEVER_2026_07_07.md (4-reader workflow). Measured
+basis: turnaround ≈ fixed 3.37 s/cycle (F163/F187); frames are fixed 1.237 s
+slots; the tone-ACK does not lengthen with N.
+
+1. **Phantom charge retired:** `shouldUseWideOFDMShortReanchor` now always
+   false — the encoder's continuation re-anchor was REMOVED in May (R4), but
+   the predicate kept charging 100 ms/frame in every budget/timeout model,
+   pinning Good-era groups at N=5 and making N=8 unreachable even via the env
+   ceiling (8×1272+7×100+1200 = 12,076 > the 12,000 clamp). The wire model
+   (F163, sample-exact) proves nothing rides between frames.
+2. **Streak-gated ceiling:** 2 consecutive CLEAN ack rounds (full retire, no
+   holes) at the current rung escalate the ceiling 8600 → 11,500 ms → N=8 at
+   the duration-normalized rungs (cycle efficiency 64.7 % → 74.6 %, fade-taxed
+   ≈ +11.6 %); any holey/zero-progress round or rung change resets to base —
+   rough epochs keep 8.6 s key-downs. Duty 77 % inside the deliberate
+   [5000,12000] PA clamp; ~2 s turnaround remains the cooling gap.
+3. **Co-fixes:** backstop window now DERIVED from the ceiling clamp
+   (48×(12000+1410+1200) — the fixed 600k would have fired mid-burst at N≥10);
+   CCA relearn 25 s documented as an invariant ≥ 2× the escalated ceiling;
+   ULTRA_BURST_GROUP_FRAMES clamp tightened [2,32]→[2,16] (past the 16-bit
+   mask = silently un-ACKable frames). Ack-timeout scaling verified airtime-
+   derived (no change needed — recorded so nobody "fixes" it).
+
 ## 2026-07-07 — fix(arq/sync): F181/F186 closing pair — SACK-salvage skip default-OFF (phantom-mark stranded file); real-time search LOAD-SHED (2 s staleness cap)
 
 1. **F181 (BUG-SACK-DURABILITY-RESIDUAL, DEFUSED):** the sender-side "skip

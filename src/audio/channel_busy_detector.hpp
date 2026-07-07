@@ -70,6 +70,10 @@ inline ChannelBusyDetectorConfig ratiometricHfCarrierSenseConfig() {
     config.noise_floor_estimate_rms_ceiling = 0.0f;
     // 13 s > kMaxBurstAirtimeMs ceiling (12 s): a real burst never trips relearn,
     // but a latched-low floor on a steady (e.g. WGN) band recovers within 13 s.
+    // INVARIANT (GROUP-SIZE co-fix #3): this must stay > 2× the burst airtime
+    // ceiling (escalated ceiling 11,500 ms → 23,000 < 25,000, margin 2 s). A
+    // future ceiling raise past 12.5 s silently re-opens the F129 mid-burst
+    // floor-relearn crater — re-derive BOTH together.
     // 25 s (was 13): F129 falsified the "13 s > longest burst" premise two ways —
     // a false-busy stretch CONCATENATES with a real burst, and the sender can queue
     // back-to-back bursts (measured 16.4 s continuous TX). Mid-burst relearn seeds
