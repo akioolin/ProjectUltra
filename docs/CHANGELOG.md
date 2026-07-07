@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(handshake): #70 stage 1.5b — PING-gate floor reference is now a MIN-STATISTICS floor (rig F223 regression: last-window floor over-read +4 dB → every CONNECT classified as noise)
+
+**What was broken (caught on the rig, first MPG@10 run after stage 1.5):** the
+gap_is_noise gate compared the in-band gap RMS against
+`IdleNoiseSNREstimator.filtered_noise_rms` — the LAST idle window's
+INSTANTANEOUS RMS. On the rig, "idle" audio is nonstationary (bursts,
+undetected signal tails, own-TX echo — none of it modeled by OTASim), so the
+last window over-read the true floor by ~+4 dB (F223: reference 0.067–0.077 vs
+true ambient 0.048). With an inflated floor every one of the Pi5's 10 CONNECT
+retries (in-band 0.058–0.079) read as "noise" → the Mac PONGed instead of
+attempting the 4-CW decode → connect starved in a PONG loop. Sim never catches
+this: OTASim noise is stationary, so last-window ≈ true floor there.
+
+**What changed:** the estimator keeps a ring of the last 15 idle-window RMS
+values (~3 s) and publishes `Snapshot.floor_noise_rms` = min over the ring
+(minimum-statistics noise floor — the floor is what the channel reads when
+NOTHING is there, so bursts must not raise it). The #70 gate reads the floor
+field; `filtered_noise_rms` (meter/SNR semantics) is unchanged.
+
+**Why min and not mean/EMA:** any averaging statistic is biased upward by
+exactly the burst energy that pollutes idle windows; the min over a few
+seconds of 200 ms windows tracks the quiet-channel level with negligible
+downward bias (window RMS estimator std ≈ 2 % at 9600 samples). With an honest
+floor the F223 CONNECT reads 1.65× (> the 1.5 factor) → correctly proceeds to
+the 4-CW decode (where HARQ soft-combining across retries gets its chance);
+a true PING gap still reads ≈ 1.0×.
+
+**Verification:** `UltraTncSimAudio` PASS 61.9 s (handshake 16.0 s);
+sim good@20 PASS 2250 bps, 0 spurious path2 both ends; sim good@10 handshake
+forms cleanly (gap 1.06× floor → PING; CONNECT_ACK 4/4 at 30 s — the run's
+later data-phase stall is the pre-existing @10 entry-floor marginality, not
+the gate); full ctest 84/84. GOTCHA logged: this real-time test fails under
+CPU contention from concurrent GUI sims or a leftover `ota_simulator serve`
+daemon — kill stragglers before trusting a red.
+
+---
+
 ## 2026-07-07 — fix(handshake): #70 STAGE 1.5 — noise-floor-RELATIVE PING gate (in-band), mid-SNR connect window CLOSED (sim good@10 out-of-box PASS; UltraTncSimAudio green)
 
 **What was broken:** the robust-idle-PING emit used an ABSOLUTE payload-absence

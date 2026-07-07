@@ -43,6 +43,7 @@ void IdleNoiseSNREstimator::reset() {
     latest_instant_snr_db_ = 0.0f;
     filtered_noise_rms_ = 0.0f;
     normalized_noise_rms_ = 0.0f;
+    window_rms_ring_.fill(0.0f);
     windows_observed_ = 0;
 }
 
@@ -91,6 +92,7 @@ void IdleNoiseSNREstimator::observeIdleAudio(const float* samples, size_t count)
 
         latest_instant_snr_db_ = snr_db;
         filtered_noise_rms_ = static_cast<float>(std::sqrt(std::max(0.0, filtered_power)));
+        window_rms_ring_[windows_observed_ % kFloorWindowCount] = filtered_noise_rms_;
         normalized_noise_rms_ = static_cast<float>(std::sqrt(bounded_noise_power));
         if (!valid_) {
             smoothed_snr_db_ = snr_db;
@@ -123,6 +125,16 @@ IdleNoiseSNREstimator::Snapshot IdleNoiseSNREstimator::snapshot() const {
     out.idle_in_band_snr_db = smoothed_snr_db_;
     out.latest_instant_idle_in_band_snr_db = latest_instant_snr_db_;
     out.filtered_noise_rms = filtered_noise_rms_;
+    {
+        // Min over the populated part of the ring (ignore empty slots).
+        float floor = 0.0f;
+        const size_t filled = std::min(windows_observed_, kFloorWindowCount);
+        for (size_t i = 0; i < filled; ++i) {
+            const float v = window_rms_ring_[i];
+            if (v > 0.0f && (floor == 0.0f || v < floor)) floor = v;
+        }
+        out.floor_noise_rms = floor;
+    }
     out.normalized_noise_rms = normalized_noise_rms_;
     out.fir_energy = fir_energy_;
     out.equivalent_noise_bandwidth_hz = equivalent_noise_bandwidth_hz_;

@@ -536,7 +536,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         float data_inband_rms = 0.0f;
         if (robust_idle_ping) {
             const auto ns = idle_noise_snr_estimator_.snapshot();
-            if (ns.valid) idle_noise_rms = ns.filtered_noise_rms;
+            // floor (min-statistics), NOT the last window: real-channel idle
+            // audio is bursty and the last window over-reads the floor by dBs
+            // (F223 rig: 0.067-0.077 vs true 0.048 → all CONNECTs "noise").
+            if (ns.valid) idle_noise_rms = ns.floor_noise_rms;
             if (idle_noise_rms > 0.0f && !frame_buffer.empty()) {
                 // Same design as IdleNoiseSNREstimator's reference filter.
                 FIRFilter gap_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);

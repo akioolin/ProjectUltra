@@ -2,6 +2,7 @@
 
 #include "ultra/dsp.hpp"
 
+#include <array>
 #include <cstddef>
 #include <mutex>
 
@@ -10,6 +11,10 @@ namespace gui {
 
 class IdleNoiseSNREstimator {
 public:
+    // ~3 s of idle windows for the min-statistics floor: long enough to span
+    // noise bursts, short enough to track slow real-channel drift.
+    static constexpr size_t kFloorWindowCount = 15;
+
     struct Config {
         float sample_rate = 48000.0f;
         size_t window_samples = 9600;  // 200 ms at 48 kHz
@@ -24,6 +29,15 @@ public:
         float idle_in_band_snr_db = 0.0f;
         float latest_instant_idle_in_band_snr_db = 0.0f;
         float filtered_noise_rms = 0.0f;
+        // Minimum-statistics floor: min in-band window RMS over the last
+        // kFloorWindowCount idle windows. The floor is what the channel reads
+        // when NOTHING is there — real-channel "idle" audio is nonstationary
+        // (static bursts, undetected signal tails, own-TX echo on hardware),
+        // so the last window's instantaneous RMS over-reads it by dBs (F223:
+        // last-window 0.067-0.077 vs true 0.048 → every CONNECT classified as
+        // noise). Consumers gating on "is this region noise-only" (#70
+        // gap_is_noise) MUST use this, not filtered_noise_rms.
+        float floor_noise_rms = 0.0f;
         float normalized_noise_rms = 0.0f;
         double fir_energy = 0.0;
         double equivalent_noise_bandwidth_hz = 0.0;
@@ -56,6 +70,7 @@ private:
     float latest_instant_snr_db_ = 0.0f;
     float filtered_noise_rms_ = 0.0f;
     float normalized_noise_rms_ = 0.0f;
+    std::array<float, kFloorWindowCount> window_rms_ring_{};
     size_t windows_observed_ = 0;
 };
 
