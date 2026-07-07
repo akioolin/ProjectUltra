@@ -37,6 +37,35 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Regression: `tests/test_arq_toneburst_fabrication.cpp` (4/4: exact F116 repro, 64-value property sweep, control-path fabrication, legit-ack preservation).
 - Residual: a corrupt control-frame SACK could still phantom-retire WITHIN the sent window (needs an LDPC+frame-CRC fluke — astronomically rarer than the tone path).
 
+### BUG-DECODE-BACKLOG-COLLISIONS: under deep-fade search thrash the decoder falls 10-20 s behind LIVE audio — every receiver response (ACK, backstop, adopt) leaves stale, colliding with the sender's already-airing recovery bursts
+- Status: **OPEN — pinned 2026-07-07 (F176 rig, MPG@20).** Hard evidence: a burst
+  AIRED at t≈218, its anchor was ACCEPTED by the decoder at t≈239 (**~20 s of
+  processing lag**), the anchored-burst backstop (sample-clock, correct by its own
+  basis) therefore fired at t=251 — exactly as the sender's next recovery burst
+  keyed. Operator waterfall shows the ACK tones over the burst head.
+- **Mechanism:** when fades deepen (F176 post-80%: CFO drift to −0.49, 2/5
+  groups), the sync search THRASHES — full-anchor-wait reject streaks with
+  decaying thresholds, weak-DATA fallbacks, repeated correlation over the same
+  audio — and per-buffer processing cost exceeds real time. The ring keeps
+  filling; the decoder's "now" detaches from the antenna's "now".
+- **Why no receiver-side gate can fix collisions while this holds:** the
+  geometric ACK gate (F176 fix), CCA, and decoder-evidence checks all consume
+  DECODED state; a burst the decoder hasn't reached yet is invisible to all of
+  them. With the decoder 20 s behind, the receiver is answering questions from
+  20 s ago. This is the same #56/RXQ class that defeated warm-sync in June
+  (rig turnaround forensics) — now shown to also manufacture TX collisions.
+- **Fix direction (next session, co-priority with the group-size lever):**
+  bound the search cost per fed buffer (correlation work budget per real-time
+  interval; skip-ahead instead of re-correlating overlapping windows on reject
+  streaks), and/or a load-shedding rule: when unsearched backlog exceeds ~2 s,
+  jump the search floor to (write_pos − backlog_cap) and eat the loss — a
+  real radio that falls behind MUST drop audio, not time-travel. Measure
+  backlog_ms (already in DecoderStats: current/peak_unsearched_samples) around
+  fade episodes to size the budget.
+- **Impact:** the top remaining source of ACK/burst collisions and late-response
+  stalls; also inflates every ack round-trip during fade episodes (the F163
+  budget's "RTO dead-air" rows are partly this).
+
 ### BUG-POSTTX-ACK-MISS: tone monitor tail-window sweep never scans audio deeper than ~520ms into a single feedAudio append — the first ACK after our own key-down (capture-resume backlog) is captured, fed, and never scanned (~19s RTO each, 2/run F76-F77)
 - Status: **FIXED 2026-07-05 (ULTRA_ACK_MONITOR_GAPLESS, DEFAULT-ON since 6340f51+flip; =0 opts out).** Root cause: all cadence passes triggered inside one feedAudio(count) call scan the SAME end-anchored window (tail_base = buffer end - window); a chunk larger than a bin's tail window leaves a permanent blind hole (12ms bin window ≈ 25k samples). Fade and staircase-bin mismatch REFUTED by capture ledger (tone arrived rms 0.033-0.091, all ACKs symbol_ms=12).
 - Fix: gapless armed sweep — per-bin window extends to cover everything since the scan high-water mark + one burst of context (gapless by induction; hw jumps to buffer end per pass; end-straddling tones re-covered next pass). Plus permanent forensics: arm log INFO, armed-window-EXPIRED-undetected INFO (fed_in_window/max_chunk/passes classifies any future miss), monitor-level detection INFO chained in front of the production callback.
