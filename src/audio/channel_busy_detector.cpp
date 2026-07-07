@@ -131,19 +131,29 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
         : static_cast<float>(rms_window_sum_ / static_cast<double>(rms_window_.size()));
     const float threshold = quietThresholdLocked();
 
-    // AGC-SETTLE HOLDOFF (F129): after burst-level audio, the rig RX chain's AGC
-    // recovery produces SUB-AMBIENT dips (measured 0.008-0.026 vs true band noise
-    // ~0.030). The one-way admission gate loves exactly those samples, the median
-    // collapses below the real floor, and post-burst ambient then reads "busy"
-    // forever (both F129 ACK drops, 2x ~19 s RTO stalls). Noise cannot fade —
-    // sub-floor readings after strong audio are artifacts: suspend admission for
-    // 2.5 s after any burst-level sample.
+    // AGC-SETTLE HOLDOFF (F129, scoped by the CI catch): after burst-level audio,
+    // the rig RX chain's AGC recovery produces SUB-AMBIENT dips (measured
+    // 0.008-0.026 vs true band noise ~0.030). The one-way admission gate loves
+    // exactly those samples, the median collapses below the real floor, and
+    // post-burst ambient then reads "busy" forever (both F129 ACK drops, 2x
+    // ~19 s RTO stalls). Noise cannot fade — SUB-FLOOR readings after strong
+    // audio are artifacts: suspend their admission for 2.5 s.
+    // SCOPE (testRelearnsRisenNoiseFloorAfterLowSeed, caught by CI Debug — the
+    // original form gated ALL admission during the holdoff): steady RISEN noise
+    // at >4x a stale low floor re-arms the holdoff on every sample, which would
+    // starve the floor window forever and defeat the sustained-elevation relearn
+    // — re-latching the exact IONOS false-busy lockup that test guards. The
+    // AGC-artifact class is only samples BELOW the cached floor; at-or-above-
+    // floor samples must always stay admissible so the relearn can re-seed a
+    // genuinely risen band.
     if (cached_noise_floor_valid_ &&
         current_rms_ > cached_noise_floor_rms_ * 4.0f) {
         agc_holdoff_until_ = now + std::chrono::milliseconds(2500);
     }
-    if (now >= agc_holdoff_until_ &&
-        shouldRecordNoiseFloorSampleLocked(current_rms_)) {
+    const bool agc_dip_suspect =
+        now < agc_holdoff_until_ && cached_noise_floor_valid_ &&
+        current_rms_ < cached_noise_floor_rms_;
+    if (!agc_dip_suspect && shouldRecordNoiseFloorSampleLocked(current_rms_)) {
         noise_floor_window_.emplace_back(now, current_rms_);
         pruneNoiseFloorLocked(now);
     }
