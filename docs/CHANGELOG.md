@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(handshake): #70 STAGE 1.5 — noise-floor-RELATIVE PING gate (in-band), mid-SNR connect window CLOSED (sim good@10 out-of-box PASS; UltraTncSimAudio green)
+
+**What was broken:** the robust-idle-PING emit used an ABSOLUTE payload-absence
+floor (`data_rms ≤ 0.16`). Ambient broadband noise crosses that floor around
+~8–15 dB, so in the whole mid-SNR band a real PING's noise-flooded gap read as
+"data-bearing" → the receiver waited the multi-second 4-CW CONNECT window,
+decoded noise, and (with the absolute floor also failing) never PONGed. Sim
+good@10 never connected; `UltraTncSimAudio` (awgn@15) was deterministically red
+since 2026-07-02 (the documented #70 ctest reproducer: gap 0.1653 vs floor
+0.16 — a knife edge). A second hole: the responder's noise-floor estimator was
+only fed on no-lock search passes, so a station that hears the peer's probe on
+its FIRST pass (fresh boot answering a handshake) had no floor reference at all.
+
+**What changed:**
+- `streaming_frame_policy.hpp`: `evaluatePingFrame` takes `idle_noise_rms` +
+  `data_inband_rms`; new payload-absence arm `gap_is_noise = inband_gap ≤
+  floor × kPingNoiseGapFactor (1.5)`. Absolute 0.16 kept only as the
+  no-estimate fallback.
+- `streaming_ofdm_decode.cpp`: `evaluatePingDecision` measures the gap through
+  a 101-tap 50–2950 FIR IDENTICAL to `IdleNoiseSNREstimator`'s and passes the
+  estimator's `filtered_noise_rms`; the CW0-peek wait gate honors
+  `gap_is_noise` (a flooded probe no longer costs the 4-CW wait); the pre-LDPC
+  robust emit uses the classifier's verdict (duplicate cut).
+- `streaming_sync_acquisition.cpp` + `SyncResult.preamble_start_sample`
+  (mc_dpsk/ofdm_chirp waveforms): on sync-found, the pre-chirp buffer prefix
+  (ambient by construction) feeds the estimator — BOOT-ONLY (`hasEstimate()`
+  gate) so steady-state estimates stay sourced from true-idle passes.
+
+**Why it works (and the two wrong cuts):** a bare PING's gap IS the receiver's
+ambient floor (ratio ≈ 1) at every level and SNR — level-invariant, unlike the
+absolute floor (#74 lesson). A real payload rides `sqrt(1+SNR_lin)` above the
+in-band floor (3.3× at 10 dB, 2.2× at 6 dB — MC-DPSK's own floor is 5 dB, so
+the 1.5 factor separates everywhere the modem operates). Wrong cut (a):
+raw-gap vs in-band floor never fires (broadband ambient ≈ 2.9× in-band).
+Wrong cut (b): raw vs raw fires but out-of-band noise adds to BOTH sides and
+compresses the discriminant to `sqrt(1+SNR·B_band/B_tot)` ≈ 1.49× at good@10 —
+it misclassified a real CONNECT as a PING (caught by the faithful gate, run
+sim10f). In-band vs in-band is the only correct domain.
+
+**Verification:** sim good@10 seed 42: never-connect → **PASS** (QPSK R1/4,
+FILE_CRC_OK×2; gap 0.0997 vs floor 0.0955 — ratio 1.04, textbook).
+good@20 seed 42: **PASS 2070 bps, 0 spurious path2** on both stations (the
+historical churn regression). `UltraTncSimAudio`: red → **PASS ×3**
+(handshake 16.3 s, was never-completes; note: can still starve under
+`ctest -j4` run CONCURRENTLY with a GUI sim — harness artifact). Full ctest
+84/84. Also in this change: tone-ACK repeat dedup-arm (one repeat per DISTINCT
+ack, `ack_repeat_last_armed_samples_` compare in `App::submitToneAckSamples`) —
+kills the F222 backstop-ack→repeat blind key-up chains at MPG@10.
+
+---
+
 ## 2026-07-07 — fix(ack): F221 — geometric ack gate was computing air-end from the HEADER's frame length (operator-caught at MPG@10)
 
 The F176 gate published `air_end = frame_sync_abs + N × frame_len` at the

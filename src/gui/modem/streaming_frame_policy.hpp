@@ -17,6 +17,19 @@ inline constexpr size_t kPingRMSCheckSamples = 5000;
 inline constexpr float kMinTrainingRMSForPingRatio = 0.001f;
 inline constexpr float kPingMaxDataToTrainingRMSRatio = 0.5f;
 inline constexpr float kPingChirpLockMaxDataRMS = 0.16f;
+// Noise-relative payload-absence gate (#70 stage 1.5): a bare PING's gap is
+// ambient noise, so gap_rms/idle_noise_rms ≈ 1 at every RX level and SNR. The
+// 1.5x margin admits fade/estimator slop while a real 4-CW payload rides
+// sqrt(1+SNR_lin) above the floor — 3.3x at a 10 dB in-band SNR, 2.2x at 6 dB.
+// BOTH sides MUST be measured IN-BAND (same 50-2950 Hz FIR): in the raw
+// domain, out-of-band ambient noise adds equally to both measurements and
+// compresses the discriminant to sqrt(1 + SNR_lin*B_band/B_total) — measured
+// 1.49x at sim good@10, straddling this factor, which misclassified a real
+// CONNECT as a PING. Level-invariant, unlike the absolute
+// kPingChirpLockMaxDataRMS floor (#74 lesson) — the absolute floor is kept as
+// the fallback when the caller has no valid idle-noise estimate.
+inline constexpr float kPingNoiseGapFactor = 1.5f;
+inline constexpr float kMinIdleNoiseRMSForPingGap = 1e-4f;
 inline constexpr float kPingCorrFloor = 0.30f;
 inline constexpr float kPingMaxGapError = 1000.0f;
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
@@ -47,6 +60,9 @@ struct PingFrameDecision {
     bool ping_by_silence = false;
     bool ping_by_chirp_lock = false;
     bool is_ping = true;
+    float idle_noise_rms = 0.0f;   // 0 = caller had no valid idle-noise estimate
+    float data_inband_rms = 0.0f;  // gap RMS through the in-band FIR (0 = not measured)
+    bool gap_is_noise = false;     // noise-relative payload-absence verdict
 };
 
 using PingRMSDecision = PingFrameDecision;
@@ -59,7 +75,9 @@ inline PingFrameDecision evaluatePingFrame(
     float gap_error_samples = std::numeric_limits<float>::infinity(),
     bool ldpc_decode_succeeded = false,
     bool ldpc_magic_valid = false,
-    bool ldpc_decode_attempted = false) {
+    bool ldpc_decode_attempted = false,
+    float idle_noise_rms = 0.0f,
+    float data_inband_rms = 0.0f) {
     PingFrameDecision decision;
 
     const size_t train_len = std::min(training_skip_samples, count);
@@ -96,8 +114,20 @@ inline PingFrameDecision evaluatePingFrame(
     // *pre*-decode WAIT decision must NOT use this absolute floor (it would skip
     // the 4-CW CONNECT decode for a low-level-but-real CONNECT) — it gates on
     // ping_by_silence (ratiometric) only. See streaming_ofdm_decode.cpp ~1290.
+    // Payload absence, most-principled test first: (a) ratiometric silence,
+    // (b) noise-relative — the gap reads as the receiver's own idle noise
+    // floor (level-invariant; the discriminator that works when broadband
+    // noise floods the gap at low SNR, where (a) and (c) both fail),
+    // (c) absolute-floor fallback for callers without a noise estimate.
+    decision.idle_noise_rms = idle_noise_rms;
+    decision.data_inband_rms = data_inband_rms;
+    decision.gap_is_noise =
+        idle_noise_rms > kMinIdleNoiseRMSForPingGap &&
+        data_inband_rms > 0.0f &&
+        data_inband_rms <= idle_noise_rms * kPingNoiseGapFactor;
     const bool payload_energy_absent =
-        decision.ping_by_silence || decision.data_rms <= kPingChirpLockMaxDataRMS;
+        decision.ping_by_silence || decision.gap_is_noise ||
+        decision.data_rms <= kPingChirpLockMaxDataRMS;
     decision.ping_by_chirp_lock =
         chirp_signature_real && no_valid_frame &&
         (!ldpc_decode_attempted || payload_energy_absent);

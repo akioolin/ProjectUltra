@@ -523,6 +523,7 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         // Training starts after [down-chirp][gap]. Both the full anchor and the short warm anchor
         // are DUAL chirps, so down_chirp_start is CFO-robust (up/down peak shifts cancel) for both.
         result.start_sample = chirp_result.down_chirp_start + chirp_samples + gap_samples;
+        result.preamble_start_sample = chirp_result.up_chirp_start;
         // NOTE: Do NOT add training_samples - process() needs them for channel estimation
 
         // Store training start position for CFO phase calculation in process()

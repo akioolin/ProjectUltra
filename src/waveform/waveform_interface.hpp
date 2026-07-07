@@ -37,6 +37,10 @@ struct WaveformCapabilities {
 struct SyncResult {
     bool detected = false;
     int start_sample = -1;          // Sample position where data starts
+    int preamble_start_sample = -1; // Frame START (up-chirp begin); audio before
+                                    // this point is ambient — usable as an
+                                    // idle-noise observation. -1 = unknown
+                                    // (e.g. warm-LTS syncs with no chirp).
     float correlation = 0.0f;       // Peak correlation value (0-1)
     float cfo_hz = 0.0f;            // Estimated carrier frequency offset
     float gap_error_samples = 0.0f; // Dual-chirp actual_gap - expected_gap

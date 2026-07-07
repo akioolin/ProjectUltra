@@ -111,6 +111,7 @@ bool MCDPSKWaveform::detectSync(SampleSpan samples, SyncResult& result, float th
 
     result.detected = chirp_result.success;
     result.start_sample = chirp_result.up_chirp_start;
+    result.preamble_start_sample = chirp_result.up_chirp_start;
     result.correlation = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
     result.cfo_hz = chirp_result.cfo_hz;
     result.gap_error_samples = chirp_result.gap_error_samples;

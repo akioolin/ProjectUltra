@@ -532,12 +532,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   for command line". Verified pre-existing on main (fails at main HEAD with a clean tree,
   2026-07-02); NOT a live-ladder or connect-policy regression. awgn@15 sits in the same
   in-between band as good@10-15. The red ctest is THIS bug; fix = the noise-floor-relative
-  emit gate above.
+  emit gate above. **FIXED 2026-07-07 by STAGE 1.5 (below): PASS ×3, handshake 16 s (was
+  never-completes). NOTE: it can still fail under `ctest -j4` when a GUI sim runs
+  CONCURRENTLY on the same machine (real-time CPU starvation, harness artifact).**
+- **STAGE 1.5 (2026-07-07, LANDED — the mid-SNR window CLOSED):** the noise-floor-RELATIVE
+  emit gate the entries above called for. `gap_is_noise` = IN-BAND gap RMS (same 101-tap FIR
+  as `IdleNoiseSNREstimator`) ≤ the receiver's own measured idle floor × 1.5 — level-invariant
+  (#74-safe) and high-SNR-safe by construction (a real payload rides sqrt(1+SNR_lin) above the
+  floor; the good@20 false-sync class reads ~10×). TWO WRONG CUTS documented for posterity:
+  (a) comparing the RAW-domain gap vs the in-band floor never fires (broadband ambient reads
+  ~2.9× the in-band floor); (b) comparing raw-vs-raw fires but COMPRESSES the payload
+  discriminant to sqrt(1+SNR·B_band/B_tot) ≈ 1.49× at good@10 → misclassified a real CONNECT
+  as a PING (caught in sim). In-band-vs-in-band is the only correct domain. Also: the CW0-peek
+  wait gate honors gap_is_noise (no more multi-second 4-CW waits per flooded probe), and
+  sync-found feeds the estimator the pre-chirp ambient prefix (SyncResult.preamble_start_sample,
+  boot-only) so a first-pass responder has a floor reference. This RETIRES the never-implemented
+  STAGE2 `bare_chirp_expected_` plan as the gate for the robust emit (the noise-relative test
+  subsumes it). PROVEN: sim good@10 out-of-box CONNECT+PASS (QPSK R1/4, CRC ×2), good@20 PASS
+  2070 bps 0 spurious, UltraTncSimAudio PASS ×3.
 - Status: **FIXED + DEFAULT-ON (rig path); mid-SNR sim window re-opened by the emit gate.** `ULTRA_ROBUST_IDLE_PING` promoted DEFAULT-ON (opt-out `=0`) after all three sub-issues were closed: (1) initiator #27 (bare_chirp_expected_=FALSE during CONNECTING), (2) responder starvation (STAGE2 expects-CONNECT window), (3) high-SNR churn (data_rms≤0.16 emit gate). VERIFIED: good@20 sim PASS with the emit active (2/2 PING/PONG, 1860 bps); rig **MPM@8 pure-default (zero env vars) connects + delivers CRC-clean** (2/2). With #74 (ratiometric) also default-on, the low-SNR path is now the shipped default on a real radio. See CHANGELOG 2026-07-01.
 - **What:** a PING is a bare chirp with no data (`encodePing`→`generatePreamble`). The receiver tells a PING from a CONNECT with a LEVEL test (`data/training RMS ratio < 0.5`, abs floor 0.16). At low SNR broadband noise floods the PING's silent gap (ratio 0.68–0.88 > 0.5) → real PING reads as a faded CONNECT → waits for a 4-CW frame that never comes → no PONG → never connects. The chirp itself locks solid (corr 0.6–0.75). Floor map (faithful gate): never connects awgn@6/8 good@8/10/12; marginal good@15; reliable good@20. The published 5 dB AWGN *data* floor never caught this (`measure_ack_fer` skips the live handshake).
 - **Fix (env-gated):** when the knob is ON, a solid chirp-lock with a low-LLR (false-lock-rejected) frame emits the PING on chirp signature alone; gated on `bare_chirp_expected_` (FALSE during CONNECTING) so a faded CONNECT_ACK isn't mis-PONGed (#27-safe on the initiator). PROVEN: good@10/12 never-connect→PASS, good@20 no-regress.
 - **STAGE2 (2026-07-01, LANDED — responder hole CLOSED):** on PONG-TX the responder now sets `bare_chirp_expected_`=FALSE + arms a ~20 s expects-CONNECT window (app.cpp), mirroring the initiator's PROBING→CONNECTING disarm, then the tick re-arms. Sound for any window: while CONNECTING the initiator re-SENDS CONNECT (never re-PINGs, connection.cpp:2421-2442) and a stray PONG to a CONNECTING initiator is a no-op + half-duplex-inaudible, so worst case is occasional harmless waste, never permanent starvation.
-- **Remaining before default-ON (the NEW blocker):** flipping `ULTRA_ROBUST_IDLE_PING` default-ON REGRESSES the faithful sim gate at good@20 — the near-silent HIGH-SNR PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real chirp, so the robust emit fires SPURIOUSLY → PING/PONG churn (11/9) → ~30 s connect → gate overrun. Isolation-proven: same build with `=0` → good@20 PASS (1860 bps); STAGE2 alone is clean. FIX NEEDED: a high-SNR-safe emit gate (e.g. a higher data_bearing floor separating a noise-FLOODED low-SNR PING (ratio 0.68–0.88) from high-SNR PONG residual (~0.5–0.6)). Also: throughput below ~8 dB is a separate lever (#71), not this bug.
+- **Remaining before default-ON (RESOLVED 2026-07-07 by STAGE 1.5 — kept for history):** flipping `ULTRA_ROBUST_IDLE_PING` default-ON REGRESSES the faithful sim gate at good@20 — the near-silent HIGH-SNR PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real chirp, so the robust emit fires SPURIOUSLY → PING/PONG churn (11/9) → ~30 s connect → gate overrun. Isolation-proven: same build with `=0` → good@20 PASS (1860 bps); STAGE2 alone is clean. FIX NEEDED: a high-SNR-safe emit gate (e.g. a higher data_bearing floor separating a noise-FLOODED low-SNR PING (ratio 0.68–0.88) from high-SNR PONG residual (~0.5–0.6)). Also: throughput below ~8 dB is a separate lever (#71), not this bug.
 
 ### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
 - Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First

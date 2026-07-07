@@ -561,6 +561,30 @@ void StreamingDecoder::searchForSync() {
     }
 
     if (found) {
+        // #70: the audio BEFORE the detected up-chirp START is ambient by
+        // construction — feed it to the idle-noise estimator (state is still
+        // SEARCHING here, so the candidate gate accepts it). The no-lock branch
+        // below only observes after a full search pass finds nothing, which
+        // never happens for a station that hears the peer's probe on its very
+        // first pass (fresh boot answering a handshake) — leaving the
+        // noise-relative PING gap test without a floor reference exactly when
+        // the responder needs it. Uses preamble_start_sample (frame start), NOT
+        // start_sample (training start — the two chirps before it are full-level
+        // signal and would poison the floor 2-3x high). BOOT-ONLY (hasEstimate
+        // gate): in steady state the true-idle passes are the clean source; a
+        // prefix can contain an undetected earlier transmission's tail, which
+        // would over-read the floor and widen the false-PING window. Cap at
+        // 1 s: five estimator windows, enough to go valid in one shot.
+        if (sync_result.preamble_start_sample > 0 &&
+            !idle_noise_snr_estimator_.hasEstimate()) {
+            const size_t chirp_off = std::min(
+                static_cast<size_t>(sync_result.preamble_start_sample),
+                search_buffer.size());
+            const size_t prefix = std::min(chirp_off, static_cast<size_t>(48000));
+            observeIdleNoiseCandidate(
+                search_buffer.data() + (chirp_off - prefix), prefix);
+        }
+
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
         sync_position_ = sync_controller_.ring_.wrapRingIndexLocked(search_start + sync_result.start_sample);

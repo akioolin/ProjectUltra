@@ -522,10 +522,50 @@ void StreamingDecoder::decodeCurrentFrame() {
     auto evaluatePingDecision = [&](bool ldpc_attempted,
                                     bool ldpc_decode_succeeded,
                                     bool ldpc_magic_valid) {
+        // #70 stage 1.5: give the classifier the receiver's idle noise floor so
+        // ping_by_chirp_lock can use the level-invariant noise-relative gap test
+        // (a flooded PING gap reads ≈ the noise floor at any SNR; the absolute
+        // 0.16 floor fails above ~8 dB of broadband noise). BOTH sides in-band:
+        // the ambient reference is the estimator's post-FIR value, and the gap
+        // RMS is measured through an identical FIR here. In the raw domain the
+        // out-of-band noise fraction compresses payload-vs-noise separation to
+        // ~1.5x at good@10 (a real CONNECT misclassified as PING); in-band the
+        // separation is sqrt(1+SNR_lin) ≈ 3.3x. Knob-off passes 0, which
+        // disables the noise arm inside evaluatePingFrame.
+        float idle_noise_rms = 0.0f;
+        float data_inband_rms = 0.0f;
+        if (robust_idle_ping) {
+            const auto ns = idle_noise_snr_estimator_.snapshot();
+            if (ns.valid) idle_noise_rms = ns.filtered_noise_rms;
+            if (idle_noise_rms > 0.0f && !frame_buffer.empty()) {
+                // Same design as IdleNoiseSNREstimator's reference filter.
+                FIRFilter gap_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+                const size_t check_start =
+                    std::min(ping_training_skip, frame_buffer.size());
+                const size_t check_len =
+                    std::min(frame_buffer.size() - check_start, ping_check_samples);
+                if (check_len > 0) {
+                    // Prime the filter on the preceding samples so its
+                    // transient settles before the measured window.
+                    const size_t prime = std::min(check_start, static_cast<size_t>(512));
+                    for (size_t i = check_start - prime; i < check_start; ++i) {
+                        gap_filter.process(frame_buffer[i]);
+                    }
+                    double sum_sq = 0.0;
+                    for (size_t i = check_start; i < check_start + check_len; ++i) {
+                        const float y = gap_filter.process(frame_buffer[i]);
+                        sum_sq += static_cast<double>(y) * static_cast<double>(y);
+                    }
+                    data_inband_rms = static_cast<float>(
+                        std::sqrt(sum_sq / static_cast<double>(check_len)));
+                }
+            }
+        }
         return frame_policy::evaluatePingFrame(
             frame_buffer.data(), frame_buffer.size(), ping_training_skip,
             ping_check_samples, sync_correlation_, sync_gap_error_samples_,
-            ldpc_decode_succeeded, ldpc_magic_valid, ldpc_attempted);
+            ldpc_decode_succeeded, ldpc_magic_valid, ldpc_attempted,
+            idle_noise_rms, data_inband_rms);
     };
     auto emitPingFrame = [&](const frame_policy::PingFrameDecision& ping_decision,
                              bool ldpc_attempted) {
@@ -606,11 +646,14 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
-                  "valid_frame=0, reason=%s, path1=%d, path2=%d",
+                  "valid_frame=0, reason=%s, inband_rms=%.4f noise_rms=%.4f "
+                  "gap_is_noise=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
                   ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
                   reason,
+                  ping_decision.data_inband_rms, ping_decision.idle_noise_rms,
+                  ping_decision.gap_is_noise ? 1 : 0,
                   ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0);
 
@@ -1369,16 +1412,29 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // lesson (RX level varies on a real radio); a noise-floor-RELATIVE gate is the
                 // level-invariant refinement, but the observed margins here are 2-8x and
                 // bare_chirp_expected_ (STAGE2) backstops the residual low-SNR ambiguity.
+                // #70 STAGE-1.5 (F222, sim good@10): the NOISE-RELATIVE gate
+                // the 2026-07-01 note called for. A bare PING's gap IS the
+                // ambient noise (gap_rms/noise_rms ≈ 1) at EVERY level and SNR;
+                // a real CONNECT's 4-CW data rides ≥ ~3x above the floor even
+                // at 10 dB, and the good@20 spurious-lock class reads ~10x —
+                // both rejected by the same test. Level-invariant (#74 lesson:
+                // absolute thresholds break on real radios), high-SNR-safe by
+                // construction, and it replaces the STAGE2 bare_chirp_expected_
+                // gate that was never implemented (the knob was inert — sim
+                // good@10: responder heard corr 0.754 PINGs and never PONGed;
+                // initiator gave up after 5).
                 if (data_bearing_mcdpsk && robust_idle_ping &&
-                    bare_chirp_expected_.load(std::memory_order_relaxed) &&
-                    reject_ping.data_rms <= frame_policy::kPingChirpLockMaxDataRMS &&
+                    reject_ping.gap_is_noise &&
                     reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
                     std::abs(reject_ping.gap_error_samples) <=
                         frame_policy::kPingMaxGapError) {
                     LOG_MODEM(INFO, "[%s] robust idle PING by chirp-lock "
-                              "(ratio=%.2f corr=%.2f gap=%.1f) — low-SNR (not silent)",
+                              "(ratio=%.2f corr=%.2f gap=%.1f inband_rms=%.4f "
+                              "noise_rms=%.4f) — gap is NOISE, not data",
                               log_prefix_.c_str(), reject_ping.ratio,
-                              reject_ping.chirp_corr, reject_ping.gap_error_samples);
+                              reject_ping.chirp_corr, reject_ping.gap_error_samples,
+                              reject_ping.data_inband_rms,
+                              reject_ping.idle_noise_rms);
                     emitPingFrame(reject_ping, false);
                     return;
                 }
@@ -1573,7 +1629,20 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // 4-CW decode, and the post-decode PATH2 fallback (which keeps the
                 // absolute floor) re-classifies it as a ping only if that decode
                 // also fails. Correctness (try to decode) over a fast false PONG.
-                return !ping_decision.ping_by_silence;
+                //
+                // #70 stage 1.5: gap_is_noise is the NOISE-RELATIVE arm — the
+                // payload region reads at the receiver's own measured ambient
+                // floor (within kPingNoiseGapFactor), i.e. there is nothing to
+                // decode. Unlike the absolute floor this does NOT re-create the
+                // hardware regression above: a real low-level CONNECT still
+                // rides well above its own chain's floor, fails this test, and
+                // proceeds to the 4-CW decode. Without this arm, every noise-
+                // flooded probe (ratio > 0.5 once broadband noise fills the gap,
+                // ~10 dB and below) costs the full multi-second 4-CW wait before
+                // PATH2 can classify it — the responder half of the #70
+                // handshake floor.
+                return !(ping_decision.ping_by_silence ||
+                         ping_decision.gap_is_noise);
             }();
             if (wait_for_fixed_connect) {
                 pending_total_cw_ = v2::kDefaultFixedFrameCodewords;
@@ -2004,12 +2073,15 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
-                  "ldpc_ok=%d, magic=%d, path1=%d, path2=%d",
+                  "ldpc_ok=%d, magic=%d, inband_rms=%.4f noise_rms=%.4f "
+                  "gap_is_noise=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
                   ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
                   ping_decision.ldpc_decode_succeeded ? 1 : 0,
                   ping_decision.ldpc_magic_valid ? 1 : 0,
+                  ping_decision.data_inband_rms, ping_decision.idle_noise_rms,
+                  ping_decision.gap_is_noise ? 1 : 0,
                   ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0);
 
