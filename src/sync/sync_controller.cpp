@@ -456,6 +456,35 @@ SearchWindowResult SyncController::acquireSearchWindow(
             unsearched = ring_.buffer_capacity_samples_ - ring_.correlation_pos_ + ring_.write_pos_;
         }
 
+        // LOAD-SHED (BUG-DECODE-BACKLOG-COLLISIONS, F176/F186): under deep-fade
+        // search thrash the per-buffer correlation cost exceeds real time and
+        // the search position detaches from the antenna's "now" (F176: a burst
+        // AIRED at t≈218, its anchor was accepted at t≈239 — every receiver
+        // response left ~20 s stale and collided with the sender's recovery
+        // bursts; F186: 7,668 anchor-wait rejects, died at 75 %). A real radio
+        // that falls behind MUST drop audio, not time-travel: cap the search
+        // backlog at ~2 s of real time — jump the search floor forward and eat
+        // the loss (the skipped audio is stale by definition; a chirp inside
+        // it is an old chirp, and the sender's RTO covers anything real).
+        // Frame ASSEMBLY for an already-anchored group is untouched (it reads
+        // ring positions independently of the search cursor).
+        constexpr size_t kMaxSearchBacklogSamples = 96000;  // 2 s @ 48 kHz
+        if (real_time_audio_ && unsearched > kMaxSearchBacklogSamples) {
+            const size_t shed = unsearched - kMaxSearchBacklogSamples;
+            ring_.correlation_pos_ =
+                ring_.wrapRingIndexLocked(ring_.correlation_pos_ + shed);
+            unsearched = kMaxSearchBacklogSamples;
+            static int shed_log_count = 0;
+            if (++shed_log_count % 5 == 1) {
+                LOG_MODEM(WARN,
+                          "[%s] searchForSync: LOAD-SHED %zu samples (%.1f s) — "
+                          "search fell behind live; staying within %.1f s of the "
+                          "antenna (x%d)",
+                          log_prefix_.c_str(), shed, shed / 48000.0f,
+                          kMaxSearchBacklogSamples / 48000.0f, shed_log_count);
+            }
+        }
+
         // Need at least min_search unsearched samples
         if (!used_warm_timed_window && unsearched < min_search) {
             static int skip_count2 = 0;

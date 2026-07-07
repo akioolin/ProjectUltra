@@ -466,6 +466,7 @@ public:
     const std::vector<float>& getLastGroupCarrierGammas() const {
         return last_group_carrier_gammas_;  // decode-thread only (group callback)
     }
+    void setRealTimeAudio(bool v) { sync_controller_.real_time_audio_ = v; }
     void setAnchoredBurstNoGroupCallback(std::function<void()> cb) {
         anchored_burst_no_group_callback_ = std::move(cb);
     }

@@ -330,6 +330,10 @@ public:
     bool     next_expected_frame_sample_valid_ = false;
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
     bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
+    // BUG-DECODE-BACKLOG load-shed applies ONLY to real-time audio (GUI/rig/
+    // OTASim). Batch decode (tests, file tools) legitimately feeds faster than
+    // real time and must never shed. Default OFF; the production engine opts in.
+    bool     real_time_audio_ = false;
                                                      // (the 11-flip flag; toggled by the burst decode path)
     // #69 anchor-skip: the LAST decoded BURST_HEADER's BURST_FLAG_NEXT_LIGHT_ANCHOR — the sender's
     // announcement that the NEXT group's descriptor is light (chirp-less). Set by the decoder at

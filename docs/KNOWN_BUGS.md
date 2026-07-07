@@ -37,7 +37,7 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Regression: `tests/test_arq_toneburst_fabrication.cpp` (4/4: exact F116 repro, 64-value property sweep, control-path fabrication, legit-ack preservation).
 - Residual: a corrupt control-frame SACK could still phantom-retire WITHIN the sent window (needs an LDPC+frame-CRC fluke — astronomically rarer than the tone path).
 
-### BUG-SACK-DURABILITY-RESIDUAL: F181 reproduced the sender-complete/receiver-stranded wedge WITH the F168 deliver-before-discard fix active — a third loss path exists
+### BUG-SACK-DURABILITY-RESIDUAL (DEFUSED 2026-07-07; root-cause narrowed): F181 reproduced the sender-complete/receiver-stranded wedge WITH the F168 deliver-before-discard fix active — a third loss path exists
 - Status: **OPEN — observed 2026-07-07 F181 (final batch, MPG@20).** Sender
   "Transfer complete 1.37 kbps" (salvaged ranges [1824,3048) at t=82); receiver
   logged ZERO file-progress marks in 900+ s (contiguous prefix stuck < 25 %)
@@ -50,11 +50,17 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   salvage skipped ranges the receiver NEVER confirmed in the new era; (c) the
   salvage delivered but FILE_START/offset bookkeeping rejected the write.
 - **Evidence preserved:** ~/Documents/ultra_forensics/F181_{mac,pi5}.log.
-- **Action (next session, FIRST):** replay the F181 timeline (sender salvage
-  events vs receiver salvage/delivery lines vs file-layer writes at those
-  offsets). Until root-caused, consider `ULTRA_SACK_SALVAGE=0` opt-out wiring
-  for the sender-side skip (re-sending SACKed ranges is only ~1 s/transfer —
-  the optimization is NOT worth a stranded-file class).
+- **DEFUSED (same night):** forensics narrowed it — the sender skipped
+  [0,456) (the file's FIRST chunk) on a SACK mark for a frame the receiver
+  PROVABLY never had (prefix pinned at 0; receiver spent that era ack-silent/
+  UNANCHORED, so it could not have SACKed anything → the mark was
+  era-corrupted/phantom). The sender-side skip now defaults OFF
+  (`ULTRA_SACK_SALVAGE=1` re-enables for measurement); SACKed ranges are
+  re-sent and the receiver dedups by offset — the stranded-file class is
+  structurally closed. Receiver-side deliver-before-discard stays (pure
+  benefit; the rate-change site now logs its salvages for forensic parity).
+- **Remaining open question (low priority):** the exact phantom-mark chain
+  (stale-epoch SACK bit surviving the era gate on slot 0).
 
 ### BUG-DECODE-BACKLOG-COLLISIONS: under deep-fade search thrash the decoder falls 10-20 s behind LIVE audio — every receiver response (ACK, backstop, adopt) leaves stale, colliding with the sender's already-airing recovery bursts
 - Status: **OPEN — pinned 2026-07-07 (F176 rig, MPG@20).** Hard evidence: a burst
@@ -73,7 +79,13 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   them. With the decoder 20 s behind, the receiver is answering questions from
   20 s ago. This is the same #56/RXQ class that defeated warm-sync in June
   (rig turnaround forensics) — now shown to also manufacture TX collisions.
-- **Fix direction (next session, co-priority with the group-size lever):**
+- **MITIGATED 2026-07-07 (same night):** search LOAD-SHED landed — real-time
+  decoders (production engine opts in; batch tools/tests never shed) cap the
+  search backlog at 2 s: the search floor jumps forward and eats the loss
+  (WARN-logged with shed seconds). Receiver staleness is now bounded at ~2 s —
+  the collision class and 20 s-stale responses are structurally gone. The
+  original fix direction below remains for the underlying thrash cost:
+- **Fix direction (deeper, next session):**
   bound the search cost per fed buffer (correlation work budget per real-time
   interval; skip-ahead instead of re-correlating overlapping windows on reject
   streaks), and/or a load-shedding rule: when unsearched backlog exceeds ~2 s,

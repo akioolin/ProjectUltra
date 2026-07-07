@@ -257,6 +257,21 @@ Connection::Connection(const ConnectionConfig& config)
     // slots — salvage their FILE byte-ranges so the requeue does not re-send
     // bytes the receiver already holds (13 confirmed frames re-sent in F163).
     arq_.setSackedFrameDiscardedCallback([this](const Bytes& frame_data) {
+        // F181 (BUG-SACK-DURABILITY-RESIDUAL): the skip trusts slot.acked, and
+        // F181 proved a SACK mark can be era-corrupted — the sender skipped
+        // re-sending [0,456) (the file's FIRST chunk) on a mark for a frame
+        // the receiver PROVABLY never had (prefix pinned at 0, receiver was
+        // ack-silent/UNANCHORED that whole era) — permanent hole, stranded
+        // file. The optimization is worth ~1 s/transfer; the failure costs the
+        // run. Default OFF until the phantom-mark chain is root-caused
+        // (ULTRA_SACK_SALVAGE=1 re-enables for measurement).
+        static const bool kSackSalvage = []() {
+            const char* e = std::getenv("ULTRA_SACK_SALVAGE");
+            return e && e[0] == '1' && e[1] == '\0';
+        }();
+        if (!kSackSalvage) {
+            return;  // re-send SACKed ranges; receiver dedups by offset
+        }
         auto frame = v2::DataFrame::deserialize(frame_data);
         if (!frame || frame->payload.size() <= FileTransferController::FILE_DATA_OVERHEAD) {
             return;

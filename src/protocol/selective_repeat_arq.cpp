@@ -274,6 +274,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
     }
 
     size_t discarded_rx = 0;
+    size_t rate_change_file_salvaged = 0;
     for (auto& slot : rx_window_) {
         if (!slot.received && !slot.partial) {
             continue;
@@ -285,6 +286,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
             slot.type == v2::FrameType::DATA &&
             (slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_START) ||
              slot.payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA))) {
+            ++rate_change_file_salvaged;  // F181: this site salvaged SILENTLY
             last_rx_frame_type_ = slot.type;
             if (on_data_received_) {
                 on_data_received_(slot.payload);
@@ -296,6 +298,12 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;
         discarded_rx++;
+    }
+    if (rate_change_file_salvaged > 0) {
+        LOG_MODEM(WARN,
+                  "SR-ARQ: rate-change RX discard — salvaged %zu buffered FILE "
+                  "frame(s) to the file layer (F181 forensic parity)",
+                  rate_change_file_salvaged);
     }
 
     if (discarded_rx > 0) {

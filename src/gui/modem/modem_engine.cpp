@@ -90,6 +90,10 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // Initialize StreamingDecoder (primary RX path)
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
+    // Production engine = real-time audio: enable the search load-shed
+    // (BUG-DECODE-BACKLOG). Batch decoders (tests/tools) construct
+    // StreamingDecoder directly and never shed.
+    streaming_decoder_->setRealTimeAudio(true);
 
     // Set callbacks to wire into existing ModemEngine callbacks
     streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {

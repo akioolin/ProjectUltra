@@ -372,6 +372,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     machinery ONLY after the §6.5 deaf-peer fallback proves unneeded (the frame type + handler
     stay for connect-time/USER_REQUEST/MC-DPSK/narrow regardless).
 9f. `ULTRA_RX_RATE_AUTHORITY` — 2026-07-05 🟢 **DEFAULT-ON** (campaign flip, same day; `=0` opts out). Receiver-commanded
+| `ULTRA_SACK_SALVAGE` | 🟡 EXPERIMENTAL (default OFF) | connection.cpp SackedFrameDiscardedCallback | Sender-side skip of re-sending SACKed FILE ranges across rate aborts — DEFUSED after F181 (phantom SACK mark stranded a file); re-enable only after the era-gate chain is root-caused |
 | `ULTRA_ZF_LLR_UNBIAS` | 🟡 EXPERIMENTAL (default OFF) | channel_equalizer_equalize.cpp (end of equalize()) | Stage A ZF-consistent LLR unbias — measured MARGINAL on the failing sim cell (docs/LLR_NOTCH_CALIBRATION_2026_07_06.md §measured); controls exactly invariant (QPSK/AWGN); keep OFF unless rig evidence diverges from the sim cell |
 | `ULTRA_NOTCH_NV` | 🟡 EXPERIMENTAL (default OFF) | channel_equalizer_equalize.cpp nv denominator (+ raw-obs writer channel_equalizer_pilot.cpp) | Stage B per-carrier reliability floor from raw LS pilot observations — same experiment, same marginal verdict; keep OFF |
 | `ULTRA_RX_PREDICTIVE_CLIMB` | 🟢 ACTIVE (default ON, `=0` opt-out) | connection.cpp updateRxAuthorityCommand | EESM per-carrier virtual rung evaluation — direct multi-rung climbs from measured gamma snapshots (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md); fallback = one-rung ladder |

@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(arq/sync): F181/F186 closing pair — SACK-salvage skip default-OFF (phantom-mark stranded file); real-time search LOAD-SHED (2 s staleness cap)
+
+1. **F181 (BUG-SACK-DURABILITY-RESIDUAL, DEFUSED):** the sender-side "skip
+   re-sending SACKed ranges" trusted slot.acked marks that survive era
+   confusion — F181 skipped [0,456), the file's FIRST chunk, on a mark for a
+   frame the ack-silent/UNANCHORED receiver provably never SACKed → permanent
+   hole, sender "complete", receiver stranded at 0 %. Skip now opt-in only
+   (`ULTRA_SACK_SALVAGE`, default OFF; worth ~1 s/transfer vs a stranded run).
+   Receiver deliver-before-discard unchanged; the rate-change discard site now
+   WARN-logs its salvages (it salvaged silently — an F181 forensic gap).
+2. **F186 (BUG-DECODE-BACKLOG, MITIGATED):** real-time search LOAD-SHED — when
+   the sync search falls >2 s behind the antenna (deep-fade thrash: 7,668
+   anchor-wait rejects in F186), the search floor jumps forward and eats the
+   loss (a radio that falls behind must drop audio, not time-travel). Gated to
+   real-time decoders via `setRealTimeAudio(true)` in the production engine;
+   batch decode (tests, file tools) legitimately outruns real time and never
+   sheds (MCDPSKClockOffset/PingDetector caught the unconditional version —
+   the tests did their job). Receiver staleness now bounded ≈2 s: the F176
+   collision class and 20 s-stale ACKs are structurally gone.
+
+**Verified:** full ctest 83/84 (known TNC red); gate + rig run below.
+
 ## 2026-07-07 — fix(ack): F176 GEOMETRIC ACK GATE — never key an ack before the burst finishes ARRIVING (sample-clock, descriptor-declared)
 
 **What was broken (operator waterfall, 4th energy-CCA failure tonight):** an ACK
