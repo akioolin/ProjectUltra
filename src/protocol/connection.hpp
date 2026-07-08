@@ -415,6 +415,7 @@ public:
     // Set measured SNR from modem layer (call this when decoding frames).
     // data_aided: snr_db is the MC-DPSK data-aided (fade-averaged) estimate — the
     // only source the connectSelectionSnrDb saturation bound may act on.
+    // (§6 physical entry-cap inputs live below as physical_channel_*_.)
     void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE,
                         bool data_aided = false) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
@@ -463,6 +464,15 @@ public:
     // valid only after enough OFDM data has pooled (~8 frames). Consumed via
     // connection_policy::coherenceAdjustedFadingIndex in the rate-decision handlers.
     // See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
+    // Handoff §6: the fade-averaged PHYSICAL channel SNR distribution measured
+    // across the handshake (decoder ring, linear-mean, dial convention) — the
+    // physics ceiling for the entry pick (connectSelectionSnrDb cap).
+    void setPhysicalChannelStats(float mean_db, float spread_db, uint32_t n) {
+        physical_channel_mean_db_ = mean_db;
+        physical_channel_spread_db_ = spread_db;
+        physical_channel_n_ = n;
+    }
+
     void setChannelCoherence(float coherence_score, float doppler_hz, bool valid) {
         // BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE fix (2026-07-02): while CONNECTED, a valid
         // Good/Moderate verdict is CARRIED at the Connection layer across any modem-layer
@@ -693,6 +703,9 @@ private:
     LadderRungId data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // Routed SNR measured by modem (see source).
+    float physical_channel_mean_db_ = 0.0f;   // §6 entry cap (dial convention)
+    float physical_channel_spread_db_ = 0.0f;
+    uint32_t physical_channel_n_ = 0;
     SNRSource measured_snr_source_ = SNRSource::NONE;
     bool measured_snr_data_aided_ = false;  // measured_snr_db_ is the data-aided MC-DPSK estimate
     bool measured_snr_valid_ = false;

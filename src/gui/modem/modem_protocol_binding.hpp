@@ -55,6 +55,13 @@ inline void wireModemToProtocol(ModemEngine& modem,
             const bool use_quality = protocol.shouldUseRxFrameForChannelQuality(data);
             const bool snr_data_aided = stats.mcdpsk_snr_routed_data_aided;
             protocol.setMeasuredSNR(snr_db, snr_source, snr_data_aided);
+            {
+                // §6: fade-averaged physical channel stats (decoder ring) — the
+                // physics ceiling for the entry pick.
+                float pm = 0.0f, ps = 0.0f;
+                const size_t pn = modem.physicalSnrStats(pm, ps);
+                protocol.setPhysicalChannelStats(pm, ps, static_cast<uint32_t>(pn));
+            }
             if (use_quality) {
                 protocol.setChannelQuality(snr_db, fading, snr_source, snr_data_aided);
                 // Doppler coherence (Good/Moderate discriminator) — refines the channel

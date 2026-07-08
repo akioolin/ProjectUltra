@@ -236,7 +236,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         const bool selection_snr_data_aided = rateSelectionSnrDataAided();
         const float selection_snr_db =
             connection_policy::connectSelectionSnrDb(snr_db, entry_fading,
-                                                     selection_snr_data_aided);
+                                                     selection_snr_data_aided,
+                                                     physical_channel_mean_db_,
+                                                     physical_channel_n_);
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -1055,7 +1057,9 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
             : entry_fading_raw;
     float snr = rate_selection_snr_valid
         ? connection_policy::connectSelectionSnrDb(rateSelectionSnrDb(), entry_fading,
-                                                   rateSelectionSnrDataAided())
+                                                   rateSelectionSnrDataAided(),
+                                                   physical_channel_mean_db_,
+                                                   physical_channel_n_)
         : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
         config_.mode_capabilities,

@@ -529,7 +529,9 @@ void Connection::acceptCall() {
     const bool accept_snr_data_aided = rateSelectionSnrDataAided();
     const float accept_selection_snr_db =
         connection_policy::connectSelectionSnrDb(snr_db, entry_fading,
-                                                 accept_snr_data_aided);
+                                                 accept_snr_data_aided,
+                                                 physical_channel_mean_db_,
+                                                 physical_channel_n_);
     recommendDataMode(accept_selection_snr_db, negotiated_mode_, rec_mod, rec_rate, entry_fading);
 
     // Bootstrap safety: the connect-time reading can overestimate first OFDM frame

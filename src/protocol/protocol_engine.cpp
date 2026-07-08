@@ -734,6 +734,12 @@ void ProtocolEngine::setMeasuredSNR(float snr_db, SNRSource source, bool data_ai
     connection_.setMeasuredSNR(snr_db, source, data_aided);
 }
 
+void ProtocolEngine::setPhysicalChannelStats(float mean_db, float spread_db,
+                                             uint32_t n) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setPhysicalChannelStats(mean_db, spread_db, n);
+}
+
 float ProtocolEngine::getMeasuredSNR() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getMeasuredSNR();

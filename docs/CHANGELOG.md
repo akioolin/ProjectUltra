@@ -10,6 +10,24 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-08 — feat(rate): handoff §6 (first half) — PHYSICAL ENTRY CAP: the dial-equivalent entry estimate can never exceed the physically measured channel
+
+The affine fade basis inflates a single data-aided snapshot (bets it was a
+trough) — F232 entered QPSK R3/4 at MPG@10 off a boosted reading. Now the
+fade-averaged per-frame PHYSICAL channel measurement (linear-mean, dial
+convention, EVM-unsaturated) caps `connectSelectionSnrDb`:
+sel = min(sel, physical_mean + 2.0 dB). CAP ONLY — entries can only get more
+conservative; AWGN untouched (outside the fading branch); composes with the
+Moderate saturation bound (physical reads ~20 at MPM@20, never clamps it).
+Margin 2.0 = payload-reference offset (~0.5) + few-frame spread (~1.5).
+Plumbing: decoder ring stats → binding → ProtocolEngine::setPhysicalChannelStats
+→ Connection members → all three connectSelectionSnrDb call sites.
+Verified: ctest 85/85; good@10 entry R2/3→R1/2 (PASS); good@20 entry R3/4
+unchanged, 1940 bps (no regression). Remaining §6 (Opus): whole-handshake
+accumulation + mean−k·σ entry replacing the boost outright.
+
+---
+
 ## 2026-07-08 — feat(ui): handoff §5 — fading channel SNR displayed as a DISTRIBUTION (mean±spread), not snapshot flicker
 
 On fading there is no single SNR — each reading samples one fade state (the

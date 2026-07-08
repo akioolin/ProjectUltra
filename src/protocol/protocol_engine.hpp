@@ -212,6 +212,8 @@ public:
     // not the training snapshot — see connectSelectionSnrDb's saturation bound.
     void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE,
                         bool data_aided = false);
+    // §6: fade-averaged physical channel SNR stats (entry-pick physics cap).
+    void setPhysicalChannelStats(float mean_db, float spread_db, uint32_t n);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
 

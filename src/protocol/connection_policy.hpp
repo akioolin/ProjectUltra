@@ -817,7 +817,9 @@ inline float dialEquivalentSnrDb(float reading_db, float fading_index,
 // knob is ON.
 inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
                                    bool snr_is_data_aided,
-                                   bool affine_basis_enabled) {
+                                   bool affine_basis_enabled,
+                                   float physical_mean_db = 0.0f,
+                                   uint32_t physical_n = 0) {
     if (fading_index >= kFadingAwgnMax) {
         float sel = dialEquivalentSnrDb(measured_snr_db, fading_index,
                                         affine_basis_enabled && snr_is_data_aided);
@@ -843,10 +845,34 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
             fading_index >= kFadingGoodMax && measured_snr_db >= 6.5f) {
             sel = std::max(sel, kOFDMEntryFloorModerateDb + 0.5f);
         }
+        // ═══ PHYSICAL ENTRY CAP (handoff §6, 2026-07-08) ═══
+        // The dial-equivalent estimate can never exceed what the channel
+        // PHYSICALLY measured: the per-frame physical readings (power ratio of
+        // the training span vs the frame's burst-time noise, linear-mean over
+        // the handshake — the dial convention by construction, and EVM-
+        // unsaturated so it composes with the Moderate bound above: at MPM@20
+        // physical reads ~20 and never clamps it). The affine boost bets a
+        // snapshot was a trough; when the physically measured channel says
+        // otherwise, the physics wins. CAP ONLY — entries can only get MORE
+        // conservative (worst case: MC-DPSK entry, recoverable by the ladder).
+        // Margin +2.0 dB = the payload-referenced definition's ~0.5 dB offset
+        // from dial + ~1.5 dB single/few-frame measurement spread. AWGN is
+        // outside this branch entirely (reading==dial basis there).
+        if (physical_n >= 1 && physical_mean_db > 0.0f) {
+            sel = std::min(sel, physical_mean_db + 2.0f);
+        }
         return sel;
     }
     return measured_snr_db;  // AWGN: reading and thresholds share the basis already
 }
+inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
+                                   bool snr_is_data_aided,
+                                   float physical_mean_db, uint32_t physical_n) {
+    return connectSelectionSnrDb(measured_snr_db, fading_index, snr_is_data_aided,
+                                 connectAffineBasisEnabled(),
+                                 physical_mean_db, physical_n);
+}
+
 inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
                                    bool snr_is_data_aided) {
     return connectSelectionSnrDb(measured_snr_db, fading_index, snr_is_data_aided,
