@@ -144,7 +144,12 @@ jobs:
 
       - name: Build Tests (Windows)
         if: runner.os == 'Windows'
-        run: cmake --build build --config Debug --parallel
+        # --parallel 2: vcpkg's z-applocal post-build step copies the SAME
+        # runtime DLLs into the shared tests/Debug output dir for every test
+        # target — at full parallelism two copies collide ("file is being used
+        # by another process", run 28949911161). Two concurrent post-builds
+        # make the race effectively improbable; same bound as Linux.
+        run: cmake --build build --config Debug --parallel 2
 
       - name: Run CTest (Linux/macOS)
         if: runner.os != 'Windows'
