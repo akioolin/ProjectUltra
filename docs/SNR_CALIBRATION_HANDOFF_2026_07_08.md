@@ -233,6 +233,16 @@ same diversity logic helps marginal 5-8 dB links. Half-duplex: the copies
 must fit the turnaround budget (veteran-operator lens: this is what tone
 repetition on real HF nets is for.)
 
+F235 (MPG@5, the exact MC-DPSK floor) sharpened the evidence: connected off a
+trough-1 reading, ground ~98% of the file with the ack ledger CLEAN (one ack
+per round, base 50→62 marching) — then died in the ENDGAME: the same
+hole-bitmap ack for frame 64 repeated 8 rounds over ~6 min until the sender's
+900 s cap fired. Single-frame endgame rounds have the least ack diversity and
+the tightest half-duplex timing — the §8 fix pays there first. FLOOR MAP as
+handed over: MPG@0 connect + 5 frames (ack path dead); MPG@5 connect + ~98%
+(endgame ack); MPG@10 repeated full CRC deliveries. Graded degradation, every
+failure named.
+
 ## Traps that cost hours tonight (do not rediscover)
 
 1. **IONOS is an S:N machine** — noise level TRACKS the input signal. Idle
