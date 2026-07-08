@@ -283,6 +283,31 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                   result.has_idle_in_band_snr_db ? "" : "unavailable/",
                   result.idle_in_band_snr_db, result.snr_db,
                   snrSourceToString(result.snr_source), idle_snr.windows_observed);
+
+        // ═══ SNR-SANITY (handoff §4): usable can NEVER exceed channel ═══
+        // The demod-usable (effective) SNR is the channel's physical S:N minus
+        // implementation loss — physics forbids usable > channel. When this
+        // frame carries BOTH a routed usable reading and the per-frame physical
+        // measurement, a violation beyond the combined measurement slop means
+        // ONE OF THE METERS IS BROKEN for this frame: log it and downgrade the
+        // routed source to SYNC_QUALITY, which acceptsRateSelectionSNR already
+        // rejects — the suspect reading cannot steer a rate decision. One
+        // frame, never a latch. Margin 2.0 dB = the physical readout's known
+        // −0.66 dB noise-ref residual + both estimators' per-frame variance;
+        // tighten alongside the §2 residual fix. This exact invariant caught
+        // the pre-recalibration OFDM optimism from a single operator log line.
+        if (result.snr_source == SNRSource::MCDPSK_IN_BAND &&
+            last_physical_snr_valid_.load() &&
+            result.snr_db > last_physical_snr_db_.load() + 2.0f) {
+            LOG_MODEM(WARN,
+                      "[%s] SNR-SANITY: usable %.1f dB EXCEEDS channel %.1f dB "
+                      "(+%.1f > 2.0 margin) — meter suspect, reading excluded "
+                      "from rate selection for this frame",
+                      log_prefix_.c_str(), result.snr_db,
+                      last_physical_snr_db_.load(),
+                      result.snr_db - last_physical_snr_db_.load());
+            result.snr_source = SNRSource::SYNC_QUALITY;
+        }
     }
 }
 

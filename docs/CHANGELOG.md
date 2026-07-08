@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-08 — feat(snr): handoff §4 — the usable≤channel invariant enforced in code (SNR-SANITY)
+
+Physics forbids demod-usable SNR exceeding the channel's physical S:N. When a
+decoded MC-DPSK frame carries both the routed MCDPSK_IN_BAND reading and the
+per-frame physical measurement, a violation beyond the 2.0 dB measurement-slop
+margin logs `SNR-SANITY` and downgrades the frame's source to SYNC_QUALITY —
+which `acceptsRateSelectionSNR` already rejects, so a broken meter cannot
+steer a rate decision. One frame, never a latch. Margin tightens with the §2
+noise-ref residual fix. Verified: awgn@10 and good@10 sims PASS with ZERO
+false warnings. This is the operator-discovered invariant that exposed the
+OFDM estimator optimism from a single log line — now permanent.
+
+---
+
 ## 2026-07-08 — fix(snr): handoff §1+§2+§7 — physical channel SNR moved in-waveform (per-frame, ±1 dB), OFDMSnrCalibration tightened to 1.5 dB, CLAUDE.md SNR facts corrected
 
 §1: OFDMSnrCalibration default tolerance 4.0 → 1.5 dB (post-recalibration bias
