@@ -654,6 +654,53 @@ void StreamingDecoder::searchForSync() {
                 }
                 sync_noise_ref_rms_ = static_cast<float>(
                     std::sqrt(sum_sq / static_cast<double>(meas_end - gs - skip)));
+                // Handoff §6 second half (F233 trough gap): the CHIRP span is
+                // a channel power sample that survives fade nulls — the
+                // data-span physical correctly abstains in a trough (its
+                // anti-noise gate), which left the entry cap blind exactly
+                // where the affine boost is most dangerous (F233 entered off
+                // a wire-0 trough with an empty ring). Every dual-chirp anchor
+                // (PING, PONG, CONNECT, CONNECT_ACK) now contributes one
+                // sample: in-band power of the up-chirp span vs THIS frame's
+                // gap noise ref, latched only ≥3 dB above it (a false lock on
+                // noise reads ~0 and is refused). Convention: chirp-referenced
+                // ≈ dial within ~1 dB (the reference power is chirp-dominated;
+                // the ring's consumers carry a 2 dB margin).
+                if (sync_result.preamble_start_sample >= 0 &&
+                    sync_noise_ref_rms_ > 0.0f) {
+                    const size_t cs = std::min(
+                        static_cast<size_t>(sync_result.preamble_start_sample),
+                        search_buffer.size());
+                    const size_t clen = std::min(
+                        static_cast<size_t>(sync_result.interchirp_gap_start_sample >
+                                                sync_result.preamble_start_sample
+                                            ? sync_result.interchirp_gap_start_sample -
+                                                  sync_result.preamble_start_sample
+                                            : 0),
+                        search_buffer.size() - cs);
+                    if (clen > 4800) {  // >=0.1 s of chirp
+                        FIRFilter chirp_filter =
+                            FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+                        const size_t skip = clen / 10;
+                        for (size_t i = cs; i < cs + skip; ++i) {
+                            chirp_filter.process(search_buffer[i]);
+                        }
+                        double sum_sq = 0.0;
+                        for (size_t i = cs + skip; i < cs + clen; ++i) {
+                            const float y = chirp_filter.process(search_buffer[i]);
+                            sum_sq += static_cast<double>(y) * y;
+                        }
+                        const double p_c =
+                            sum_sq / static_cast<double>(clen - skip);
+                        const double p_n =
+                            static_cast<double>(sync_noise_ref_rms_) *
+                            static_cast<double>(sync_noise_ref_rms_);
+                        if (p_n > 0.0 && p_c > 2.0 * p_n) {
+                            notePhysicalSnrSample(static_cast<float>(
+                                10.0 * std::log10((p_c - p_n) / p_n)));
+                        }
+                    }
+                }
                 // Handoff §2: hand THIS frame's burst-time noise reference to
                 // the waveform so its training-span decode computes the
                 // physical channel SNR (per-frame — no stale latch).

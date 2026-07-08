@@ -190,7 +190,14 @@ trough-zero wire reading (F233: "usable 0 dB" → boosted → R1/2, no physical
 sample at pick time) runs uncapped exactly where the boost is most dangerous.
 The chirp-accumulation half (this section's main spec) closes that: chirp
 |H|² samples have ~20 dB processing gain and measure cleanly inside data
-nulls. F233 also re-confirmed the mid-transfer dial-10 stall class
+nulls. **SHIPPED 2026-07-08 (second half): every dual-chirp anchor now
+contributes a physical sample (up-chirp span power vs the frame's gap noise,
+≥3 dB latch) — the entry line carries `channel X±Y` AT the pick (verified
+awgn@10 + good@10, both PASS, cap active at entry). RESIDUAL: chirp-referenced
+samples read ~+1.9 dB vs dial on AWGN (duty-factor + reference-convention
+detail) — fold into the §2 per-profile derivation test (derive
+10log10(P_chirp_span/P_ping_ref) from the generator, never tune by eye); the
+cap's 2.0 margin absorbs it until then.** F233 also re-confirmed the mid-transfer dial-10 stall class
 (rate thrash R1/2↔R2/3 riding fade epochs, then full-anchor-wait reject
 streak=1461 — the BUG-DECODE-BACKLOG/anchor family, pre-existing).
 
