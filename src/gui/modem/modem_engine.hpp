@@ -152,6 +152,11 @@ public:
     bool rxSignalActive(int64_t within_ms = 1600) const;
     int64_t lastRxSignalMs() const;
     int64_t lastRxSubstantiveMs() const;  // F147: accepted-decode evidence only
+    // Two-SNR model: last PHYSICAL in-band channel SNR (power ratio vs the
+    // burst-time noise ref) measured at the connect sequence. BETA — see
+    // BUG-PHYSICAL-SNR-RIG-REF. Valid=false until first data-bearing frame.
+    bool hasLastPhysicalSnr() const;
+    float lastPhysicalSnrDb() const;
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,

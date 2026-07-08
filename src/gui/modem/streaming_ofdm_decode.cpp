@@ -576,10 +576,16 @@ void StreamingDecoder::decodeCurrentFrame() {
                     train_sum_sq += static_cast<double>(y) * static_cast<double>(y);
                 }
                 if (check_start > 200) {
+                    // Latch ONLY from clearly data-bearing frames: a PING's
+                    // "training" span is noise, and latching it poisons the
+                    // channel readout for the whole session (rig F228 read an
+                    // impossible 4.4). Require the received training power to
+                    // sit well above the noise ref (>= ~3 dB) before trusting
+                    // the frame as a signal-bearing sample of the channel.
                     const double p_rx = train_sum_sq / static_cast<double>(check_start);
                     const double p_n = static_cast<double>(idle_noise_rms) *
                                        static_cast<double>(idle_noise_rms);
-                    if (p_n > 0.0 && p_rx > p_n) {
+                    if (p_n > 0.0 && p_rx > 2.0 * p_n) {
                         last_physical_snr_db_.store(static_cast<float>(
                             10.0 * std::log10((p_rx - p_n) / p_n)));
                         last_physical_snr_valid_.store(true);

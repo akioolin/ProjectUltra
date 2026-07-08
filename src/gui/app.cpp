@@ -1128,18 +1128,29 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             snprintf(link_snr_text, sizeof(link_snr_text), "%d dB (wire)",
                      static_cast<int>(snr_db));
         }
-        char buf[260];
+        // Two-SNR display: the link value above is the demod-USABLE (effective)
+        // SNR — the right rate-selection input but NOT the channel's S:N (the
+        // gap between them is the hardware chain's implementation loss). Show
+        // the locally measured physical channel SNR beside it when available.
+        // BETA readout (BUG-PHYSICAL-SNR-RIG-REF): power ratio of the connect
+        // sequence's training span vs the frame's own inter-chirp noise.
+        char channel_snr_text[40] = "";
+        if (modem_.hasLastPhysicalSnr()) {
+            snprintf(channel_snr_text, sizeof(channel_snr_text),
+                     ", local channel~%.1f dB (beta)", modem_.lastPhysicalSnrDb());
+        }
+        char buf[300];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             snprintf(buf, sizeof(buf),
-                     "[MODE] MC-DPSK 8 carriers %s (link RX SNR=%s, peer fading=%s, local fading=%.2f %s)",
-                     codeRateToString(rate), link_snr_text,
+                     "[MODE] MC-DPSK 8 carriers %s (usable RX SNR=%s%s, peer fading=%s, local fading=%.2f %s)",
+                     codeRateToString(rate), link_snr_text, channel_snr_text,
                      peer_fading_text,
                      local_fading, local_quality);
         } else {
             snprintf(buf, sizeof(buf),
-                     "[MODE] %s %s %s (link RX SNR=%s, peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] %s %s %s (usable RX SNR=%s%s, peer fading=%s, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
-                     link_snr_text, peer_fading_text,
+                     link_snr_text, channel_snr_text, peer_fading_text,
                      local_fading, local_quality);
         }
         appendRxLogLine(buf);

@@ -987,6 +987,14 @@ int64_t ModemEngine::lastRxSignalMs() const {
     return streaming_decoder_ ? streaming_decoder_->lastRxSignalMs() : -1000000;
 }
 
+bool ModemEngine::hasLastPhysicalSnr() const {
+    return streaming_decoder_ && streaming_decoder_->hasLastPhysicalSnr();
+}
+
+float ModemEngine::lastPhysicalSnrDb() const {
+    return streaming_decoder_ ? streaming_decoder_->lastPhysicalSnrDb() : 0.0f;
+}
+
 int64_t ModemEngine::lastRxSubstantiveMs() const {
     return streaming_decoder_ ? streaming_decoder_->lastRxSubstantiveMs() : -1000000;
 }

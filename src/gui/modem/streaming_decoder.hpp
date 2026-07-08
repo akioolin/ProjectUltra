@@ -453,6 +453,8 @@ public:
     // "inbound transmission in progress" with nothing on the air. The broad
     // stamp stays for listen-before-ACK, where conservative deferral is right.
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    bool hasLastPhysicalSnr() const { return last_physical_snr_valid_.load(); }
+    float lastPhysicalSnrDb() const { return last_physical_snr_db_.load(); }
     uint64_t burstAirSamplesRemaining() {
         const uint64_t end = burst_air_end_abs_.load(std::memory_order_relaxed);
         if (end == 0) return 0;
