@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(snr): OFDM in-band SNR estimator recalibrated — +2.5-3.4 dB structural optimism removed at the root; calibration truth-matrix CTest added (OFDMSnrCalibration)
+
+**What was broken:** the OFDM broadband/LTS estimator (the SAME value behind
+both "(lts)" display and SNRSource::OFDM_BROADBAND rate-selection input) read
++3.4/+2.9/+2.6/+2.5 dB above injected truth at 6/10/15/20 dB AWGN, and worse
+under fading (16.4 displayed while the link couldn't hold QPSK R1/2). Two
+derived errors: (1) STRUCTURAL +2.758 dB — the per-carrier→in-band conversion
+(`measurement_gain`) implicitly credited the OFDM waveform with the PING-chirp
+reference power; the correct conversion is geometric: SNR_broadband =
+per_carrier × 2·Ncar/N (no reference-power or CP term — the CP is a signal
+copy). (2) SNR-DEPENDENT +0.4-0.9 dB — signal power used raw LS |h|² whose
+expectation is |H|²+N·σ²; the estimation noise is now subtracted (floored at
+−20 dB per-carrier). Term (2) grew in fades — the fading-optimism bug.
+
+**Consumer compatibility (kOfdmLegacyAnchorScaleOffsetDb = 2.758, derived not
+fitted, connection_policy.hpp):** the kCoherentLadder rung anchors, EESM gamma
+anchoring, and tone-ACK staircase edges were all TUNED against the old scale —
+they consume reading + offset until re-measured on the honest scale (grep the
+constant; delete all sites together). Display, wire, pool, and routing get the
+honest value. The SNR-dependent debias deliberately passes through to the
+authority (that was the bug). Verified: good@20 gate PASS 2080 bps (behavior
+preserved), awgn@10 [MODE] line reads usable 10 (wire) with idle 9.6-10.0 —
+all meters agree at truth.
+
+**New permanent gate: tests/test_ofdm_snr_calibration.cpp (OFDMSnrCalibration,
+4.5 s)** — the OFDM analog of MCDPSKSnrCalibration: sweeps truth {6,10,15,20},
+5 seeds/point, asserts the routed estimate within ULTRA_OFDM_SNR_CAL_TOL_DB
+(default 4.0; tighten to 1.5 next session). Post-fix bias: −0.4/−0.3/−0.2/−0.2.
+Harness subtlety (documented in-file): SimulatedChannel's TX-burst
+normalization pins the OFDM LTS/data section ~2.7 dB below the burst reference
+(peak-normalized ~10 dB-PAPR burst duty split) — the test disables it and
+scales the MEASURED SECTION to the reference so dial == truth by construction.
+
+---
+
 ## 2026-07-07 — fix(arq): F227 — the silent ack-repeat keyed over inbound MC-DPSK bursts (3x goodput loss); + TWO-SNR model (physical vs effective) surfaced at the connect sequence
 
 **F227 (rig WGN@10):** MC-DPSK cycles ran 45 s instead of ~14 s — 73 % overhead.

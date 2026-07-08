@@ -119,8 +119,13 @@ inline void wireModemToProtocol(ModemEngine& modem,
             // frame path and are handshake-stale during burst transfers; the honest
             // live sources are the decoder's lock-free per-frame atomics.
             if (modem.hasLastOFDMBroadbandSNR()) {
+                // kOfdmLegacyAnchorScaleOffsetDb: the rung anchors were measured
+                // on the pre-2026-07-07 estimator scale — compensate until the
+                // anchor table is re-measured (see connection_policy.hpp).
                 protocol.setBurstChannelObservation(
-                    modem.getLastOFDMBroadbandSNR(), modem.getFadingIndex(),
+                    modem.getLastOFDMBroadbandSNR() +
+                        protocol::connection_policy::kOfdmLegacyAnchorScaleOffsetDb,
+                    modem.getFadingIndex(),
                     modem.getDopplerCoherenceScore(), modem.getDopplerCoherenceValid(),
                     modem.getDopplerCoherenceDopplerHz());
             }

@@ -15,6 +15,22 @@ namespace ultra {
 namespace protocol {
 namespace connection_policy {
 
+// ═══════ OFDM LEGACY ANCHOR SCALE (2026-07-07 — RETIRE after anchor re-measure) ═══════
+// The OFDM in-band SNR estimator was recalibrated 2026-07-07: a structural
+// +2.758 dB conversion error (it credited the OFDM waveform with the PING-chirp
+// reference power; the correct geometric conversion is per_carrier +
+// 10log10(2*Ncar/N)) plus an SNR-dependent LS |h|^2 estimation-noise inflation
+// were removed at the source (channel_equalizer_lts.cpp). Readings are now the
+// honest in-band S:N. BUT three consumers were TUNED against the old (biased)
+// scale: the kCoherentLadder rung anchors, the EESM gamma anchoring, and the
+// tone-ACK staircase edges. Until those are re-measured on the honest scale,
+// they consume reading + this offset — the exact structural constant, derived
+// not fitted: 10log10(P_ref/(P_ofdm)) at 59 carriers/1024 FFT. The SNR-dependent
+// debias intentionally passes through (that WAS the fading-optimism bug).
+// Grep for this constant to find every compatibility site; delete them together.
+inline constexpr float kOfdmLegacyAnchorScaleOffsetDb = 2.758f;
+
+
 inline constexpr uint32_t kOFDMSampleRate = 48000;
 inline constexpr uint32_t kWideOFDMFFTSamples = 1024;
 inline constexpr uint32_t kWideOFDMLongCPSamples = 128;

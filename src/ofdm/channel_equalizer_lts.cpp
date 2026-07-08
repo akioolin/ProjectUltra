@@ -95,24 +95,36 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
         // level, so the ratio is invariant) and apply the SAME constant measurement-gain
         // offset the fitted-gain path below uses to reach the in-band operator convention.
         // In the sim (signal at reference, |H|² ≈ output_scale²·0.25·cp) this is unchanged.
+        // 2026-07-07 CALIBRATION FIX (+3.2 dB AWGN optimism root-caused):
+        // (a) DEBIAS the signal power: signal_power is the mean of RAW
+        //     per-symbol LS |h|^2, whose expectation is |H|^2 + N*sigma^2 —
+        //     the per-bin estimation noise INFLATES it by exactly the
+        //     (scale-corrected) noise power. Subtract it; floor keeps deep
+        //     fades finite (-20 dB per-carrier) instead of log(<=0).
+        //     This term (+10log10(1+1/SNR_c)) GREW under fading — the
+        //     "reads 16.4 while the link can't hold QPSK R1/2" optimism.
+        const float debiased_signal_power = std::max(
+            signal_power - corrected_noise_power,
+            0.01f * corrected_noise_power);
         const float snr_per_carrier_db = 10.0f * std::log10(
-            std::max(signal_power, 1.0e-12f) /
-            std::max(corrected_noise_power, 1.0e-12f));
-        const double carrier_signal_power =
-            static_cast<double>(config.output_scale) *
-            static_cast<double>(config.output_scale) * 0.25;
-        const double cp_reference =
-            static_cast<double>(config.fft_size + config.getCyclicPrefix()) /
-            static_cast<double>(config.fft_size);
-        const double measurement_gain =
-            (carrier_signal_power /
-             (static_cast<double>(config.fft_size) * sim::kModemReferencePower)) *
-            cp_reference;
-        if (!(measurement_gain > 0.0)) {
-            return;
-        }
+            debiased_signal_power / std::max(corrected_noise_power, 1.0e-12f));
+        // (b) GEOMETRIC per-carrier -> in-band conversion. The old
+        //     measurement_gain implicitly credited the OFDM signal with the
+        //     PING-chirp reference power (output_scale^2/4 vs
+        //     kModemReferencePower), over-reporting by a structural
+        //     +2.758 dB: a num_carriers-strong OFDM waveform at bin power
+        //     |H|^2 carries total audio signal power 2*Ncar*|H|^2/N^2 while
+        //     the bin noise is N*sigma^2, so
+        //       SNR_broadband = per_carrier * (2*Ncar / N)
+        //     with NO reference-power or CP term (the CP is a signal copy —
+        //     continuous signal power is unchanged by it; noise persists
+        //     through it identically). broadbandToInBandSnrDb then applies
+        //     the shared 50-2950 Hz convention (net +0.26 dB at 59/1024).
+        //     Level-invariant by construction — pure measured ratio.
         const float broadband_snr_db =
-            snr_per_carrier_db - 10.0f * std::log10(static_cast<float>(measurement_gain));
+            snr_per_carrier_db +
+            10.0f * std::log10(2.0f * static_cast<float>(config.num_carriers) /
+                               static_cast<float>(config.fft_size));
         const float in_band_snr_db =
             sim::broadbandToInBandSnrDb(broadband_snr_db);
 
@@ -144,29 +156,24 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     // signal_power. Averaging bins reduces estimator variance; it is not RF
     // gain. The temporal pilot path also fits one common complex gain, removing
     // one complex degree of freedom, so undo that small residual-noise bias.
-    const float snr_per_carrier_db =
-        10.0f * std::log10(signal_power / std::max(noise_power, 1.0e-12f));
-    const double carrier_signal_power =
-        static_cast<double>(config.output_scale) *
-        static_cast<double>(config.output_scale) * 0.25;
-    const double fft_noise_reference =
-        static_cast<double>(config.fft_size) * sim::kModemReferencePower;
-    const double cp_reference =
-        static_cast<double>(config.fft_size + config.getCyclicPrefix()) /
-        static_cast<double>(config.fft_size);
-    double measurement_gain = carrier_signal_power / fft_noise_reference;
-    measurement_gain *= cp_reference;
+    // Same 2026-07-07 calibration fix as the noise_reference_only path above:
+    // debias the LS signal power, then the GEOMETRIC per-carrier -> in-band
+    // conversion (2*Ncar/N), no reference-power/CP terms. The fitted-common-
+    // gain dof correction on the residual is kept (one complex dof removed).
+    float dof_corrected_noise = std::max(noise_power, 1.0e-12f);
     if (fitted_common_gain && independent_bins > 1) {
-        measurement_gain *= static_cast<double>(independent_bins) /
-                            static_cast<double>(independent_bins - 1);
+        dof_corrected_noise *= static_cast<float>(independent_bins) /
+                               static_cast<float>(independent_bins - 1);
     }
-
-    if (measurement_gain <= 0.0) {
-        return;
-    }
-
+    const float debiased_signal_power =
+        std::max(signal_power - dof_corrected_noise,
+                 0.01f * dof_corrected_noise);
+    const float snr_per_carrier_db =
+        10.0f * std::log10(debiased_signal_power / dof_corrected_noise);
     const float broadband_snr_db =
-        snr_per_carrier_db - 10.0f * std::log10(static_cast<float>(measurement_gain));
+        snr_per_carrier_db +
+        10.0f * std::log10(2.0f * static_cast<float>(config.num_carriers) /
+                           static_cast<float>(config.fft_size));
     const float in_band_snr_db =
         sim::broadbandToInBandSnrDb(broadband_snr_db);
 

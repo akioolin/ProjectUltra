@@ -693,6 +693,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     std::sort(v.begin(), v.end());
                     staircase_snr = v[v.size() / 2];
                 }
+                // kOfdmLegacyAnchorScaleOffsetDb: the 16/18 dB staircase edges
+                // were hardware-proven against the pre-2026-07-07 OFDM estimator
+                // scale — compensate OFDM-sourced readings until the edges are
+                // re-measured (see connection_policy.hpp). IDLE readings were
+                // always on the honest scale and pass through unchanged.
+                if (src == SNRSource::OFDM_BROADBAND) {
+                    staircase_snr += protocol::connection_policy::
+                        kOfdmLegacyAnchorScaleOffsetDb;
+                }
                 symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
                     staircase_snr, fading_present);
             }

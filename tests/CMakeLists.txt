@@ -504,6 +504,22 @@ target_include_directories(test_mcdpsk_snr_calibration PRIVATE
 target_link_libraries(test_mcdpsk_snr_calibration PRIVATE ultra_core ota_channel_core)
 add_test(NAME MCDPSKSnrCalibration COMMAND test_mcdpsk_snr_calibration)
 
+# OFDM in-band SNR estimator calibration (SNRSource::OFDM_BROADBAND, the OFDM
+# analog of MCDPSKSnrCalibration): sweeps true AWGN in-band SNR and gates the
+# routed ofdm_broadband estimate against injected truth. Tolerance is
+# env-overridable (ULTRA_OFDM_SNR_CAL_TOL_DB, default 4.0 dB — absorbs the known
+# +2.5-3.2 dB estimator bias; tighten to 1.5 dB once the bias fix lands).
+add_executable(test_ofdm_snr_calibration
+    test_ofdm_snr_calibration.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_ofdm_snr_calibration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_ofdm_snr_calibration PRIVATE ultra_core ota_channel_core)
+add_test(NAME OFDMSnrCalibration COMMAND test_ofdm_snr_calibration)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.
