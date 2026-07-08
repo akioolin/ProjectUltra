@@ -2800,6 +2800,24 @@ void App::maybeFireAckRepeatIfSilent() {
         if (modem_.burstAirSamplesRemaining() > 0) {
             return;
         }
+        // F227 MC-DPSK HOLD: only OFDM descriptor bursts publish an air-end, so
+        // an inbound MC-DPSK burst is invisible to the gate above — and CCA
+        // can't see it either on a quiet chain (burst RMS below the learned
+        // threshold). A broad RX-signal stamp (chirp/LTS sync) within the last
+        // frame-scale window means a frame is likely mid-air: HOLD, don't
+        // cancel (F147: idle-noise false locks must not kill the repeat — a
+        // hold only delays it past the frame's geometry; the substantive gate
+        // below still decides the cancel). F227 measured: repeat fired 1.3 s
+        // after the peer's burst SYNC, wiped frame 1, cost a 30.9 s RTO every
+        // other cycle (~3x MC-DPSK goodput).
+        {
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const int64_t sig_ms = modem_.lastRxSignalMs();
+            if (sig_ms > 0 && now_ms - sig_ms < 5000) {
+                return;
+            }
+        }
         // F129 DECODER-EVIDENCE cancel, F143-corrected, F147-corrected again:
         // count only SUBSTANTIVE evidence (accepted sync / consumed descriptor /
         // decoded codewords) NEWER than the arm. The F143 broad-stamp version

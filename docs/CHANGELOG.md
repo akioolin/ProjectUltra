@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-07 — fix(arq): F227 — the silent ack-repeat keyed over inbound MC-DPSK bursts (3x goodput loss); + TWO-SNR model (physical vs effective) surfaced at the connect sequence
+
+**F227 (rig WGN@10):** MC-DPSK cycles ran 45 s instead of ~14 s — 73 % overhead.
+Decomposed from both logs: the sender's next burst is ack-clocked and prompt
+(0.14 s), but the receiver's ACK-REPEAT-SILENT fired 5 s after each ack ON TOP
+of the peer's already-arriving next burst, wiping frame 1 → ack window expires
+→ 30.9 s RTO, EVERY OTHER cycle. All three repeat guards were OFDM-only in
+practice: CCA can't see a quiet-chain MC-DPSK burst (RMS 0.09 < learned 0.14),
+the geometric air-end gate is published only by the OFDM descriptor path, and
+the substantive-evidence stamp never fired on MC-DPSK (a chirp sync + DECODED
+CW0 header didn't stamp). Fixes: (1) CW0-peek success (LDPC-decoded magic — not
+an F147 false-lock) stamps substantive; (2) the repeat HOLDs (never cancels —
+F147) while a broad RX-signal stamp is < 5 s old — the MC-DPSK analogue of the
+geometric hold. Verified ctest 84/84 + TNC + good@20 PASS 2120 bps.
+
+**TWO-SNR model (the "why is SNR 6 at dial 10" answer):** the routed
+`mcdpsk_in_band` estimator reconstructs the training waveform from a static
+per-carrier channel estimate and reports signal/residual — so CFO/clock/jitter
+wander across the ~144 ms window lands in the residual AND shrinks the coherent
+numerator: it measures the demod-usable EFFECTIVE SNR. ~1.2 Hz of effective
+wander fully explains rig 6.5 vs wire 9.3 (sim reads dead-on 10.1 — perfect
+clocks). That is the CORRECT input for rate selection (#74) but NOT the
+channel's S:N. NEW: a PHYSICAL in-band SNR — pure power ratio of the training
+span vs the burst-time inter-chirp noise ref, no phase model — is computed at
+the connect sequence and logged beside the routed value ("[physical X dB
+in-band]"). KNOWN BIAS (filed): the decoder-side training window over-includes
+~1 non-training slot → reads ~-1 dB (sim: 9.0 vs true 10.0); refinement = move
+the measurement into the waveform where training geometry is exact. The
+physical-vs-effective GAP is now visible per frame = the hardware chain's
+implementation loss, measured live.
+
+---
+
 ## 2026-07-07 — fix(handshake): F225 rig half-open — CONNECT_ACK rescue was OFDM-only (0 retries on MC-DPSK) + the #27 state gate was bypassed by the unified PING arm
 
 **What was broken (rig F225, MPG@10 — the first-ever dial-10 rig connect, then

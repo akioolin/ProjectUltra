@@ -558,18 +558,34 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
             if (idle_noise_rms > 0.0f && !frame_buffer.empty()) {
                 // Same design as IdleNoiseSNREstimator's reference filter.
+                // ONE filter pass over [0, check_end): the training span
+                // [0, training_skip) feeds the PHYSICAL channel-SNR estimate
+                // (power ratio vs the burst-time noise ref — no phase model,
+                // so unlike the coherence-weighted mcdpsk_in_band estimator it
+                // reads the CHANNEL, not the demod's usable margin), and the
+                // filter is fully settled by the gap window it doubles as
+                // priming for.
                 FIRFilter gap_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
                 const size_t check_start =
                     std::min(ping_training_skip, frame_buffer.size());
                 const size_t check_len =
                     std::min(frame_buffer.size() - check_start, ping_check_samples);
-                if (check_len > 0) {
-                    // Prime the filter on the preceding samples so its
-                    // transient settles before the measured window.
-                    const size_t prime = std::min(check_start, static_cast<size_t>(512));
-                    for (size_t i = check_start - prime; i < check_start; ++i) {
-                        gap_filter.process(frame_buffer[i]);
+                double train_sum_sq = 0.0;
+                for (size_t i = 0; i < check_start; ++i) {
+                    const float y = gap_filter.process(frame_buffer[i]);
+                    train_sum_sq += static_cast<double>(y) * static_cast<double>(y);
+                }
+                if (check_start > 200) {
+                    const double p_rx = train_sum_sq / static_cast<double>(check_start);
+                    const double p_n = static_cast<double>(idle_noise_rms) *
+                                       static_cast<double>(idle_noise_rms);
+                    if (p_n > 0.0 && p_rx > p_n) {
+                        last_physical_snr_db_.store(static_cast<float>(
+                            10.0 * std::log10((p_rx - p_n) / p_n)));
+                        last_physical_snr_valid_.store(true);
                     }
+                }
+                if (check_len > 0) {
                     double sum_sq = 0.0;
                     for (size_t i = check_start; i < check_start + check_len; ++i) {
                         const float y = gap_filter.process(frame_buffer[i]);
@@ -1617,6 +1633,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         auto [peek_ok, peek_data] = frame_decoder_.codec_->decode(cw0);
 
         if (peek_ok && peek_data.size() >= 4 && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
+            // F227: a decoded CW0 with valid magic IS substantive peer-TX
+            // evidence (LDPC-decoded header — not an F147 false-lock reject).
+            // Without this stamp the MC-DPSK path was invisible to the
+            // ack-repeat evidence gate: the silent repeat keyed up over the
+            // peer's already-arriving burst (CCA can't see a quiet-chain
+            // MC-DPSK burst), wiping frame 1 -> 30.9 s RTO every other cycle.
+            stampRxSubstantive();
             auto hdr = v2::parseHeader(peek_data);
             if (hdr.valid && hdr.total_cw > 1) {
                 int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
@@ -2184,9 +2207,21 @@ void StreamingDecoder::decodeCurrentFrame() {
             sync_from_warm_timed_window_ = false;
         }
 
-        LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",
-                  log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
-                  result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz);
+        if (last_physical_snr_valid_.load()) {
+            // Two SNRs, two questions: physical = the CHANNEL's in-band S:N
+            // (power ratio vs the burst-time noise ref); the routed SNR is the
+            // demod-usable EFFECTIVE S:N (coherence-weighted — CFO/clock/jitter
+            // wander lands in its residual). Their gap IS the hardware chain's
+            // implementation loss, now visible per frame.
+            LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s) [physical %.1f dB in-band], CFO=%.1f Hz",
+                      log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
+                      result.snr_db, snrSourceToString(result.snr_source),
+                      last_physical_snr_db_.load(), result.cfo_hz);
+        } else {
+            LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",
+                      log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
+                      result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz);
+        }
     } else {
         LOG_MODEM(WARN, "[%s] StreamingDecoder: Decode failed (cw_ok=%d, cw_fail=%d, is_ping=%d)",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);

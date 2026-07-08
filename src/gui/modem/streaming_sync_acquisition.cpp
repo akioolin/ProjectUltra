@@ -615,6 +615,10 @@ void StreamingDecoder::searchForSync() {
                 }
                 sync_noise_ref_rms_ = static_cast<float>(
                     std::sqrt(sum_sq / static_cast<double>(meas_end - gs - skip)));
+                LOG_MODEM(INFO,
+                          "[%s] burst-noise ref: rms=%.4f gap=[%zu+%zu..%zu) of buf=%zu",
+                          log_prefix_.c_str(), sync_noise_ref_rms_, gs, skip,
+                          meas_end, search_buffer.size());
             }
         }
 

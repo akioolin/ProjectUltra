@@ -763,6 +763,16 @@ private:
     // 0 = unavailable (LTS/warm sync, single chirp). Set at sync-found,
     // consumed by the same frame's decode on the same thread.
     float sync_noise_ref_rms_ = 0.0f;
+    // PHYSICAL in-band channel SNR from the last chirp-synced MC-DPSK frame:
+    // 10log10((P_train - P_noise)/P_noise), training-span power vs the
+    // burst-time inter-chirp noise ref. A pure POWER ratio — no phase model —
+    // so it reads the CHANNEL's SNR where the coherence-weighted
+    // mcdpsk_in_band estimator reads the demod-usable EFFECTIVE SNR (CFO/
+    // clock/jitter wander lands in its residual: rig WGN@10 reads ~9.3 phys
+    // vs ~6.5 effective; sim reads both ~10). Display/telemetry: BOTH numbers;
+    // rate selection stays on effective (#74 — the demod lives there).
+    mutable std::atomic<float> last_physical_snr_db_{0.0f};
+    mutable std::atomic<bool> last_physical_snr_valid_{false};
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
