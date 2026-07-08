@@ -657,8 +657,23 @@ void StreamingDecoder::searchForSync() {
                 // Handoff §2: hand THIS frame's burst-time noise reference to
                 // the waveform so its training-span decode computes the
                 // physical channel SNR (per-frame — no stale latch).
+                // ROBUSTIFIED (F231, measured on the IONOS bench): that box's
+                // S:N-tracking noise BREATHES around bursts — the inter-chirp
+                // gap measured 0.021-0.035 vs a steady idle floor of 0.044
+                // (up to 6 dB quieter, 2x frame-to-frame swing), which made
+                // the physical readout unstable there. A noise estimate can
+                // read falsely LOW (tracker decay in silence) but the
+                // min-statistics idle floor bounds it from below, so the
+                // reference is the MAX of the two independent measurements.
+                // On constant-noise channels (real radios, OTASim) gap == floor
+                // and this is a no-op.
                 if (waveform_) {
-                    waveform_->setNoiseReferenceRMS(sync_noise_ref_rms_);
+                    float ref = sync_noise_ref_rms_;
+                    const auto ns = idle_noise_snr_estimator_.snapshot();
+                    if (ns.valid && ns.floor_noise_rms > ref) {
+                        ref = ns.floor_noise_rms;
+                    }
+                    waveform_->setNoiseReferenceRMS(ref);
                 }
                 LOG_MODEM(INFO,
                           "[%s] burst-noise ref: rms=%.4f gap=[%zu+%zu..%zu) of buf=%zu",
