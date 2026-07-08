@@ -51,7 +51,9 @@
 // knob can mask a genuine calibration defect.
 //
 // GATE: |mean(reading) - truth| <= tolerance at every swept point, with the
-// tolerance env-overridable: ULTRA_OFDM_SNR_CAL_TOL_DB (default 4.0 dB).
+// tolerance env-overridable: ULTRA_OFDM_SNR_CAL_TOL_DB (default 1.5 dB —
+// tightened 2026-07-08 after the estimator recalibration; post-fix bias is
+// -0.4..-0.2 dB across 6-20 dB).
 // WHY 4.0 TODAY: the estimator carried a known +2.5..+3.2 dB optimistic bias
 // (level-blind reference-power crediting + un-debiased LS signal power —
 // root-caused and fixed in the parallel 2026-07-07 calibration change in
@@ -217,7 +219,7 @@ float toleranceDb() {
         const float v = std::strtof(env, &end);
         if (end != env && std::isfinite(v) && v > 0.0f) return v;
     }
-    return 4.0f;
+    return 1.5f;
 }
 
 }  // namespace

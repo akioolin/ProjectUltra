@@ -121,14 +121,21 @@ Single-seed entries are floor *locators*, not statistical floors. Higher rates
 
 **Auto rate ladder:** `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`
 is the single source of truth for code-rate selection; wideband entry floors are
-in `src/protocol/connection_policy.hpp` (AWGN 10, Good 12, Moderate 14, Poor 18 dB).
+in `src/protocol/connection_policy.hpp` (AWGN 8, Good 8, Moderate 14, Poor disabled — lowered from 10/12 on 2026-07-07
+measured sweeps; the old 10/12/14/18 table is obsolete).
 Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.cpp`
 — don't duplicate the threshold table elsewhere.
 
 **Conventions / durable facts:**
 - SNR: all operator-facing knobs, idle meter, OFDM LTS/pilot meter, and rate
-  selector use receiver in-band SNR (3 kHz). Only physical SNR sources
-  (IDLE_IN_BAND, OFDM_BROADBAND) feed rate selection.
+  selector use receiver in-band SNR (3 kHz). Rate selection accepts
+  IDLE_IN_BAND, OFDM_BROADBAND, and MCDPSK_IN_BAND (`acceptsRateSelectionSNR`);
+  the PRIMARY connect-time input is the data-aided MCDPSK_IN_BAND estimator
+  (only it populates the ConnectSnrPool entry pick). Every estimator has a
+  calibration CTest (ChannelIdleNoiseSNRCalibration, MCDPSKSnrCalibration,
+  OFDMSnrCalibration); the OFDM estimator was recalibrated 2026-07-07 and
+  three consumers ride `kOfdmLegacyAnchorScaleOffsetDb` until re-measured
+  (docs/SNR_CALIBRATION_HANDOFF_2026_07_08.md §3).
 - AWGN calibration: `SimulatedChannel` AWGN sized from `encodePing()` in-band RMS
   `0.3048` (after 101-tap 50-2950 Hz RX FIR). Watterson CFO uses an analytic-signal
   (Hilbert) shifter.
