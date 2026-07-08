@@ -214,6 +214,25 @@ streak=1461 — the BUG-DECODE-BACKLOG/anchor family, pre-existing).
 
 ---
 
+## §8 (discovered F234, MPG@0): ACK TIME-DIVERSITY at sub-floor SNR
+
+F234 connected AT MPG@0 (the full handshake stack working: flooded-gap PING
+classified at ratio 0.926, CONNECT decoded on a fade peak, honest 0 dB entry
+at MC-DPSK R1/4) and moved 5 frames — then deadlocked on a one-way ACK path:
+the DATA direction has time diversity (every retry samples a new fade state,
+HARQ accumulates) but each tone-burst ACK is a single 0.85 s shot — SHORTER
+than one fade null (Tc≈4 s), all symbols die together, one shot per round.
+Five decorrelated rounds all lost; the Pi5 re-sent the same retired frames
+forever (Mac base=5, same ack ×5 over 3 min). Fix shape: when the measured
+SNR reads below ~5 dB, transmit the ack as N copies spread over ≥Tc (the
+existing ack-repeat machinery is close but repeats are one-shot and cancel on
+peer activity — at high-retx the peer re-sending RETIRED frames is PROOF the
+ack was lost, the opposite inference). Below the design floor this only
+degrades gracefully — but it converts "stall at 4%" into "crawl", and the
+same diversity logic helps marginal 5-8 dB links. Half-duplex: the copies
+must fit the turnaround budget (veteran-operator lens: this is what tone
+repetition on real HF nets is for.)
+
 ## Traps that cost hours tonight (do not rediscover)
 
 1. **IONOS is an S:N machine** — noise level TRACKS the input signal. Idle
