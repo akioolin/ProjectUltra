@@ -181,6 +181,19 @@ Acceptance: entry-rung distribution vs the first-2-minute sustained rung on
 20 rig sessions — entries at or one below sustained ≥85% of the time, never
 above by ≥2 rungs.
 
+**STATUS 2026-07-08 (first half SHIPPED, 902282d):** the PHYSICAL ENTRY CAP
+(sel = min(sel, physical_mean + 2.0)) is live — good@10 entry R2/3→R1/2,
+good@20 unchanged (1940 bps). **MEASURED GAP (rig F233 @MPG:10): the cap
+ABSTAINS in the deepest troughs** — the physical latch correctly refuses when
+the training span is within 3 dB of noise, so an entry picked off a
+trough-zero wire reading (F233: "usable 0 dB" → boosted → R1/2, no physical
+sample at pick time) runs uncapped exactly where the boost is most dangerous.
+The chirp-accumulation half (this section's main spec) closes that: chirp
+|H|² samples have ~20 dB processing gain and measure cleanly inside data
+nulls. F233 also re-confirmed the mid-transfer dial-10 stall class
+(rate thrash R1/2↔R2/3 riding fade epochs, then full-anchor-wait reject
+streak=1461 — the BUG-DECODE-BACKLOG/anchor family, pre-existing).
+
 ## 7. Documentation debt (surfaced by tonight's audit — fix in CLAUDE.md)
 
 - CLAUDE.md says "Only physical SNR sources (IDLE_IN_BAND, OFDM_BROADBAND)
