@@ -136,7 +136,11 @@ jobs:
 
       - name: Build Tests (Linux/macOS)
         if: runner.os != 'Windows'
-        run: cmake --build build --parallel
+        # --parallel 2: the ubuntu runner (2 vCPU / ~7 GB) OOM-kills cc1plus
+        # when two heavy test TUs build concurrently (test_watterson_proof +
+        # test_ofdm_snr_calibration, each compiling the full streaming-decoder
+        # set — 2026-07-08 run 28916672556). Same bound as the sanitizer job.
+        run: cmake --build build --parallel 2
 
       - name: Build Tests (Windows)
         if: runner.os == 'Windows'
