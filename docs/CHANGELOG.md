@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-08 — test(snr): OFDMSnrCalibration extended with the FADING ensemble contract (Stage-2 input under gate)
+
+The RX-authority consumes per-group OFDM broadband readings ON FADING, but the
+truth-matrix only gated AWGN. New section: 16 seeds through the shared ITU-R
+F.1487 Good Watterson model (unit mean tap power, same noise convention) —
+each seed samples one fade state; the ENSEMBLE linear-mean must equal the dial
+(mean-power definition, ±3.0 dB ≈ 2.7σ of the 16-sample mean) and the dB-mean
+must sit below it (Jensen). Measured: lin-mean +1.4/+1.2 dB at dial 10/20
+(the residual = LTS-time intra-frame peak-riding, now bounded), dB-mean 10.2/
+19.9 ✓. The harness records readings for NON-decoded frames too, so this
+ensemble has no survivor bias — unlike the live decoded-frames ring (§5
+residual). AWGN section unchanged at the 1.5 dB tolerance.
+
+---
+
 ## 2026-07-08 — feat(rate): handoff §6 (first half) — PHYSICAL ENTRY CAP: the dial-equivalent entry estimate can never exceed the physically measured channel
 
 The affine fade basis inflates a single data-aided snapshot (bets it was a

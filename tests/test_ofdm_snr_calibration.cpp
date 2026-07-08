@@ -147,7 +147,8 @@ double ltsDataSectionRms(const Bytes& serialized, Modulation mod, CodeRate rate)
     return rmsOf(probe.encodeFrameLight(serialized));
 }
 
-MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payload) {
+MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payload,
+                              bool fading = false) {
     constexpr Modulation kMod = Modulation::QPSK;
     constexpr CodeRate kRate = CodeRate::R1_4;
     MeasuredSNR out;
@@ -172,15 +173,29 @@ MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payloa
 
     auto audio = withSilence(samples);
 
-    ultra::ota_channel_core::SimulatedChannel channel;
-    channel.setSeed(seed);
-    channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
-    // Keep the channel's per-burst TX level policy out of the calibration
-    // (it would re-normalize the burst and undo the known-truth injection
-    // above — see file header, decision 2).
-    channel.setTxBurstNormalizationEnabled(false);
-    channel.transmitFromA(audio);
-    audio = channel.receiveForB(audio.size());
+    if (fading) {
+        // FADING section (Stage-2 contract): ITU-R F.1487 Good (0.1 Hz/0.5 ms
+        // Watterson, unit mean tap power) at the same noise convention — the
+        // per-seed reading samples ONE fade state; the ENSEMBLE across seeds
+        // is the fade average (ergodicity), and this harness records readings
+        // even for frames that fail to decode, so unlike the live decoded-
+        // frames ring it has NO survivor bias.
+        ultra::ota_channel_core::WattersonChannelModel model(
+            ultra::ota_channel_core::itu_r_f1487::good(snr_db), seed);
+        std::vector<float> faded;
+        model.process(audio, 0, faded);
+        audio = std::move(faded);
+    } else {
+        ultra::ota_channel_core::SimulatedChannel channel;
+        channel.setSeed(seed);
+        channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+        // Keep the channel's per-burst TX level policy out of the calibration
+        // (it would re-normalize the burst and undo the known-truth injection
+        // above — see file header, decision 2).
+        channel.setTxBurstNormalizationEnabled(false);
+        channel.transmitFromA(audio);
+        audio = channel.receiveForB(audio.size());
+    }
 
     StreamingDecoder decoder;
     decoder.setLogPrefix("CAL");
@@ -271,6 +286,39 @@ int main() {
                       << (n_est < 3 ? "insufficient readings" : "bias out of tolerance")
                       << ")";
         }
+        std::cout << "\n";
+    }
+
+    // ═══ FADING contract (Stage-2: what the RX-authority consumes) ═══
+    // Per-frame readings on ITU Good fading sample single fade states; the
+    // ENSEMBLE linear-mean must equal the dial (mean-power definition) and the
+    // dB-mean must sit BELOW the linear-mean (Jensen). Tolerance 3.0 dB on the
+    // ensemble mean: 16 one-frame fade samples, per-sample dB std ~4 ->
+    // std(mean) ~1.1 dB, so 3.0 is a ~2.7-sigma gate (stable across seeds).
+    std::cout << "\n fading (ITU Good) | lin-mean  bias | dB-mean | n\n";
+    for (float snr : {10.f, 20.f}) {
+        double lin_sum = 0.0, db_sum = 0.0;
+        int n = 0;
+        for (uint32_t s2 = 0; s2 < 16; ++s2) {
+            const auto m = measureEstimatedSNR(snr, 0x7000u + s2 * 104729u,
+                                               payload, /*fading=*/true);
+            if (std::isfinite(m.reading)) {
+                lin_sum += std::pow(10.0, m.reading / 10.0);
+                db_sum += m.reading;
+                ++n;
+            }
+        }
+        const double lin_mean_db = n ? 10.0 * std::log10(lin_sum / n) : std::nan("");
+        const double db_mean = n ? db_sum / n : std::nan("");
+        std::cout << std::setw(10) << (int)snr << "         | " << std::fixed
+                  << std::setprecision(1) << std::setw(7) << lin_mean_db << " "
+                  << std::showpos << std::setw(5) << (lin_mean_db - snr)
+                  << std::noshowpos << " | " << std::setw(6) << db_mean
+                  << " | " << n;
+        const bool ok = n >= 10 && std::isfinite(lin_mean_db) &&
+                        std::abs(lin_mean_db - snr) <= 3.0 &&
+                        db_mean <= lin_mean_db + 0.3;
+        if (!ok) { ++failed_points; std::cout << "   <- FAIL (fading ensemble)"; }
         std::cout << "\n";
     }
 
