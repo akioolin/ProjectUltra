@@ -117,8 +117,10 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     // ratio over the exact training span vs THIS frame's burst-time noise
     // ref) — replaces the old handshake-latched decoder-side computation.
     if (!is_ofdm && waveform_ && waveform_->hasPhysicalSNR()) {
-        last_physical_snr_db_.store(waveform_->getPhysicalSNRdB());
+        const float phys = waveform_->getPhysicalSNRdB();
+        last_physical_snr_db_.store(phys);
         last_physical_snr_valid_.store(true);
+        notePhysicalSnrSample(phys);  // §5: distribution ring
     }
     result.sync_correlation = sync_correlation_;
     result.sync_quality_db = result.snr_db;
@@ -205,6 +207,11 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         }
         result.snr_source = SNRSource::SYNC_QUALITY;
         if (result.has_ofdm_broadband_snr_db) {
+            // §5: the recalibrated OFDM broadband reading is truth-calibrated
+            // (OFDMSnrCalibration ±1.5 dB) — feed the channel-SNR distribution
+            // ring so the mean±spread display keeps updating through OFDM
+            // transfers (MC-DPSK frames stop at the handshake).
+            notePhysicalSnrSample(result.ofdm_broadband_snr_db);
             result.snr_db = result.ofdm_broadband_snr_db;
             result.snr_source = SNRSource::OFDM_BROADBAND;
             last_ofdm_broadband_snr_db_valid_.store(true);

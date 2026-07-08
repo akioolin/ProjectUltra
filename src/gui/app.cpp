@@ -1143,10 +1143,20 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // the locally measured physical channel SNR beside it when available.
         // BETA readout (BUG-PHYSICAL-SNR-RIG-REF): power ratio of the connect
         // sequence's training span vs the frame's own inter-chirp noise.
-        char channel_snr_text[40] = "";
-        if (modem_.hasLastPhysicalSnr()) {
-            snprintf(channel_snr_text, sizeof(channel_snr_text),
-                     ", local channel~%.1f dB (beta)", modem_.lastPhysicalSnrDb());
+        char channel_snr_text[48] = "";
+        {
+            float mean_db = 0.0f, spread_db = 0.0f;
+            const size_t n = modem_.physicalSnrStats(mean_db, spread_db);
+            if (n >= 3) {
+                // §5: on fading, the channel is a distribution — report the
+                // linear-domain (fade-averaged) mean and the dB spread across
+                // the recent frames instead of a single-snapshot flicker.
+                snprintf(channel_snr_text, sizeof(channel_snr_text),
+                         ", channel %.1f±%.1f dB", mean_db, spread_db);
+            } else if (modem_.hasLastPhysicalSnr()) {
+                snprintf(channel_snr_text, sizeof(channel_snr_text),
+                         ", channel~%.1f dB (1 frame)", modem_.lastPhysicalSnrDb());
+            }
         }
         char buf[300];
         if (waveform == protocol::WaveformMode::MC_DPSK) {

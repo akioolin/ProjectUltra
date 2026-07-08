@@ -995,6 +995,11 @@ float ModemEngine::lastPhysicalSnrDb() const {
     return streaming_decoder_ ? streaming_decoder_->lastPhysicalSnrDb() : 0.0f;
 }
 
+size_t ModemEngine::physicalSnrStats(float& mean_db, float& spread_db) const {
+    if (!streaming_decoder_) { mean_db = 0.0f; spread_db = 0.0f; return 0; }
+    return streaming_decoder_->physicalSnrStats(mean_db, spread_db);
+}
+
 int64_t ModemEngine::lastRxSubstantiveMs() const {
     return streaming_decoder_ ? streaming_decoder_->lastRxSubstantiveMs() : -1000000;
 }

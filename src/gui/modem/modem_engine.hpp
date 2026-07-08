@@ -157,6 +157,7 @@ public:
     // BUG-PHYSICAL-SNR-RIG-REF. Valid=false until first data-bearing frame.
     bool hasLastPhysicalSnr() const;
     float lastPhysicalSnrDb() const;
+    size_t physicalSnrStats(float& mean_db, float& spread_db) const;
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,

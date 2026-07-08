@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-08 — feat(ui): handoff §5 — fading channel SNR displayed as a DISTRIBUTION (mean±spread), not snapshot flicker
+
+On fading there is no single SNR — each reading samples one fade state (the
+F230 confusion: 2/6.6/12.6 flashed at the operator for the same dial-10
+channel). The decoder now keeps a ring of the last 8 channel-SNR readings
+(MC-DPSK physical measurements at the handshake; the truth-calibrated OFDM
+broadband per frame during transfers), reports the LINEAR-domain mean (the
+honest fade average — dB-averaging under-reads by the Jensen penalty) and the
+dB spread. MODE lines now read `channel 8.5±4.0 dB` (good@10) /
+`channel 20.6±2.5 dB` (good@20) — the mean tracks the dial, the ± IS the
+fading. Ring resets per session (a new QSO never averages the old channel).
+Verified: ctest 85/85; good@10 PASS + good@20 PASS 1440 bps.
+
+---
+
 ## 2026-07-08 — feat(snr): handoff §4 — the usable≤channel invariant enforced in code (SNR-SANITY)
 
 Physics forbids demod-usable SNR exceeding the channel's physical S:N. When a

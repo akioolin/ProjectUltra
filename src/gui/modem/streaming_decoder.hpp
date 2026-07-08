@@ -455,6 +455,33 @@ public:
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
     bool hasLastPhysicalSnr() const { return last_physical_snr_valid_.load(); }
     float lastPhysicalSnrDb() const { return last_physical_snr_db_.load(); }
+    // Handoff §5: distribution over the recent physical readings.
+    // Returns readings-count; mean is linear-domain (fade-averaged), spread
+    // is the dB standard deviation of the samples.
+    size_t physicalSnrStats(float& mean_db, float& spread_db) const {
+        std::lock_guard<std::mutex> lk(physical_ring_mutex_);
+        const size_t n = std::min(physical_ring_count_, kPhysicalSnrRing);
+        if (n == 0) { mean_db = 0.0f; spread_db = 0.0f; return 0; }
+        double lin_sum = 0.0, db_sum = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            lin_sum += std::pow(10.0, physical_ring_db_[i] / 10.0);
+            db_sum += physical_ring_db_[i];
+        }
+        mean_db = static_cast<float>(10.0 * std::log10(lin_sum / n));
+        const double db_mean = db_sum / n;
+        double var = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            const double d = physical_ring_db_[i] - db_mean;
+            var += d * d;
+        }
+        spread_db = static_cast<float>(std::sqrt(var / n));
+        return n;
+    }
+    void notePhysicalSnrSample(float db) const {
+        std::lock_guard<std::mutex> lk(physical_ring_mutex_);
+        physical_ring_db_[physical_ring_count_ % kPhysicalSnrRing] = db;
+        ++physical_ring_count_;
+    }
     uint64_t burstAirSamplesRemaining() {
         const uint64_t end = burst_air_end_abs_.load(std::memory_order_relaxed);
         if (end == 0) return 0;
@@ -775,6 +802,16 @@ private:
     // rate selection stays on effective (#74 — the demod lives there).
     mutable std::atomic<float> last_physical_snr_db_{0.0f};
     mutable std::atomic<bool> last_physical_snr_valid_{false};
+    // Handoff §5: fading channel SNR is a DISTRIBUTION, not a number — each
+    // per-frame physical reading samples one fade state. Keep a short ring
+    // and report mean ± spread: mean in the LINEAR power domain (the honest
+    // fade average — dB-averaging under-reads by the Jensen penalty), spread
+    // as the dB standard deviation. ~8 readings ≈ 15-40 s of frames ≈ several
+    // coherence times on Good.
+    static constexpr size_t kPhysicalSnrRing = 8;
+    mutable std::mutex physical_ring_mutex_;
+    mutable std::array<float, kPhysicalSnrRing> physical_ring_db_{};
+    mutable size_t physical_ring_count_ = 0;
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
