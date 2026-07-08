@@ -8,6 +8,25 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-PHYSICAL-SNR-RIG-REF: the new physical in-band SNR readout is wrong on the IONOS bench (read 4.4 dB below effective 6.7 — physically impossible) and stale after handshake
+- Status: **OPEN (filed 2026-07-07; display-only — nothing consumes it).** The two-SNR model
+  (CHANGELOG 2026-07-07) computes physical = (P_train − N)/N with N = the burst-time
+  inter-chirp-gap RMS. On sim it reads 9.0 at a true 10.0 (known −1 dB training-window
+  geometry bias). On the rig (WGN@10) it read 4.4 vs effective 6.7 — impossible (physical ≥
+  effective always), so the reference is polluted: the IONOS gap noise measured ~4-5 dB hotter
+  than the noise present during the training span (S:N-machine tracker dynamics inside the
+  100 ms gap, and/or gap-window geometry on the corrected chirp positions). Also STALE: only
+  computed on ping-check paths (handshake), then the atomic latches — data-frame logs reprint
+  the connect-era value.
+- Fix path: (1) move the measurement into `updateTrainingSNREstimate` where the training
+  geometry is exact (per-symbol span, settled FIRs); (2) characterize the IONOS gap-noise
+  level vs during-signal noise (one bench experiment: long chirp train, compare gap RMS vs
+  post-burst decay curve); (3) recompute per decoded frame, not per ping-check.
+- The EFFECTIVE (routed) SNR is unaffected and remains the rate-selection input (#74).
+- Context: rig effective 6.5 vs wire-truth 9.3 at WGN@10 = real hardware implementation loss
+  (~1.2 Hz clock/jitter wander over the 144 ms training window explains it exactly; sim reads
+  10.1 dead-on). The operator display should eventually show BOTH numbers.
+
 ### BUG-FILE-CRC-MISMATCH: complete 51200/51200 file assembled with WRONG CONTENT (P0)
 - Status: **FIXED 2026-07-05 late evening.** Root-caused by 3-agent forensics (write-map + code audit + adversarial verify) over the preserved run; rig gate LIFTED.
 - Mechanism (confirmed, single event in all logs): the LDPC false-positive BIT-FLIP SALVAGE (frame_v2.cpp Case 2). Under status.allSuccess() every CW is a VALID codeword, so the true error is a codeword DIFFERENCE (>= d_min, tens of bits) — a 1-bit "repair" can never be genuine there. The salvage searched ~5k bit positions for a 16-bit CRC syndrome match (~7.8% collision odds vs garbage), hit one at t=38.4 ("FALSE POSITIVE RECOVERED (1-bit flip frame byte 584 bit 3)"), and delivered a corrupted 616-byte chunk (file[616:1232), seq=2) that was ACKed and never resent. Receiver assembly was proven flawless (78 chunks, perfect tiling, all era boundaries exact ACK-edge requeues).
