@@ -159,6 +159,28 @@ of MPG@10/MPG@20 sessions with zero authority demotes in the first 2 minutes.
 Do NOT re-tune the affine constants piecemeal — they are pinned in
 `tests/test_connection_policy.cpp` and were calibrated as a set.
 
+**The theoretically correct entry estimator (build THIS, not another boost):**
+at Tc≈4 s a single ~2 s frame window sees half a fade cycle — the mean is
+UNLEARNABLE from it (irreducible ±3-4 dB; no estimator fixes that). Decompose:
+1. Noise N: stationary, from the idle estimator (minutes of observation,
+   ±0.2 dB) — already accurate.
+2. Mean signal power S̄: accumulate |H(t)|²-proportional power samples from
+   EVERY handshake transmission (each PING/PONG chirp, each CONNECT/ACK frame,
+   including retries) across the WHOLE probing+connect phase — 10-40 s spans
+   multiple coherence times → a true LINEAR-domain fade average. Today only
+   the final frame's window is used; the rest is discarded. The chirp is
+   constant-envelope at known TX scaling → each chirp's received in-band power
+   is one clean |H|² sample (the burst-time noise ref machinery already
+   isolates per-event noise).
+3. Entry policy: enter at mean − k·σ (k from the loss asymmetry: a low entry
+   costs ~60-90 s of authority climb; a high entry costs demote thrash or a
+   stall) and let the existing authority/EESM machinery climb. The current
+   affine basis INFLATES a single snapshot — the inverse of the correct
+   posture. Commercial HF modems converged on enter-robust/climb-fast.
+Acceptance: entry-rung distribution vs the first-2-minute sustained rung on
+20 rig sessions — entries at or one below sustained ≥85% of the time, never
+above by ≥2 rungs.
+
 ## 7. Documentation debt (surfaced by tonight's audit — fix in CLAUDE.md)
 
 - CLAUDE.md says "Only physical SNR sources (IDLE_IN_BAND, OFDM_BROADBAND)
