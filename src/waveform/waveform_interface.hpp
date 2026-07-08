@@ -60,6 +60,13 @@ class IWaveform {
 public:
     virtual ~IWaveform() = default;
 
+    // Physical channel SNR (handoff §2): burst-time noise reference in, pure
+    // power-ratio channel SNR out. Default no-op — only waveforms with a
+    // known-power training span (MC-DPSK) implement it.
+    virtual void setNoiseReferenceRMS(float) {}
+    virtual bool hasPhysicalSNR() const { return false; }
+    virtual float getPhysicalSNRdB() const { return 0.0f; }
+
     // ========================================================================
     // IDENTITY
     // ========================================================================

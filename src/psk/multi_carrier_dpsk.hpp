@@ -353,6 +353,17 @@ public:
     bool hasDataAidedSNR() const { return last_data_aided_snr_valid_; }
     float getDataAidedSNRdB() const { return last_data_aided_snr_db_; }
 
+    // PHYSICAL in-band channel SNR (handoff §2): pure power ratio of the
+    // received training span vs an externally supplied noise reference —
+    // no phase model, so unlike the training/data-aided estimators it reads
+    // the CHANNEL's S:N, not the demod-usable margin. The reference must be
+    // measured at BURST TIME on the same chain (the decoder's inter-chirp-gap
+    // RMS): S:N-holding channel simulators scale idle noise differently from
+    // burst noise, and real-radio fade state matches only within the frame.
+    void setNoiseReferenceRMS(float rms) { noise_ref_rms_ = rms; }
+    bool hasPhysicalSNR() const { return last_physical_snr_valid_; }
+    float getPhysicalSNRdB() const { return last_physical_snr_db_; }
+
     // Set CFO (from external estimation like dual chirp)
     void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; cfo_initial_phase_ = 0.0f; }
 
@@ -1101,11 +1112,14 @@ private:
 
         double signal_power = 0.0;
         double residual_power = 0.0;
+        double rx_power = 0.0;  // raw received in-band power (physical SNR)
         size_t sample_count = 0;
         FIRFilter signal_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
                                                        config_.sample_rate);
         FIRFilter residual_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
                                                          config_.sample_rate);
+        FIRFilter rx_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
+                                                   config_.sample_rate);
         for (int sym = 0; sym < config_.training_symbols; ++sym) {
             for (int i = 0; i < config_.samples_per_symbol; ++i) {
                 Complex fitted_complex(0.0f, 0.0f);
@@ -1127,8 +1141,10 @@ private:
                 const float residual = sample - fitted;
                 const float signal_in_band = signal_filter.process(fitted);
                 const float residual_in_band = residual_filter.process(residual);
+                const float rx_in_band = rx_filter.process(sample);
                 signal_power += static_cast<double>(signal_in_band) * signal_in_band;
                 residual_power += static_cast<double>(residual_in_band) * residual_in_band;
+                rx_power += static_cast<double>(rx_in_band) * rx_in_band;
                 ++sample_count;
             }
         }
@@ -1138,6 +1154,32 @@ private:
         }
         signal_power /= static_cast<double>(sample_count);
         residual_power /= static_cast<double>(sample_count);
+        rx_power /= static_cast<double>(sample_count);
+
+        // PHYSICAL channel SNR (handoff §2): (P_rx − N)/N over the exact
+        // training span, N = the burst-time noise reference the decoder set
+        // from THIS frame's inter-chirp gap. Signal-presence gate ≥3 dB above
+        // the reference: a noise-only PING "training" span must never latch
+        // (rig F228: a latched noise span poisoned the readout all session).
+        // Definition: PAYLOAD-REFERENCED channel SNR (handoff §2 option (a)):
+        // the training/data-section signal power over in-band noise — the SNR
+        // the payload actually experiences. Measured at sim awgn@10: reads
+        // 9.2-9.6 (−0.4..−0.8 vs dial; the residual is the noise-ref's known
+        // −0.66 dB, filed). NOTE: the +1.72 dB dial-equivalent constant from
+        // the 07-07 audit OVERSHOOTS on the live CONNECT profile (measured
+        // +1.0..+1.3 at truth) — it was derived for a different geometry. A
+        // dial-equivalent display needs the per-profile derivation test
+        // (generate PING + training at equal drive, measure both in-band
+        // powers) before any constant is added here. Never tune it by eye.
+        if (noise_ref_rms_ > 0.0f) {
+            const double p_n = static_cast<double>(noise_ref_rms_) *
+                               static_cast<double>(noise_ref_rms_);
+            if (p_n > 0.0 && rx_power > 2.0 * p_n) {
+                last_physical_snr_db_ = static_cast<float>(
+                    10.0 * std::log10((rx_power - p_n) / p_n));
+                last_physical_snr_valid_ = true;
+            }
+        }
         if (signal_power <= 0.0 || residual_power <= std::numeric_limits<double>::min()) {
             return;
         }
@@ -1360,6 +1402,9 @@ private:
     float temporal_fading_index_ = 0.0f;
     bool last_snr_valid_ = false;
     float last_snr_db_ = 0.0f;
+    float noise_ref_rms_ = 0.0f;         // burst-time N (set per frame by the decoder)
+    bool last_physical_snr_valid_ = false;
+    float last_physical_snr_db_ = 0.0f;  // physical channel SNR (dial convention)
     // #58: data-aided fade-averaged SNR over the last demodulated data span.
     bool last_data_aided_snr_valid_ = false;
     float last_data_aided_snr_db_ = 0.0f;

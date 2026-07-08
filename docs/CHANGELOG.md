@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-08 — fix(snr): handoff §1+§2+§7 — physical channel SNR moved in-waveform (per-frame, ±1 dB), OFDMSnrCalibration tightened to 1.5 dB, CLAUDE.md SNR facts corrected
+
+§1: OFDMSnrCalibration default tolerance 4.0 → 1.5 dB (post-recalibration bias
+is ≤0.4; the truth-matrix is now a real regression wall).
+
+§2 (BUG-PHYSICAL-SNR-RIG-REF, first half): the physical channel-SNR readout
+moved from the decoder's ping-check window into
+`updateTrainingSNREstimate` (multi_carrier_dpsk.hpp) — exact training-span
+geometry, third in-band FIR accumulator on the raw samples, ≥3 dB
+signal-presence latch. The decoder hands the frame's burst-time inter-chirp
+noise ref to the waveform at sync-found (`IWaveform::setNoiseReferenceRMS`,
+default no-op); `populateDecodeMetrics` refreshes the display atomics PER
+DECODED FRAME (stale handshake latch killed). Definition: PAYLOAD-REFERENCED
+(option (a)) — the audit's +1.72 dB dial constant OVERSHOOTS on the live
+CONNECT profile (measured +1.0..+1.3 at truth); a dial-equivalent constant
+needs the per-profile derivation test first. Measured: sim awgn@10 reads
+9.1-10.1 (was −1.7 biased and stale). REMAINING (filed): the −0.66 dB
+noise-ref residual; the IONOS gap-noise bench experiment before trusting the
+readout on that bench.
+
+§7: CLAUDE.md corrected — rate selection accepts MCDPSK_IN_BAND (data-aided is
+the PRIMARY connect input); entry floors 8/8/14 (old 10/12/14/18 table
+obsolete).
+
+---
+
 ## 2026-07-07 — fix(snr): OFDM in-band SNR estimator recalibrated — +2.5-3.4 dB structural optimism removed at the root; calibration truth-matrix CTest added (OFDMSnrCalibration)
 
 **What was broken:** the OFDM broadband/LTS estimator (the SAME value behind

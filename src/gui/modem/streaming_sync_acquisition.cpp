@@ -113,6 +113,13 @@ bool connectDataAidedSnrEnabled() {
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                              float residual_cfo_hz) const {
     stampRxSignal();  // F129: decoder evidence of incoming signal (per-frame)
+    // Handoff §2: per-frame physical channel SNR from the waveform (power
+    // ratio over the exact training span vs THIS frame's burst-time noise
+    // ref) — replaces the old handshake-latched decoder-side computation.
+    if (!is_ofdm && waveform_ && waveform_->hasPhysicalSNR()) {
+        last_physical_snr_db_.store(waveform_->getPhysicalSNRdB());
+        last_physical_snr_valid_.store(true);
+    }
     result.sync_correlation = sync_correlation_;
     result.sync_quality_db = result.snr_db;
     const auto idle_snr = idle_noise_snr_estimator_.snapshot();
@@ -615,6 +622,12 @@ void StreamingDecoder::searchForSync() {
                 }
                 sync_noise_ref_rms_ = static_cast<float>(
                     std::sqrt(sum_sq / static_cast<double>(meas_end - gs - skip)));
+                // Handoff §2: hand THIS frame's burst-time noise reference to
+                // the waveform so its training-span decode computes the
+                // physical channel SNR (per-frame — no stale latch).
+                if (waveform_) {
+                    waveform_->setNoiseReferenceRMS(sync_noise_ref_rms_);
+                }
                 LOG_MODEM(INFO,
                           "[%s] burst-noise ref: rms=%.4f gap=[%zu+%zu..%zu) of buf=%zu",
                           log_prefix_.c_str(), sync_noise_ref_rms_, gs, skip,

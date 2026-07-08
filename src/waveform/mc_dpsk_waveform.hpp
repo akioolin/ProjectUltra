@@ -83,6 +83,18 @@ public:
     // consumer must gate on the frame's LDPC decode success before routing it.
     bool hasDataAidedSNR() const { return last_data_aided_snr_valid_; }
     float getDataAidedSNRdB() const { return last_data_aided_snr_; }
+    // Physical channel SNR plumbing (handoff §2): the decoder supplies the
+    // burst-time noise reference before decode; the demodulator computes the
+    // power-ratio SNR over the exact training span it processes.
+    void setNoiseReferenceRMS(float rms) override {
+        if (demodulator_) demodulator_->setNoiseReferenceRMS(rms);
+    }
+    bool hasPhysicalSNR() const override {
+        return demodulator_ && demodulator_->hasPhysicalSNR();
+    }
+    float getPhysicalSNRdB() const override {
+        return demodulator_ ? demodulator_->getPhysicalSNRdB() : 0.0f;
+    }
     float estimatedCFO() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
 
