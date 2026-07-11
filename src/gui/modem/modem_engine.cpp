@@ -941,8 +941,36 @@ Bytes ModemEngine::getReceivedData() {
 }
 
 LoopbackStats ModemEngine::getStats() const {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
+    LoopbackStats out;
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        out = stats_;
+    }
+    // LIVE OVERLAY (external review 2026-07-10, finding 3): the cache above is
+    // refreshed only by the per-frame callback, which the burst transport
+    // suppresses (frames deliver as a unit) — so during a file transfer every
+    // getStats() consumer (GUI meters, polled TNC) froze at the handshake-era
+    // values while the protocol correctly consumed the decoder's lock-free
+    // atomics. Overlay those same live values here so one snapshot serves all
+    // consumers: per-frame OFDM broadband (updated inside bursts), the live
+    // idle-noise meter, and the current fading index.
+    if (streaming_decoder_) {
+        if (streaming_decoder_->hasLastOFDMBroadbandSNREstimate()) {
+            const float bb = streaming_decoder_->getLastOFDMBroadbandSNREstimate();
+            if (std::isfinite(bb)) {
+                out.snr_db = bb;
+                out.snr_source = SNRSource::OFDM_BROADBAND;
+                out.has_ofdm_broadband_snr_db = true;
+                out.ofdm_broadband_snr_db = bb;
+            }
+        }
+        const auto idle = streaming_decoder_->getIdleNoiseSNRSnapshot();
+        if (idle.valid && std::isfinite(idle.idle_in_band_snr_db)) {
+            out.has_idle_in_band_snr_db = true;
+            out.idle_in_band_snr_db = idle.idle_in_band_snr_db;
+        }
+    }
+    return out;
 }
 
 DecoderStats ModemEngine::getDecoderStats() const {

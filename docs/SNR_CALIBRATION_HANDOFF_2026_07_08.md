@@ -243,6 +243,18 @@ handed over: MPG@0 connect + 5 frames (ack path dead); MPG@5 connect + ~98%
 (endgame ack); MPG@10 repeated full CRC deliveries. Graded degradation, every
 failure named.
 
+## §9 (external review 2026-07-10): TNC SNR reporting semantics — FILED
+
+The TNC's polled SNR reads ProtocolEngine::getMeasuredSNR (Connection default
+15.0 dB, source NONE) — before any measurement a client sees a confident "15";
+unknown and a genuine 0 dB are indistinguishable. Fix shape: report the
+modem's live getStats() overlay when the protocol source is NONE, and give the
+TNC status string an explicit unknown marker — BUT this changes what client
+apps parse, so it needs the cross-machine Winlink/PAT rig for validation
+(memory: project_winlink_pat_otasim_crossmachine, tnc bulk-accum notes)
+before shipping. Everything else from the 2026-07-10 external review
+(findings 1-6) is fixed and gated — see CHANGELOG entries of that date.
+
 ## Traps that cost hours tonight (do not rediscover)
 
 1. **IONOS is an S:N machine** — noise level TRACKS the input signal. Idle

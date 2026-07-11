@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-10 — fix(snr): review findings 3/5 — getStats() live overlay (meters no longer freeze during bursts) + session-teardown SNR clear; finding 2 script removed; finding 7 filed
+
+**Finding 3:** the LoopbackStats cache is refreshed only by the per-frame
+callback, which the burst transport suppresses — GUI meters (and any polled
+consumer of getStats) froze at handshake-era values for entire file transfers
+while the protocol correctly consumed the decoder's lock-free atomics.
+getStats() now OVERLAYS those live values (per-frame OFDM broadband — updated
+inside bursts — plus the live idle-noise meter) so one snapshot serves all
+consumers. The broadband atomics are already cleared by decoder reset, so the
+overlay cannot resurrect a dead session's values.
+
+**Finding 5:** disconnect never cleared the stats cache — the previous QSO's
+SNR/fading stayed on the meters and could be attached to the next session's
+first PONG. ModemEngine::setConnected(false) now clears the channel-
+measurement fields; the live idle overlay repopulates within ~1 s.
+
+**Finding 2:** tools/snr_meter_validation.sh REMOVED (REMOVAL_BACKLOG R12) —
+it false-passed via a deleted probe's stale binary + column mismatch + empty
+summary treated as success; superseded by the OFDMSnrCalibration CTest matrix.
+
+**Finding 7 (FILED, not changed):** the TNC's polled SNR reads the protocol
+engine's measured value, which defaults to 15 dB (source NONE) before any
+measurement, and conflates unknown with 0 dB. Changing what ultra_tnc reports
+to client apps is a wire-behavior change we won't ship without the
+cross-machine Winlink/PAT rig to test against — filed in the SNR handoff §7
+follow-ups with this analysis.
+
+Verified: ctest 85/85; good@20 gate PASS 1530 bps.
+
+---
+
 ## 2026-07-10 — fix(snr): external-review findings 1/4/6 — in-band-first noise source (guard bins lie on band-limited noise), physical-SNR per-frame validity, session-only ring clear
 
 **Finding 1 (critical, real-radio class):** the OFDM meter PREFERRED guard-bin

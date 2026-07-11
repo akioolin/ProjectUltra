@@ -194,6 +194,22 @@ void ModemEngine::setConnected(bool connected) {
         // Switching to disconnected state - use robust mode for RX
         decoder_->setRate(CodeRate::R1_4);
 
+        // SESSION SNR LIFECYCLE (external review 2026-07-10, finding 5): the
+        // LoopbackStats cache is refreshed only by decode events, so without
+        // this the previous QSO's SNR/fading stayed visible on the meters and
+        // could be attached to the next session's first PONG. Clear the
+        // channel-measurement fields at teardown; the idle meter (live overlay
+        // in getStats) repopulates within ~1 s of idle audio.
+        updateStats([&](LoopbackStats& st) {
+            st.snr_db = 0.0f;
+            st.snr_source = SNRSource::NONE;
+            st.has_ofdm_broadband_snr_db = false;
+            st.ofdm_broadband_snr_db = 0.0f;
+            st.ofdm_internal_snr_db = 0.0f;
+            st.sync_quality_db = 0.0f;
+            st.synced = false;
+        });
+
         // BUG-TNC-SESSION-001 fix (port from tools/ultra_tnc.cpp): a persistent
         // ModemEngine across multiple sessions must perform the same RX/TX
         // state reset on disconnect that ultra_tnc does, otherwise the next
