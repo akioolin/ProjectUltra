@@ -453,6 +453,9 @@ public:
         soft_bits_.clear();
         prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
         cfo_hz_ = 0.0f;
+        last_physical_snr_valid_ = false;
+        last_physical_snr_db_ = 0.0f;
+        noise_ref_rms_ = 0.0f;
         cfo_initial_phase_ = 0.0f;
         external_chirp_detected_ = false;
         chirp_position_ = -1;
@@ -1088,6 +1091,13 @@ private:
     void updateTrainingSNREstimate(SampleSpan training) {
         last_snr_valid_ = false;
         last_snr_db_ = 0.0f;
+        // Per-frame semantics (external review 2026-07-10, finding 4): the
+        // physical latch is valid ONLY for the frame that measured it — an
+        // abstaining later frame (signal-presence gate refused) must not
+        // republish the previous frame's value into the distribution ring
+        // and the SNR-SANITY comparison.
+        last_physical_snr_valid_ = false;
+        last_physical_snr_db_ = 0.0f;
         if (training.size() < training_samples_ ||
             config_.training_symbols <= 0 ||
             config_.num_carriers <= 0) {

@@ -718,21 +718,38 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
             noise_variance = lts_noise_var;
             estimated_snr_linear = lts_snr;
+            // NOISE SOURCE (external review 2026-07-10, finding 1): the meter
+            // must measure noise IN THE OCCUPIED BAND. The guard bins sit just
+            // ABOVE it (~3 kHz+ audio) — on white sim noise they read the same
+            // density, but real-radio SSB filtering and hardware channel-sim
+            // LPFs leave the guard band nearly empty (checked-in HF capture:
+            // occupied-band noise 20.9 dB above guard) → guard-preferred SNR
+            // over-reads by that whole margin, and the AWGN calibration can
+            // never catch it. The repeated-LTS difference measures the noise
+            // the demodulator actually sees, on any noise spectrum; its
+            // channel-motion term on fast fading only ADDS noise (SNR reads
+            // conservative — the safe direction). Guard bins remain only as
+            // the no-second-LTS fallback below. When BOTH exist, take the MAX
+            // (physics: in-band noise cannot be lower than either measurement;
+            // guard > diff would indicate broadband interference above the
+            // band leaking in — still noise the FIR passes).
+            const float lts_diff_single_symbol_var = 2.0f * lts_noise_var;
             const float meter_noise_var =
-                guard_noise_valid ? guard_noise_var : lts_noise_var;
-            const float meter_noise_reference_scale =
-                guard_noise_valid ? 1.0f : 2.0f;
+                guard_noise_valid
+                    ? std::max(guard_noise_var, lts_diff_single_symbol_var)
+                    : lts_diff_single_symbol_var;
 
             updateLastSNREstimate(lts_signal_power, meter_noise_var,
                                   static_cast<size_t>(count), 1.0f,
-                                  false, true, meter_noise_reference_scale);
+                                  false, true, 1.0f);
 
             LOG_DEMOD(INFO, "LTS SNR estimate: internal=%.1f dB in_band=%.1f dB "
                       "(measured noise_var=%.6f, meter_noise=%.6f source=%s, signal=%.4f)",
                       10.0f * std::log10(estimated_snr_linear),
                       last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
                       noise_variance, meter_noise_var,
-                      guard_noise_valid ? "guard" : "time",
+                      (guard_noise_valid && guard_noise_var > lts_diff_single_symbol_var)
+                          ? "guard" : "lts-diff",
                       lts_signal_power);
         }
     } else if (h_mag_avg > 1e-6f) {

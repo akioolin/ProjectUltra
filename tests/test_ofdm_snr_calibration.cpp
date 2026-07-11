@@ -74,6 +74,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -148,7 +149,8 @@ double ltsDataSectionRms(const Bytes& serialized, Modulation mod, CodeRate rate)
 }
 
 MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payload,
-                              bool fading = false) {
+                              bool fading = false,
+                              bool colored = false) {
     constexpr Modulation kMod = Modulation::QPSK;
     constexpr CodeRate kRate = CodeRate::R1_4;
     MeasuredSNR out;
@@ -173,7 +175,37 @@ MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payloa
 
     auto audio = withSilence(samples);
 
-    if (fading) {
+    if (colored) {
+        // COLORED-NOISE section (external review 2026-07-10, finding 1): real
+        // SSB receive chains band-limit the noise (~50-2950 Hz); the guard
+        // bins above the occupied band then read the FILTER SKIRT, not the
+        // in-band noise — a guard-preferred meter over-reads by the whole
+        // stopband depth (measured 20.9 dB on a checked-in HF capture). White
+        // AWGN can never catch this; this section can: noise shaped by the
+        // same 101-tap 50-2950 bandpass the receive convention uses, sized so
+        // the IN-BAND S:N equals truth, PASSTHROUGH channel (no added noise).
+        ultra::ota_channel_core::SimulatedChannel channel;
+        channel.setSeed(seed);
+        channel.configure(0.0f, ultra::ota_channel_core::ChannelType::PASSTHROUGH);
+        channel.setTxBurstNormalizationEnabled(false);
+        std::mt19937 rng(seed ^ 0xC01Du);
+        std::normal_distribution<float> gauss(0.0f, 1.0f);
+        FIRFilter shape = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+        std::vector<float> noise(audio.size());
+        double nss = 0.0;
+        for (size_t i = 0; i < noise.size(); ++i) {
+            noise[i] = shape.process(gauss(rng));
+            nss += static_cast<double>(noise[i]) * noise[i];
+        }
+        const double n_rms = std::sqrt(nss / noise.size());
+        const double target_rms =
+            ultra::ota_channel_core::kModemReferenceInBandRms /
+            std::pow(10.0, snr_db / 20.0);
+        const float k = static_cast<float>(target_rms / std::max(n_rms, 1e-12));
+        for (size_t i = 0; i < audio.size(); ++i) audio[i] += noise[i] * k;
+        channel.transmitFromA(audio);
+        audio = channel.receiveForB(audio.size());
+    } else if (fading) {
         // FADING section (Stage-2 contract): ITU-R F.1487 Good (0.1 Hz/0.5 ms
         // Watterson, unit mean tap power) at the same noise convention — the
         // per-seed reading samples ONE fade state; the ENSEMBLE across seeds
@@ -286,6 +318,25 @@ int main() {
                       << (n_est < 3 ? "insufficient readings" : "bias out of tolerance")
                       << ")";
         }
+        std::cout << "\n";
+    }
+
+    // ═══ COLORED-NOISE contract (real-radio noise shape; finding 1) ═══
+    std::cout << "\n colored (band-limited) | mean  bias | n\n";
+    for (float snr : {10.f, 20.f}) {
+        double sum = 0.0; int n = 0;
+        for (uint32_t s3 = 0; s3 < 3; ++s3) {
+            const auto m = measureEstimatedSNR(snr, 0x9100u + s3 * 6151u, payload,
+                                               /*fading=*/false, /*colored=*/true);
+            if (std::isfinite(m.reading)) { sum += m.reading; ++n; }
+        }
+        const double mean = n ? sum / n : std::nan("");
+        std::cout << std::setw(11) << (int)snr << "            | " << std::fixed
+                  << std::setprecision(1) << std::setw(4) << mean << " "
+                  << std::showpos << std::setw(5) << (mean - snr)
+                  << std::noshowpos << " | " << n;
+        const bool ok = n >= 3 && std::isfinite(mean) && std::abs(mean - snr) <= tol;
+        if (!ok) { ++failed_points; std::cout << "   <- FAIL (colored noise)"; }
         std::cout << "\n";
     }
 

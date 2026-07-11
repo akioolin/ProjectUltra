@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-10 — fix(snr): external-review findings 1/4/6 — in-band-first noise source (guard bins lie on band-limited noise), physical-SNR per-frame validity, session-only ring clear
+
+**Finding 1 (critical, real-radio class):** the OFDM meter PREFERRED guard-bin
+noise (bins just above the occupied band, ~3 kHz+ audio) whenever nonzero. On
+white sim noise that's harmless; on ANY band-limited noise — a real SSB
+receive chain, or a hardware channel simulator's 3 kHz LPF — the guard band
+holds only the filter skirt (a checked-in HF capture measured occupied-band
+noise 20.9 dB above guard) → the meter over-reads by the stopband depth, and
+the AWGN calibration can never catch it. FIX: the repeated-LTS in-band
+residual is now the primary meter noise source (measures the noise the
+demodulator actually sees, on any spectrum; its fading-motion term only reads
+conservative); guard bins survive as the single-LTS fallback and via
+max(guard, in-band) (broadband interference above the band still counts).
+NEW REGRESSION: OFDMSnrCalibration gained a COLORED-NOISE section (noise
+shaped by the receive-convention 101-tap 50-2950 bandpass, PASSTHROUGH
+channel) — reads +0.3 dB at dial 10/20 post-fix; the old preference would
+over-read this section catastrophically. Side effect measured: the fading
+ensemble bias improved from +1.4/+1.2 to +0.7/+0.1 (guard-preference was part
+of the fade optimism).
+
+**Finding 4 (mine, 07-08 regression):** `updateTrainingSNREstimate` never
+cleared `last_physical_snr_valid_` at entry (only the usable flags), so an
+abstaining frame republished the previous frame's physical value into the
+distribution ring and SNR-SANITY. Per-frame semantics now enforced at entry;
+demodulator reset() also clears physical + the noise ref.
+
+**Finding 6 (mine, 07-08 regression):** the per-session physical ring was
+cleared inside `StreamingDecoder::reset()` unconditionally — the MC-DPSK TX
+echo-clear calls reset(false) EVERY turnaround, reducing the "session"
+distribution to one round's samples. Clear now gated on
+reset_doppler_coherence (the existing session-vs-echo discriminator).
+
+Verified: ctest 85/85; OFDMSnrCalibration full matrix (AWGN −0.6..−0.3,
+colored +0.3, fading +0.7/+0.1) at tol 1.5.
+
+---
+
 ## 2026-07-08 — test(snr): OFDMSnrCalibration extended with the FADING ensemble contract (Stage-2 input under gate)
 
 The RX-authority consumes per-group OFDM broadband readings ON FADING, but the

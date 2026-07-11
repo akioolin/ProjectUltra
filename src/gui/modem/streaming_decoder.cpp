@@ -1347,10 +1347,14 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     if (waveform_) waveform_->reset();
     idle_noise_snr_estimator_.reset();
     // §5: the physical-SNR distribution is per-session — a new QSO (or channel
-    // change) must not average against the previous channel's samples.
-    last_physical_snr_valid_.store(false);
-    last_physical_snr_db_.store(0.0f);
-    {
+    // change) must not average against the previous channel's samples. Gated
+    // on reset_doppler_coherence (the session-vs-echo discriminator, see
+    // below): the MC-DPSK TX echo-clear calls reset(false) every turnaround,
+    // and wiping the ring there reduced the "session" distribution to one
+    // round's samples (external review 2026-07-10, finding 6).
+    if (reset_doppler_coherence) {
+        last_physical_snr_valid_.store(false);
+        last_physical_snr_db_.store(0.0f);
         std::lock_guard<std::mutex> lk(physical_ring_mutex_);
         physical_ring_count_ = 0;
     }
