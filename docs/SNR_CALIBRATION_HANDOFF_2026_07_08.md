@@ -243,6 +243,21 @@ handed over: MPG@0 connect + 5 frames (ack path dead); MPG@5 connect + ~98%
 (endgame ack); MPG@10 repeated full CRC deliveries. Graded degradation, every
 failure named.
 
+## §4-addendum (F236, 2026-07-10): the sanity gate can't yet tell WHICH meter broke
+
+F236 (rig, dial unrecorded — user asleep): 39 SNR-SANITY firings
+("usable 16.7 EXCEEDS channel 7.0"), file still delivered CRC-clean at
+F228-pace. Diagnosis: on a BUSY MC-DPSK link there is almost no clean idle
+audio, so even the min-statistics floor windows are signal-contaminated →
+noise ref reads HIGH → the PHYSICAL side under-reads → the gate (which assumes
+the physical side is the reference) excludes the possibly-HONEST usable
+reading. The invariant correctly detects a broken meter; attribution needs the
+§2 reference-quality residuals (busy-channel floor: e.g. feed the inter-chirp
+gap of every RECEIVED frame — those exist all transfer long — rather than
+relying on idle windows). Forensic log: ~/Documents/ultra_forensics/F236_mac.log.
+Until fixed, expect sanity firings on busy rig MC-DPSK sessions; the excluded
+readings only affect rate selection, which sits at floor rungs there anyway.
+
 ## §9 (external review 2026-07-10): TNC SNR reporting semantics — FILED
 
 The TNC's polled SNR reads ProtocolEngine::getMeasuredSNR (Connection default
