@@ -291,3 +291,24 @@ _(none currently — R7 done, see Completed removals)_
 ## R11 (2026-07-07): wideOFDM short-reanchor charge machinery
 - **Scope:** `shouldUseWideOFDMShortReanchor` (now constant false), `wideOFDMShortReanchorChirpDurationMs`, `kWideOFDMShortReanchor*Ms` constants, the `reanchor_ms` parameters threaded through `wideOFDMBurstAirtimeMs`/`wideOFDMSackDelayMs` + 5 connection.cpp call sites + test_connection_policy reanchor rows. The encoder feature was removed in May (R4); the charge was a phantom that mis-priced every airtime budget (GROUP_SIZE_LEVER brief §1).
 - **KEEP:** the airtime FORMULAS themselves (budget/timeout derivations are live); `#69 anchor` streak machinery (unrelated); warm-handoff (the thing that superseded it).
+
+## R12 — tools/snr_meter_validation.sh + orphaned ofdm_snr_probe (REMOVED 2026-07-10)
+
+**What:** the shell-based SNR meter validation probe. External review (finding
+2) proved it FALSE-PASSING: its `ofdm_snr_probe` CMake target had been deleted
+(a stale orphaned binary lingered in build/), the script parsed the stale
+binary's columns incorrectly, dropped every row, and treated the empty summary
+as PASS (exit 0). Its header also asserted the pre-recalibration
+"+9.642 dB" expectation — wrong since the 2026-07-07 estimator fix.
+
+**Scope:** tools/snr_meter_validation.sh (deleted), build/ofdm_snr_probe
+(untracked artifact, removed). No CMake changes needed (target was already
+gone).
+
+**Superseded by:** tests/test_ofdm_snr_calibration.cpp (OFDMSnrCalibration
+CTest) — hard assertions, AWGN ±1.5 dB + colored-noise + 16-seed fading
+ensemble sections; plus MCDPSKSnrCalibration and
+ChannelIdleNoiseSNRCalibration.
+
+**KEEP (anti-footgun):** the CTest calibration suite and
+`docs/PERFORMANCE_HISTORY.md` records — this removal is the SCRIPT only.
