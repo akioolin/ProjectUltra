@@ -147,8 +147,18 @@ void StreamingEncoder::applyPaprReductionIfNeeded(std::vector<float>& samples,
                                                   bool is_control_frame,
                                                   const char* label) {
     last_papr_reduction_ = {};
-    if (!papr_reduction_enabled_ || !is_ofdm || is_control_frame ||
-        samples.empty()) {
+    // ULTRA_COHERENT_PAPR_DB self-enables for coherent mods (2026-07-13): the
+    // GUI setPaprReductionEnabled flag is the only enable path, which is why the
+    // RIG A/B this feature needs was never run headlessly. Setting the coherent
+    // threshold knob IS the intent to enable — the 2026-07-02 "cost>benefit"
+    // verdict was measured in SIM, which structurally CANNOT show the benefit
+    // (no peak-limited PA → peak-normalization gain is zero by construction);
+    // the rig is the only valid A/B. Knob default 0 = off = byte-identical.
+    const bool coherent_papr_knob_on =
+        ofdm_link_adaptation::isCoherentModulation(modulation_) &&
+        coherentPaprThresholdDb() > 0.0f;
+    if ((!papr_reduction_enabled_ && !coherent_papr_knob_on) || !is_ofdm ||
+        is_control_frame || samples.empty()) {
         return;
     }
 
