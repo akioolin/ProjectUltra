@@ -10,6 +10,19 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — fix(snr): SNR-SANITY exclusion is connected-only + distribution-convicted (F241: the ≥3 threshold was satisfied by chirp samples, and a single-sample comparison still blinded the entry)
+
+F241 failed identically AFTER the ≥3-sample threshold: the §6 chirp samples
+legitimately fill the ring to ≥3 by CONNECT time, and the comparison still
+used the LATEST single physical sample — which on this bench episodically
+under-reads (the filed IONOS gap-reference instability). Two rules now:
+(1) NO exclusion authority pre-connected — the physical entry CAP already
+bounds hot entries there; a false conviction blinds the pick entirely.
+(2) Conviction requires usable > ring_mean + ring_spread + 2.0 — on fading,
+one sample is one fade instant; the invariant only binds distributions.
+
+---
+
 ## 2026-07-13 — fix(snr): SNR-SANITY attribution threshold — the gate may only exclude with a ≥3-sample physical distribution (rig F238/F239: single-snapshot exclusion left entries BLIND at 15.0/none)
 
 At the handshake the physical ring holds 1-2 samples in an unknown fade state.

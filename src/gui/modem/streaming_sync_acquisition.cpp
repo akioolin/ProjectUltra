@@ -312,19 +312,29 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         // fallback). Single-sample disagreement is logged by the WARN below
         // when it trips with n>=3; below that, silence — a snapshot cannot
         // convict a meter.
+        // F241 (2026-07-13): two hard-won rules for exclusion authority.
+        // (1) NEVER pre-connected — at the handshake the physical entry CAP
+        //     already bounds a hot reading physically, so exclusion buys
+        //     nothing there and a false conviction blinds the entry pick
+        //     entirely (15.0/source-none default -> DQPSK fallback; F238/239/
+        //     241 all died this way, each against a single trough/ref-glitch
+        //     physical sample).
+        // (2) Convict against the ring DISTRIBUTION (mean + spread + margin),
+        //     never a single sample — on fading, usable and any one physical
+        //     sample are different fade instants; the invariant usable<=channel
+        //     only binds same-moment or distribution-vs-distribution.
         float ph_mean = 0.0f, ph_spread = 0.0f;
         const size_t ph_n = physicalSnrStats(ph_mean, ph_spread);
         if (result.snr_source == SNRSource::MCDPSK_IN_BAND &&
+            connected_ &&
             ph_n >= 3 &&
-            last_physical_snr_valid_.load() &&
-            result.snr_db > last_physical_snr_db_.load() + 2.0f) {
+            result.snr_db > ph_mean + ph_spread + 2.0f) {
             LOG_MODEM(WARN,
-                      "[%s] SNR-SANITY: usable %.1f dB EXCEEDS channel %.1f dB "
-                      "(+%.1f > 2.0 margin) — meter suspect, reading excluded "
-                      "from rate selection for this frame",
-                      log_prefix_.c_str(), result.snr_db,
-                      last_physical_snr_db_.load(),
-                      result.snr_db - last_physical_snr_db_.load());
+                      "[%s] SNR-SANITY: usable %.1f dB EXCEEDS channel "
+                      "%.1f±%.1f dB (n=%zu, margin 2.0) — meter suspect, "
+                      "reading excluded from rate selection for this frame",
+                      log_prefix_.c_str(), result.snr_db, ph_mean, ph_spread,
+                      ph_n);
             result.snr_source = SNRSource::SYNC_QUALITY;
         }
     }
