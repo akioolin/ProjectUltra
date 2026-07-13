@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — campaign (extended): 15-run B-arm fleet @ MPG@20 — 15/15 delivered, 0 meter incidents; multi-epoch mean 1.59 / median 1.47 / max 2.40
+
+F247-F261 on the re-based build: 2.40/2.14/1.81/1.60/1.82 (midday epoch),
+then 1.26/1.46/1.41/1.47/1.71/1.69/1.40/1.24/1.13/1.33 as the evening epoch
+roughened. Honest read: the old 2.04 ledger was ONE calm epoch (documented at
+the time); this fleet spans calm→rough and its distribution (min 1.13, median
+1.47, max 2.40) is the first multi-epoch characterization of the bench. The
+same-epoch comparisons stand: re-base +49% over the honest-arm (1.95 vs 1.31
+adjacent epochs); calm-epoch B-arm (2.27 first two runs) matches the calm-
+epoch ledger. RELIABILITY is the headline: 20/20 deliveries today post-fixes
+(the 2.04 ledger fleet was 8/10), with every meter truthful throughout.
+
+---
+
 ## 2026-07-13 — campaign: MPG@20 fleet on the honest-meter stack — ledger throughput RECOVERED with truthful instrumentation
 
 Same-day two-arm campaign at MPG@20, 50 KB transfers:
