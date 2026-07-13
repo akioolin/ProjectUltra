@@ -4,6 +4,8 @@
 #include "waveform/tone_burst_ack/tone_burst_constants.hpp"
 #include "waveform/tone_burst_ack/tone_burst_payload.hpp"
 
+#include "env_compat.hpp"  // setenv/unsetenv on MSVC (knob-pinning below)
+
 #include <cassert>
 #include <cstdlib>
 #include <cstdint>
