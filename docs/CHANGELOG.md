@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — campaign: MPG@20 fleet on the honest-meter stack — ledger throughput RECOVERED with truthful instrumentation
+
+Same-day two-arm campaign at MPG@20, 50 KB transfers:
+- A-arm (honest meters, +2.758 only): 1.07/1.56/1.69/1.18/1.49/0.86 — mean
+  **1.31**, one-to-two rungs under-exploited (the anchors' old-scale tuning).
+- B-arm (honest meters + measured 8.70 re-base): 2.40/2.14/1.81/1.60/1.82 —
+  mean **1.95**, 5/5 PASS, ZERO sanity incidents.
+Old ledger (biased meters, F177-F186): mean 2.04, record 2.70. B-arm vs
+ledger is statistically indistinguishable at the gate's ±25% fade noise →
+**the old fleet's speed, now on instruments that tell the truth.** The
+campaign also rig-caught and fixed three guard bugs (LTS glitch guard,
+sanity-gate attribution, connected-only distribution conviction) — 11/11
+delivered runs after the fixes, 0 meter incidents. §3 anchor re-measure
+remains the endgame that retires the 8.70 quarantine.
+
+---
+
 ## 2026-07-13 — fix(rate): kOfdmLegacyAnchorScaleOffsetDb re-measured 2.758 → 8.70 dB (the anchors were tuned on the FULL old-meter inflation, not just the structural bug)
 
 The honest-meter fleet (F237-F245: 1.07/1.56/1.69/1.18/1.49/0.86, F246 parked
