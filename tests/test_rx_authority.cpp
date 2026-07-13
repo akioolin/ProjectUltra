@@ -383,6 +383,39 @@ static bool test_sender_ignores_none_and_garbage() {
     return true;
 }
 
+// A fixed-rung probe is an operator command, not an advisory. Receiver authority
+// must not move the sender while ULTRA_LOCK_RATE is active.
+static bool test_operator_lock_overrides_authority() {
+    TEST("operator adaptation controls override receiver authority");
+
+    {
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);
+        setenv("ULTRA_LOCK_RATE", "1", 1);
+        TA::obey(c, kRungIdxQam8R23);
+        unsetenv("ULTRA_LOCK_RATE");
+        if (TA::modeChangePending(c)) FAIL("authority bypassed ULTRA_LOCK_RATE");
+    }
+    {
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);
+        setenv("ULTRA_RATE_ADAPT", "0", 1);
+        TA::obey(c, kRungIdxQam8R23);
+        unsetenv("ULTRA_RATE_ADAPT");
+        if (TA::modeChangePending(c)) FAIL("authority bypassed ULTRA_RATE_ADAPT=0");
+    }
+    {
+        setenv("ULTRA_ADAPTIVE_RATE", "0", 1);
+        Connection c;
+        unsetenv("ULTRA_ADAPTIVE_RATE");
+        TA::makeConnectedOFDM(c, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);
+        TA::obey(c, kRungIdxQam8R23);
+        if (TA::modeChangePending(c)) FAIL("authority bypassed ULTRA_ADAPTIVE_RATE=0");
+    }
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
@@ -403,6 +436,7 @@ int main() {
     ok &= test_no_observation_no_command();
     ok &= test_sender_obeys_and_dedups();
     ok &= test_sender_ignores_none_and_garbage();
+    ok &= test_operator_lock_overrides_authority();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }

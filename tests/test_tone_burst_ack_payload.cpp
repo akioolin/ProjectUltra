@@ -5,6 +5,7 @@
 #include "waveform/tone_burst_ack/tone_burst_payload.hpp"
 
 #include <cassert>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -559,6 +560,17 @@ void test_symbol_ms_staircase() {
 }  // namespace
 
 int main() {
+    EXPECT(!rungCmdCrcSpanRequired(false, false));
+    EXPECT(rungCmdCrcSpanRequired(true, false));
+    EXPECT(rungCmdCrcSpanRequired(false, true));
+    EXPECT(rungCmdCrcSpanRequired(true, true));
+
+    // Receiver authority is default-on, so the parameter-less production codec
+    // must cover its command bits even when no environment knob is present.
+    unsetenv("ULTRA_RX_RATE_CMD");
+    unsetenv("ULTRA_RX_RATE_AUTHORITY");
+    EXPECT(rungCmdCrcSpanEnabled());
+
     test_constants_sanity();
     test_pack_unpack_round_trip();
     test_pack_clamps_out_of_range_fields();

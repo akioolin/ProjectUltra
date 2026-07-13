@@ -96,20 +96,25 @@ inline uint32_t crcMessageBits(bool cover_rung_cmd) {
 
 }  // namespace
 
-// ULTRA_RX_RATE_CMD process-wide binding for the parameter-less overloads.
+// ULTRA_RX_RATE_CMD / ULTRA_RX_RATE_AUTHORITY process-wide binding for the
+// parameter-less overloads.
 // Read ONCE (static; same pattern as ULTRA_ARQ_MOVE_EPOCH's ctor read) — the
 // codec functions themselves stay stateless via the explicit-span overloads.
 bool rungCmdCrcSpanEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_RX_RATE_CMD");
-        if (e != nullptr && e[0] == '1') return true;
+        const bool rx_rate_cmd = !(e && e[0] == '0');
         // RX-AUTHORITY (2026-07-05) reinterprets [rate_hint|rung_cmd] as a 5-bit
         // absolute rung command — all five bits must sit inside the CRC span (a
         // corrupted command = a wrong-rate burst). Same lockstep semantics as
         // ULTRA_RX_RATE_CMD: a knob-OFF peer CRC-rejects these ACKs (fails safe
         // as ack loss).
         const char* a = std::getenv("ULTRA_RX_RATE_AUTHORITY");
-        return a != nullptr && std::atoi(a) != 0;
+        // Keep this default exactly aligned with rxRateAuthorityEnabled(). Both
+        // command paths are default-on; the legacy span is valid only when both
+        // have been explicitly disabled.
+        const bool rx_authority = a == nullptr || std::atoi(a) != 0;
+        return rungCmdCrcSpanRequired(rx_rate_cmd, rx_authority);
     }();
     return v;
 }

@@ -103,9 +103,21 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
         //     fades finite (-20 dB per-carrier) instead of log(<=0).
         //     This term (+10log10(1+1/SNR_c)) GREW under fading — the
         //     "reads 16.4 while the link can't hold QPSK R1/2" optimism.
-        const float debiased_signal_power = std::max(
-            signal_power - corrected_noise_power,
-            0.01f * corrected_noise_power);
+        // GLITCH GUARD (rig F237, 2026-07-13): a frame that achieved LTS sync
+        // has processing-gain-proven signal presence — a same-frame noise
+        // estimate at/above the signal power is a MEASUREMENT FAULT (timing
+        // slip / CFO glitch corrupting the LTS pair), not channel state.
+        // Without this, the debias floors at 0.01x and one glitch frame
+        // injects a -19.5 dB reading into the EMA (rig meter collapsed to
+        // -9.2 at a 20 dB channel -> authority demote churn + ACK-staircase
+        // flapping). Skip the update; the EMA holds and the next clean frame
+        // measures honestly. A GENUINE deep fade produces no LTS sync and
+        // therefore no reading — same outcome, no lie either way.
+        if (signal_power <= 2.0f * corrected_noise_power) {
+            return;
+        }
+        const float debiased_signal_power =
+            signal_power - corrected_noise_power;
         const float snr_per_carrier_db = 10.0f * std::log10(
             debiased_signal_power / std::max(corrected_noise_power, 1.0e-12f));
         // (b) GEOMETRIC per-carrier -> in-band conversion. The old
@@ -165,9 +177,11 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
         dof_corrected_noise *= static_cast<float>(independent_bins) /
                                static_cast<float>(independent_bins - 1);
     }
-    const float debiased_signal_power =
-        std::max(signal_power - dof_corrected_noise,
-                 0.01f * dof_corrected_noise);
+    // Same glitch guard as the noise_reference_only path above.
+    if (signal_power <= 2.0f * dof_corrected_noise) {
+        return;
+    }
+    const float debiased_signal_power = signal_power - dof_corrected_noise;
     const float snr_per_carrier_db =
         10.0f * std::log10(debiased_signal_power / dof_corrected_noise);
     const float broadband_snr_db =

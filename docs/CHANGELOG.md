@@ -10,6 +10,26 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — fix(snr): LTS glitch guard — a synced frame at sub-0 dB is a measurement fault, not channel state (rig F237: meter collapsed to −9.2 at a 20 dB channel)
+
+The 07-10 estimation-noise debias floored at 0.01× when a glitched LTS pair
+(rig timing jitter on fading) pushed the noise estimate above the signal —
+one glitch frame injected a −19.5 dB reading into the meter EMA; two or three
+collapsed it to −9.2 at MPG@20 → authority demote churn, ACK-staircase
+flapping, ring spread ±13.5 (the pre-fix guard-biased code had masked the same
+glitches as spikes UP). Physics: a frame that achieved LTS sync has
+processing-gain-proven signal presence — same-frame noise ≥ signal is a fault;
+SKIP the meter update (both estimator paths). A genuine deep fade never syncs
+and thus never lies either way. Sim gates passed pre-fix because sim timing is
+clean — the rig is the glitch amplifier (fidelity lesson: single-seed sim
+gates under-sample LTS-glitch behavior).
+
+Verified: OFDMSnrCalibration full matrix unchanged; good@20 PASS 1650 bps with
+ZERO negative lts readings; ctest 85/85 (one TNC straggler artifact, clean on
+rerun). Forensics: ~/Documents/ultra_forensics/F237_{mac,pi5}.log.
+
+---
+
 ## 2026-07-10 — fix(snr): review findings 3/5 — getStats() live overlay (meters no longer freeze during bursts) + session-teardown SNR clear; finding 2 script removed; finding 7 filed
 
 **Finding 3:** the LoopbackStats cache is refreshed only by the per-frame

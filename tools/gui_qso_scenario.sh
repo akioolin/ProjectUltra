@@ -195,6 +195,16 @@ sum_cw_fail() {
 count_deinterleave_fail() { count_pattern 'Frame deinterleave decode FAILED' "$1"; }
 count_deinterleave_ok()   { count_pattern 'Frame deinterleave decode SUCCESS' "$1"; }
 
+count_unexpected_rate() {
+  local file="$1"
+  awk -v expected="$EXPECT_RATE" '
+    /Data mode set to:/ {
+      if (index($0, " " expected " ") == 0) ++n
+    }
+    END { print n + 0 }
+  ' "$file" 2>/dev/null
+}
+
 sum_tx_samples() {
   local file="$1"
   { grep -E 'TX(:| Burst:).* -> [0-9]+ samples' "$file" 2>/dev/null || true; } |
@@ -249,11 +259,11 @@ collect_metrics() {
   [[ -z "$actual_data_mode" ]] && actual_data_mode="unknown"
   alpha_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$ALPHA_LOG")"
   bravo_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$BRAVO_LOG")"
-  # Forced-rung floor probes (ULTRA_FORCE_DATA_MOD / ULTRA_FORCE_WAVEFORM) PIN the
-  # mod/waveform — the modem cannot adapt away, so the "unexpected data mode" watchdog is
-  # meaningless. Worse, the per-EXPECT_MOD pattern's catch-all (e.g. DQPSK -> the '*' case)
-  # false-matches the NORMAL "Data mode set to:" / "MODE_CHANGE: OFDM" lines, so the live
-  # poll loop kills the run ~2 s after handshake before any data flows. Disable when forced.
+  alpha_unexpected_rates="$(count_unexpected_rate "$ALPHA_LOG")"
+  bravo_unexpected_rates="$(count_unexpected_rate "$BRAVO_LOG")"
+  # Force knobs select the entry profile; ULTRA_LOCK_RATE is what pins it after
+  # handshake. Keep the unexpected-mode watchdog active for locked probes so a
+  # force/authority configuration error cannot be reported as a fixed-rung PASS.
   #
   # --expect-mod any|coherent (2026-06-12, Phase 1): the adaptive ladder is ALLOWED to
   # vary/promote the modulation (e.g. QPSK -> 16QAM under ULTRA_ENABLE_QAM16_LADDER), so a
@@ -264,11 +274,12 @@ collect_metrics() {
   # 2026-07-02: with the fade-riding ladder default-ON (ULTRA_LOCK_RATE=0), mid-transfer
   # rate/modulation moves are the MECHANISM, not a failure — the pinning watchdog only
   # applies when the operator pinned the rate (ULTRA_LOCK_RATE=1).
-  if [[ -n "${ULTRA_FORCE_DATA_MOD:-}" || -n "${ULTRA_FORCE_WAVEFORM:-}" \
-        || "$EXPECT_MOD" == "any" || "$EXPECT_MOD" == "coherent" \
+  if [[ "$EXPECT_MOD" == "any" || "$EXPECT_MOD" == "coherent" \
         || "${ULTRA_LOCK_RATE:-0}" == "0" ]]; then
     alpha_unexpected_modes=0
     bravo_unexpected_modes=0
+    alpha_unexpected_rates=0
+    bravo_unexpected_rates=0
   fi
   file_crc_ok="$(count_pattern "\\[FILE\\] Received .*\\(${FILE_BYTES} bytes, CRC ok|FileTransfer: Received OK \\(${FILE_BYTES} bytes|Received OK .*${FILE_BYTES} bytes.*CRC" "$BRAVO_LOG")"
   alpha_file_done="$(count_pattern '\[FILE\] Transfer complete|FileTransfer: Transfer complete' "$ALPHA_LOG")"
@@ -317,7 +328,7 @@ scenario_passed() {
   # PASS = the file delivered CRC-clean (BRAVO verified the file + ALPHA finalized the
   # transfer). DELIVERY is the verdict.
   #
-  # We do NOT require the run to have hit the EXACT expected (mod, rate). The old gate
+  # Adaptive runs do not have to hit the exact expected (mod, rate). The old gate
   # `alpha_mode_count>0 && bravo_mode_count>0` counted the literal string
   # "configured for <EXPECT_MOD> <EXPECT_RATE>" and so FALSE-FAILED any delivered transfer
   # whose negotiated rate differed from --expect-rate. That is common and correct on a
@@ -325,11 +336,12 @@ scenario_passed() {
   # seeds land in the Moderate class (>=0.65), where the ladder rightly picks QPSK R1/4 —
   # not the R2/3 a caller guessed. Those runs delivered CRC-clean but were stamped FAIL
   # (REASON=process_exit_before_pass), corrupting reliability sweeps. The actual negotiated
-  # mode is recorded as ACTUAL_DATA_MODE in summary.env for diagnostics; EXPECT_RATE is
-  # only used to size the timeout budget, not to gate PASS.
+  # mode is recorded as ACTUAL_DATA_MODE in summary.env for diagnostics. Locked probes
+  # are different: every reported data-mode rate must match EXPECT_RATE, and the
+  # modulation watchdog below enforces EXPECT_MOD.
   #
-  # We still reject drift to an UNEXPECTED MODULATION (e.g. QAM16 when probing QPSK) — that
-  # is a real "wrong rung" signal, distinct from a benign rate change within the same mod.
+  # We reject drift to an unexpected modulation on locked probes (e.g. QAM16 when
+  # probing QPSK); rate changes are rejected by the unexpected-rate counters.
   #
   # We intentionally do NOT gate on disconnect bookkeeping: the disconnect INITIATOR (ALPHA,
   # on the payload-drained auto-disconnect) quits during teardown and never logs a
@@ -338,13 +350,16 @@ scenario_passed() {
   # verdict; close cleanliness is tracked separately.)
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
+  [[ "$alpha_unexpected_rates" -eq 0 ]] &&
+  [[ "$bravo_unexpected_rates" -eq 0 ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
   [[ "$alpha_file_done" -gt 0 ]]
 }
 
 hard_failure_reason() {
   local pattern='max retries exceeded|maximum retries exceeded|transfer failed|Transfer failed|FileTransfer: .*failed|FILE.*failed|SR-ARQ:.*retries exhausted|Connection: Connect failed|Connect failed after|giving up'
-  if [[ "${alpha_unexpected_modes:-0}" -gt 0 || "${bravo_unexpected_modes:-0}" -gt 0 ]]; then
+  if [[ "${alpha_unexpected_modes:-0}" -gt 0 || "${bravo_unexpected_modes:-0}" -gt 0 \
+        || "${alpha_unexpected_rates:-0}" -gt 0 || "${bravo_unexpected_rates:-0}" -gt 0 ]]; then
     echo "unexpected_data_mode"
     return
   fi
@@ -388,6 +403,8 @@ write_summary() {
     echo "BRAVO_MODE_COUNT=$bravo_mode_count"
     echo "ALPHA_UNEXPECTED_MODE_COUNT=$alpha_unexpected_modes"
     echo "BRAVO_UNEXPECTED_MODE_COUNT=$bravo_unexpected_modes"
+    echo "ALPHA_UNEXPECTED_RATE_COUNT=$alpha_unexpected_rates"
+    echo "BRAVO_UNEXPECTED_RATE_COUNT=$bravo_unexpected_rates"
     echo "FILE_CRC_OK_COUNT=$file_crc_ok"
     echo "ALPHA_FILE_DONE_COUNT=$alpha_file_done"
     echo "ALPHA_DISCONNECTED_COUNT=$alpha_disconnected"

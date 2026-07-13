@@ -422,7 +422,7 @@ inline uint8_t snapRungIndexDownToEnabled(uint8_t idx) {
     return kRungIdxNone;
 }
 
-// ULTRA_RX_RATE_AUTHORITY (2026-07-05, default OFF): receiver-commanded absolute
+// ULTRA_RX_RATE_AUTHORITY (2026-07-05, default ON): receiver-commanded absolute
 // rung selection — the receiver maps ITS fresh per-group channel measurements
 // through selectCoherentOFDM and commands the sender's next rung on every group
 // ACK; the sender OBEYS (descriptor commit) and its own mid-transfer rate drivers

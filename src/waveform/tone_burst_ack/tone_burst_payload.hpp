@@ -112,9 +112,9 @@ struct ToneBurstAckPayload {
 //
 // STATELESSNESS: the CRC span is a PARAMETER of every pack/verify/codec entry
 // point (`cover_rung_cmd`). The parameter-less overloads bind it once from the
-// ULTRA_RX_RATE_CMD env (read a single time, process-wide — the production
-// encoder/detector path); tests pass it explicitly, so no env ordering can
-// change a test's meaning.
+// ULTRA_RX_RATE_CMD / ULTRA_RX_RATE_AUTHORITY env (read a single time,
+// process-wide — the production encoder/detector path); tests pass it
+// explicitly, so no env ordering can change a test's meaning.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on
@@ -122,7 +122,13 @@ struct ToneBurstAckPayload {
 // for our 26-bit message — overkill for ACK semantics.
 
 // Process-wide CRC-span binding for the parameter-less overloads below:
-// true iff ULTRA_RX_RATE_CMD=1 (read once on first use).
+// true when either default-on receiver command path is enabled (read once on
+// first use). The pure predicate is exposed so all four feature states can be
+// tested without depending on the process-wide environment latch.
+inline constexpr bool rungCmdCrcSpanRequired(bool rx_rate_cmd_enabled,
+                                             bool rx_authority_enabled) {
+    return rx_rate_cmd_enabled || rx_authority_enabled;
+}
 bool rungCmdCrcSpanEnabled();
 
 // Pack the kPayloadBits (44) raw payload bits (excluding Hamming) into a

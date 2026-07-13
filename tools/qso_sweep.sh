@@ -65,6 +65,11 @@ while read -r ch snr mod rate fkb _rest || [[ -n "${ch:-}" ]]; do
     dir="$OUT_ROOT/$tag"
     echo ">>> [$i] $ch @ ${snr} dB  $mod $rate  ${fkb} KB  (seed $sd)" >&2
 
+    ULTRA_RX_RATE_AUTHORITY=0 \
+    ULTRA_RX_RATE_CMD=0 \
+    ULTRA_ADAPTIVE_RATE=0 \
+    ULTRA_RATE_ADAPT=0 \
+    ULTRA_LOCK_RATE=1 \
     ULTRA_FORCE_WAVEFORM=OFDM_CHIRP \
     ULTRA_FORCE_DATA_MOD="$mod" \
     ULTRA_FORCE_DATA_RATE="$rate_us" \

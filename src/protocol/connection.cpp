@@ -196,8 +196,8 @@ Connection::Connection(const ConnectionConfig& config)
     }
 
     // RX-RATE-CMD Phase 2 (design §5.2, knob ULTRA_RX_RATE_CMD, read once per
-    // Connection; default OFF = byte-identical — rung_cmd bits stay 0 AND the tone-ACK
-    // CRC span stays 28 bits, see tone_burst_payload.cpp rungCmdCrcSpanEnabled()).
+    // Connection; default ON since 2026-07-05). The tone-ACK codec must use the
+    // widened CRC span whenever this command path or RX authority is enabled.
     // SEMANTICS-BREAKING lockstep when ON; the descriptor-committed consume path
     // additionally needs ULTRA_DESCRIPTOR_MODE_SWITCH (+ ULTRA_ARQ_MOVE_EPOCH for
     // mid-window) — it falls back to the legacy MODE_CHANGE exchange without them.
@@ -2649,6 +2649,10 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
     if (cmd_idx == kRungIdxNone || cmd_idx >= kRungIdxCount) return;
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
+    // The operator pin is the final authority. Receiver authority replaces the
+    // adaptive controller, but it must not bypass ULTRA_LOCK_RATE or an explicit
+    // ULTRA_RATE_ADAPT=0 fixed-rung measurement.
+    if (!rateAdaptationActive()) return;
     if (mode_change_pending_) return;  // a move is already in flight — obey later copies
     CoherentPick pick = coherentRungFromIndex(cmd_idx);
     Modulation mod = pick.mod;
