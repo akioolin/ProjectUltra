@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — fix(rate): kOfdmLegacyAnchorScaleOffsetDb re-measured 2.758 → 8.70 dB (the anchors were tuned on the FULL old-meter inflation, not just the structural bug)
+
+The honest-meter fleet (F237-F245: 1.07/1.56/1.69/1.18/1.49/0.86, F246 parked
+at R1/4) sat 1-2 rungs below the 2.04 ledger at the same dial. Archaeology on
+the per-ACK staircase traces: old-era median 23.8 dB (n=539) vs honest-era
+15.1 dB (n=190) — the rung anchors were tuned **8.70 dB** above the honest
+scale: structural +2.758 PLUS the guard-bin noise under-read on this bench's
+band-limited noise PLUS the fading/LS optimism. The quarantine constant now
+carries the measured value (bench-measured — the guard-bin component depends
+on noise shape; OTASim runs hotter under it, measured PASS **3160 bps** at
+good@20, a sim-gate record). The §3 anchor re-measure remains the honest
+endgame; this makes the bench exploit its channel meanwhile.
+
+---
+
 ## 2026-07-13 — fix(snr): SNR-SANITY exclusion is connected-only + distribution-convicted (F241: the ≥3 threshold was satisfied by chirp samples, and a single-sample comparison still blinded the entry)
 
 F241 failed identically AFTER the ≥3-sample threshold: the §6 chirp samples

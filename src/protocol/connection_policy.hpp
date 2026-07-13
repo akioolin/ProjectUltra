@@ -28,7 +28,19 @@ namespace connection_policy {
 // not fitted: 10log10(P_ref/(P_ofdm)) at 59 carriers/1024 FFT. The SNR-dependent
 // debias intentionally passes through (that WAS the fading-optimism bug).
 // Grep for this constant to find every compatibility site; delete them together.
-inline constexpr float kOfdmLegacyAnchorScaleOffsetDb = 2.758f;
+//
+// RE-MEASURED 2026-07-13 (rig F237-F245 vs the F208-F217 ledger, same dial
+// MPG@20, same bench): per-ACK ofdm_broadband medians — old (biased) era
+// 23.8 dB (n=539) vs honest era 15.1 dB (n=190) → the anchors were tuned
+// 8.70 dB above the honest scale, NOT 2.758: the structural conversion bug
+// was only part of the old inflation; the guard-bin noise under-read on this
+// bench's band-limited noise (finding 1) and the fading/LS optimism made up
+// the rest. With only +2.758 the authority sat 1-2 rungs low (fleet 1.07-1.69
+// vs ledger 2.04; F246 parked at R1/4). NOTE this is a BENCH-MEASURED value
+// (the guard-bin component depends on the noise shape); on OTASim (white
+// noise) it over-boosts the authority — acceptable hotter-sim until the §3
+// anchor re-measure replaces the whole quarantine.
+inline constexpr float kOfdmLegacyAnchorScaleOffsetDb = 8.70f;
 
 
 inline constexpr uint32_t kOFDMSampleRate = 48000;
