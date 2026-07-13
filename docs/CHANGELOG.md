@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-13 — fix(snr): SNR-SANITY attribution threshold — the gate may only exclude with a ≥3-sample physical distribution (rig F238/F239: single-snapshot exclusion left entries BLIND at 15.0/none)
+
+At the handshake the physical ring holds 1-2 samples in an unknown fade state.
+F238/F239 (MPG@20): the connect frame's reading tripped the gate against that
+single snapshot, was excluded from rate selection, and the entry was picked
+with NO measurement at all — the protocol default 15.0 dB / source NONE →
+blind conservative DQPSK fallback (2 of 3 campaign entries). A snapshot cannot
+convict a meter: the exclusion now requires the same ≥3-sample trust bar the
+distribution display uses; below it the gate is silent. The F236 busy-channel
+detection (ring well-populated) is unaffected.
+
+Verified: ctest 85/85; good@20 PASS 1600 bps.
+
+---
+
 ## 2026-07-13 — fix(snr): LTS glitch guard — a synced frame at sub-0 dB is a measurement fault, not channel state (rig F237: meter collapsed to −9.2 at a 20 dB channel)
 
 The 07-10 estimation-noise debias floored at 0.01× when a glitched LTS pair

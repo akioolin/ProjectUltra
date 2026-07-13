@@ -303,7 +303,19 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         // −0.66 dB noise-ref residual + both estimators' per-frame variance;
         // tighten alongside the §2 residual fix. This exact invariant caught
         // the pre-recalibration OFDM optimism from a single operator log line.
+        // ATTRIBUTION THRESHOLD (rig F238, 2026-07-13): the gate may only
+        // EXCLUDE a reading when its physical reference is a DISTRIBUTION
+        // (>=3 ring samples — the display's own trust bar), not a single
+        // snapshot. At the handshake the ring holds 1-2 samples in an unknown
+        // fade state; excluding the connect frame's ONLY reading left the
+        // entry pick blind (protocol default 15.0/source-none -> DQPSK
+        // fallback). Single-sample disagreement is logged by the WARN below
+        // when it trips with n>=3; below that, silence — a snapshot cannot
+        // convict a meter.
+        float ph_mean = 0.0f, ph_spread = 0.0f;
+        const size_t ph_n = physicalSnrStats(ph_mean, ph_spread);
         if (result.snr_source == SNRSource::MCDPSK_IN_BAND &&
+            ph_n >= 3 &&
             last_physical_snr_valid_.load() &&
             result.snr_db > last_physical_snr_db_.load() + 2.0f) {
             LOG_MODEM(WARN,
