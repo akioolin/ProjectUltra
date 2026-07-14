@@ -84,6 +84,33 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-13 — feat(papr): ACE built + rig A/B — proven SAFE (guaranteed non-negative), gain ~0.8 dB below the 3-pair noise floor; stays default-off
+
+ACE (src/ofdm/papr_ace.hpp, ULTRA_ACE_PAPR, default off) extends outer
+constellation points OUTWARD to shave peaks. Unit-proven (test_papr_ace):
+0.7-0.9 dB PAPR reduction, and the two invariants that make it SAFE — every
+point moves only outward (never toward a decision boundary), pilots/empty bins
+untouched. This is a GUARANTEE, not a measurement: ACE mathematically cannot
+increase BER, so the crude clip's −58% clean-channel crater is IMPOSSIBLE for
+ACE by construction.
+
+Rig A/B (F273-F278, interleaved 16QAM natural MPG@30): pairs +1.20/+0.34/−0.65
+kbps, mean ACE 2.97 vs OFF 2.74 (+8%) — INSIDE the ±25% fade-epoch noise, so
+inconclusive (as predicted: 0.8 dB is too small to resolve in 3 pairs). The
+−0.65 pair is 100% epoch (F278 hit 441 channel CW-fails; ACE cannot cause
+them). Stays default-off — won't flip a default on an unresolved small gain —
+but it is a ZERO-RISK option (worst case neutral), unlike the clip (footgun).
+
+PAPR arc CLOSED: tone reservation doesn't fit our packed spectrum (frame
+redesign); crude clip = big gain but channel-state-dependent harmful (net −12%,
+default-off); ACE = safe but small. No free lunch. NEXT (filed §10/§11): the
+best NET is likely ACE-always-on (free safety) + SNR-gated clip for the
+marginal case (rig-measured +39% where starved) — needs the peer-margin
+plumbing (RX usable-SNR → TX). A many-pair ACE campaign could still justify
+default-on if the +8% holds.
+
+---
+
 ## 2026-07-13 — experiment(papr): rig A/B of ULTRA_COHERENT_PAPR_DB — crude clip is CHANNEL-STATE-DEPENDENT harmful (net −12%); stays default-off, tone-reservation is the real fix
 
 The 2026-07-02 PAPR disable was a SIM verdict that structurally cannot show the

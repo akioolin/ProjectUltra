@@ -274,6 +274,22 @@ bound). Cheaper interim: SNR-gate the existing crude clip (enable only when the
 RX-reported usable SNR is within ~2 dB of the active constellation's floor —
 exactly the marginal state where it helped). Evidence: CHANGELOG 2026-07-13.
 
+## §11 (2026-07-13): PAPR endgame — ACE (safe, small) + SNR-gated clip (big, marginal-only)
+
+Built + rig-tested (CHANGELOG 2026-07-13). ACE is default-off, proven-safe,
+~0.8 dB (below the 3-pair noise floor). The remaining levers:
+1. Longer ACE campaign (10+ pairs) to resolve the +8% — if real, ACE default-on
+   is FREE (guaranteed non-negative).
+2. SNR-gated crude clip: the clip's rig-measured +39%-when-marginal is the big
+   number; gate it to fire ONLY when the RX-reported usable SNR is within ~2 dB
+   of the active constellation floor (the marginal state where it helped),
+   off otherwise (avoids the −58% clean crater). Needs peer-margin plumbing:
+   the receiver knows its usable SNR (already commands the rung via authority);
+   add a PAPR-request bit to the ACK, or have the connection set
+   modem_.setPaprReductionEnabled dynamically from the peer's reported SNR.
+3. ACE tuning: lower clip_ratio / more iters for QPSK/8PSK (all points
+   extendable → more room than QAM) — could push the lower rungs' gain higher.
+
 ## §9 (external review 2026-07-10): TNC SNR reporting semantics — FILED
 
 The TNC's polled SNR reads ProtocolEngine::getMeasuredSNR (Connection default
