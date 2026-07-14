@@ -84,6 +84,35 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-14 — fix(arq): keepalive ACK REVERTED to default-off — re-emits re-assert the rung command (pins R1/4 on a stall); + surfaced a pre-existing MPG@20 over-demote
+
+Rig F293-F298 (MPG@20, keepalive default-on) exposed two problems (operator-
+caught: "R1/4 doesn't make sense" + "ACK while receiving"):
+
+1. **KEEPALIVE FLAW (mine):** the keepalive re-emits the FULL tone-burst ACK,
+   which carries the current rung command (rate_hint). During a stall the
+   receiver's reading is momentarily low, so the re-emits (7× the same
+   group_seq) RE-ASSERT rate_hint=1 → PIN R1/4 through any recovery, and the
+   18 fires/transfer add ACK-vs-burst collision traffic (visible on the
+   waterfall). A keepalive must trigger a RESEND, not re-command the rung.
+   REVERTED to default-off. BLOCKER for default-on: emit a rung-NEUTRAL/HOLD
+   keepalive (base+bitmap only, don't refresh rate_hint).
+
+2. **PRE-EXISTING OVER-DEMOTE (the real "R1/4 doesn't make sense"):** at MPG@20
+   — Multipath GOOD — the receiver read fading index 0.65 as **Moderate** and
+   usable **8.8 dB** (channel 12.0, dial 20 → an 11 dB gap), so its authority
+   demoted to R1/4 (38× rate_hint=1). The Good/Moderate discriminator
+   fuzzy-boundary (0.65 straddles the threshold) + the large dial→usable gap
+   over-demote a healthy Good@20 channel. FILED: this is a rate-selection
+   accuracy issue independent of the keepalive — likely a bigger lever than the
+   stall fix (over-demoting to R1/4 at Good@20 caps throughput hard).
+
+The keepalive mechanism (cap the 44 s stall) remains sound + rig-proven
+(F290/F291 8 s cap; F292 universal 16 s cap); it needs the neutral-rung
+variant before default-on. Stays opt-in (ULTRA_KEEPALIVE_ACK=1).
+
+---
+
 ## 2026-07-14 — feat(arq): keepalive ACK now DEFAULT-ON — universal channel-busy gate makes it collision-safe on GUI AND TNC
 
 The TNC-path blocker is fixed. The keepalive's collision-safety no longer

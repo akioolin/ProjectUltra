@@ -4432,10 +4432,19 @@ void Connection::tick(uint32_t elapsed_ms) {
             // so it no longer depends on the GUI-only listen-before-ACK (which
             // had blocked default-on: the headless TNC lacked it). Both the GUI
             // (app.cpp) and the TNC (ultra_tnc.cpp) wire the query from the modem.
+            // DEFAULT-OFF (reverted 2026-07-14, rig F293-F298 MPG@20): the
+            // keepalive re-emits the FULL tone-burst ACK, which carries the
+            // current rung command (rate_hint). During a stall the receiver's
+            // reading is momentarily low (usable 8.8, fading misread Moderate),
+            // so the re-emits RE-ASSERT the low rung (rate_hint=1 → R1/4) 7×,
+            // PINNING R1/4 through recovery + adding ACK-vs-burst collision
+            // traffic (18 fires/transfer). A keepalive must trigger a RESEND,
+            // NOT re-command the rung. BLOCKER for default-on: emit a
+            // rung-NEUTRAL/HOLD keepalive (base+bitmap only, no rate_hint
+            // update). Until then opt-in.
             static const bool keepalive_ack_enabled = [] {
                 const char* e = std::getenv("ULTRA_KEEPALIVE_ACK");
-                if (!e || e[0] == '\0') return true;         // default-ON
-                return !(e[0] == '0' && e[1] == '\0');       // "0" opts out
+                return e != nullptr && e[0] != '\0' && e[0] != '0';
             }();
             // Threshold env-tunable (ULTRA_KEEPALIVE_ACK_MS, default 25000).
             // The keepalive routes through listen-before-ACK (defers on channel

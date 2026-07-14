@@ -27,6 +27,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   (~1.2 Hz clock/jitter wander over the 144 ms training window explains it exactly; sim reads
   10.1 dead-on). The operator display should eventually show BOTH numbers.
 
+### BUG-MPG20-OVER-DEMOTE-R14: Good@20 read as Moderate + low usable → authority over-demotes to R1/4 (operator: "R1/4 doesn't make sense")
+
+- **Rig F293-F298 (MPG@20, 2026-07-14).** At MPG@20 (Multipath GOOD, effective
+  ~15 dB) the receiver read fading index **0.65 → "Moderate"** and usable
+  **8.8 dB** (physical channel 12.0; dial 20 → usable 8.8 = ~11 dB gap), so the
+  RX authority commanded rate_hint=1 → **QPSK R1/4** (38× rate_hint=1 in one
+  transfer). R1/4 at Good@20 caps throughput hard (2 bits × R1/4 vs the R2/3
+  the channel supports).
+- **Two contributing causes (both pre-existing):** (a) the Good/Moderate
+  Doppler discriminator fuzzy boundary — 0.65 straddles the Good/Moderate
+  threshold, so Good@20 intermittently reads Moderate (see
+  [[project_disc_radio_agnostic_fuzzy_boundary_2026_06_20]]); (b) usable 8.8 vs
+  channel 12.0 vs dial 20 — the usable (effective/demod) SNR is ~3 dB under
+  physical AND physical is ~8 dB under dial (fading Jensen + implementation
+  loss), and the rate anchors may be too conservative for the honest-meter
+  scale at this fading class.
+- **Likely a BIGGER throughput lever than the stall fix** — over-demoting a
+  healthy Good@20 to R1/4 is a large, systematic loss. Investigate: is the
+  fading misclassification the dominant cause (fix the discriminator boundary),
+  or the usable-reading conservatism (fading class × anchor calibration)?
+- Independent of the keepalive (which merely AMPLIFIED it by re-asserting the
+  low rung — see CHANGELOG 2026-07-14).
+
 ### BUG-ANCHOR-WAIT-NO-ACK-STALL: marginal-SNR bursts rejected in full-anchor-wait emit NO ACK → sender 44 s RTO stall (THE marginal-SNR throughput lever, quantified ~+30%)
 
 - **Discovered/quantified 2026-07-14 (operator-caught "we didn't even ACK at
