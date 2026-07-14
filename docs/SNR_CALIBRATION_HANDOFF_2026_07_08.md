@@ -258,6 +258,22 @@ relying on idle windows). Forensic log: ~/Documents/ultra_forensics/F236_mac.log
 Until fixed, expect sanity firings on busy rig MC-DPSK sessions; the excluded
 readings only affect rate selection, which sits at floor rungs there anyway.
 
+## §10 (rig-measured 2026-07-13): PAPR reduction — tone reservation, NOT crude clip
+
+Rig A/B (F267-F272, interleaved 16QAM MPG@30) proved the crude amplitude clip
+(ULTRA_COHERENT_PAPR_DB) is channel-state-dependent harmful: +39% on a marginal
+channel, −58% on a clean one (clip EVM injects errors into a signal the RX was
+decoding fine), net −12%. The 4.5 dB peak-normalization power gain is REAL and
+hardware-only (sim can't show it). To capture it without the clean-channel
+crater, the technique must add ZERO data-EVM: TONE RESERVATION (reserve K
+carriers, solve for peak-cancelling tones per symbol — no information carriers
+touched). Payoff estimate: the +39% marginal-channel gain WITHOUT the downside,
+i.e. lets 16QAM hold ~4 dB lower and unlocks the currently-disabled 16QAM R3/4
+rung (~4.3 kbps raw). Also improves 32QAM (PHY works at MPG@30 but is retx-
+bound). Cheaper interim: SNR-gate the existing crude clip (enable only when the
+RX-reported usable SNR is within ~2 dB of the active constellation's floor —
+exactly the marginal state where it helped). Evidence: CHANGELOG 2026-07-13.
+
 ## §9 (external review 2026-07-10): TNC SNR reporting semantics — FILED
 
 The TNC's polled SNR reads ProtocolEngine::getMeasuredSNR (Connection default

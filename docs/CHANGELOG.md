@@ -84,6 +84,36 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-13 — experiment(papr): rig A/B of ULTRA_COHERENT_PAPR_DB — crude clip is CHANNEL-STATE-DEPENDENT harmful (net −12%); stays default-off, tone-reservation is the real fix
+
+The 2026-07-02 PAPR disable was a SIM verdict that structurally cannot show the
+peak-normalization power benefit (OTASim has no peak-limited element). Added a
+headless self-enable (ULTRA_COHERENT_PAPR_DB>0 → on for coherent mods) and ran
+the rig A/B that was never possible — interleaved same-epoch, natural 16QAM,
+MPG@30, PAPR off vs on@10dB, 3 pairs (F267-F272):
+- Mechanism CONFIRMED: 14.5→10.1 dB peak reduction = ~4.5 dB average-power gain
+  after peak-normalization (real, hardware-only).
+- BUT the result is channel-state-dependent: marginal channel (OFF 2.38) →
+  PAPR ON +39% (3.31); CLEAN channel (OFF 3.33) → PAPR ON −58% (1.38, 1199
+  CW-fails). Mean ON 2.50 vs OFF 2.84 = **net −12%**. On a clean channel the
+  clip's EVM INJECTS errors that weren't there (self-inflicted on a signal the
+  RX was decoding fine) — the crude fixed-threshold amplitude clip cannot ship
+  enabled. The knob correctly STAYS default-off, now on RIG evidence.
+- 32QAM (F263-F266): PHY decodes at MPG@30 but is retx-bound to ~16QAM
+  throughput (~3.25 kbps) even PAPR-fed — not a throughput win on this channel.
+- 16QAM HOLDS at MPG@30 (F262): 3.37 kbps, a rig record (headroom was the whole
+  limit at MPG@20).
+
+REAL FIX (filed, not built): TONE RESERVATION — peak cancellation on reserved
+carriers = ZERO data-EVM, so it captures the +39% marginal-channel benefit
+WITHOUT the −58% clean-channel crater. The only PAPR technique whose cost
+doesn't scale with clean-channel decode margin. Alternative: SNR-gated crude
+clip (clip only when RX reports usable near the constellation floor) — cheaper,
+hackier. Methodology note: interleaved A/B caught this — pair 1 alone said
+"+39%, ship it"; the crater was in pair 3.
+
+---
+
 ## 2026-07-13 — fix(snr): LTS glitch guard — a synced frame at sub-0 dB is a measurement fault, not channel state (rig F237: meter collapsed to −9.2 at a 20 dB channel)
 
 The 07-10 estimation-noise debias floored at 0.01× when a glitched LTS pair
