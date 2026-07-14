@@ -258,25 +258,27 @@ static bool writeF32File(const std::string& path, const std::vector<float>& samp
 }
 
 // Convert fading index to channel quality string
-// Thresholds aligned with waveform_selection.hpp (2026-02-03)
+// Boundaries are the SINGLE source in waveform_selection.hpp (kFading*Max) — the
+// display MUST match what the rate selector classifies, or the operator sees
+// "Moderate" while the ladder runs a Good rung (and vice versa).
 // Combined index = freq_cv + temporal_cv (includes Doppler spread measurement)
-// Calibrated: AWGN ~0.04, Good ~0.62, Moderate ~0.90, Poor ~0.82
+// Calibrated cluster centers: AWGN ~0.04, Good ~0.62, Moderate ~0.90.
 static const char* fadingToQuality(float fading) {
-    if (fading < 0.15f) return "AWGN";
-    if (fading < 0.65f) return "Good";
-    if (fading < 1.10f) return "Moderate";
+    if (fading < protocol::kFadingAwgnMax) return "AWGN";
+    if (fading < protocol::kFadingGoodMax) return "Good";
+    if (fading < protocol::kFadingModerateMax) return "Moderate";
     return "Poor";
 }
 
 // Same as above but also sets color for GUI display
 static const char* fadingToQualityWithColor(float fading, ImVec4& color) {
-    if (fading < 0.15f) {
+    if (fading < protocol::kFadingAwgnMax) {
         color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
         return "AWGN";
-    } else if (fading < 0.65f) {
+    } else if (fading < protocol::kFadingGoodMax) {
         color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
         return "Good";
-    } else if (fading < 1.10f) {
+    } else if (fading < protocol::kFadingModerateMax) {
         color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
         return "Moderate";
     } else {

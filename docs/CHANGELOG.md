@@ -10,6 +10,56 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-14 — fix(rate): Good/Moderate class boundary → ML midpoint 0.76 (BUG-MPG20-OVER-DEMOTE-R14, "R1/4 doesn't make sense")
+
+**What was broken.** On MPG@20 (Multipath GOOD) the receiver intermittently read
+fading index ~0.65 as **"Moderate"** and the RX-authority verdict pinned **QPSK
+R1/4** (operator: "this run dropped to r1/4 .. that doesn't make any sense"; 38×
+rate_hint=1 in one transfer). A dial-20 Good channel carries R2/3; R1/4 caps
+throughput ~3×.
+
+**Root cause.** The Good/Moderate class boundary `kFadingGoodMax` sat at **0.65 —
+essentially ON the measured Good cluster center (0.62)** — so a true-Good channel
+had ~zero classification margin. Single-frame fading on a dial-20 Good channel
+scatters to 0.74 (σ 0.129, 48-entry ledger, `CONNECT_ENTRY_CALIBRATION_2026_07_03`),
+so the upper tail false-classified Moderate → the ladder's sparse Moderate column
+(R2/3 anchor 20, R1/2 18 dB) → falls through to the QPSK R1/4 floor. The code
+*already documented* this (`connection_policy.hpp:708`: "raw reading in (0.65, 0.78]
+… 18.8% of Good entries false-Moderate") and had a connect-time mitigation
+(`entryClassificationFadingIndex`, σ/√N shrink toward Good) — but the **per-group
+RX-authority verdict** (`updateRxAuthorityCommand`, the mid-transfer path that
+pinned R1/4) used the RAW boundary and had no such guard. 0.65 was never the
+ML-optimal boundary between the Good (0.62) and Moderate (0.90) clusters — the
+midpoint is 0.76.
+
+**What changed.** `src/protocol/waveform_selection.hpp`: `kFadingGoodMax` is now the
+maximum-likelihood midpoint of the documented cluster centers,
+`(kFadingCenterGood 0.62 + kFadingCenterModerate 0.90) * 0.5 = 0.76` — DERIVED, not
+hand-tuned (equal-variance Gaussian ⇒ a reading joins the nearer center). All the
+duplicated `0.65` **class** boundaries consolidated onto the single constant:
+connection_policy `classifyChannel`/`fadingLabel`/`designDopplerForFadingIndex`,
+waveform_selection entry-floor + OFDM_NARROW good-path, and app.cpp `fadingToQuality`
+/`fadingToQualityWithColor` (the operator display now matches what the ladder
+classifies). The `isFading()` family and `isHighThroughputOFDM` keep their own 0.65
+"significant-fading present" / conservative-window gate — a different question than
+the class label, and left conservative on purpose.
+
+**Why it works.** At a Good@20 channel's verdict SNR (~17.5 dB after the +8.70
+legacy-anchor offset) the class flip Good→ `selectCoherentOFDM(17.5, Good)` = QPSK
+R2/3 (anchor 15, clears the 2.5 dB climb haircut), vs the old Moderate→R1/4. The
+crater-demote still protects: an optimistically-Good call that's really Moderate
+craters and demotes within ~2 groups (~16 s), whereas the old over-pessimism had NO
+recovery path — the asymmetry is why the boundary belongs at (or above) the midpoint.
+
+**Verification.** `cmake --build build -j4 && ctest -j4` → **87/87 pass**.
+test_connection_policy: classifyChannel(0.74)==GOOD, (0.78)==MODERATE (BUG guard);
+the "screenshot-bug counterfactual" now asserts 0.66→GOOD directly; the Moderate
+saturation-bound + trough-suppression tests re-based to a faithful Moderate index
+(0.85, since 0.73/0.70 now correctly class Good). Rig A/B (MPG@20 interleaved) is the
+throughput proof and is the next step.
+
+---
+
 ## 2026-07-13 — campaign (extended): 15-run B-arm fleet @ MPG@20 — 15/15 delivered, 0 meter incidents; multi-epoch mean 1.59 / median 1.47 / max 2.40
 
 F247-F261 on the re-based build: 2.40/2.14/1.81/1.60/1.82 (midday epoch),

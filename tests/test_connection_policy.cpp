@@ -34,8 +34,14 @@ void test_fading_labels_and_capabilities() {
           "channel classifier should preserve AWGN threshold");
     CHECK(classifyChannel(0.15f) == ChannelClassification::GOOD,
           "channel classifier should enter Good at 0.15 fading index");
-    CHECK(classifyChannel(0.65f) == ChannelClassification::MODERATE,
-          "channel classifier should enter Moderate at 0.65 fading index");
+    // BUG-MPG20-OVER-DEMOTE-R14 (2026-07-14): the Good/Moderate boundary moved to the
+    // ML midpoint of the cluster centers (kFadingGoodMax = 0.76). The ledger's Good
+    // upper tail (to 0.74 on a true-Good MPG@20 channel) now classes Good instead of
+    // false-Moderate -> QPSK R1/4.
+    CHECK(classifyChannel(0.74f) == ChannelClassification::GOOD,
+          "0.74 (ledger true-Good max) classes Good under the 0.76 boundary");
+    CHECK(classifyChannel(0.78f) == ChannelClassification::MODERATE,
+          "channel classifier enters Moderate above the 0.76 Good/Moderate boundary");
     CHECK(classifyChannel(1.10f) == ChannelClassification::POOR,
           "channel classifier should enter Poor at 1.10 fading index");
 
@@ -491,7 +497,7 @@ void test_auto_data_mode_boundaries() {
     CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto -> 16QAM (default ladder = psk8-exp 2026-07-05)");
     CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto -> 16QAM R2/3 (G20 anchor)");
 
-    // fading 0.79 is MODERATE class (>= 0.65). R2/3 is now ENABLED on moderate at >= 20 dB
+    // fading 0.79 is MODERATE class (>= kFadingGoodMax 0.76). R2/3 is now ENABLED on moderate at >= 20 dB
     // (measured 2026-06-09: genuine moderate R2/3 9/9 PASS @20-24 dB) — so a moderate-classified
     // channel at SNR20 gets R2/3, not R1/2. This is the SOFTENED Good/Moderate cliff: a
     // good-channel misclassified as moderate now costs 1 rung (R3/4->R2/3) instead of 2.
@@ -805,18 +811,20 @@ void test_connect_selection_saturation_bound() {
     const float mod_floor = kOFDMEntryFloorModerateDb;
 
     // MPM@20 measured case: data-aided reads 7.7 (saturated) -> bound fires,
-    // selection clears the Moderate OFDM entry floor.
-    CHECK(connectSelectionSnrDb(7.7f, 0.70f, true) >= mod_floor,
+    // selection clears the Moderate OFDM entry floor. (Index 0.85 = mid-Moderate;
+    // the earlier 0.70 sat just under the new Good/Moderate boundary 0.76 and now
+    // classes Good — a real MPM channel reads ~0.85, so this is also more faithful.)
+    CHECK(connectSelectionSnrDb(7.7f, 0.85f, true) >= mod_floor,
           "data-aided saturated reading on Moderate must clear the OFDM floor");
 
     // MPM@8 measured case: training fade-crest reads up to 7.8 -> bound must
     // NOT fire; basis alone (7.8+5=12.8) stays below the floor -> MC-DPSK.
-    CHECK(connectSelectionSnrDb(7.8f, 0.70f, false) < mod_floor,
+    CHECK(connectSelectionSnrDb(7.8f, 0.85f, false) < mod_floor,
           "training crest reading on Moderate must NOT clear the OFDM floor");
 
     // Below the saturation zone the reading is trustworthy: no bound even for
     // data-aided (true weak channel pulls the reading below the zone).
-    CHECK(connectSelectionSnrDb(5.3f, 0.70f, true) < mod_floor,
+    CHECK(connectSelectionSnrDb(5.3f, 0.85f, true) < mod_floor,
           "below-zone data-aided reading keeps the MC-DPSK fallback");
 
     // Good-class fading (< kFadingGoodMax): bound never applies; basis only.
@@ -1118,14 +1126,17 @@ void test_connect_snr_pool_tc_clustering() {
 }
 
 void test_connect_snr_pool_trough_suppression() {
-    // W3 counterfactual (rig MPG@20, Moderate-classed fading 0.73): the lone 3.9 dB
-    // trough reading bought a ~90 bps DBPSK session on a channel carrying ~2 kbps.
-    // Single reading, composed exactly as handleConnect does it:
-    const float sel_single = connectSelectionSnrDb(3.9f, 0.73f, true);
+    // Moderate-class trough suppression: a lone 3.9 dB trough reading buys a ~90 bps
+    // DBPSK session on a channel carrying ~2 kbps; the pool rescues it to OFDM entry.
+    // (The original W3 counterfactual read fading 0.73 on rig MPG@20 and called it
+    // Moderate — that mis-class was BUG-MPG20-OVER-DEMOTE-R14; 0.73 now correctly
+    // classes Good, so this test uses an unambiguously-Moderate index (0.85) to keep
+    // exercising the Moderate-class saturation-rescue path the mechanism owns.)
+    const float sel_single = connectSelectionSnrDb(3.9f, 0.85f, true);
     CHECK(sel_single < kOFDMEntryFloorModerateDb,
           "single trough reading (3.9, below the saturation zone) stays sub-OFDM");
-    CHECK(selectLadderRung(sel_single, 0.73f).waveform == WaveformMode::MC_DPSK,
-          "W3 as-shipped: one trough reading lands MC-DPSK");
+    CHECK(selectLadderRung(sel_single, 0.85f).waveform == WaveformMode::MC_DPSK,
+          "as-shipped: one trough reading lands MC-DPSK");
 
     // Pool replay: {3.9, then a decorrelated healthy 12.8} -> dB-mean 8.35. The +5
     // fade basis composes ONCE downstream, and the >=6.5 data-aided Moderate
@@ -1138,11 +1149,11 @@ void test_connect_snr_pool_trough_suppression() {
     const float mean = pool.clusteredDbMeanDb(tc_ms, true, UINT64_MAX);
     CHECK(std::fabs(mean - 8.35f) < 1e-3f,
           "dB-mean of decorrelated trough+healthy readings = 8.35");
-    const float sel_pool = connectSelectionSnrDb(mean, 0.73f, true);
+    const float sel_pool = connectSelectionSnrDb(mean, 0.85f, true);
     CHECK(sel_pool >= kOFDMEntryFloorModerateDb,
           "pool mean + basis + saturation rescue clears the Moderate entry floor");
-    CHECK(selectLadderRung(sel_pool, 0.73f).waveform == WaveformMode::OFDM_CHIRP,
-          "W3 counterfactual: OFDM entry instead of the 90 bps DBPSK session");
+    CHECK(selectLadderRung(sel_pool, 0.85f).waveform == WaveformMode::OFDM_CHIRP,
+          "trough suppression: OFDM entry instead of the 90 bps DBPSK session");
 
     // Composition guard: the aggregate is basis-free (a raw-population statistic);
     // the +5 basis and the Moderate saturation bound compose exactly ONCE downstream:
@@ -1223,13 +1234,15 @@ void test_connect_fading_pool_aggregate() {
     CHECK(std::fabs(pool.clusteredFadingIndex(tc_ms, true, UINT64_MAX) - 0.50f) < 1e-4f,
           "aggregate = mean of cluster means ((0.70 + 0.30)/2), not of raw readings");
 
-    // The screenshot bug counterfactual (rig dial-20 Watterson Good): a SINGLE
-    // CONNECT frame read fading 0.66 -> classified Moderate (boundary 0.65) ->
-    // QPSK R1/4 entry on a true-Good channel. Pooled with one decorrelated
-    // second reading at the ledger mean (~0.5), the aggregate falls back inside
-    // the Good class.
-    CHECK(classifyChannel(0.66f) == ChannelClassification::MODERATE,
-          "single 0.66 frame reads Moderate (the mis-class)");
+    // The screenshot bug (rig dial-20 Watterson Good): a SINGLE CONNECT frame read
+    // fading 0.66 -> classified Moderate under the OLD 0.65 boundary -> QPSK R1/4
+    // entry on a true-Good channel (BUG-MPG20-OVER-DEMOTE-R14). PRIMARY fix: the
+    // boundary now sits at the ML midpoint (kFadingGoodMax = 0.76), so 0.66 classes
+    // Good on the single frame — no pool needed.
+    CHECK(classifyChannel(0.66f) == ChannelClassification::GOOD,
+          "single 0.66 frame now classes Good directly (0.76 boundary)");
+    // The pool remains the SNR-variance decorrelator and averages residual fading
+    // spread: two decorrelated Good readings still aggregate comfortably Good.
     ConnectSnrPool bug;
     bug.addReading(12.0f, SNRSource::MCDPSK_IN_BAND, true, 0.66f);
     bug.tick(10000);  // CONNECT retry > 2 Tc later
@@ -1238,7 +1251,7 @@ void test_connect_fading_pool_aggregate() {
     CHECK(std::fabs(pooled_fading - 0.55f) < 1e-4f,
           "pooled fading = (0.66 + 0.44)/2 = 0.55");
     CHECK(classifyChannel(pooled_fading) == ChannelClassification::GOOD,
-          "pooled fading re-classes the true-Good channel Good");
+          "pooled fading stays in the Good class");
 }
 
 void test_connect_pick_defer_semantics() {

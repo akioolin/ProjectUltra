@@ -27,29 +27,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   (~1.2 Hz clock/jitter wander over the 144 ms training window explains it exactly; sim reads
   10.1 dead-on). The operator display should eventually show BOTH numbers.
 
-### BUG-MPG20-OVER-DEMOTE-R14: Good@20 read as Moderate + low usable → authority over-demotes to R1/4 (operator: "R1/4 doesn't make sense")
-
-- **Rig F293-F298 (MPG@20, 2026-07-14).** At MPG@20 (Multipath GOOD, effective
-  ~15 dB) the receiver read fading index **0.65 → "Moderate"** and usable
-  **8.8 dB** (physical channel 12.0; dial 20 → usable 8.8 = ~11 dB gap), so the
-  RX authority commanded rate_hint=1 → **QPSK R1/4** (38× rate_hint=1 in one
-  transfer). R1/4 at Good@20 caps throughput hard (2 bits × R1/4 vs the R2/3
-  the channel supports).
-- **Two contributing causes (both pre-existing):** (a) the Good/Moderate
-  Doppler discriminator fuzzy boundary — 0.65 straddles the Good/Moderate
-  threshold, so Good@20 intermittently reads Moderate (see
-  [[project_disc_radio_agnostic_fuzzy_boundary_2026_06_20]]); (b) usable 8.8 vs
-  channel 12.0 vs dial 20 — the usable (effective/demod) SNR is ~3 dB under
-  physical AND physical is ~8 dB under dial (fading Jensen + implementation
-  loss), and the rate anchors may be too conservative for the honest-meter
-  scale at this fading class.
-- **Likely a BIGGER throughput lever than the stall fix** — over-demoting a
-  healthy Good@20 to R1/4 is a large, systematic loss. Investigate: is the
-  fading misclassification the dominant cause (fix the discriminator boundary),
-  or the usable-reading conservatism (fading class × anchor calibration)?
-- Independent of the keepalive (which merely AMPLIFIED it by re-asserting the
-  low rung — see CHANGELOG 2026-07-14).
-
 ### BUG-ANCHOR-WAIT-NO-ACK-STALL: marginal-SNR bursts rejected in full-anchor-wait emit NO ACK → sender 44 s RTO stall (THE marginal-SNR throughput lever, quantified ~+30%)
 
 - **Discovered/quantified 2026-07-14 (operator-caught "we didn't even ACK at
@@ -1149,6 +1126,28 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+- 2026-07-14: BUG-MPG20-OVER-DEMOTE-R14 fixed — Good@20 read as Moderate → RX authority
+  pinned QPSK R1/4 (operator: "R1/4 doesn't make sense"). **Root cause:** the Good/Moderate
+  class boundary `kFadingGoodMax` sat at **0.65 — essentially ON the measured Good cluster
+  center (0.62)**, giving a true-Good channel ~zero margin. On a dial-20 Good channel
+  single-frame fading readings scatter to 0.74 (σ 0.129, 48-entry ledger), so the upper tail
+  false-classified Moderate → the ladder's sparse Moderate column (R2/3 needs 20, R1/2 needs
+  18 dB) → QPSK R1/4. The per-group RX-authority verdict (`updateRxAuthorityCommand`) used the
+  RAW boundary and re-issued R1/4 every group (38× rate_hint=1 in one transfer); connect-time
+  had a partial mitigation (`entryClassificationFadingIndex` σ/√N shrink) but the running
+  verdict did not. **Fix:** `kFadingGoodMax` now = the maximum-likelihood midpoint of the Good
+  (0.62) and Moderate (0.90) cluster centers = **0.76**, DERIVED not hand-tuned
+  (`waveform_selection.hpp`). At the verdict SNR of a Good@20 channel (~17.5 dB after the +8.70
+  legacy-anchor offset) the class flips Good→R2/3 instead of Moderate→R1/4. All duplicated 0.65
+  class boundaries consolidated onto the single constant (connection_policy classifyChannel/
+  fadingLabel/designDoppler, app.cpp fadingToQuality); the `isFading()`/`isHighThroughputOFDM`
+  "significant-fading present"/conservative-window gates keep their own 0.65 (a different
+  question than the class label). Cost-asymmetry backs the move up (false-Moderate = minutes of
+  low-rung crawl; false-Good = one ~16 s group before the crater-demote self-corrects). Tests:
+  test_connection_policy (classifyChannel(0.74)==GOOD, (0.78)==MODERATE + regression comment),
+  test_waveform_policy — full ctest 87/87 green. Was independent of the keepalive, which only
+  AMPLIFIED it by re-asserting the low rung (see 2026-07-14 keepalive revert).
 
 - 2026-07-02: BUG-FILE-REQUEUE-OFFSET fixed — the live-ladder Moderate@20 data-loss root cause.
   `FileTransferController::requeuePendingChunks()` reconstructed the resume offset as

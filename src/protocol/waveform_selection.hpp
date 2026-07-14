@@ -47,8 +47,29 @@ inline constexpr float kOFDMEntryFloorPoorDb = 1.0e9f;
 // Fading-class boundaries (combined freq_cv + temporal_cv). Poor (>= kFadingModerateMax)
 // routes to MC-DPSK upstream (kOFDMEntryFloorPoorDb), so the coherent OFDM ladder below
 // only ever classifies AWGN / GOOD / MODERATE.
+//
+// Cluster centers, ground-truth-labeled by the OTASim ITU channel model in use
+// (app.cpp fading calibration + docs/CONNECT_ENTRY_CALIBRATION_2026_07_03.md, the
+// 48-entry MPG@20 dial-Good ledger): ITU Good clusters ~0.62, ITU Moderate ~0.90.
+inline constexpr float kFadingCenterGood = 0.62f;
+inline constexpr float kFadingCenterModerate = 0.90f;
+
 inline constexpr float kFadingAwgnMax = 0.15f;
-inline constexpr float kFadingGoodMax = 0.65f;
+// Good<->Moderate boundary = the maximum-likelihood midpoint of the Good and Moderate
+// cluster centers (equal-variance Gaussian => a reading joins the NEARER center) —
+// DERIVED from the calibration, not hand-tuned. The old 0.65 sat essentially ON the
+// Good center (0.62), giving a true-Good channel ~zero margin: its upper-tail readings
+// (measured to 0.74, sigma 0.129) tipped into Moderate -> the ladder's sparse Moderate
+// column -> QPSK R1/4 (BUG-MPG20-OVER-DEMOTE-R14: on a dial-20 Good channel, 18.8% of
+// Good entries false-Moderate, each a ~100-200 s climb-back; the per-group RX-authority
+// verdict pins R1/4 the whole transfer, connection_policy.hpp:708). The misclassification
+// cost is ASYMMETRIC — false-Moderate = minutes of low-rung crawl, false-Good = one ~16 s
+// group before the crater-demote — which justifies the boundary sitting AT LEAST at the
+// ML midpoint. 0.76 clears the ledger's Good max (0.74) while keeping real Moderate
+// (center 0.90) correctly classified. (isFading()/isHighThroughputOFDM keep their own
+// 0.65 "significant-fading present"/conservative-window gate — a different question than
+// the class label; not the rate-selection boundary this fixes.)
+inline constexpr float kFadingGoodMax = (kFadingCenterGood + kFadingCenterModerate) * 0.5f;  // 0.76
 inline constexpr float kFadingModerateMax = 1.10f;
 
 enum class FadingClass { AWGN = 0, GOOD = 1, MODERATE = 2 };
@@ -762,14 +783,14 @@ inline CodeRate capInitialOFDMRate(float snr_db,
 // - In-band SNR >= 25 dB + good/moderate fading: OFDM_CHIRP R1/2 (~2208 bps raw)
 // - Heavy+ fading (>= 1.10): R1/4 only (~1104 bps raw)
 //
-// Calibrated fading thresholds:
-//   < 0.15: True AWGN, < 0.65: Good, >= 0.65: Moderate+
+// Calibrated fading thresholds (kFading*Max, single source above):
+//   < 0.15: True AWGN, < 0.76: Good, >= 0.76: Moderate+
 inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index) {
     WaveformRecommendation rec;
     const float ofdm_floor =
-        (fading_index < 0.15f) ? kOFDMEntryFloorAwgnDb :
-        (fading_index < 0.65f) ? kOFDMEntryFloorGoodDb :
-        (fading_index < 1.10f) ? kOFDMEntryFloorModerateDb : kOFDMEntryFloorPoorDb;
+        (fading_index < kFadingAwgnMax) ? kOFDMEntryFloorAwgnDb :
+        (fading_index < kFadingGoodMax) ? kOFDMEntryFloorGoodDb :
+        (fading_index < kFadingModerateMax) ? kOFDMEntryFloorModerateDb : kOFDMEntryFloorPoorDb;
 
     if (snr_db < ofdm_floor) {
         // Low SNR: MC-DPSK 8 carriers is most robust
@@ -869,8 +890,8 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // because near-AWGN is a much easier channel.
     if (waveform == WaveformMode::OFDM_NARROW) {
         mod = Modulation::DQPSK;
-        const bool awgn_path = fading_index < 0.15f && snr_db >= 18.0f;
-        const bool good_path = fading_index < 0.65f && snr_db >= 20.0f;
+        const bool awgn_path = fading_index < kFadingAwgnMax && snr_db >= 18.0f;
+        const bool good_path = fading_index < kFadingGoodMax && snr_db >= 20.0f;
         if (awgn_path || good_path) {
             rate = CodeRate::R1_2;
         } else {

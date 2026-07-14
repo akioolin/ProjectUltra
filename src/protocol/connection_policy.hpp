@@ -71,13 +71,13 @@ inline constexpr float kGoodHFDesignDopplerHz = 0.1f;
 inline constexpr float kModerateHFDesignDopplerHz = 0.5f;
 inline constexpr float kPoorHFDesignDopplerHz = 1.0f;
 
-// Map the measured combined fading_index (same scale as waveform_selection.hpp:
-// <0.15 AWGN, <0.65 Good, <1.10 Moderate, else Poor) to the channel class's design
-// Doppler, so the coherence-time CW cap reflects the channel actually in use rather
-// than a fixed worst-case constant.
+// Map the measured combined fading_index (same scale/boundaries as
+// waveform_selection.hpp: kFading*Max — <0.15 AWGN, <0.76 Good, <1.10 Moderate,
+// else Poor) to the channel class's design Doppler, so the coherence-time CW cap
+// reflects the channel actually in use rather than a fixed worst-case constant.
 inline float designDopplerForFadingIndex(float fading_index) {
-    if (fading_index < 0.65f) return kGoodHFDesignDopplerHz;
-    if (fading_index < 1.10f) return kModerateHFDesignDopplerHz;
+    if (fading_index < kFadingGoodMax) return kGoodHFDesignDopplerHz;
+    if (fading_index < kFadingModerateMax) return kModerateHFDesignDopplerHz;
     return kPoorHFDesignDopplerHz;
 }
 inline constexpr float kClarkeCoherenceNumerator = 0.423f;
@@ -272,9 +272,9 @@ struct MCDPSKFrameTiming {
 };
 
 inline const char* fadingLabel(float fading) {
-    if (fading < 0.15f) return "AWGN";
-    if (fading < 0.65f) return "Good";
-    if (fading < 1.10f) return "Moderate";
+    if (fading < kFadingAwgnMax) return "AWGN";
+    if (fading < kFadingGoodMax) return "Good";
+    if (fading < kFadingModerateMax) return "Moderate";
     return "Poor";
 }
 
@@ -286,9 +286,9 @@ enum class ChannelClassification {
 };
 
 inline ChannelClassification classifyChannel(float fading) {
-    if (fading < 0.15f) return ChannelClassification::AWGN;
-    if (fading < 0.65f) return ChannelClassification::GOOD;
-    if (fading < 1.10f) return ChannelClassification::MODERATE;
+    if (fading < kFadingAwgnMax) return ChannelClassification::AWGN;
+    if (fading < kFadingGoodMax) return ChannelClassification::GOOD;
+    if (fading < kFadingModerateMax) return ChannelClassification::MODERATE;
     return ChannelClassification::POOR;
 }
 
@@ -308,8 +308,8 @@ inline ChannelClassification classifyChannel(float fading) {
 // < 0.45, margin 0.09), so "Moderate read as Good -> over-high rate" cannot happen on this data.
 inline constexpr float kCoherenceGoodThreshold = 0.45f;      // confident Good (legacy lag-1; SIM-scale)
 inline constexpr float kCoherenceModerateThreshold = 0.30f;  // confident Moderate (legacy lag-1; SIM-scale)
-inline constexpr float kRepresentativeGoodFadingIndex = 0.40f;      // mid-Good (< 0.65)
-inline constexpr float kRepresentativeModerateFadingIndex = 0.85f;  // mid-Moderate (0.65-1.10)
+inline constexpr float kRepresentativeGoodFadingIndex = 0.40f;      // mid-Good (< kFadingGoodMax)
+inline constexpr float kRepresentativeModerateFadingIndex = 0.85f;  // mid-Moderate (kFadingGoodMax..kFadingModerateMax)
 
 // RADIO-AGNOSTIC coherence-AREA thresholds (2026-06-20, docs/SCALE_INVARIANT_COHERENCE_DISC_2026_06_20.md).
 // The legacy lag-1 score above is SIM-calibrated and platform-broken (needs ~0.045 on the IONOS rig,
@@ -710,7 +710,12 @@ inline bool shouldDeferConnectPick(int effective_count, float fading_index,
 // measures sigma = 0.129 (N=48 rig entries at a known dial), so a raw reading in
 // (0.65, 0.78] is within 1 sigma of the Good/Moderate boundary — 18.8% of Good
 // entries false-classified Moderate and 8/9 of those entered QPSK R1/4
-// (~100-200 s of climb-back each). The misclassification costs are ASYMMETRIC:
+// (~100-200 s of climb-back each). (BUG-MPG20-OVER-DEMOTE-R14, 2026-07-14: the
+// class boundary kFadingGoodMax has since moved to the ML midpoint 0.76, which
+// absorbs most of that band directly; this shrink now stacks as a small belt-and-
+// suspenders at ENTRY, where N_eff is small — and it is the ONLY mitigation the raw
+// per-group RX-authority verdict lacked before the boundary move.) The
+// misclassification costs are ASYMMETRIC:
 // false-Moderate = minutes of low-rung crawl (climbs need clean-group streaks);
 // false-Good = one bad group (~16 s) before the prompt demote. So shrink the
 // CLASSIFICATION input toward Good by the standard error of the estimate:
