@@ -27,6 +27,43 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   (~1.2 Hz clock/jitter wander over the 144 ms training window explains it exactly; sim reads
   10.1 dead-on). The operator display should eventually show BOTH numbers.
 
+### BUG-ANCHOR-WAIT-NO-ACK-STALL: marginal-SNR bursts rejected in full-anchor-wait emit NO ACK → sender 44 s RTO stall (THE marginal-SNR throughput lever, quantified ~+30%)
+
+- **Discovered/quantified 2026-07-14 (operator-caught "we didn't even ACK at
+  SNR 25"; MPG@25 natural batch F279-F283).** The receiver, while in
+  full-anchor-wait, runs a light DATA sync on each incoming burst. At marginal
+  SNR the burst-head correlations arrive at **0.15-0.32**, below the
+  weak_accept floor (~0.44-0.45, `signal_policy.hpp` evaluateLightSyncCandidate
+  :262-278 requires corr ≥ max(weak_floor 0.45, min_confidence-0.08)). So the
+  burst is REJECTED (`Full-anchor wait rejected DATA fallback`,
+  sync_controller.cpp:817), in streaks of 2-5. A rejected burst never reaches
+  group-decode → **NO ACK is emitted** → the sender waits its full RTO
+  (**44.68 s** at window-16, burst airtime 21.5 s × 2) before resending as a
+  full-anchor burst the receiver finally accepts.
+- **Cost (measured):** each stall ≈ 44 s dead air. MPG@25 batch: goodput
+  inversely tracks CW-fails/stalls — F283 clean (4 fails) = **2.81 kbps** vs
+  rough F281 (1015 fails) = 1.38; mean 2.16. Eliminating the stall lifts the
+  mean toward the ~2.8 clean-epoch ceiling ≈ **+30% at this SNR** — bigger than
+  any PAPR/QAM lever. Forensics: ~/Documents/ultra_forensics/{F283_mac,nat25_pi5}.log.
+- **KEY (the elegant fix): even a FAILED (0/N) decoded group still emits a
+  tone-burst ACK with the cumulative base UNCHANGED** ("no progress, resend") —
+  which breaks the 44 s silence and gets an immediate resend. So the receiver
+  does NOT need to decode the weak burst; it only needs to NOT be silent.
+- **Fix approaches (next session — protocol/sync path, rig-validate; ACK
+  contract has regressed before, build carefully):**
+  1. ACK-LIVENESS ACCEPT: when a burst is rejected in full-anchor-wait but
+     light_found with clear energy (corr above a low floor, e.g. 0.15 — a real
+     burst, weak sync), still let it into the decode path so a group-ACK (even
+     0/N) is emitted. Risk: false-lock on noise / misaligning the next real
+     sync — bound with an energy floor + the correct-base 0/N ACK is harmless.
+  2. IMMEDIATE ANCHOR-NACK: on reject-with-energy, send a bare "resend full
+     anchor" tone NACK immediately (needs a group-less NACK tone type). Cleaner
+     semantically, more protocol surface.
+  3. RTO CAP for the anchor-reject case: the receiver knows instantly it can't
+     sync; the sender shouldn't wait 44 s. (Blunt; approach 1 is better.)
+- Related: [[project_turnaround_rxq_defeats_warmsync]] (warm-sync defeat /
+  echo-clear), the ACK-contract family.
+
 ### BUG-FILE-CRC-MISMATCH: complete 51200/51200 file assembled with WRONG CONTENT (P0)
 - Status: **FIXED 2026-07-05 late evening.** Root-caused by 3-agent forensics (write-map + code audit + adversarial verify) over the preserved run; rig gate LIFTED.
 - Mechanism (confirmed, single event in all logs): the LDPC false-positive BIT-FLIP SALVAGE (frame_v2.cpp Case 2). Under status.allSuccess() every CW is a VALID codeword, so the true error is a codeword DIFFERENCE (>= d_min, tens of bits) — a 1-bit "repair" can never be genuine there. The salvage searched ~5k bit positions for a 16-bit CRC syndrome match (~7.8% collision odds vs garbage), hit one at t=38.4 ("FALSE POSITIVE RECOVERED (1-bit flip frame byte 584 bit 3)"), and delivered a corrupted 616-byte chunk (file[616:1232), seq=2) that was ACKed and never resent. Receiver assembly was proven flawless (78 chunks, perfect tiling, all era boundaries exact ACK-edge requeues).

@@ -84,6 +84,19 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-14 — diag: MPG@25 natural batch + BUG-ANCHOR-WAIT-NO-ACK-STALL (the marginal-SNR throughput lever, ~+30%)
+
+MPG@25 natural (F279-F283, ACE off, no force): 1.80/2.48/1.38/2.32/2.81,
+mean 2.16. 16QAM reachable (1-2 switches/run) but never sustained — the ladder
+settles at the more-robust QPSK R3/4. Goodput inversely tracks CW-fails, and
+the driver is BUG-ANCHOR-WAIT-NO-ACK-STALL (filed KNOWN_BUGS): marginal burst
+heads (corr 0.15-0.32) fall below the weak_accept floor (~0.45) → rejected in
+full-anchor-wait → no ACK → 44.68 s sender RTO. Clean run F283 (4 fails) hit
+2.81; killing the stall lifts the mean toward that ceiling ≈ +30%. This is the
+top throughput lever — bigger than PAPR/higher-QAM at the SNRs the fleet lives.
+
+---
+
 ## 2026-07-13 — feat(papr): ACE built + rig A/B — proven SAFE (guaranteed non-negative), gain ~0.8 dB below the 3-pair noise floor; stays default-off
 
 ACE (src/ofdm/papr_ace.hpp, ULTRA_ACE_PAPR, default off) extends outer
