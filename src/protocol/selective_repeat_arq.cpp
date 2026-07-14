@@ -1368,6 +1368,7 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
 
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     arq_time_ms_ += elapsed_ms;
+    keepalive_silent_ms_ += elapsed_ms;  // reset on each sendSack() emit
 
     if (ack_dedup_timer_ms_ > 0) {
         if (elapsed_ms >= ack_dedup_timer_ms_) {
@@ -2044,6 +2045,19 @@ size_t SelectiveRepeatARQ::bufferedRxFrameCount() const {
     return count;
 }
 
+bool SelectiveRepeatARQ::keepaliveAckIfStalled(uint32_t threshold_ms) {
+    if (!(rx_base_seq_ > 0 && last_rx_more_data_ &&
+          keepalive_silent_ms_ >= threshold_ms)) {
+        return false;
+    }
+    LOG_MODEM(INFO,
+              "SR-ARQ: keepalive ACK — receiver silent %u ms during active RX "
+              "(base=%u, stall recovery)",
+              keepalive_silent_ms_, rx_base_seq_);
+    sendSack();  // re-emit current cumulative state; resets keepalive_silent_ms_
+    return true;
+}
+
 void SelectiveRepeatARQ::sendSack() {
     // MOVE-EPOCH: TOTAL ack silence while unanchored — rx_base_seq_ is still an
     // old-era number, so ANY cumulative claim built from it would fabricate
@@ -2055,6 +2069,8 @@ void SelectiveRepeatARQ::sendSack() {
         LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH unanchored — SACK suppressed (awaiting rebase)");
         return;
     }
+
+    keepalive_silent_ms_ = 0;  // we are emitting an ACK now → not silent
 
     uint32_t bitmap = buildRXBitmap();
     uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;

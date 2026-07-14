@@ -192,6 +192,16 @@ public:
     }
     size_t getWindowSize() const { return config_.window_size; }
     uint16_t getRxBaseSeq() const { return rx_base_seq_; }
+
+    // Keepalive ACK (BUG-ANCHOR-WAIT-NO-ACK-STALL, 2026-07-14): when we are
+    // actively receiving a file (more frames expected) but our ACK side has
+    // gone silent for threshold_ms — bursts arriving yet rejected at sync
+    // (marginal corr) or failing before decode, so no SACK was emitted — we
+    // re-emit the current cumulative ACK. The sender treats ANY tone-burst ACK
+    // as a turn boundary and resends the holes immediately, converting a full
+    // 44 s RTO stall into a fast turnaround. Routes through the normal
+    // listen-before-ACK channel gating. Returns true if a keepalive was sent.
+    bool keepaliveAckIfStalled(uint32_t threshold_ms);
     uint16_t getTxBaseSeq() const { return tx_base_seq_; }
     // HARQ provisional keys (2026-07-01): the receiver's mirror of the
     // sender's next-burst seq fill = ascending !received seqs in the rx
@@ -389,6 +399,7 @@ private:
     // RX state
     std::array<RXSlot, MAX_WINDOW> rx_window_;
     uint16_t rx_base_seq_ = 0;      // Next expected sequence
+    uint32_t keepalive_silent_ms_ = 0;  // ms since last SACK emit (stall detect)
     bool last_rx_more_data_ = false;
     uint8_t last_rx_flags_ = 0;
     v2::FrameType last_rx_frame_type_ = v2::FrameType::DATA;

@@ -4413,6 +4413,25 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
+
+            // KEEPALIVE ACK (BUG-ANCHOR-WAIT-NO-ACK-STALL, ULTRA_KEEPALIVE_ACK,
+            // default off): break the 44 s RTO stall when marginal bursts get
+            // rejected at sync (no ACK emitted) during an active file receive.
+            // Threshold 25 s > max burst airtime (window-16 ≈ 21.5 s) so it
+            // only fires on a genuine stall (no burst completed in the window),
+            // not mid-legit-burst — no channel-busy gating needed for v1. Fires
+            // before the 44.68 s RTO, saving ~19 s/stall. The re-emitted ACK
+            // routes through listen-before-ACK; the sender resends holes on any
+            // tone-burst ACK (turn boundary). v2 (filed): channel-gated shorter
+            // threshold for a bigger saving.
+            static const bool keepalive_ack_enabled = [] {
+                const char* e = std::getenv("ULTRA_KEEPALIVE_ACK");
+                return e != nullptr && e[0] != '\0' && e[0] != '0';
+            }();
+            if (keepalive_ack_enabled) {
+                arq_.keepaliveAckIfStalled(25000u);
+            }
+
             // RX-AUTHORITY: age the verdict-SNR ring (stale readings must not
             // steer the rung after a quiet stretch).
             for (size_t i = 0; i < kRxAuthObsRing; ++i) {
