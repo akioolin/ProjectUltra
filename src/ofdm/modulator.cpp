@@ -5,7 +5,9 @@
 #include "ultra/logging.hpp"
 #include "demodulator_constants.hpp"
 #include "pilot_pattern.hpp"
+#include "papr_ace.hpp"
 #include "genie_tx_capture.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include <algorithm>
 #include <random>
 
@@ -278,6 +280,26 @@ struct OFDMModulator::Impl {
         // push per data OFDM symbol, in TX order. See genie_tx_capture.hpp.
         if (genie_capture && ultra::genie::txCapture().enabled) {
             ultra::genie::txCapture().symbols.push_back(freq_domain);
+        }
+
+        // ACE PAPR reduction (ULTRA_ACE_PAPR, default off; 2026-07-13). DATA
+        // symbols only (genie_capture marks them — never LTS/probe/preamble, so
+        // sync/channel-estimation waveforms stay pristine) and coherent mods
+        // only. Extends outer constellation points OUTWARD to shave time peaks
+        // → after the TX peak-normalization, ~0.8 dB more average power on the
+        // air, with ZERO harmful EVM (points move only away from decision
+        // boundaries → RX BER equal-or-better). No RX change. Unit-proven in
+        // test_papr_ace. Unlike the crude clip (rig-measured −58% on clean
+        // channels), ACE is strictly non-negative.
+        static const bool ace_enabled = [] {
+            const char* e = std::getenv("ULTRA_ACE_PAPR");
+            return e != nullptr && e[0] != '\0' && e[0] != '0';
+        }();
+        if (ace_enabled && genie_capture &&
+            ultra::ofdm_link_adaptation::isCoherentModulation(config.modulation)) {
+            ofdm::papr_ace::applyAce(freq_domain, data_carrier_indices,
+                               config.modulation, fft,
+                               /*clip_ratio=*/1.6f, /*max_iters=*/8, /*mu=*/1.0f);
         }
 
         // IFFT to time domain

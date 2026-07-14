@@ -46,6 +46,13 @@ target_include_directories(test_papr_reduction PRIVATE
     ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
 add_test(NAME PaprReduction COMMAND test_papr_reduction)
 
+# ACE PAPR reduction — invariant proofs (points move only outward; PAPR down).
+add_executable(test_papr_ace test_papr_ace.cpp)
+target_link_libraries(test_papr_ace PRIVATE ultra_core ota_channel_core)
+target_include_directories(test_papr_ace PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
+add_test(NAME PaprAce COMMAND test_papr_ace)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)
