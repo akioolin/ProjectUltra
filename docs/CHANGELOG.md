@@ -84,6 +84,25 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-14 — feat(arq): keepalive ACK now DEFAULT-ON — universal channel-busy gate makes it collision-safe on GUI AND TNC
+
+The TNC-path blocker is fixed. The keepalive's collision-safety no longer
+depends on the GUI-only listen-before-ACK: the Connection gained a
+channel_busy_query_ (mirrors setTxActiveProvider) that BOTH the GUI (app.cpp)
+and the headless TNC (ultra_tnc.cpp) wire from the modem
+(channelBusyForTx || burstAirSamplesRemaining>0). The keepalive checks it and
+skips while a burst is arriving — self-gating, universal. So the 8 s keepalive
+is now DEFAULT-ON (opt-out ULTRA_KEEPALIVE_ACK=0).
+
+Verified: UltraTncSimAudio — which default-on BROKE before the gate (264 s
+timeout) — now PASSES (58.8 s) with default-on. Full ctest 86/86. The 8 s
+stall-cap (rig-proven F290/F291) is unchanged on the GUI: after a rejected
+burst the channel is idle → busy=false → keepalive fires at 8 s exactly as
+before. Answers the operator's "no ACK at SNR 25": the 44 s marginal-SNR stall
+is now capped at 8 s everywhere.
+
+---
+
 ## 2026-07-14 — feat(arq): keepalive ACK v2 (8 s) — rig-PROVEN (stall 44→8 s, no collision), default-off blocked by TNC listen-before-ACK gap
 
 Direct silence-gap measurement (epoch-independent, unlike the goodput A/B)

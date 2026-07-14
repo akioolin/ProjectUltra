@@ -233,6 +233,17 @@ public:
         tx_active_provider_ = std::move(provider);
     }
 
+    // Channel-busy query (keepalive ACK universal gating, 2026-07-14): returns
+    // true when a burst is currently arriving / the channel is busy. The
+    // keepalive checks this BEFORE emitting so it never TX's over an inbound
+    // burst — replacing the GUI-only listen-before-ACK dependency that blocked
+    // default-on (the headless TNC lacked it). Both the GUI and the TNC set it
+    // from the modem (channelBusyForTx || burstAirSamplesRemaining>0). Unwired
+    // (tests) => nullptr => keepalive falls back to threshold-only safety.
+    void setChannelBusyQuery(std::function<bool()> query) {
+        channel_busy_query_ = std::move(query);
+    }
+
     void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
         on_transmit_tone_burst_ack_ = std::move(cb);
     }
@@ -1292,6 +1303,7 @@ private:
     TransmitInfoCallback on_transmit_info_;
     TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
     std::function<bool()> tx_active_provider_;  // BUG-MC-RETRY-SPURIOUS: see setter
+    std::function<bool()> channel_busy_query_;  // keepalive universal busy gate
     DriveAdvisoryCallback on_drive_advisory_;  // software-ALC sender-side hook
     ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
     ConnectedCallback on_connected_;

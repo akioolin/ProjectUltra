@@ -542,6 +542,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setTxActiveProvider(
         [this] { return tx_in_progress_.load(std::memory_order_relaxed); });
 
+    // Keepalive ACK universal busy gate: don't re-emit an ACK while a burst is
+    // arriving (would collide). Mirrors the GUI's own listen-before-ACK signal.
+    protocol_.setChannelBusyQuery([this] {
+        return modem_.channelBusyForTx() ||
+               modem_.burstAirSamplesRemaining() > 0;
+    });
+
     // Set up status callback to show codeword progress in RX log
     modem_.setStatusCallback([this](const std::string& status) {
         enqueueOperatorLogLine(status);

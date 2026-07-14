@@ -466,6 +466,12 @@ private:
         // to a full chirp+LTS anchor so the peer can re-acquire our timing — the
         // fix for the half-duplex B2F stall (BUG-TNC-B2F-001). The yielding peer
         // already arms expectFullOFDMAnchorOnce() via the TURNOVER it sent.
+        // Keepalive ACK universal busy gate (the headless TNC has no
+        // listen-before-ACK, so the keepalive must self-gate on channel-busy).
+        engine_.setChannelBusyQuery([this] {
+            return modem_.channelBusyForTx() ||
+                   modem_.burstAirSamplesRemaining() > 0;
+        });
         engine_.setDataTurnAcquiredCallback([this]() {
             modem_.forceNextFrameFullPreamble();
         });

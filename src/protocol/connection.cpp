@@ -4424,20 +4424,18 @@ void Connection::tick(uint32_t elapsed_ms) {
             // routes through listen-before-ACK; the sender resends holes on any
             // tone-burst ACK (turn boundary). v2 (filed): channel-gated shorter
             // threshold for a bigger saving.
-            // ULTRA_KEEPALIVE_ACK, DEFAULT-OFF. On the rig/GUI the 8 s keepalive
-            // is mechanism-proven (F290/F291: max ACK-silence gap capped at
-            // exactly 8.0 s vs OFF's 36.7 s) and collision-free — because it
-            // routes through the GUI's listen-before-ACK (app.cpp), so a
-            // mid-burst fire DEFERS. BLOCKER for default-on: the HEADLESS TNC
-            // path (ultra_tnc) has NO listen-before-ACK gating, so default-on
-            // broke UltraTncSimAudio (keepalive TX'd over inbound bursts →
-            // collision → timeout). Fix before flipping: move the channel-clear
-            // gating into the connection/ARQ (universal) rather than the GUI
-            // app layer, so the keepalive is safe on TNC too. Until then:
-            // opt-in on the GUI/rig where the gating exists.
+            // KEEPALIVE ACK, DEFAULT-ON 2026-07-14 (opt-out ULTRA_KEEPALIVE_ACK=0).
+            // 8 s keepalive: rig-proven (F290/F291 max ACK-silence gap capped at
+            // exactly 8.0 s vs OFF's 36.7 s, reproducible, cwfails normal).
+            // UNIVERSAL collision-safety via channel_busy_query_ (below) — the
+            // keepalive checks "is a burst arriving?" itself and skips if busy,
+            // so it no longer depends on the GUI-only listen-before-ACK (which
+            // had blocked default-on: the headless TNC lacked it). Both the GUI
+            // (app.cpp) and the TNC (ultra_tnc.cpp) wire the query from the modem.
             static const bool keepalive_ack_enabled = [] {
                 const char* e = std::getenv("ULTRA_KEEPALIVE_ACK");
-                return e != nullptr && e[0] != '\0' && e[0] != '0';
+                if (!e || e[0] == '\0') return true;         // default-ON
+                return !(e[0] == '0' && e[1] == '\0');       // "0" opts out
             }();
             // Threshold env-tunable (ULTRA_KEEPALIVE_ACK_MS, default 25000).
             // The keepalive routes through listen-before-ACK (defers on channel
@@ -4453,7 +4451,11 @@ void Connection::tick(uint32_t elapsed_ms) {
                 }
                 return 8000u;  // v2 (rig-proven): caps stall at 8 s, no collision
             }();
-            if (keepalive_ack_enabled) {
+            // Emit only when the channel is NOT busy (no inbound burst) — the
+            // universal collision guard. If unwired (tests), fall back to
+            // threshold-only (safe when threshold > max burst airtime).
+            if (keepalive_ack_enabled &&
+                (!channel_busy_query_ || !channel_busy_query_())) {
                 arq_.keepaliveAckIfStalled(keepalive_ack_ms);
             }
 

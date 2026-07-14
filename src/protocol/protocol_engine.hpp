@@ -286,6 +286,10 @@ public:
         connection_.setTxActiveProvider(std::move(provider));
     }
 
+    void setChannelBusyQuery(std::function<bool()> query) {
+        connection_.setChannelBusyQuery(std::move(query));
+    }
+
     // Half-duplex INTERACTIVE (bidirectional) data path — the TNC / Winlink-B2F
     // case where both stations alternately transmit. Keeps the ISS/IRS turn gate
     // on burst sends so the directions serialize instead of colliding.
