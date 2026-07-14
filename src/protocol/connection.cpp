@@ -4428,8 +4428,22 @@ void Connection::tick(uint32_t elapsed_ms) {
                 const char* e = std::getenv("ULTRA_KEEPALIVE_ACK");
                 return e != nullptr && e[0] != '\0' && e[0] != '0';
             }();
+            // Threshold env-tunable (ULTRA_KEEPALIVE_ACK_MS, default 25000).
+            // The keepalive routes through listen-before-ACK (defers on channel
+            // busy), so a mid-legit-burst fire is deferred, not collided —
+            // meaning a SHORTER threshold (v2, ~8-10 s) is safe and catches the
+            // stall ~15 s earlier. Left at 25 s by default pending the v2 rig
+            // A/B (F284-F289 at 25 s: fires 1-2×/transfer on the real stall,
+            // benefit epoch-noise-dominated).
+            static const uint32_t keepalive_ack_ms = [] {
+                if (const char* e = std::getenv("ULTRA_KEEPALIVE_ACK_MS")) {
+                    const long v = std::atol(e);
+                    if (v >= 3000 && v <= 60000) return static_cast<uint32_t>(v);
+                }
+                return 25000u;
+            }();
             if (keepalive_ack_enabled) {
-                arq_.keepaliveAckIfStalled(25000u);
+                arq_.keepaliveAckIfStalled(keepalive_ack_ms);
             }
 
             // RX-AUTHORITY: age the verdict-SNR ring (stale readings must not

@@ -84,6 +84,32 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-14 — feat(arq): keepalive ACK v1 (default off) + honest rig A/B — mechanism works, benefit epoch-noise-dominated; v2 (fire sooner) filed
+
+Built the receiver keepalive ACK for BUG-ANCHOR-WAIT-NO-ACK-STALL: re-emit the
+current cumulative ACK when the ACK side has been silent > threshold (default
+25 s, env ULTRA_KEEPALIVE_ACK_MS) during an active receive (rx_base>0 &&
+last_rx_more_data). Sender resends holes on any tone-burst ACK → converts the
+44.68 s RTO stall into a faster turnaround. Env-gated ULTRA_KEEPALIVE_ACK,
+default off; ctest 86/86 byte-identical; routes through listen-before-ACK.
+
+Rig A/B (F284-F289, interleaved MPG@25, KA off vs on): the keepalive FIRES
+correctly (1-2×/transfer, exactly on the anchor-reject stalls) and is safe
+(cannot cause failures). But the A/B is INCONCLUSIVE — the KA-ON arm drew
+consistently rougher epochs (fails 2386/487/860 vs OFF 386/216/645; means ON
+1.51 vs OFF 2.45 is pure epoch luck). The one clean pair (F288/F289, comparable
+fails) is a faint POSITIVE: ON matched OFF's goodput despite 33% more fails.
+
+LESSON: the 25 s threshold catches the stall LATE (~19 s of 44 s saved). Since
+the keepalive routes through listen-before-ACK (mid-burst fire is DEFERRED not
+collided), a shorter threshold is SAFE. **v2 (do next): ULTRA_KEEPALIVE_ACK_MS
+≈ 8000-10000** — catches the stall ~15 s earlier (~36 s saved), no rebuild.
+Or sender-side "no-ACK-after-burst → immediate full-anchor resend". Keep v1
+default-off until v2 is rig-A/B-confirmed with a many-pair batch (the effect
+is intermittent + small vs the huge MPG@25 epoch noise).
+
+---
+
 ## 2026-07-14 — diag: MPG@25 natural batch + BUG-ANCHOR-WAIT-NO-ACK-STALL (the marginal-SNR throughput lever, ~+30%)
 
 MPG@25 natural (F279-F283, ACE off, no force): 1.80/2.48/1.38/2.32/2.81,

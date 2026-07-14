@@ -49,7 +49,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   tone-burst ACK with the cumulative base UNCHANGED** ("no progress, resend") —
   which breaks the 44 s silence and gets an immediate resend. So the receiver
   does NOT need to decode the weak burst; it only needs to NOT be silent.
-- **Fix approaches (next session — protocol/sync path, rig-validate; ACK
+- **Status (2026-07-14): v1 SHIPPED (keepalive ACK, ULTRA_KEEPALIVE_ACK default
+  off, fc75b5b+). Mechanism confirmed on rig (fires 1-2×/transfer on the
+  stall), safe (ctest clean, cannot cause fails), but the 25 s threshold
+  catches the stall late and the A/B was epoch-noise-dominated (inconclusive,
+  faint positive in the one clean pair). NEXT = v2: ULTRA_KEEPALIVE_ACK_MS
+  ≈ 8-10 s (safe — routes through listen-before-ACK, mid-burst fire is
+  deferred; catches the stall ~15 s earlier) + many-pair rig A/B; then flip
+  default-on. See CHANGELOG 2026-07-14.**
+- **Fix approaches (protocol/sync path, rig-validate; ACK
   contract has regressed before, build carefully):**
   1. ACK-LIVENESS ACCEPT: when a burst is rejected in full-anchor-wait but
      light_found with clear energy (corr above a low floor, e.g. 0.15 — a real
