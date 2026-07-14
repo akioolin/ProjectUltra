@@ -95,11 +95,16 @@ skips while a burst is arriving — self-gating, universal. So the 8 s keepalive
 is now DEFAULT-ON (opt-out ULTRA_KEEPALIVE_ACK=0).
 
 Verified: UltraTncSimAudio — which default-on BROKE before the gate (264 s
-timeout) — now PASSES (58.8 s) with default-on. Full ctest 86/86. The 8 s
-stall-cap (rig-proven F290/F291) is unchanged on the GUI: after a rejected
-burst the channel is idle → busy=false → keepalive fires at 8 s exactly as
-before. Answers the operator's "no ACK at SNR 25": the 44 s marginal-SNR stall
-is now capped at 8 s everywhere.
+timeout) — now PASSES (58.8 s) with default-on. Full ctest 86/86. Rig F292
+(default-on, no env, MPG@25): delivered CRC-clean, max ACK-silence gap **16.1 s**
+(down from OFF's 36.7 s). HONEST NOTE: this is LOOSER than the GUI-only 8.0 s
+(F290/F291) — the connection busy-gate checks channelBusyForTx (CCA), which
+reads residual energy conservatively and delays the keepalive past 8 s, vs the
+app's tighter listen-before-ACK clear-confirmation. Trade: universal safety
+(GUI+TNC) for ~8 s of cap tightness. Still a big win (36.7→16.1 s). Answers the
+operator's "no ACK at SNR 25". REFINEMENT (filed): gate on burstAirSamplesRemaining
+only (drop CCA) to recover the ~8 s cap universally — bounded residual risk of a
+burst-HEAD-window collision; validate on the TNC before flipping.
 
 ---
 
