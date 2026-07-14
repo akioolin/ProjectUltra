@@ -4424,6 +4424,17 @@ void Connection::tick(uint32_t elapsed_ms) {
             // routes through listen-before-ACK; the sender resends holes on any
             // tone-burst ACK (turn boundary). v2 (filed): channel-gated shorter
             // threshold for a bigger saving.
+            // ULTRA_KEEPALIVE_ACK, DEFAULT-OFF. On the rig/GUI the 8 s keepalive
+            // is mechanism-proven (F290/F291: max ACK-silence gap capped at
+            // exactly 8.0 s vs OFF's 36.7 s) and collision-free — because it
+            // routes through the GUI's listen-before-ACK (app.cpp), so a
+            // mid-burst fire DEFERS. BLOCKER for default-on: the HEADLESS TNC
+            // path (ultra_tnc) has NO listen-before-ACK gating, so default-on
+            // broke UltraTncSimAudio (keepalive TX'd over inbound bursts →
+            // collision → timeout). Fix before flipping: move the channel-clear
+            // gating into the connection/ARQ (universal) rather than the GUI
+            // app layer, so the keepalive is safe on TNC too. Until then:
+            // opt-in on the GUI/rig where the gating exists.
             static const bool keepalive_ack_enabled = [] {
                 const char* e = std::getenv("ULTRA_KEEPALIVE_ACK");
                 return e != nullptr && e[0] != '\0' && e[0] != '0';
@@ -4440,7 +4451,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     const long v = std::atol(e);
                     if (v >= 3000 && v <= 60000) return static_cast<uint32_t>(v);
                 }
-                return 25000u;
+                return 8000u;  // v2 (rig-proven): caps stall at 8 s, no collision
             }();
             if (keepalive_ack_enabled) {
                 arq_.keepaliveAckIfStalled(keepalive_ack_ms);

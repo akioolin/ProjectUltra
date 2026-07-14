@@ -84,6 +84,29 @@ Verified: ctest 85/85; good@20 PASS 1600 bps.
 
 ---
 
+## 2026-07-14 — feat(arq): keepalive ACK v2 (8 s) — rig-PROVEN (stall 44→8 s, no collision), default-off blocked by TNC listen-before-ACK gap
+
+Direct silence-gap measurement (epoch-independent, unlike the goodput A/B)
+validated the fix cleanly. Rig F290/F291 (ULTRA_KEEPALIVE_ACK_MS=8000): **max
+ACK-silence gap capped at exactly 8.0 s** (vs OFF 36.7 s, v1@25s 25.0 s),
+reproducible across both runs, 13 keepalives/transfer, and cwfails NORMAL
+(266/491 — the faster firing did NOT collide, because it routes through the
+GUI's listen-before-ACK deferral). Default threshold set to 8000 (from 25000).
+
+**Default-on ATTEMPTED and REVERTED:** flipping ULTRA_KEEPALIVE_ACK default-on
+broke UltraTncSimAudio (timeout 264 s vs 58 s off). Root cause: the keepalive's
+collision-safety depends on listen-before-ACK, which lives in the GUI app layer
+(app.cpp) — the HEADLESS TNC (ultra_tnc, the Winlink/PAT path) has NO such
+gating, so the keepalive TX'd over inbound bursts → collision. So it stays
+DEFAULT-OFF (opt-in on the rig/GUI where the gating exists).
+
+**BLOCKER for default-on (filed):** move the channel-clear gating from the GUI
+app layer into the connection/ARQ (universal) so the keepalive is collision-
+safe on TNC too — then flip default-on at 8 s. The mechanism + rig safety are
+already proven; only the TNC-path gating remains.
+
+---
+
 ## 2026-07-14 — feat(arq): keepalive ACK v1 (default off) + honest rig A/B — mechanism works, benefit epoch-noise-dominated; v2 (fire sooner) filed
 
 Built the receiver keepalive ACK for BUG-ANCHOR-WAIT-NO-ACK-STALL: re-emit the
