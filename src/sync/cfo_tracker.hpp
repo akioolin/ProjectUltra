@@ -61,8 +61,25 @@ public:
     // +0.29 across a crater run once the chirp stopped re-centering it). A
     // DELIVERED group certifies the warm estimate; a 0/N group revokes the
     // certificate, so the next full anchor takes the chirp again and re-centers.
-    void certifyWarm() { pilot_seeded_.store(true); }
+    void certifyWarm() {
+        certified_cfo_.store(cfo_.load());  // snapshot the PROVEN CFO (this group decoded with it)
+        has_certified_.store(true);
+        pilot_seeded_.store(true);
+    }
     void revokeWarm() { pilot_seeded_.store(false); }
+
+    // CHEAP RE-ANCHOR (ULTRA_CHEAP_REANCHOR): restore the last CERTIFIED CFO — the value
+    // a delivered group proved — WITHOUT a full dual-chirp re-anchor. A fade is an
+    // amplitude event: warm TIMING survives it; only the pilot-tracked CFO may have
+    // WALKED (noisy pilots ingested before the LDPC verdict, BUG-ANCHOR-CFO-KILL). The
+    // full chirp (~1.2 s) re-acquires timing too — overkill. Rolling the CFO back to the
+    // last proven value un-poisons it for free, so warm sync can retry the next group
+    // without the chirp tax. Returns false if nothing certified yet (keep current).
+    bool rollbackToCertified() {
+        if (!has_certified_.load()) return false;
+        cfo_.store(certified_cfo_.load());
+        return true;
+    }
 
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
     // was applied to the demod) with `current` via signal_policy::combinePilotCFO, then STORE the
@@ -80,11 +97,15 @@ public:
     void reset() {
         cfo_.store(0.0f);
         pilot_seeded_.store(false);
+        has_certified_.store(false);
+        certified_cfo_.store(0.0f);
     }
 
 private:
     std::atomic<float> cfo_{0.0f};
     std::atomic<bool> pilot_seeded_{false};
+    std::atomic<float> certified_cfo_{0.0f};  // last DELIVERED-group CFO (cheap re-anchor)
+    std::atomic<bool> has_certified_{false};
 };
 
 }  // namespace sync

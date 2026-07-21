@@ -102,6 +102,33 @@ pending to confirm the auto 16QAM path doesn't regress without the R2/3 interlea
 
 ---
 
+## 2026-07-21 — feat(sync): cheap crater re-anchor — CFO rollback-to-certified + periodic chirp (ULTRA_CHEAP_REANCHOR, default-off)
+
+**Motivation.** With all levers on, the 12-run characterization (F520-531, MPG@20) sat at
+1.49 kbps with **8.4 full re-anchors/run** (~10s/transfer of chirp overhead) — the EMA-hold
+FEEDS it by holding a high rung through fades, so more groups crater AT that rung and each
+tripped a full ~1.2s dual-chirp re-anchor. Re-anchor churn is now the dominant airtime tax.
+
+**What changed.** A full dual-chirp re-acquires TIMING + CFO, but a fade only threatens the
+CFO (warm timing survives — the samples are there, just attenuated). So on a crater, instead
+of a full chirp: (1) roll the CFO back to the last CERTIFIED value (last delivered group's
+proven CFO — `CFOTracker::certifyWarm` now snapshots it, `rollbackToCertified()` restores it;
+un-poisons a fade-walked CFO for FREE), keep warm timing, and (2) fire the expensive full
+chirp only PERIODICALLY (every kChirpEvery=4 craters) as a "is sync really lost?" probe — a
+chirp that didn't recover the link (still cratering) means a FADE, not lost sync, so ride it
+warm. Drops chirps from ~1/crater to ~1/4-craters. Behind `ULTRA_CHEAP_REANCHOR` (default-off
+⇒ byte-identical); extends lever #3's warm-hold (which held only crater #1, chirped the rest).
+
+**Why safe.** Rolling to the last-proven CFO is what the connected-anchor logic already
+prefers over a fade-jittered chirp gap (seedFromChirpConnectedAnchor). Timing stays warm
+(receiver-local, no sender signal). The periodic chirp bounds sync staleness to 4 craters if
+sync genuinely drifted. `crater_reanchor_streak_` resets on any decoded frame.
+
+**Verification.** ctest -j4 full suite green (86/86, knob off = byte-identical). Rig A/B
+(cheap on vs off, all other levers on, MPG@20) is the throughput proof; default-on pending it.
+
+---
+
 ## 2026-07-21 — feat(rate): EMA-supported crater-hold + censored failed-group SNR (ULTRA_RX_EMA_HOLD, DEFAULT-ON) — throughput-ceiling audit lever #1
 
 **FLIPPED DEFAULT-ON (rig A/B F500-511, MPG@20, interleaved ON vs OFF).** Operator noticed

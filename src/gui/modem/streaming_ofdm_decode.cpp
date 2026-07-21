@@ -2301,23 +2301,47 @@ void StreamingDecoder::decodeCurrentFrame() {
             const char* e = std::getenv("ULTRA_CRATER_REANCHOR_HOLD");
             return !(e && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON; =0 restores legacy
         }();
+        // CHEAP RE-ANCHOR (ULTRA_CHEAP_REANCHOR, default-off): a full dual-chirp (~1.2s)
+        // re-acquires TIMING + CFO, but a fade only threatens the CFO (warm timing
+        // survives). So on a crater, HOLD warm timing and roll the CFO back to the last
+        // CERTIFIED value (last delivered group's proven CFO — un-poisons a walked CFO
+        // for free), and fire the expensive full chirp only PERIODICALLY (every
+        // kChirpEvery craters) as a "is sync really lost?" probe. A chirp that didn't
+        // recover the link (still cratering) means a FADE, not lost sync — more chirps
+        // won't help, so ride it warm. This attacks the ~8.4 re-anchors/run (each 1.2s)
+        // that the EMA-hold FEEDS by holding a high rung through fades (F520-531). Legacy
+        // lever #3 (below) chirps on crater #2; cheap drops that to 1 chirp per 4 craters.
+        static const bool kCheapReanchor = [] {
+            const char* e = std::getenv("ULTRA_CHEAP_REANCHOR");
+            return e && e[0] == '1' && e[1] == '\0';  // default-off
+        }();
+        constexpr int kChirpEvery = 4;  // cheap: 1 full chirp per N craters, warm between
         ++crater_reanchor_streak_;
-        const bool hold_warm_sync =
-            kCraterReanchorHold && crater_reanchor_streak_ < 2;
+        bool force_chirp;
+        if (!kCraterReanchorHold) {
+            force_chirp = true;  // legacy: full chirp on every crater
+        } else if (!kCheapReanchor) {
+            force_chirp = (crater_reanchor_streak_ >= 2);  // lever #3: hold #1 only
+        } else {
+            force_chirp = (crater_reanchor_streak_ % kChirpEvery == 0);  // periodic probe
+        }
         if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo &&
-            !hold_warm_sync) {
+            force_chirp) {
             resetFrameArrivalTrackingLocked();
             sync_controller_.expect_full_ofdm_anchor_ = true;
             sync_controller_.clearRejectStreak();
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);
-        } else if (hold_warm_sync && mode_ == protocol::WaveformMode::OFDM_CHIRP &&
-                   !ack_listen_self_echo) {
+        } else if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo) {
+            // HOLD warm sync (no chirp). Cheap re-anchor: un-poison the CFO to the last
+            // certified value so the warm retry uses a proven CFO, not a fade-walked one.
+            const bool rolled = kCheapReanchor && cfo_tracker_.rollbackToCertified();
             LOG_MODEM(INFO,
-                      "[%s] OFDM decode failed 0/%d CWs (crater #%d) — HOLDING warm sync "
-                      "(a single fade is not a sync loss; #2 forces re-anchor)",
-                      log_prefix_.c_str(), result.codewords_failed, crater_reanchor_streak_);
+                      "[%s] OFDM decode failed 0/%d CWs (crater #%d) — HOLDING warm sync%s "
+                      "(fade is not a sync loss)",
+                      log_prefix_.c_str(), result.codewords_failed, crater_reanchor_streak_,
+                      rolled ? " + CFO rollback-to-certified" : "");
         } else if (ack_listen_self_echo) {
             LOG_MODEM(INFO,
                       "[%s] SELF-ECHO 0-CW during ACK-listen (monitor armed) — "
