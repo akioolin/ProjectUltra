@@ -10,7 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-07-21 — feat(sync): two-crater discipline for the sync re-anchor (ULTRA_CRATER_REANCHOR_HOLD, default-off) — stop nuking warm sync on a single fade
+## 2026-07-21 — feat(sync): two-crater discipline for the sync re-anchor (ULTRA_CRATER_REANCHOR_HOLD, DEFAULT-ON) — stop nuking warm sync on a single fade
+
+**RIG-CONFIRMED + FLIPPED DEFAULT-ON (F470-481, MPG@20 interleaved A/B).** HOLD vs OFF:
+full re-anchors **HALVED** (25 vs 50 total; delivered HOLD runs ~1 each vs 8-18 on OFF),
+goodput **+44%** on delivered runs (1.87 vs 1.30 kbps), delivery **tied 4/6** (no
+regression). The 2 HOLD FAILs churned HIGH re-anchors (6, 15) = the hold correctly fell
+back to re-anchoring on genuinely sustained failure, so the FAILs are channel roughness,
+not the hold. Rough/FAIL-heavy epoch so the +44% magnitude is directional, but the
+decisive results (re-anchors halved, no delivery regression, safe by construction) hold.
+`=0` restores legacy. ctest green with the hold ACTIVE (default path). [details below]
+
 
 **What was broken.** On every 0-CW group crater the RECEIVER
 (`streaming_ofdm_decode.cpp` decodeCurrentFrame) forced a full chirp+LTS re-anchor —

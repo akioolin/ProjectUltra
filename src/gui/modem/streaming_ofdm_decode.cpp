@@ -2284,19 +2284,22 @@ void StreamingDecoder::decodeCurrentFrame() {
         }();
         const bool ack_listen_self_echo =
             kEchoReanchorGate && tone_burst_monitor_.isArmed();
-        // Lever #3 TWO-CRATER SYNC DISCIPLINE (ULTRA_CRATER_REANCHOR_HOLD, default-off):
-        // a deep fade is an AMPLITUDE event, not a lost sync — warm TIMING survives it
-        // (the samples are there, just attenuated). Forcing a full chirp+LTS re-anchor
-        // on the FIRST crater treats the fade as a sync loss: it delays the ACK (the RX
-        // is re-acquiring instead of signaling) and makes the sender prepend a ~1.2s
-        // chirp. The RATE controller already declines to react to a single crater
-        // (F122 two-crater rule); this gives the SYNC re-anchor the same restraint —
-        // hold warm sync through crater #1, re-anchor only on crater #2. Worst case is
-        // ONE extra warm-attempt group before the re-anchor (bounded), and crater #2
-        // still re-centers a genuinely-walked CFO exactly as before.
+        // Lever #3 TWO-CRATER SYNC DISCIPLINE (ULTRA_CRATER_REANCHOR_HOLD, DEFAULT-ON
+        // 2026-07-21; =0 opts out): a deep fade is an AMPLITUDE event, not a lost sync —
+        // warm TIMING survives it (the samples are there, just attenuated). Forcing a
+        // full chirp+LTS re-anchor on the FIRST crater treats the fade as a sync loss:
+        // it delays the ACK (the RX is re-acquiring instead of signaling) and makes the
+        // sender prepend a ~1.2s chirp. The RATE controller already declines to react to
+        // a single crater (F122 two-crater rule); this gives the SYNC re-anchor the same
+        // restraint — hold warm sync through crater #1, re-anchor only on crater #2.
+        // Worst case is ONE extra warm-attempt group before the re-anchor (bounded), and
+        // crater #2 still re-centers a genuinely-walked CFO exactly as before. Rig A/B
+        // (F470-481, MPG@20): full re-anchors HALVED (25 vs 50), goodput +44% on
+        // delivered runs (1.87 vs 1.30 kbps), delivery tied 4/6 (no regression); the
+        // HOLD FAILs churned high re-anchors = correct fallback on sustained failure.
         static const bool kCraterReanchorHold = [] {
             const char* e = std::getenv("ULTRA_CRATER_REANCHOR_HOLD");
-            return e && e[0] == '1' && e[1] == '\0';
+            return !(e && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON; =0 restores legacy
         }();
         ++crater_reanchor_streak_;
         const bool hold_warm_sync =
