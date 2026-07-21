@@ -2251,6 +2251,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     size_t next_search_abs = frame_sync_abs + consumed;
 
     if (result.success && connected_ && is_ofdm) {
+        crater_reanchor_streak_ = 0;  // lever #3: a decode proves warm sync is fine
         noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         if (!is_non_data_frame) {
@@ -2283,13 +2284,37 @@ void StreamingDecoder::decodeCurrentFrame() {
         }();
         const bool ack_listen_self_echo =
             kEchoReanchorGate && tone_burst_monitor_.isArmed();
-        if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo) {
+        // Lever #3 TWO-CRATER SYNC DISCIPLINE (ULTRA_CRATER_REANCHOR_HOLD, default-off):
+        // a deep fade is an AMPLITUDE event, not a lost sync — warm TIMING survives it
+        // (the samples are there, just attenuated). Forcing a full chirp+LTS re-anchor
+        // on the FIRST crater treats the fade as a sync loss: it delays the ACK (the RX
+        // is re-acquiring instead of signaling) and makes the sender prepend a ~1.2s
+        // chirp. The RATE controller already declines to react to a single crater
+        // (F122 two-crater rule); this gives the SYNC re-anchor the same restraint —
+        // hold warm sync through crater #1, re-anchor only on crater #2. Worst case is
+        // ONE extra warm-attempt group before the re-anchor (bounded), and crater #2
+        // still re-centers a genuinely-walked CFO exactly as before.
+        static const bool kCraterReanchorHold = [] {
+            const char* e = std::getenv("ULTRA_CRATER_REANCHOR_HOLD");
+            return e && e[0] == '1' && e[1] == '\0';
+        }();
+        ++crater_reanchor_streak_;
+        const bool hold_warm_sync =
+            kCraterReanchorHold && crater_reanchor_streak_ < 2;
+        if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo &&
+            !hold_warm_sync) {
             resetFrameArrivalTrackingLocked();
             sync_controller_.expect_full_ofdm_anchor_ = true;
             sync_controller_.clearRejectStreak();
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);
+        } else if (hold_warm_sync && mode_ == protocol::WaveformMode::OFDM_CHIRP &&
+                   !ack_listen_self_echo) {
+            LOG_MODEM(INFO,
+                      "[%s] OFDM decode failed 0/%d CWs (crater #%d) — HOLDING warm sync "
+                      "(a single fade is not a sync loss; #2 forces re-anchor)",
+                      log_prefix_.c_str(), result.codewords_failed, crater_reanchor_streak_);
         } else if (ack_listen_self_echo) {
             LOG_MODEM(INFO,
                       "[%s] SELF-ECHO 0-CW during ACK-listen (monitor armed) — "

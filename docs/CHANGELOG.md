@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-21 — feat(sync): two-crater discipline for the sync re-anchor (ULTRA_CRATER_REANCHOR_HOLD, default-off) — stop nuking warm sync on a single fade
+
+**What was broken.** On every 0-CW group crater the RECEIVER
+(`streaming_ofdm_decode.cpp` decodeCurrentFrame) forced a full chirp+LTS re-anchor —
+`resetFrameArrivalTrackingLocked()` + `expect_full_ofdm_anchor_ = true`. A deep fade is
+an AMPLITUDE event (warm TIMING survives it — the samples are there, just attenuated),
+so re-acquiring timing+CFO from a fresh chirp is over-reaction: it delays the ACK (the RX
+is re-acquiring instead of signaling the failure), and the next group must prepend a
+~1.2 s chirp. Measured on the rig: ~7 full re-anchors per 50 KB transfer, and the
+operator watched the resulting "long ACK → sender RTO → resend" loop repeatedly. The RATE
+controller already declines to react to a single crater (F122 two-crater rule: one crater
+is a fade the ARQ absorbs, not evidence) — but the SYNC re-anchor never got that discipline
+and fired on the FIRST crater every time.
+
+**What changed.** New `crater_reanchor_streak_` counter (StreamingDecoder), reset on any
+decoded frame. Behind `ULTRA_CRATER_REANCHOR_HOLD` (default-off ⇒ byte-identical): the
+full re-anchor is HELD on crater #1 (warm sync kept — the RX tries warm light-sync on the
+next group instead of a full blind chirp search) and fires only on crater #2 consecutive.
+Same restraint the rate controller already uses.
+
+**Why safe.** `expect_full_ofdm_anchor_` is RECEIVER-LOCAL (drives the RX's own search
+mode; NOT wired to force a sender full-anchor — the WAITING-REBASE voice is a separate
+ARQ-timeout path). So a held crater just makes the RX attempt warm on the next group:
+if warm works, a full re-anchor + ~1.2 s chirp is saved and the ACK isn't delayed; if the
+CFO genuinely walked, the next group craters and #2 re-anchors + re-centers exactly as
+before. Worst case = ONE extra warm-attempt group (bounded); crater #2 onward is unchanged.
+
+**Verification.** `ctest -j4` full suite green (86/86, knob off = byte-identical). Rig A/B
+(ULTRA_CRATER_REANCHOR_HOLD on vs off, MPG@20) is the throughput proof — expected to cut
+the per-run full-re-anchor count and the ACK-delay→RTO→resend loop the operator flagged.
+Default-on pending the rig A/B.
+
+---
+
 ## 2026-07-21 — fix(arq): cross-frame burst interleave DEFAULT-OFF for all modulations (was >=16QAM-ON) — rig-measured harmful on fading, +37% with per-frame SACK
 
 **What changed.** `connection_policy.hpp::burstCrossFrameInterleaveOn(mod)` now returns

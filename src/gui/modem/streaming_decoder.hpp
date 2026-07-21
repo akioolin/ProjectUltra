@@ -816,6 +816,13 @@ private:
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
+    // Lever #3 (ULTRA_CRATER_REANCHOR_HOLD): consecutive 0-CW crater re-anchor
+    // triggers since the last decoded frame. The sync layer forces a full
+    // chirp+LTS re-anchor on the FIRST crater; the RATE controller learned long ago
+    // (F122 two-crater rule) that a single crater is a fade the ARQ absorbs, not
+    // evidence — this counter gives the SYNC re-anchor the same discipline: hold warm
+    // sync through the first crater, re-anchor only on the second consecutive one.
+    int crater_reanchor_streak_ = 0;
     // warm_sync_phase_ + last_frame_* relocated into sync_controller_ (§7.4 shell-move A1,
     // 2026-05-31); accessed as sync_controller_.<field> until A2 moves the transition logic in.
 
