@@ -102,7 +102,21 @@ pending to confirm the auto 16QAM path doesn't regress without the R2/3 interlea
 
 ---
 
-## 2026-07-21 — feat(rate): EMA-supported crater-hold + censored failed-group SNR (ULTRA_RX_EMA_HOLD, default-OFF) — throughput-ceiling audit lever #1
+## 2026-07-21 — feat(rate): EMA-supported crater-hold + censored failed-group SNR (ULTRA_RX_EMA_HOLD, DEFAULT-ON) — throughput-ceiling audit lever #1
+
+**FLIPPED DEFAULT-ON (rig A/B F500-511, MPG@20, interleaved ON vs OFF).** Operator noticed
+16QAM runs but never STAYS — the climb-crater-demote oscillation (8 rung moves/transfer,
+each a ~1.2s DESC-SWITCH re-anchor) is the real cap, not a failure to reach 16QAM. EMA-hold
+dampens it: demotes cut **22→8 (−63%)**, rung moves 42→28, and it HOLDS 16QAM through fade
+brushes (9 EMA-HOLD events fired). Goodput **+8.5% mean** (1.92 vs 1.77) — HONEST: the
+interim 3-pair read of +45% was a lucky draw; the full 12-run gain is modest and the win is
+mostly the FLOOR (EMA-ON worst 1.57 vs OFF worst 1.08 — kills the catastrophic-thrash tail
+like OFF's F505 14-moves/9-demotes→1.08), not the peak (OFF caught the single best run 2.68).
+Delivery tied 6/6 (no regression). Justified on robustness (halved demotes + higher floor +
+safe/unit-tested), not raw speed. `=0` opts out. NOTE: re-anchors slightly HIGHER on EMA-ON
+(21 vs 17) — holding a high rung → more craters AT it → more sync re-anchors (mild lever-#3
+interaction, watch). test_rx_authority baseline set to `=0` (legacy demote tests need the
+hold off; ema tests toggle explicitly). ctest green with hold ACTIVE by default. [orig below]
 
 **Motivation (throughput-ceiling audit, docs + workflow 2026-07-21).** A 6-facet
 first-principles audit of the "~2000 bps cap" found it is NOT a PHY/modulation

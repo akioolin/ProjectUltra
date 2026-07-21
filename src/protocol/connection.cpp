@@ -32,11 +32,13 @@ constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // floor: monitor arm wi
 bool kInteractiveToneAckEnabled() { return true; }
 bool kUnifiedSeqEnabled() { return true; }
 
-// ULTRA_RX_EMA_HOLD (default OFF ⇒ byte-identical): lever #1 of the throughput-
-// ceiling audit (2026-07-21). Two coupled corrections to the RX-authority rung
-// controller's crater response, targeting the fast-vs-slow variance (F344 2.61 vs
-// F372 1.16 kbps on the SAME MPG@20 channel — the gap is a rate-controller limit
-// cycle, not PHY): (1) EMA-SUPPORTED HOLD — a confirmed crater does NOT demote while
+// ULTRA_RX_EMA_HOLD (DEFAULT-ON 2026-07-21; =0 opts out): lever #1 of the throughput-
+// ceiling audit. Two coupled corrections to the RX-authority rung controller's crater
+// response, targeting the fast-vs-slow variance (F344 2.61 vs F372 1.16 kbps on the SAME
+// MPG@20 channel — the gap is a rate-controller limit cycle, not PHY). Rig A/B F500-511
+// (MPG@20): dampens the climb-crater-demote oscillation (fewer rung moves/demotes/
+// re-anchors) → holds 16QAM through fade brushes → measured +~45% goodput vs OFF.
+// (1) EMA-SUPPORTED HOLD — a confirmed crater does NOT demote while
 // the fade-averaged broadband SNR still clears the CURRENT rung's calibrated floor
 // (rungClassAnchorDb); consecutive craters at a healthy average are deep-null fade
 // brushes the ARQ absorbs, not rung failure. (2) CENSORED failed-group SNR — a
@@ -47,7 +49,7 @@ bool kUnifiedSeqEnabled() { return true; }
 // makes (1) honest: the hold gate cannot latch on a crest-biased average.
 bool emaHoldEnabled() {
     const char* e = std::getenv("ULTRA_RX_EMA_HOLD");
-    return e && e[0] == '1' && e[1] == '\0';
+    return !(e && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON 2026-07-21; =0 opts out
 }
 
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {

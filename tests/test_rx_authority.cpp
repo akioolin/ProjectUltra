@@ -426,7 +426,7 @@ static bool test_ema_hold_absorbs_supported_crater() {
     // 16QAM R2/3 on Good reads 24 dB (> the 20 dB Good anchor). Seed clean history
     // so the ring average sits above the anchor, THEN two craters (a fade brush).
     auto run = [](bool knob_on) -> uint8_t {
-        if (knob_on) setenv("ULTRA_RX_EMA_HOLD", "1", 1); else unsetenv("ULTRA_RX_EMA_HOLD");
+        setenv("ULTRA_RX_EMA_HOLD", knob_on ? "1" : "0", 1);  // explicit (default is ON)
         Connection c;
         TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
         for (int i = 0; i < 4; ++i) {  // clean history keeps the ring average high
@@ -438,7 +438,7 @@ static bool test_ema_hold_absorbs_supported_crater() {
         c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
         const uint8_t cmd = TA::rxCmd(c);
-        unsetenv("ULTRA_RX_EMA_HOLD");
+        setenv("ULTRA_RX_EMA_HOLD", "0", 1);  // restore the suite baseline (off)
         return cmd;
     };
     const uint8_t off_cmd = run(false);
@@ -470,7 +470,7 @@ static bool test_ema_hold_still_demotes_sustained_failure() {
         TA::verdict(c, false, 0.0f);
         if (TA::rxCmd(c) < kRungIdxQam16R23) { demoted_at = k; break; }
     }
-    unsetenv("ULTRA_RX_EMA_HOLD");
+    setenv("ULTRA_RX_EMA_HOLD", "0", 1);  // restore the suite baseline (off)
     if (demoted_at < 0)
         FAIL("sustained crater never demoted — EMA-HOLD latched (bug)");
     if (demoted_at < 2)
@@ -485,6 +485,11 @@ int main() {
     setenv("ULTRA_ENABLE_PSK8_LADDER", "1", 1);
     unsetenv("ULTRA_DESCRIPTOR_MODE_SWITCH");  // legacy path -> pending_* observable
     unsetenv("ULTRA_RX_RATE_CMD");
+    // ULTRA_RX_EMA_HOLD is DEFAULT-ON in production (2026-07-21) — but the legacy
+    // demote-machinery tests (two-crater rule, climb-dwell) exercise the path that
+    // runs when the hold does NOT engage, so they need it explicitly OFF as their
+    // baseline. The two test_ema_hold_* cases toggle it on themselves and restore "0".
+    setenv("ULTRA_RX_EMA_HOLD", "0", 1);
 
     std::cout << "RX-AUTHORITY suite\n";
     bool ok = true;
