@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-21 — fix(arq): cross-frame burst interleave DEFAULT-OFF for all modulations (was >=16QAM-ON) — rig-measured harmful on fading, +37% with per-frame SACK
+
+**What changed.** `connection_policy.hpp::burstCrossFrameInterleaveOn(mod)` now returns
+`false` by default for every modulation (was `isCoherentModulation(mod) && bits>=4`, i.e.
+ON for >=16QAM). Interleave OFF ⇒ per-frame SR-ARQ SACK (resend only dead frames);
+ON ⇒ whole-group ACK/NACK. `ULTRA_BURST_INTERLEAVE=1` re-enables it (for A/B / restoring
+the Good@20 case), `=0` forces off (same as default). One caller (modem_mode.cpp), no test
+pinned the old default. NOTE: this is a behavior change to main (not byte-identical) — 16QAM
+file transfers now use per-frame SACK.
+
+**Why (rig evidence).** Cross-frame TIME interleave spreads each LDPC codeword's bits across
+ALL N frames of the burst. The prior default turned it ON for dense mods on the theory that
+a frozen FREQUENCY null smeared across frames becomes a recoverable ~1/N nick (GUI/offline
++47% on 16QAM R2/3 Good@20, 2026-06-14). But the HF fade the rig actually delivers is
+TIME-localized (a Watterson deep fade hits one stretch of the burst): interleaving then puts
+~1/N corruption into EVERY codeword at once, and when that exceeds the LDPC budget (it does
+at MPG@20) ALL codewords fail together — a whole-group 0/N crater instead of one dead frame.
+
+**Measured (forced-16QAM-R1/2 interleaved A/B, IONOS rig, MPG@20, F440-449, 2026-07-21;
+RX-authority+adaptive disabled so only interleave varies):**
+
+| arm | delivered | mean kbps | full craters | partial craters |
+|-----|-----------|-----------|--------------|-----------------|
+| interleave ON (old default) | 4/5 | 1.13 | **62** | 13 |
+| interleave OFF (per-frame SACK) | **5/5** | **1.55 (+37%)** | **12** | 41 |
+
+OFF won 4/5 pairs, delivered every transfer, and had **5× fewer full craters** — because
+failures stay LOCAL (partial groups the per-frame SACK resends cheaply) instead of coupling
+to the burst's worst instant. The crater SHAPE is the mechanism proof: ON fails WHOLE (62
+full / 13 partial), OFF fails LOCAL (12 full / 41 partial).
+
+**Reconciliation with the 2026-06-14 +47%.** MPG@20 IS a "Multipath GOOD" channel, so the new
+rig result directly CONTRADICTS the old Good@20 interleave benefit — that +47% was a calmer
+epoch / R2/3 / possibly-sim realization. The newer, faithful hardware measurement wins. AWGN
+has no nulls to smear, so interleave buys nothing there either → no channel where it clearly
+earns its keep on the real rig. `maxValidatedCoherentRate` comment flagged: the 16QAM R2/3
+cap's interleave-dependent margin is now UNRE-MEASURED — re-A/B R2/3 vs R1/2 with per-frame
+SACK before trusting R2/3 as the 16QAM cap.
+
+**Origin.** Operator observation ("we ACK, sender resends, we ACK over the resend") →
+traced the whole-group-resend to interleave (streaming_burst_interleave.cpp:1207) → forced
+A/B. Also directly kills the whole-group-resend airtime waste that prompted the investigation.
+
+**Verification.** `ctest -j4` full suite green. Rig A/B above. Natural-ladder (auto-path) A/B
+pending to confirm the auto 16QAM path doesn't regress without the R2/3 interleave margin.
+
+---
+
 ## 2026-07-21 — feat(rate): EMA-supported crater-hold + censored failed-group SNR (ULTRA_RX_EMA_HOLD, default-OFF) — throughput-ceiling audit lever #1
 
 **Motivation (throughput-ceiling audit, docs + workflow 2026-07-21).** A 6-facet

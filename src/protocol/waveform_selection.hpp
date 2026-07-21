@@ -505,9 +505,12 @@ inline bool rxRateAuthorityEnabled() {
 // rate_controller.hpp). R5_6 is no longer a cap value.
 inline CodeRate maxValidatedCoherentRate(Modulation mod) {
     switch (mod) {
-        // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (auto-on for QAM16 via
-        // burstCrossFrameInterleaveOn) makes 16QAM R2/3 Good@20 viable at ~1790 bps GUI-measured
-        // (6/6 seeds), now ABOVE the R1/2 clean rung (~1550). 2026-07-03: the R2/3 measured
+        // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (then auto-on for QAM16 via
+        // burstCrossFrameInterleaveOn) made 16QAM R2/3 Good@20 viable at ~1790 bps GUI-measured
+        // (6/6 seeds), then ABOVE the R1/2 clean rung (~1550). NOTE (2026-07-21): interleave is now
+        // DEFAULT-OFF (rig-measured harmful on MPG@20 fading — see burstCrossFrameInterleaveOn); the
+        // R2/3 cap stands but its interleave-dependent margin is UNRE-MEASURED without it — re-A/B
+        // 16QAM R2/3 vs R1/2 on the rig (per-frame SACK) before trusting R2/3 as the 16QAM cap. 2026-07-03: the R2/3 measured
         // ceiling is 3520 bps AWGN@20 with the wide window (the old "~2850 AWGN@30" figure is
         // stale); R3/4 raw = 9/8 of R2/3 -> projected ceiling ~3900. R3/4 measured damage-bound
         // PRE-interleave (55-70% frame loss — fable_analysis/07), so it ships knob-gated

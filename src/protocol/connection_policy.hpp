@@ -143,24 +143,30 @@ inline size_t burstInterleaveGroupFrames() {
 // QAM16 via a QPSK||QAM8 hardcode, but the ARQ stayed whole-group from the env default)
 // -> ALPHA ignored BRAVO's per-frame masks and skipped partial-group holes (the QAM16
 // offset-skip bug). Invariant: interleave OFF -> per-frame SR masks; ON -> whole-group
-// ACK/NACK. Default OFF for ALL modulations/rates "for now"; re-enable for Moderate/Poor
-// time-diversity later. Override: ULTRA_BURST_INTERLEAVE=1 (force ON), =0 (force OFF).
-inline bool burstCrossFrameInterleaveOn(Modulation mod) {
+// ACK/NACK.
+//
+// DEFAULT OFF FOR ALL MODULATIONS (2026-07-21, rig-measured — flips the prior >=16QAM-ON
+// default). Cross-frame TIME interleave spreads each LDPC codeword's bits across ALL N
+// frames of the burst. The prior default turned it ON for dense mods (>=16QAM) on the
+// theory that spreading a frozen FREQUENCY null into a ~1/N NICK is recoverable (GUI/offline
+// +47% on 16QAM R2/3 Good@20, 2026-06-14). But the HF fade the rig actually delivers is
+// TIME-localized (a Watterson deep fade hits one stretch of the burst): interleaving then
+// puts ~1/N corruption into EVERY codeword at once, and when that exceeds the LDPC budget
+// (it does on MPG@20) ALL codewords fail together -> a whole-group 0/N crater instead of one
+// dead frame. Forced-16QAM-R1/2 interleaved A/B on the IONOS rig (F440-449, MPG@20,
+// 2026-07-21): interleave OFF = +37% goodput (1.55 vs 1.13 kbps), 5/5 vs 4/5 delivery, and
+// 5x FEWER full craters (12 vs 62) — because failures stay LOCAL (partial groups the
+// per-frame SACK resends cheaply) instead of coupling to the burst's worst instant. MPG@20
+// IS a "Good" channel, so this DIRECTLY CONTRADICTS the 2026-06-14 Good@20 +47% (a calmer
+// epoch / R2/3 / possibly-sim realization) — the newer, faithful rig measurement wins, and
+// AWGN has no nulls to smear so interleave buys nothing there either. Net: no channel where
+// interleave clearly earns its keep on the real rig -> OFF everywhere, per-frame SACK.
+// Re-enable to A/B the Good@20 claim: ULTRA_BURST_INTERLEAVE=1 (force ON), =0 (force OFF).
+inline bool burstCrossFrameInterleaveOn(Modulation /*mod*/) {
     if (const char* env = std::getenv("ULTRA_BURST_INTERLEAVE")) {
         return env[0] == '1';  // explicit override forces ON/OFF for ALL modulations (testing)
     }
-    // Default: cross-frame TIME interleave ON for DENSE coherent mods (>=16QAM, >=4 bits/symbol),
-    // OFF (per-frame SR-ARQ) for QPSK/8PSK/BPSK. GUI-measured 2026-06-14: +47% on 16QAM R2/3
-    // Good@20 (6/6 seeds, deint-fails ~halved). MECHANISM: a dense constellation's tight rings
-    // cannot absorb a frequency-null codeword-wipe (frame << coherence time -> the null is frozen
-    // within a frame); the burst spans ~1.7 coherence times, so spreading each codeword across the
-    // burst's frames turns a static-null WIPE into a recoverable ~1/N NICK. Frequency interleaving
-    // is already structurally maxed (each CW touches all 59 carriers) — TIME diversity is the only
-    // remaining axis. Safe because 16QAM is only SELECTED on benign channels, so the whole-group-
-    // ACK cost (lost per-frame SR masks) is ~0 there (no-regress measured on AWGN@30 + QPSK R3/4
-    // Good@20). QPSK/8PSK stay per-frame SR-ARQ — their margin absorbs nulls and they serve the
-    // lossier channels where fine-grained retransmit is the proven robustness lever.
-    return ofdm_link_adaptation::isCoherentModulation(mod) && getBitsPerSymbol(mod) >= 4;
+    return false;  // per-frame SR-ARQ SACK for every modulation (rig evidence above)
 }
 // ═════════════════════ Software-ALC (closed-loop TX-drive control, 2026-07-02) ═════════════════════
 // BUG-QAM16-RIG-LEVEL-BUDGET: rig wire captures showed OFDM data arriving at only ~6-7 dB
