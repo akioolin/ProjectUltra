@@ -416,6 +416,69 @@ static bool test_operator_lock_overrides_authority() {
     return true;
 }
 
+// ── ULTRA_RX_EMA_HOLD (throughput-ceiling audit lever #1, 2026-07-21) ──
+// A confirmed crater must HOLD the rung while the fade-averaged SNR still clears the
+// rung's class floor (deep-null brush the ARQ absorbs), but sustained real failure —
+// censored samples driving the average down — must still eventually demote. Same
+// scenario, knob ON vs OFF, is the A/B: OFF demotes on the 2nd crater, ON holds.
+static bool test_ema_hold_absorbs_supported_crater() {
+    TEST("EMA-HOLD holds a confirmed crater the fade-averaged SNR still supports");
+    // 16QAM R2/3 on Good reads 24 dB (> the 20 dB Good anchor). Seed clean history
+    // so the ring average sits above the anchor, THEN two craters (a fade brush).
+    auto run = [](bool knob_on) -> uint8_t {
+        if (knob_on) setenv("ULTRA_RX_EMA_HOLD", "1", 1); else unsetenv("ULTRA_RX_EMA_HOLD");
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
+        for (int i = 0; i < 4; ++i) {  // clean history keeps the ring average high
+            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+            TA::verdict(c, true, 0.95f);
+        }
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdict(c, false, 0.0f);  // crater #1
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
+        const uint8_t cmd = TA::rxCmd(c);
+        unsetenv("ULTRA_RX_EMA_HOLD");
+        return cmd;
+    };
+    const uint8_t off_cmd = run(false);
+    const uint8_t on_cmd = run(true);
+    if (off_cmd >= kRungIdxQam16R23)
+        FAIL("knob OFF: confirmed crater must still demote (regression guard)");
+    if (on_cmd != kRungIdxQam16R23)
+        FAIL("knob ON: EMA-supported confirmed crater must HOLD 16QAM R2/3, got idx " +
+             std::to_string(on_cmd));
+    PASS();
+    return true;
+}
+
+static bool test_ema_hold_still_demotes_sustained_failure() {
+    TEST("EMA-HOLD does NOT latch: sustained failure demotes once the average drops");
+    setenv("ULTRA_RX_EMA_HOLD", "1", 1);
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
+    for (int i = 0; i < 3; ++i) {  // brief clean history
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdict(c, true, 0.95f);
+    }
+    // Sustained craters: each failed group is censored toward the rung floor, so the
+    // ring average is dragged down and MUST cross below the anchor within a bounded
+    // number of groups (strict '>' breaks the censor==anchor equality latch).
+    int demoted_at = -1;
+    for (int k = 1; k <= 10; ++k) {
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdict(c, false, 0.0f);
+        if (TA::rxCmd(c) < kRungIdxQam16R23) { demoted_at = k; break; }
+    }
+    unsetenv("ULTRA_RX_EMA_HOLD");
+    if (demoted_at < 0)
+        FAIL("sustained crater never demoted — EMA-HOLD latched (bug)");
+    if (demoted_at < 2)
+        FAIL("demoted on the very first confirmed crater — the hold did not engage");
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
@@ -431,6 +494,8 @@ int main() {
     ok &= test_predictive_direct_jump();
     ok &= test_two_crater_rule();
     ok &= test_confirmed_crater_arms_climb_dwell();
+    ok &= test_ema_hold_absorbs_supported_crater();
+    ok &= test_ema_hold_still_demotes_sustained_failure();
     ok &= test_busy_defers_up_not_down();
     ok &= test_clean_never_commands_down();
     ok &= test_no_observation_no_command();

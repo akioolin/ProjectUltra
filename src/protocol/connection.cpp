@@ -32,6 +32,24 @@ constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // floor: monitor arm wi
 bool kInteractiveToneAckEnabled() { return true; }
 bool kUnifiedSeqEnabled() { return true; }
 
+// ULTRA_RX_EMA_HOLD (default OFF ⇒ byte-identical): lever #1 of the throughput-
+// ceiling audit (2026-07-21). Two coupled corrections to the RX-authority rung
+// controller's crater response, targeting the fast-vs-slow variance (F344 2.61 vs
+// F372 1.16 kbps on the SAME MPG@20 channel — the gap is a rate-controller limit
+// cycle, not PHY): (1) EMA-SUPPORTED HOLD — a confirmed crater does NOT demote while
+// the fade-averaged broadband SNR still clears the CURRENT rung's calibrated floor
+// (rungClassAnchorDb); consecutive craters at a healthy average are deep-null fade
+// brushes the ARQ absorbs, not rung failure. (2) CENSORED failed-group SNR — a
+// cratered group feeds a sample right-censored at the rung floor into the obs ring,
+// killing the survivor bias (a fully-cratered group otherwise re-feeds a STALE CREST
+// read; a partial crater's fresh read is itself crest-biased) that let the ring read
+// 26-32 dB on a 20 dB channel and re-clear the climb bar after every demote. (2)
+// makes (1) honest: the hold gate cannot latch on a crest-biased average.
+bool emaHoldEnabled() {
+    const char* e = std::getenv("ULTRA_RX_EMA_HOLD");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
         ? Modulation::QPSK
@@ -2367,7 +2385,20 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     // echo). One such sample in a 6-ring lifts the average by ~+0.45 and flips
     // the class. Reject absurd readings; reuse the last sane value.
     if (inst_fading > 1.5f) inst_fading = rx_auth_fading_passed_;
-    rx_auth_obs_db_[rx_auth_obs_next_] = burst_obs_snr_db_;
+    // CENSORED failed-group SNR (ULTRA_RX_EMA_HOLD): a group that did not fully
+    // deliver is right-censored at the current rung's calibrated floor before it
+    // enters the obs ring. A fully-cratered group feeds NO fresh broadband SNR, so
+    // burst_obs_snr_db_ is a STALE CREST read from an earlier good group; a partial
+    // crater's fresh read is itself crest-biased (only the frames that DECODED
+    // contributed). Either way, capping the sample at the rung anchor stops a failure
+    // from pulling the ring average UP — the survivor bias that let the ring read
+    // 26-32 dB on a 20 dB channel and re-clear the climb bar ~60 s after every demote.
+    float obs_sample = burst_obs_snr_db_;
+    if (emaHoldEnabled() && !all_ok) {
+        const float a = calibrationAnchorDbFor(data_modulation_, data_code_rate_);
+        if (a < kRungDisabledDb) obs_sample = std::min(obs_sample, a);
+    }
+    rx_auth_obs_db_[rx_auth_obs_next_] = obs_sample;
     rx_auth_fading_ring_[rx_auth_obs_next_] = inst_fading;
     rx_auth_obs_age_ms_[rx_auth_obs_next_] = 0;
     rx_auth_obs_next_ = (rx_auth_obs_next_ + 1) % kRxAuthObsRing;
@@ -2439,8 +2470,22 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     if (all_ok) ++rx_auth_clean_streak_;
     else rx_auth_clean_streak_ = 0;
     const bool crater_confirmed = crater && rx_auth_crater_streak_ >= 2;
+    // EMA-SUPPORTED HOLD (ULTRA_RX_EMA_HOLD, lever #1): a confirmed crater is only
+    // rung-failure EVIDENCE if the fade-averaged SNR no longer clears the current
+    // rung's floor ON the current class. While snr_avg strictly exceeds that class
+    // anchor, consecutive craters are deep-null fade brushes the ARQ resends through
+    // (F344: 5/5 craters were partial, 24/31 frames decoded, avg 18-26 dB) — demoting
+    // there is the limit cycle that stranded F372 at QPSK (1.16 vs 2.61 kbps, same
+    // channel). The censored ring feed above keeps snr_avg honest, so sustained real
+    // failure (samples driven toward the physics floor) crosses below and DOES demote.
+    // Strict '>' avoids a latch when censor floor == class anchor (AWGN class).
+    const float cur_class_anchor =
+        rungClassAnchorDb(data_modulation_, data_code_rate_, eff_fading);
+    const bool ema_supports_cur =
+        emaHoldEnabled() && cur_class_anchor < kRungDisabledDb && snr_avg > cur_class_anchor;
+    const bool demote_on_crater = crater_confirmed && !ema_supports_cur;
     if (cur != kRungIdxNone && cur < kRungIdxCount) {
-        if (crater_confirmed) {
+        if (demote_on_crater) {
             // RATCHET (F126): the penalty DOUBLES per confirmed failure episode of
             // the rung (2 -> 4 -> 8, cap 8) and decays 40x slower than before —
             // "this rung does not work TODAY" must survive minutes, not one clean
@@ -2577,7 +2622,7 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             }
             cmd = (step != kRungIdxNone) ? step : cur;
         }
-        if (crater_confirmed) {
+        if (demote_on_crater) {
             // Confirmed-crater override: two in a row is the rung failing, not a
             // null — command the FIRST ENABLED rung below it. F160 rebalance: the
             // old cur-2 stride, snapped down THROUGH the QAM8 R3/4 hole, turned
@@ -2597,8 +2642,15 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
             }
             if (cmd >= cur) cmd = below;
         } else if (crater && cmd > cur) {
-            // Single crater: hold the rung (the ARQ resends through the null) —
-            // but never climb ON a crater either.
+            // Single crater — OR a confirmed crater the EMA still supports
+            // (ULTRA_RX_EMA_HOLD): hold the rung (the ARQ resends through the null),
+            // never climb ON a crater. The EMA-supported confirmed crater lands here
+            // because demote_on_crater is false, so the demote branch is skipped.
+            cmd = cur;
+        } else if (crater && ema_supports_cur && cmd < cur) {
+            // EMA-supported confirmed crater where the map independently wants down
+            // (fading-class flap): the fade-averaged SNR still clears the rung floor,
+            // so hold rather than let the map drop us — the whole point of the hold.
             cmd = cur;
         } else if (all_ok && cmd < cur) {
             // Clean-group override: this rung just WORKED end to end.
@@ -2638,6 +2690,14 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
                   modulationToString(mapped.mod), codeRateToString(mapped.rate),
                   cur, cmd, snr_avg, burst_obs_snr_db_, snr_n, eff_fading,
                   burst_obs_coh_score_, quality);
+    } else if (crater_confirmed && ema_supports_cur) {
+        // Made-visible: a confirmed crater that would have demoted but the EMA still
+        // clears the rung floor — the crux of ULTRA_RX_EMA_HOLD's A/B signature.
+        LOG_MODEM(INFO,
+                  "Connection: RX-AUTHORITY EMA-HOLD idx %u (snr_avg=%.1f > anchor=%.1f) "
+                  "confirmed crater absorbed (streak=%d fading=%.2f q=%.2f)",
+                  cur, snr_avg, cur_class_anchor, rx_auth_crater_streak_, eff_fading,
+                  quality);
     }
 }
 

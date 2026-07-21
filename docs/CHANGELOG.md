@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-21 — feat(rate): EMA-supported crater-hold + censored failed-group SNR (ULTRA_RX_EMA_HOLD, default-OFF) — throughput-ceiling audit lever #1
+
+**Motivation (throughput-ceiling audit, docs + workflow 2026-07-21).** A 6-facet
+first-principles audit of the "~2000 bps cap" found it is NOT a PHY/modulation
+ceiling: 16QAM R2/3 already offers 5667 bps raw and the best runs realize only
+~46% of it. The cap is a VARIANCE problem — on the SAME MPG@20 channel, F344 hit
+2.61 kbps (held 16QAM 41% of the transfer) while F372 hit 1.16 kbps (stuck at
+QPSK, 16QAM only 9%). The entire gap is a **rate-controller limit cycle**: the
+RX-authority verdict demotes on a single fade-brush crater (a group where a
+sub-coherence-time null nicked one frame while the average SNR stayed 18-26 dB),
+then a survivor-biased obs ring (failed groups fed no SNR, so it read crest-only
+26-32 dB) slowly re-climbs and re-craters. F344's craters were ALL partial
+(24/31 frames decoded) — brushes, not rung failure.
+
+**What changed (src/protocol/connection.cpp updateRxAuthorityCommand + the ring
+feed; src/protocol/waveform_selection.hpp).** Two coupled corrections behind
+`ULTRA_RX_EMA_HOLD` (default OFF ⇒ byte-identical):
+1. **EMA-SUPPORTED HOLD** — a confirmed crater (2 consecutive) does NOT demote (nor
+   ratchet the rung penalty) while the fade-averaged ring SNR `snr_avg` STRICTLY
+   exceeds the current rung's floor on the current class (`rungClassAnchorDb`, a new
+   ladder-aware + class-specific anchor primitive — `coherentLadderAnchorDb` is
+   ladder-blind for the 16QAM/8PSK rungs, `calibrationAnchorDbFor` is class-blind).
+   Consecutive craters at a supported average are deep-null brushes the ARQ resends
+   through — demoting there is the limit cycle that stranded F372.
+2. **CENSORED failed-group SNR** — a group that did not fully deliver enters the obs
+   ring right-censored at the rung's min-column floor (`min(obs, calibrationAnchorDbFor)`)
+   instead of the stale-crest `burst_obs_snr_db_`. This kills the survivor bias and
+   makes (1) honest: sustained real failure drives `snr_avg` toward the physics floor,
+   crosses below the class anchor, and DOES demote. Strict `>` in the hold gate breaks
+   the censor==class-anchor equality latch (AWGN class / 16QAM where both columns
+   coincide) — proven by test_ema_hold_still_demotes_sustained_failure.
+
+**Why principled, not a re-tune.** No new magic constants: the hold threshold is the
+rung's own calibrated anchor (which already carries its calibration margin), the
+censor level is the rung's physics floor. The asymmetry between them (censor at the
+min column, hold at the class column) is exactly what lets a fade brush hold while
+sustained failure demotes. Respects the F122-F160 history — the crater_streak≥2
+confirmation, one-rung-down demote, penalty ratchet and climb-dwell all remain; this
+only makes the demote CONDITIONAL on the measured average no longer supporting the
+rung, and de-biases the ring the dwell was a band-aid for.
+
+**Verification.** `ctest -j4` full suite green with knob OFF (byte-identical). New
+unit tests in test_rx_authority.cpp (suite 12→14): test_ema_hold_absorbs_supported_crater
+(same scenario knob ON holds 16QAM R2/3 vs OFF demotes) and
+test_ema_hold_still_demotes_sustained_failure (no-latch: sustained crater demotes
+within a bounded window). Rig A/B (interleaved OLD-off/NEW-on Mac binary, MPG@20) is
+the throughput proof — pending; expected to lift the slow-run half toward the F344
+2.6 kbps ceiling the fast runs already prove sustainable.
+
+---
+
 ## 2026-07-14 — fix(rate): Good/Moderate class boundary → ML midpoint 0.76 (BUG-MPG20-OVER-DEMOTE-R14, "R1/4 doesn't make sense")
 
 **What was broken.** On MPG@20 (Multipath GOOD) the receiver intermittently read

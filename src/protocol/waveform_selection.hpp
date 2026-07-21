@@ -394,6 +394,38 @@ inline float calibrationAnchorDbFor(Modulation mod, CodeRate rate) {
     return kRungDisabledDb;
 }
 
+// Anchor for one rung at the SPECIFIC fading class, honoring the active ladder
+// variant. Unlike coherentLadderAnchorDb() (reads ONLY kCoherentLadder, so returns
+// kRungDisabledDb for the experimental 16QAM/8PSK rungs) and calibrationAnchorDbFor()
+// (ladder-aware but returns the class-BLIND minimum column), this gives the current
+// rung's floor ON the current channel class. Used by the EMA-supported crater-hold:
+// "does the fade-averaged SNR clear THIS rung's calibrated floor on THIS class?"
+// If the class column is disabled but another is enabled (e.g. 16QAM enabled only in
+// fading columns), fall back to the minimum enabled column (the rung's physics floor).
+inline float rungClassAnchorDb(Modulation mod, CodeRate rate, float fading_index) {
+    const int cls = static_cast<int>(classifyFading(fading_index));
+    const CoherentRung* rungs = kCoherentLadder;
+    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
+    if (psk8LadderEnabled()) {
+        rungs = kCoherentLadderPsk8Exp;
+        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
+    } else if (qam16LadderEnabled()) {
+        rungs = kCoherentLadderQAM16Exp;
+        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            if (rungs[i].min_snr_db[cls] < kRungDisabledDb) return rungs[i].min_snr_db[cls];
+            float best = kRungDisabledDb;  // class column disabled → rung's physics floor
+            for (int c = 0; c < 3; ++c) {
+                if (rungs[i].min_snr_db[c] < best) best = rungs[i].min_snr_db[c];
+            }
+            return best;
+        }
+    }
+    return kRungDisabledDb;
+}
+
 // EESM virtual rung evaluation: is rung (mod, rate) predicted decodable on the
 // measured per-carrier SNR snapshot {gamma_k} (LINEAR, normalized to the
 // in-band scale)? Per-carrier capacity fraction f(γ) = 1 − exp(−γ/α) with α
