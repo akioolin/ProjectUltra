@@ -1115,7 +1115,7 @@ private:
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
-    void updateRxAuthorityCommand(bool all_ok, float quality);
+    void updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater = false);
 
 public:
     // F165 ANCHORED-BURST ACK BACKSTOP: the decoder accepted an expected full

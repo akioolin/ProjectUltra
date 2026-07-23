@@ -57,6 +57,25 @@ bool emaHoldEnabled() {
     return e && e[0] == '1' && e[1] == '\0';  // default-OFF (reverted 2026-07-23); =1 opts in
 }
 
+// ULTRA_DENSE_FAST_DEMOTE (default-off; =1 opts in): the RX-authority over-commit fix
+// (2026-07-23). The predictive climb makes AGGRESSIVE direct multi-rung jumps INTO 16QAM
+// (idx 3→8 on 2.5 dB EESM margin over crest-biased snapshots), but the demote is
+// deliberately SLOW (F122 two-crater rule + one-rung steps, anti-oscillation). Aggressive-up
+// + slow-down = the measured 82s crater stall when the jump is wrong (channel can't hold
+// 16QAM). The two-crater grace is CALIBRATED FOR ROBUST RUNGS: a single crater on QPSK's
+// WIDE margin is an ARQ-absorbed deep null, not rung failure. But 16QAM's TIGHT rings make a
+// FULL crater (0/N) much more likely genuine over-commit — and the cost is asymmetric (82s of
+// craters vs one rung down, quickly re-climbable when the EESM re-proves it). So on a
+// dense-mod rung (bits/symbol ≥ 4), a FULL crater demotes IMMEDIATELY (streak ≥ 1) instead of
+// waiting for two. Modulation-adaptive by construction; QPSK/8PSK keep the grace. Targets
+// FULL craters only (frame_mask==0) — partial 16QAM now resends cheaply via per-frame SACK
+// (interleave-off), so it keeps the two-crater grace. The demote's penalty ratchet still
+// gates re-climb (no oscillation). Leaves the CLIMB untouched.
+bool denseFastDemoteEnabled() {
+    const char* e = std::getenv("ULTRA_DENSE_FAST_DEMOTE");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
         ? Modulation::QPSK
@@ -2365,7 +2384,7 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
 //     says (the map's fading class lags a fresh trough).
 //   - CLEAN group: never command BELOW the current rung (the rung is proven
 //     working THIS group; a stale-low SNR reading must not thrash it downward).
-void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
+void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater) {
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
         rx_authority_cmd_ = kRungIdxNone;
@@ -2476,7 +2495,15 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality) {
     else if (all_ok) rx_auth_crater_streak_ = 0;
     if (all_ok) ++rx_auth_clean_streak_;
     else rx_auth_clean_streak_ = 0;
-    const bool crater_confirmed = crater && rx_auth_crater_streak_ >= 2;
+    // DENSE-MOD FAST DEMOTE (ULTRA_DENSE_FAST_DEMOTE): the two-crater grace is calibrated
+    // for robust rungs (a single QPSK crater is an ARQ-absorbed null). A dense-mod rung's
+    // tight rings make a FULL crater (0/N) genuine over-commit, and the stall cost is
+    // asymmetric — so leave after ONE full crater instead of two. Robust mods and partial
+    // craters keep the grace (partial 16QAM resends cheaply via per-frame SACK).
+    const bool dense_mod = getBitsPerSymbol(data_modulation_) >= 4;
+    const int crater_threshold =
+        (denseFastDemoteEnabled() && dense_mod && full_crater) ? 1 : 2;
+    const bool crater_confirmed = crater && rx_auth_crater_streak_ >= crater_threshold;
     // EMA-SUPPORTED HOLD (ULTRA_RX_EMA_HOLD, lever #1): a confirmed crater is only
     // rung-failure EVIDENCE if the fade-averaged SNR no longer clears the current
     // rung's floor ON the current class. While snr_avg strictly exceeds that class
@@ -3695,7 +3722,7 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // rung verdict for this group BEFORE its ACK emits — the command rides THIS
         // ACK. Hard no-op while the knob is OFF.
         if (rxRateAuthorityEnabled()) {
-            updateRxAuthorityCommand(all_ok, quality);
+            updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0);
         }
         // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
         // accumulated LOW-level streak — those readings were fade-trough artifacts,
@@ -4039,7 +4066,7 @@ void Connection::noteAnchoredBurstNoGroup() {
     // Crater verdict BEFORE the ack so the command rides it (same ordering as
     // onBurstGroupReceived).
     if (rxRateAuthorityEnabled()) {
-        updateRxAuthorityCommand(/*all_ok=*/false, /*quality=*/0.0f);
+        updateRxAuthorityCommand(/*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/true);
     }
     arq_.endGroupReceiveAndAck();
 }

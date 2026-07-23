@@ -66,6 +66,9 @@ struct ConnectionAdaptiveTestAccess {
     static void verdict(Connection& c, bool all_ok, float quality) {
         c.updateRxAuthorityCommand(all_ok, quality);
     }
+    static void verdictFull(Connection& c, bool all_ok, float quality, bool full_crater) {
+        c.updateRxAuthorityCommand(all_ok, quality, full_crater);
+    }
     static uint8_t rxCmd(const Connection& c) { return c.rx_authority_cmd_; }
     static void obey(Connection& c, uint8_t idx) { c.maybeObeyAuthorityCommand(idx); }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
@@ -479,9 +482,43 @@ static bool test_ema_hold_still_demotes_sustained_failure() {
     return true;
 }
 
+// ── ULTRA_DENSE_FAST_DEMOTE (RX-authority over-commit fix, 2026-07-23) ──
+// On a dense-mod rung (16QAM), a FULL crater (0/N) demotes on the FIRST crater instead of
+// waiting for two — the two-crater grace is for robust rungs. Robust mods and partial
+// craters keep the grace. Knob-gated (default-off).
+static bool test_dense_fast_demote_full_crater() {
+    TEST("dense-mod full crater demotes on crater #1 (fast); robust/partial keep the grace");
+    auto run_16qam = [](bool knob_on, bool full_crater) -> uint8_t {
+        setenv("ULTRA_DENSE_FAST_DEMOTE", knob_on ? "1" : "0", 1);
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
+        for (int i = 0; i < 3; ++i) {  // clean history at 16QAM R2/3
+            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+            TA::verdict(c, true, 0.95f);
+        }
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdictFull(c, false, 0.0f, full_crater);  // ONE crater
+        const uint8_t cmd = TA::rxCmd(c);
+        setenv("ULTRA_DENSE_FAST_DEMOTE", "0", 1);
+        return cmd;
+    };
+    // knob ON, dense mod, FULL crater → single crater demotes below 16QAM R2/3.
+    if (run_16qam(true, true) >= kRungIdxQam16R23)
+        FAIL("knob ON: a full 16QAM crater must demote on crater #1");
+    // knob ON but PARTIAL crater → keeps the two-crater grace (no demote on #1).
+    if (run_16qam(true, false) != kRungIdxQam16R23)
+        FAIL("knob ON but PARTIAL crater must keep the grace (hold on #1)");
+    // knob OFF → legacy two-crater rule (no demote on #1 even for a full crater).
+    if (run_16qam(false, true) != kRungIdxQam16R23)
+        FAIL("knob OFF: single crater must NOT demote (legacy two-crater rule)");
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
+    setenv("ULTRA_DENSE_FAST_DEMOTE", "0", 1);  // explicit baseline; the test toggles it
     setenv("ULTRA_ENABLE_PSK8_LADDER", "1", 1);
     unsetenv("ULTRA_DESCRIPTOR_MODE_SWITCH");  // legacy path -> pending_* observable
     unsetenv("ULTRA_RX_RATE_CMD");
@@ -501,6 +538,7 @@ int main() {
     ok &= test_confirmed_crater_arms_climb_dwell();
     ok &= test_ema_hold_absorbs_supported_crater();
     ok &= test_ema_hold_still_demotes_sustained_failure();
+    ok &= test_dense_fast_demote_full_crater();
     ok &= test_busy_defers_up_not_down();
     ok &= test_clean_never_commands_down();
     ok &= test_no_observation_no_command();

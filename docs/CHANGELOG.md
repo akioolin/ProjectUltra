@@ -102,6 +102,37 @@ pending to confirm the auto 16QAM path doesn't regress without the R2/3 interlea
 
 ---
 
+## 2026-07-23 — feat(rate): dense-mod fast demote — the RX-authority 16QAM over-commit fix (ULTRA_DENSE_FAST_DEMOTE, default-off)
+
+**The real cap.** The reckoning pinned the actual limiter: the RX-authority PREDICTIVE CLIMB
+makes AGGRESSIVE direct multi-rung jumps INTO 16QAM (measured idx 3→8, QPSK R2/3 → 16QAM
+R2/3, on 2.5 dB EESM margin over crest-biased per-carrier snapshots), but the DEMOTE is
+deliberately SLOW (F122 two-crater rule + one-rung steps, the anti-oscillation machinery).
+Aggressive-up + slow-down = the measured 82s crater stall (F494 178→260s: 16QAM R2/3 → R1/2
+craters 0/8 continuously ~84s before working down to 8PSK) — the source of the operator's
+"real bad" runs and the delivery FAILs.
+
+**What changed.** `updateRxAuthorityCommand` gains a `full_crater` arg (fed `!all_ok &&
+frame_mask==0` from onBurstGroupReceived). Behind `ULTRA_DENSE_FAST_DEMOTE` (default-off ⇒
+byte-identical): on a dense-mod rung (`getBitsPerSymbol ≥ 4` — 16QAM/32QAM), a FULL crater
+(0/N) demotes on crater #1 (`crater_threshold=1`) instead of waiting for two.
+
+**Why principled (modulation-adaptive).** The two-crater grace is CALIBRATED FOR ROBUST
+rungs: a single QPSK crater is an ARQ-absorbed deep null on a wide margin, not rung failure.
+16QAM's TIGHT rings make a FULL crater genuine over-commit, and the cost is asymmetric (82s
+of craters vs one rung down, quickly re-climbable when the EESM re-proves it). Targets FULL
+craters only — a PARTIAL 16QAM crater now resends cheaply via per-frame SACK (interleave-off,
+kept), so it keeps the two-crater grace. Robust mods (QPSK/8PSK) unchanged. The demote's
+penalty ratchet still gates re-climb (no oscillation); the CLIMB is left untouched.
+
+**Verification.** ctest -j4 full suite green (86/86, knob off = byte-identical). New unit test
+test_dense_fast_demote_full_crater (rx_authority 15 sub-tests): full 16QAM crater demotes on
+#1 with knob on; partial keeps the grace; knob off = legacy two-crater rule. Rig A/B (on vs
+off, MPG@20, ~10 runs) is the throughput proof — expected to cut the 82s stalls; default-on
+ONLY if it clearly helps without oscillation regression (the session's hard-learned bar).
+
+---
+
 ## 2026-07-23 — revert: the three "hold" throughput levers back to default-OFF (honest reckoning = aggregate wash)
 
 **Why.** After shipping four throughput levers this session (boundary fix, interleave-off,
