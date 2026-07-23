@@ -102,6 +102,39 @@ pending to confirm the auto 16QAM path doesn't regress without the R2/3 interlea
 
 ---
 
+## 2026-07-23 — revert: the three "hold" throughput levers back to default-OFF (honest reckoning = aggregate wash)
+
+**Why.** After shipping four throughput levers this session (boundary fix, interleave-off,
+sync two-crater re-anchor hold, EMA crater-hold, cheap re-anchor), the missing test was
+finally run: **all-levers-ON (shipped default) vs a clean baseline with the levers off**,
+same epoch, interleaved (F580-591, MPG@20). Verdict = **AGGREGATE WASH**: delivered-only
+mean +11% (ALL-ON 1.47 vs baseline 1.32) BUT ALL-ON failed 2/6 vs baseline 1/6, so counting
+fails as zero throughput the result flips to ~tied / slightly negative (ALL-ON ~0.98 vs
+baseline ~1.10 effective). The re-anchor gap (26 vs 70) was inflated — the baseline's forced
+`INTERLEAVE=1` over-interleaves QPSK, so the true old default had fewer. And the 2 ALL-ON
+fails matched the 88s crater-stall pattern: the "hold" levers OVER-HOLD a failing rung.
+
+**What changed.** Flipped back to default-OFF (code kept behind the knobs for measurement):
+- `ULTRA_RX_EMA_HOLD` → default-off (was ON since 2026-07-21).
+- `ULTRA_CRATER_REANCHOR_HOLD` → default-off (was ON since 2026-07-21).
+- `ULTRA_CHEAP_REANCHOR` — already default-off (never flipped on).
+test_rx_authority baseline comment updated (still explicitly sets `=0` for the legacy tests).
+
+**What STAYS on** (standalone-defensible, NOT reverted):
+- **Interleave-off** (`burstCrossFrameInterleaveOn` default false) — strong isolated evidence
+  (forced-16QAM A/B +37%, mechanism-proven: interleave couples time-fades into whole-group
+  craters). `ULTRA_BURST_INTERLEAVE=1` re-enables.
+- **Good/Moderate boundary 0.76** (`kFadingGoodMax`) — a correctness fix (prevents the
+  BUG-MPG20-OVER-DEMOTE-R14 over-demote), not a throughput lever.
+
+**Honest takeaway.** The session's rung-controller "hold" tuning was net-flat. The REAL cap
+is the rung controller over-committing to 16QAM (RX-authority multi-rung climb idx 3→8) and
+demoting too slowly — the 88s crater stalls. That is a rung-SELECTION fix, the untouched
+lever, and the target for the next attempt. ctest -j4 full suite green with the reverted
+defaults (legacy demote tests pass without the baseline crutch).
+
+---
+
 ## 2026-07-21 — feat(sync): cheap crater re-anchor — CFO rollback-to-certified + periodic chirp (ULTRA_CHEAP_REANCHOR, default-off)
 
 **Motivation.** With all levers on, the 12-run characterization (F520-531, MPG@20) sat at

@@ -32,12 +32,17 @@ constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // floor: monitor arm wi
 bool kInteractiveToneAckEnabled() { return true; }
 bool kUnifiedSeqEnabled() { return true; }
 
-// ULTRA_RX_EMA_HOLD (DEFAULT-ON 2026-07-21; =0 opts out): lever #1 of the throughput-
-// ceiling audit. Two coupled corrections to the RX-authority rung controller's crater
-// response, targeting the fast-vs-slow variance (F344 2.61 vs F372 1.16 kbps on the SAME
-// MPG@20 channel — the gap is a rate-controller limit cycle, not PHY). Rig A/B F500-511
-// (MPG@20): dampens the climb-crater-demote oscillation (fewer rung moves/demotes/
-// re-anchors) → holds 16QAM through fade brushes → measured +~45% goodput vs OFF.
+// ULTRA_RX_EMA_HOLD (default-OFF; =1 opts in): lever #1 of the throughput-ceiling audit.
+// REVERTED to default-off 2026-07-23 — the honest all-levers-ON vs baseline reckoning
+// (F580-591, MPG@20) showed the four throughput levers as an AGGREGATE WASH (delivered
+// mean +11% but ALL-ON failed 2/6 vs baseline 1/6 → effective throughput ~tied/slightly
+// negative), and this "hold" lever contributes to over-holding a failing rung (the 88s
+// crater stalls). Was briefly default-ON 2026-07-21 on the F500-511 A/B (which read +8.5%,
+// mostly a floor win); that gain did not survive the aggregate reckoning. Kept behind the
+// knob for measurement. The REAL cap is the rung controller over-committing to 16QAM +
+// demoting too slowly — a rung-SELECTION fix, not more holding. Two coupled corrections to
+// the RX-authority rung controller's crater response, targeting the fast-vs-slow variance
+// (F344 2.61 vs F372 1.16 kbps on the SAME MPG@20 channel — a rate-controller limit cycle):
 // (1) EMA-SUPPORTED HOLD — a confirmed crater does NOT demote while
 // the fade-averaged broadband SNR still clears the CURRENT rung's calibrated floor
 // (rungClassAnchorDb); consecutive craters at a healthy average are deep-null fade
@@ -49,7 +54,7 @@ bool kUnifiedSeqEnabled() { return true; }
 // makes (1) honest: the hold gate cannot latch on a crest-biased average.
 bool emaHoldEnabled() {
     const char* e = std::getenv("ULTRA_RX_EMA_HOLD");
-    return !(e && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON 2026-07-21; =0 opts out
+    return e && e[0] == '1' && e[1] == '\0';  // default-OFF (reverted 2026-07-23); =1 opts in
 }
 
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {

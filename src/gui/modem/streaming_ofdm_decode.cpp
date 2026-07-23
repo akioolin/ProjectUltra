@@ -2299,7 +2299,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         // HOLD FAILs churned high re-anchors = correct fallback on sustained failure.
         static const bool kCraterReanchorHold = [] {
             const char* e = std::getenv("ULTRA_CRATER_REANCHOR_HOLD");
-            return !(e && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON; =0 restores legacy
+            // default-OFF (reverted 2026-07-23; =1 opts in). Was DEFAULT-ON 2026-07-21 on
+            // the F470-481 A/B (re-anchors halved), but the aggregate all-levers-ON vs
+            // baseline reckoning (F580-591) was a WASH and the "hold" levers over-hold a
+            // failing rung (88s crater stalls). Kept behind the knob for measurement.
+            return e && e[0] == '1' && e[1] == '\0';
         }();
         // CHEAP RE-ANCHOR (ULTRA_CHEAP_REANCHOR, default-off): a full dual-chirp (~1.2s)
         // re-acquires TIMING + CFO, but a fade only threatens the CFO (warm timing

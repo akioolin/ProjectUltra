@@ -485,10 +485,10 @@ int main() {
     setenv("ULTRA_ENABLE_PSK8_LADDER", "1", 1);
     unsetenv("ULTRA_DESCRIPTOR_MODE_SWITCH");  // legacy path -> pending_* observable
     unsetenv("ULTRA_RX_RATE_CMD");
-    // ULTRA_RX_EMA_HOLD is DEFAULT-ON in production (2026-07-21) — but the legacy
-    // demote-machinery tests (two-crater rule, climb-dwell) exercise the path that
-    // runs when the hold does NOT engage, so they need it explicitly OFF as their
-    // baseline. The two test_ema_hold_* cases toggle it on themselves and restore "0".
+    // ULTRA_RX_EMA_HOLD is default-OFF (reverted 2026-07-23) — matches the legacy
+    // demote-machinery tests (two-crater rule, climb-dwell), which exercise the path that
+    // runs when the hold does NOT engage. Set explicitly so the baseline is unambiguous
+    // regardless of the default. The two test_ema_hold_* cases toggle it on and restore "0".
     setenv("ULTRA_RX_EMA_HOLD", "0", 1);
 
     std::cout << "RX-AUTHORITY suite\n";
