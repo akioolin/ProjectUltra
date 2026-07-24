@@ -515,6 +515,90 @@ static bool test_dense_fast_demote_full_crater() {
     return true;
 }
 
+// ── RADIO-AGNOSTIC EVM DEMOTE (ULTRA_EVM_DEMOTE, Stage 2) ───────────────────────
+// The measured OTASim AWGN anchor floors (2026-07-24): QPSK R2/3 9.4, R3/4 12.5,
+// 8PSK R2/3 13.7, 16QAM R1/2 14.9, 16QAM R2/3 16.7 dB usable EVM. The table must
+// stay monotonic across the measured rungs, and highestRungSupportedByEvm must map a
+// usable EVM to the densest rung it clears (with the 1 dB hold margin).
+static bool test_evm_floor_table_and_mapping() {
+    TEST("EVM floor table monotonic; supported-rung mapping tracks the anchors");
+    // Measured rungs increase monotonically in usable-EVM floor.
+    const float f_qpsk23 = evmUsableFloorDbForRung(kRungIdxQpskR23);
+    const float f_qpsk34 = evmUsableFloorDbForRung(kRungIdxQpskR34);
+    const float f_8psk23 = evmUsableFloorDbForRung(kRungIdxQam8R23);
+    const float f_16q12 = evmUsableFloorDbForRung(kRungIdxQam16R12);
+    const float f_16q23 = evmUsableFloorDbForRung(kRungIdxQam16R23);
+    if (!(f_qpsk23 < f_qpsk34 && f_qpsk34 < f_8psk23 &&
+          f_8psk23 < f_16q12 && f_16q12 < f_16q23))
+        FAIL("measured EVM floors are not monotonic across the rung ladder");
+    // A usable EVM of 20 dB clears 16QAM R2/3 (16.7); 14 dB does not (needs 15.7 with
+    // margin) but clears 16QAM R1/2 (14.9-1=13.9); 10 dB only QPSK R2/3 (9.4-1=8.4);
+    // 5 dB floors at QPSK R1/4.
+    if (highestRungSupportedByEvm(20.0f, kEvmDemoteHoldMarginDb) < kRungIdxQam16R23)
+        FAIL("20 dB usable EVM must support 16QAM R2/3");
+    if (highestRungSupportedByEvm(14.0f, kEvmDemoteHoldMarginDb) != kRungIdxQam16R12)
+        FAIL("14 dB usable EVM must support 16QAM R1/2 (not R2/3)");
+    if (highestRungSupportedByEvm(10.0f, kEvmDemoteHoldMarginDb) != kRungIdxQpskR23)
+        FAIL("10 dB usable EVM must support QPSK R2/3 only");
+    if (highestRungSupportedByEvm(5.0f, kEvmDemoteHoldMarginDb) != kRungIdxQpskR14)
+        FAIL("5 dB usable EVM must floor at QPSK R1/4");
+    PASS();
+    return true;
+}
+
+// End-to-end: the broadband ladder holds 16QAM R2/3 on a clean, high-SNR group, but
+// the honest usable EVM says the rung is over-committed. With the knob ON the command
+// is clamped DOWN to the EVM-supported rung; with the knob OFF the clamp is inert
+// (byte-identical to legacy). This is the IONOS over-commit the +8.70 offset caused.
+static bool test_evm_demote_strips_overcommit() {
+    TEST("EVM demote clamps an over-committed 16QAM R2/3 down (knob-gated)");
+    auto run = [](bool knob_on, float evm_db) -> uint8_t {
+        if (knob_on) setenv("ULTRA_EVM_DEMOTE", "1", 1);
+        else unsetenv("ULTRA_EVM_DEMOTE");
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+        // Broadband meter says stay high (survivor-crest read); EVM tells the truth.
+        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstEvmObservation(evm_db);
+        TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
+        unsetenv("ULTRA_EVM_DEMOTE");
+        return TA::rxCmd(c);
+    };
+    // Knob ON, usable EVM 13 dB: 16QAM R2/3 floor 16.7 is not cleared → demote to the
+    // highest supported rung (8PSK R2/3, floor 13.7 -1 margin). Measurement-backed, so
+    // it lands directly (not bounded by the broadband 2-rung down-limit).
+    if (run(true, 13.0f) != kRungIdxQam8R23)
+        FAIL("knob ON, EVM 13 dB: must demote 16QAM R2/3 -> 8PSK R2/3");
+    // Knob ON, usable EVM 14 dB: clears 16QAM R1/2 (13.9) but not R2/3 → one rung down.
+    if (run(true, 14.0f) != kRungIdxQam16R12)
+        FAIL("knob ON, EVM 14 dB: must demote 16QAM R2/3 -> 16QAM R1/2");
+    // Knob OFF: the clamp is inert — the clean high-SNR group holds the top rung.
+    if (run(false, 13.0f) < kRungIdxQam16R23)
+        FAIL("knob OFF: EVM demote must be inert (no clamp below 16QAM R2/3)");
+    PASS();
+    return true;
+}
+
+// The demote is a floor, not a ceiling: a usable EVM that CLEARS the current rung's
+// floor never demotes (and EVM can never RAISE the command — it saturates at the demod
+// ceiling and is only ever a min-clamp).
+static bool test_evm_demote_inert_when_supported() {
+    TEST("EVM demote never fires when the rung floor is cleared");
+    setenv("ULTRA_EVM_DEMOTE", "1", 1);
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    c.setBurstEvmObservation(20.0f);  // clears 16QAM R2/3 (16.7) comfortably
+    TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
+    const uint8_t got = TA::rxCmd(c);
+    unsetenv("ULTRA_EVM_DEMOTE");
+    if (got < kRungIdxQam16R23)
+        FAIL("EVM 20 dB clears the rung floor — must NOT demote (idx " +
+             std::to_string(got) + ")");
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
@@ -545,6 +629,9 @@ int main() {
     ok &= test_sender_obeys_and_dedups();
     ok &= test_sender_ignores_none_and_garbage();
     ok &= test_operator_lock_overrides_authority();
+    ok &= test_evm_floor_table_and_mapping();
+    ok &= test_evm_demote_strips_overcommit();
+    ok &= test_evm_demote_inert_when_supported();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }

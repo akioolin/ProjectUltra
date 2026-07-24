@@ -776,6 +776,11 @@ void ProtocolEngine::setBurstChannelObservation(float snr_db, float fading_index
                                            coherence_valid, doppler_hz);
 }
 
+void ProtocolEngine::setBurstEvmObservation(float evm_snr_db) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setBurstEvmObservation(evm_snr_db);
+}
+
 bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     const auto header = v2::parseHeader(data);

@@ -136,6 +136,14 @@ inline void wireModemToProtocol(ModemEngine& modem,
                     modem.getDopplerCoherenceScore(), modem.getDopplerCoherenceValid(),
                     modem.getDopplerCoherenceDopplerHz());
             }
+            // RX-AUTHORITY EVM DEMOTE (ULTRA_EVM_DEMOTE, Stage 2): the group's
+            // radio-agnostic decision-directed EVM usable-SNR — reads usable dB
+            // directly (constant-free, non-inflating), so NO kOfdmLegacyAnchorScaleOffsetDb
+            // markup. Feed it BEFORE onBurstGroupReceived so the demote clamp rides
+            // THIS group's ACK. No-op storage while the knob is off.
+            if (modem.hasLastEvmSnr()) {
+                protocol.setBurstEvmObservation(modem.getLastEvmSnrDb());
+            }
             // RX-AUTHORITY PREDICTIVE: the group's per-carrier SNR snapshot —
             // delivered AND cratered groups alike (constellation-independent;
             // the survivor-bias kill). Must land BEFORE onBurstGroupReceived:

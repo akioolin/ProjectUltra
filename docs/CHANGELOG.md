@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-24 — feat(rate): radio-agnostic EVM demote authority (ULTRA_EVM_DEMOTE, DEFAULT-OFF) — strip the +8.70 over-commit with a constant-free usable-SNR read
+
+**Stage 2 of the radio-agnostic SNR work.** Built + unit-validated + default-off; awaiting
+rig A/B before any default flip or constant deletion.
+
+**What was broken (the mechanism, not a crash).** The RX-AUTHORITY rate loop
+(`updateRxAuthorityCommand`) is steered by the OFDM broadband SNR estimator, which the
+modem binding marks up by `+kOfdmLegacyAnchorScaleOffsetDb` (8.70 dB) so it lands on the
+dial/channel scale the legacy rung anchors assume. On the IONOS bench that offset MASKS the
+real ~5 dB hardware loss: WGN@20 measured OFDM_SNR **14.1 → 22.8** after the markup → the
+ladder commits **16QAM R2/3** (needs ~16.7 dB usable), a rung the real ~15 dB usable channel
+cannot hold → the multi-rung climb + slow demote → the measured ~82 s crater stalls. The
+8.70 is a bench-fitted constant that only works at one hardware-loss operating point — a
+CLAUDE.md "works only at one SNR/channel" smell.
+
+**What was changed.**
+- `src/ofdm/demodulator_impl.hpp` (Stage 1, prior commit 29b4e43): gain-corrected
+  decision-directed EVM SNR — measures the scatter of the equalized constellation around its
+  hard decisions. Reads USABLE (post-equalizer) dB, is CONSTANT-FREE, and CANNOT INFLATE
+  (error power only grows as the channel worsens). MC-DPSK already does this in the
+  differential domain — this is the OFDM analogue.
+- `src/protocol/waveform_selection.hpp`: `evmUsableFloorDbForRung()` — per-rung EVM-usable
+  decode floors MEASURED on the OTASim AWGN forced-rung sweep (2026-07-24,
+  `/private/tmp/evm_anchors/ANCHOR_TABLE.md`): QPSK R2/3 9.4 · R3/4 12.5 · 8PSK R2/3 13.7 ·
+  16QAM R1/2 14.9 · 16QAM R2/3 16.7 dB. `highestRungSupportedByEvm()` + `kEvmDemoteHoldMarginDb`
+  (1.0 dB). USABLE dB throughout — NO dial/hardware offset (that gap is exactly what this
+  replaces).
+- `src/protocol/connection.cpp` `updateRxAuthorityCommand`: after the command is computed,
+  a knob-gated (`ULTRA_EVM_DEMOTE`) clamp — if this group's usable EVM cannot support the
+  CURRENT rung's floor, clamp the command DOWN to the highest EVM-supported rung. Demote-only
+  (EVM saturates at the demod ceiling, so it is never a climb input); orthogonal to the
+  crater/penalty machinery (a pure output clamp). Measurement-backed, so it lands directly on
+  the supported rung (not bounded by the broadband 2-rung down-limit).
+- Plumbing: `Connection::setBurstEvmObservation` + `burst_obs_evm_snr_db_` (reset each
+  session), `ProtocolEngine::setBurstEvmObservation`, `ModemEngine::hasLastEvmSnr/getLastEvmSnrDb`,
+  and the binding feeds it BEFORE `onBurstGroupReceived` so the clamp rides THIS group's ACK.
+
+**Why it's the right fix.** EVM reads the ~15 dB usable IONOS channel directly, with no
+per-soundcard reference and no hardware-loss constant → it lands the over-committed 16QAM
+R2/3 on 16QAM R1/2 / 8PSK R2/3 (~2580, deliverable) instead of stalling. Radio-agnostic by
+construction (the CLAUDE.md adaptivity mandate): the anchor floors are USABLE-dB decode
+floors, correct for any radio because the metric measures the actual demod, not a
+level-referenced proxy. Default-off keeps the tree byte-identical until the rig A/B proves it.
+
+**Test verification.** `ctest -R RxAuthority` — 18/18 (adds `test_evm_floor_table_and_mapping`,
+`test_evm_demote_strips_overcommit`, `test_evm_demote_inert_when_supported`; log shows
+`EVM-DEMOTE idx 8 -> 5` @13 dB, `idx 8 -> 7` @14 dB, inert @20 dB and knob-off). Full
+`ctest -j4` — 87/87 unchanged (default-off = inert). Rig A/B (MPG@20, ON vs clean baseline)
+PENDING. Constants (+8.70, 0.3048, 9.64) NOT deleted until anchors are rig-validated in EVM units.
+
+---
+
 ## 2026-07-21 — feat(sync): two-crater discipline for the sync re-anchor (ULTRA_CRATER_REANCHOR_HOLD, DEFAULT-ON) — stop nuking warm sync on a single fade
 
 **RIG-CONFIRMED + FLIPPED DEFAULT-ON (F470-481, MPG@20 interleaved A/B).** HOLD vs OFF:

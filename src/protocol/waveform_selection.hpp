@@ -394,6 +394,59 @@ inline float calibrationAnchorDbFor(Modulation mod, CodeRate rate) {
     return kRungDisabledDb;
 }
 
+// ── RADIO-AGNOSTIC EVM-USABLE RUNG FLOORS (Stage 2, ULTRA_EVM_DEMOTE) ──────────
+// The decision-directed EVM SNR estimator (src/ofdm/demodulator_impl.hpp) measures
+// the scatter of the equalized constellation around its hard decisions — it reads
+// USABLE (post-equalizer, demod-domain) SNR, is CONSTANT-FREE, and CANNOT INFLATE
+// (a gain-corrected error power can only grow as the channel worsens). That makes it
+// radio-agnostic by construction: no per-soundcard reference level, no hardware-loss
+// offset. It is exactly the honest quantity the +8.70 dB kOfdmLegacyAnchorScaleOffsetDb
+// "quarantine" was faking — that offset marks the OFDM broadband estimator up to the
+// dial/channel scale the legacy anchors assume, which manufactured the IONOS 16QAM
+// over-commit (WGN@20 read 14.1 → 22.8 → selects 16QAM R2/3, a rung the real ~15 dB
+// usable channel cannot hold). EVM reads the ~15 directly.
+//
+// These per-rung floors are the EVM-median at which each rung reached FULL goodput on
+// the OTASim AWGN forced-rung sweep (2026-07-24; /private/tmp/evm_anchors/ANCHOR_TABLE.md):
+//   QPSK R2/3 9.4 · QPSK R3/4 12.5 · 8PSK R2/3 13.7 · 16QAM R1/2 14.9 · 16QAM R2/3 16.7.
+// Measured rungs are exact; the two unmeasured rungs (QAM8 R3/4, QAM16 R3/4 — both
+// currently ladder holes) interpolate/extrapolate CONSERVATIVELY (a HIGHER floor
+// demotes SOONER, the safe direction for a demote-only clamp). USABLE dB throughout —
+// do NOT add any dial/hardware offset. Because EVM saturates at the demod ceiling
+// (QPSK ~16, 16QAM ~20), this is a DEMOTE authority (clamp cmd DOWN), never a climb
+// input. kRungDisabledDb for a non-rung index.
+inline float evmUsableFloorDbForRung(uint8_t rung_idx) {
+    switch (rung_idx) {
+        case kRungIdxQpskR14:  return 6.5f;   // unmeasured; more robust than R1/2
+        case kRungIdxQpskR12:  return 8.5f;   // fail@dial8, pass@dial10 (EVM 9.4)
+        case kRungIdxQpskR23:  return 9.4f;   // measured
+        case kRungIdxQpskR34:  return 12.5f;  // measured (dial13 11.9 partial→dial15 13.7 clean)
+        case kRungIdxQam8R23:  return 13.7f;  // measured
+        case kRungIdxQam8R34:  return 15.5f;  // interp 8PSK R2/3(13.7)↔16QAM R2/3(16.7)
+        case kRungIdxQam16R12: return 14.9f;  // measured (13.3 partial)
+        case kRungIdxQam16R23: return 16.7f;  // measured
+        case kRungIdxQam16R34: return 19.5f;  // extrap above 16QAM R2/3
+        default: return kRungDisabledDb;
+    }
+}
+
+// Hold margin (dB) below a rung's EVM-usable floor before the demote fires — a single
+// group's usable EVM must be clearly (≥ this) under the floor, damping boundary thrash.
+// A modest fraction of the ~3 dB inter-rung EVM spacing measured on the sweep.
+inline constexpr float kEvmDemoteHoldMarginDb = 1.0f;
+
+// Highest canonical rung whose EVM-usable floor the measured usable EVM clears (with
+// a hold margin so a single noisy read does not thrash the boundary). Demote-only:
+// the caller clamps cmd = min(cmd, this). Floors at QPSK R1/4 (the lowest rung — the
+// clamp never strands below it). Walks top-down; the first index whose floor clears
+// is the most permissive supportable rung.
+inline uint8_t highestRungSupportedByEvm(float evm_db, float hold_margin_db) {
+    for (uint8_t r = kRungIdxCount - 1; r > kRungIdxQpskR14; --r) {
+        if (evm_db >= evmUsableFloorDbForRung(r) - hold_margin_db) return r;
+    }
+    return kRungIdxQpskR14;
+}
+
 // Anchor for one rung at the SPECIFIC fading class, honoring the active ladder
 // variant. Unlike coherentLadderAnchorDb() (reads ONLY kCoherentLadder, so returns
 // kRungDisabledDb for the experimental 16QAM/8PSK rungs) and calibrationAnchorDbFor()

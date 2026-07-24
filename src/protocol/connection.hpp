@@ -536,6 +536,15 @@ public:
         burst_obs_doppler_hz_ = doppler_hz;
     }
 
+    // RX-AUTHORITY EVM DEMOTE (2026-07-24): this group's radio-agnostic
+    // decision-directed EVM usable-SNR (dB) from the decoder's finalized estimate.
+    // Fed alongside setBurstChannelObservation, BEFORE onBurstGroupReceived, so the
+    // demote clamp derived from it rides THIS group's ACK. No-op storage while the
+    // ULTRA_EVM_DEMOTE knob is off.
+    void setBurstEvmObservation(float evm_snr_db) {
+        burst_obs_evm_snr_db_ = evm_snr_db;
+    }
+
     // RX-AUTHORITY PREDICTIVE: the group's per-carrier linear-SNR snapshot
     // (in-band-normalized), delivered AND cratered groups (survivor-bias kill).
     // Ring of the last kRxAuthGammaRing snapshots; an up-jump target must pass
@@ -1049,6 +1058,12 @@ private:
     float burst_obs_coh_score_ = 0.0f;
     bool burst_obs_coh_valid_ = false;
     float burst_obs_doppler_hz_ = -1.0f;
+    // RECEIVER: this group's radio-agnostic decision-directed EVM usable-SNR (dB),
+    // fed by setBurstEvmObservation from the decoder BEFORE onBurstGroupReceived.
+    // <0 = never fed / no OFDM decode this group. Consumed by the EVM demote authority
+    // (ULTRA_EVM_DEMOTE) in updateRxAuthorityCommand — a constant-free, non-inflating
+    // clamp that reads usable dB directly (no dial/hardware offset).
+    float burst_obs_evm_snr_db_ = -1.0f;
     // RECEIVER: canonical rung this end commands (0 = none); re-stamped on every
     // ACK emit until superseded by the next group's verdict.
     uint8_t rx_authority_cmd_ = 0;

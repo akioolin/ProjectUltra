@@ -1052,6 +1052,14 @@ float ModemEngine::getLastOFDMBroadbandSNR() const {
     return streaming_decoder_ ? streaming_decoder_->getLastOFDMBroadbandSNREstimate() : 0.0f;
 }
 
+bool ModemEngine::hasLastEvmSnr() const {
+    return streaming_decoder_ ? streaming_decoder_->hasLastEvmSnr() : false;
+}
+
+float ModemEngine::getLastEvmSnrDb() const {
+    return streaming_decoder_ ? streaming_decoder_->getLastEvmSnrDb() : 0.0f;
+}
+
 bool ModemEngine::isFading() const {
     return getFadingIndex() > 0.65f;
 }

@@ -76,6 +76,23 @@ bool denseFastDemoteEnabled() {
     return e && e[0] == '1' && e[1] == '\0';
 }
 
+// ULTRA_EVM_DEMOTE (default-off; =1 opts in): radio-agnostic EVM demote authority
+// (Stage 2, 2026-07-24). The RX-authority ladder is steered by the OFDM broadband
+// SNR estimator, which is marked up by the +8.70 dB kOfdmLegacyAnchorScaleOffsetDb
+// quarantine to the dial/channel scale the legacy anchors assume — on a real radio
+// that offset MASKS the hardware loss (~5 dB on the IONOS bench) and over-commits the
+// rung. The decision-directed EVM SNR (demodulator_impl.hpp) reads USABLE dB directly,
+// constant-free and non-inflating. When this group's measured usable EVM cannot support
+// the CURRENT rung's EVM-usable floor (evmUsableFloorDbForRung), clamp the command DOWN
+// to the highest rung the EVM CAN support. Demote-only: it can never raise the command
+// (EVM saturates at the demod ceiling, so it is not a climb input) — it only strips an
+// over-commit the broadband estimator's optimism let through. Orthogonal to the crater/
+// penalty machinery: a pure output clamp so the A/B reads its effect cleanly.
+bool evmDemoteEnabled() {
+    const char* e = std::getenv("ULTRA_EVM_DEMOTE");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
         ? Modulation::QPSK
@@ -2710,6 +2727,32 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             // we are running it) before ever inverting a climb into a descent.
             const uint8_t snapped = snapRungIndexDownToEnabled(cmd);
             cmd = (snapped != kRungIdxNone) ? snapped : cur;
+        }
+        // ── RADIO-AGNOSTIC EVM DEMOTE (ULTRA_EVM_DEMOTE, Stage 2) ── the broadband
+        // estimator that drove cmd is dial/channel-scaled (+kOfdmLegacyAnchorScaleOffsetDb)
+        // and on a real radio over-reads the usable channel by the hardware loss. The
+        // decision-directed EVM reads USABLE dB directly and cannot inflate. If this
+        // group's usable EVM cannot support the CURRENT rung's EVM-usable floor, strip
+        // the over-commit: clamp DOWN to the highest rung the EVM can carry (never up —
+        // EVM saturates at the demod ceiling), then re-snap to the enabled ladder. A
+        // pure output clamp, orthogonal to the crater/penalty machinery.
+        if (evmDemoteEnabled() && burst_obs_evm_snr_db_ >= 0.0f) {
+            const float cur_floor = evmUsableFloorDbForRung(cur);
+            if (cur_floor < kRungDisabledDb &&
+                burst_obs_evm_snr_db_ < cur_floor - kEvmDemoteHoldMarginDb) {
+                uint8_t evm_cap =
+                    highestRungSupportedByEvm(burst_obs_evm_snr_db_, kEvmDemoteHoldMarginDb);
+                const uint8_t snapped_evm = snapRungIndexDownToEnabled(evm_cap);
+                evm_cap = (snapped_evm != kRungIdxNone) ? snapped_evm : kRungIdxQpskR14;
+                if (evm_cap < cmd) {
+                    LOG_MODEM(INFO,
+                              "Connection: RX-AUTHORITY EVM-DEMOTE idx %u -> %u "
+                              "(usable EVM=%.1f < rung floor=%.1f-%.1f margin)",
+                              cmd, evm_cap, burst_obs_evm_snr_db_, cur_floor,
+                              kEvmDemoteHoldMarginDb);
+                    cmd = evm_cap;
+                }
+            }
         }
     }
     // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
@@ -5887,6 +5930,7 @@ void Connection::enterConnected() {
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
+    burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
     qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
@@ -5959,6 +6003,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
+    burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
     qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped

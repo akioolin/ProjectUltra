@@ -165,6 +165,12 @@ public:
     // staircase (BUG-ACK-STAIRCASE-FADE-BIN layer 2).
     bool hasLastOFDMBroadbandSNR() const;
     float getLastOFDMBroadbandSNR() const;
+    // Radio-agnostic decision-directed EVM usable-SNR (Stage 2) from the decoder's
+    // lock-free last-estimate atomics — measures the equalized-constellation scatter,
+    // constant-free and non-inflating. The honest usable-dB feed for the RX-AUTHORITY
+    // EVM demote authority (ULTRA_EVM_DEMOTE).
+    bool hasLastEvmSnr() const;
+    float getLastEvmSnrDb() const;
     // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): latest per-burst RX level verdict
     // (connection_policy::RxLevelVerdict as int: 0=OK, 1=LOW, 2=CLIPPED) + its
     // measurement seq (fresh-vs-stale dedup). Lock-free decoder atomics.
