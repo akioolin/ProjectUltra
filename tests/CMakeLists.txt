@@ -527,6 +527,17 @@ target_include_directories(test_ofdm_snr_calibration PRIVATE
 target_link_libraries(test_ofdm_snr_calibration PRIVATE ultra_core ota_channel_core)
 add_test(NAME OFDMSnrCalibration COMMAND test_ofdm_snr_calibration)
 
+add_executable(test_evm_snr_calibration
+    test_evm_snr_calibration.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_evm_snr_calibration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_evm_snr_calibration PRIVATE ultra_core ota_channel_core)
+add_test(NAME EVMSnrCalibration COMMAND test_evm_snr_calibration)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.

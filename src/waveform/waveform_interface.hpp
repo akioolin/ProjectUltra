@@ -210,6 +210,11 @@ public:
     virtual bool hasLastOFDMBroadbandSNREstimate() const { return false; }
     virtual float getLastOFDMBroadbandSNREstimate() const { return 0.0f; }
 
+    // Radio-agnostic decision-directed EVM SNR (dB) from the equalized data
+    // constellation's own error vector. Parallel/logged Stage 1; non-OFDM = false.
+    virtual bool hasEvmSnrEstimate() const { return false; }
+    virtual float getEvmSnrDbEstimate() const { return 0.0f; }
+
     // Estimated CFO from current signal (Hz)
     virtual float estimatedCFO() const = 0;
 

@@ -1,0 +1,249 @@
+// test_evm_snr_calibration.cpp
+//
+// Calibrates the RADIO-AGNOSTIC decision-directed EVM SNR estimator. The value under
+// test is OFDMDemodulator::getEvmSnrDb(), surfaced via StreamingDecoder: the gain-
+// corrected scatter of the equalized data constellation around its own hard decisions,
+//     S_dd = Sum|decision|^2,  S_ee = Sum|eq|^2,  S_de = Sum Re(decision*conj(eq)),
+//     SNR  = S_dd / (S_dd - S_de^2/S_ee)   (best-fit scalar gain removed).
+//
+// This measures the USABLE (effective) SNR — the SNR the demod's own decisions
+// actually experience AFTER its channel estimation, unlike the LTS estimator which
+// measures the CHANNEL (thermal) SNR from the pilot-noise residual. On AWGN the two
+// agree while thermal noise dominates the error vector; ABOVE ~16-18 dB the usable SNR
+// saturates at the demod's implementation ceiling (pilot-estimate residual, ICI,
+// residual phase) — always <= thermal, never above. That is exactly the quantity rate
+// selection needs, and its cardinal virtue is that it is CONSTANT-FREE and CANNOT
+// INFLATE: signal power is measured (S_dd), not referenced, so the +8.70
+// kOfdmLegacyAnchorScaleOffsetDb bench fudge (which pushed the rig 14.1 -> 22.8 and
+// manufactured the 16QAM over-commit) is impossible by construction.
+//
+// Harness: identical known-truth injection to test_ofdm_snr_calibration.cpp — real
+// StreamingEncoder -> SimulatedChannel(AWGN) -> StreamingDecoder, LTS/data section
+// scaled to the channel's in-band reference so the AWGN dial IS the true receiver
+// in-band SNR (3 kHz convention).
+//
+// GATES (per sweep row):
+//   TRACK  (within a modulation's real operating/selection range): |mean - truth| <= tol
+//           AND mean <= truth + 1.5  (honest, no offset).
+//   HEADROOM (above the operating range, where the next modulation up is selected):
+//           mean <= truth + 1.5 only (NO-INFLATION guard — proves the +8.70 cannot
+//           return; under-reading toward the usable ceiling here is expected & safe).
+//   MONOTONIC: readings non-decreasing in truth within each modulation.
+// tol via env ULTRA_EVM_SNR_CAL_TOL_DB (default 2.0 dB).
+
+#include "gui/modem/streaming_decoder.hpp"
+#include "gui/modem/streaming_encoder.hpp"
+#include "ota_channel_core/channel.hpp"
+#include "ota_channel_core/models.hpp"
+#include "protocol/frame_v2.hpp"
+#include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/types.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <string>
+#include <vector>
+
+using namespace ultra;
+using namespace ultra::gui;
+using Bytes = std::vector<uint8_t>;
+
+namespace {
+
+std::vector<float> withSilence(const std::vector<float>& frame) {
+    std::vector<float> audio;
+    audio.resize(48000, 0.0f);
+    audio.insert(audio.end(), frame.begin(), frame.end());
+    audio.resize(audio.size() + 96000, 0.0f);
+    return audio;
+}
+
+void feedInChunks(StreamingDecoder& decoder, const std::vector<float>& audio) {
+    constexpr size_t kChunk = 4800;
+    for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+        const size_t len = std::min(kChunk, audio.size() - pos);
+        decoder.feedAudio(audio.data() + pos, len);
+        decoder.processBuffer();
+    }
+}
+
+ModemConfig ofdmGeometry(Modulation mod, CodeRate rate) {
+    ModemConfig cfg;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.sample_rate = 48000;
+    cfg.center_freq = 1500.0f;
+    cfg.cp_mode = CyclicPrefixMode::LONG;
+    cfg.modulation = mod;
+    cfg.code_rate = rate;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
+    return cfg;
+}
+
+double rmsOf(const std::vector<float>& x) {
+    double sum = 0.0;
+    for (float v : x) sum += static_cast<double>(v) * v;
+    return x.empty() ? 0.0 : std::sqrt(sum / static_cast<double>(x.size()));
+}
+
+double ltsDataSectionRms(const Bytes& serialized, Modulation mod, CodeRate rate) {
+    StreamingEncoder probe;
+    probe.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    probe.setOFDMConfig(ofdmGeometry(mod, rate));
+    probe.setDataMode(mod, rate);
+    return rmsOf(probe.encodeFrameLight(serialized));
+}
+
+// One trial's EVM SNR reading (NaN if the decoder never produced one).
+float measureEvmSNR(float snr_db, uint32_t seed, const Bytes& payload,
+                    Modulation mod, CodeRate rate) {
+    auto frame = v2::makeFixedDataFrame("ALPHA", "BRAVO", 7, payload, rate);
+    const Bytes serialized = frame.serialize();
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(ofdmGeometry(mod, rate));
+    encoder.setDataMode(mod, rate);
+    auto samples = encoder.encodeFrame(serialized);
+    if (samples.empty()) return std::nanf("");
+
+    // Known-truth injection: put the LTS/data section AT the channel's reference so the
+    // AWGN dial IS the injected in-band SNR (identical to test_ofdm_snr_calibration).
+    const double section_rms = ltsDataSectionRms(serialized, mod, rate);
+    if (section_rms <= 0.0) return std::nanf("");
+    const float scale = static_cast<float>(
+        ultra::ota_channel_core::kModemReferenceInBandRms / section_rms);
+    for (float& v : samples) v *= scale;
+
+    auto audio = withSilence(samples);
+
+    ultra::ota_channel_core::SimulatedChannel channel;
+    channel.setSeed(seed);
+    channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+    channel.setTxBurstNormalizationEnabled(false);
+    channel.transmitFromA(audio);
+    audio = channel.receiveForB(audio.size());
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("EVMCAL");
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 ofdmGeometry(mod, rate), mod, rate);
+    feedInChunks(decoder, audio);
+    // The EVM SNR is captured on each decoded frame (result.evm_snr_db) — average the
+    // per-frame readings; fall back to the decoder's decode-time atomic otherwise.
+    double sum = 0.0;
+    int n = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.is_ping) continue;
+        if (result.has_evm_snr_db && std::isfinite(result.evm_snr_db)) {
+            sum += result.evm_snr_db;
+            ++n;
+        }
+    }
+    if (n > 0) return static_cast<float>(sum / n);
+    if (decoder.hasLastEvmSnr()) return decoder.getLastEvmSnrDb();
+    return std::nanf("");
+}
+
+float toleranceDb() {
+    if (const char* env = std::getenv("ULTRA_EVM_SNR_CAL_TOL_DB")) {
+        char* end = nullptr;
+        const float v = std::strtof(env, &end);
+        if (end != env && std::isfinite(v) && v > 0.0f) return v;
+    }
+    return 2.0f;
+}
+
+struct Row {
+    Modulation mod;
+    CodeRate rate;
+    const char* name;
+    float snr;
+    bool operating;  // true: TRACK gate (in selection range); false: HEADROOM (no-inflate only)
+};
+
+constexpr float kNoInflateMarginDb = 1.5f;  // usable SNR must never exceed thermal by more
+
+}  // namespace
+
+int main() {
+    setLogLevel(LogLevel::ERROR);
+
+    Bytes payload(32);
+    for (size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<uint8_t>(0x40 + (i * 7) % 64);
+
+    constexpr uint32_t kSeeds = 5;
+    const float tol = toleranceDb();
+
+    std::cout << "== Radio-agnostic EVM (usable) SNR estimator calibration ==\n";
+    std::cout << "   Gain-corrected decision-directed error vector; measures USABLE SNR.\n";
+    std::cout << "   Constant-free -> cannot inflate (the +8.70 bench fudge is impossible).\n";
+    std::cout << "   TRACK |bias|<=" << std::fixed << std::setprecision(1) << tol
+              << " dB in operating range; HEADROOM: no-inflate only (<= truth+"
+              << kNoInflateMarginDb << ").\n\n";
+
+    // QPSK is selected at low SNR (R1/4 floor ~10); above ~15 dB higher-order takes over.
+    // 16QAM is selected ~16-20 dB; 24 is headroom (32QAM/higher territory).
+    const std::vector<Row> rows = {
+        {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  10.f, true},
+        {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  12.f, true},
+        {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  15.f, true},
+        {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  20.f, false},
+        {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2", 16.f, true},
+        {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2", 18.f, true},
+        {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2", 20.f, true},
+        {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2", 24.f, false},
+    };
+
+    std::cout << "  modulation | true | mean  bias | gate    result (of " << kSeeds << " seeds)\n";
+    int failed = 0;
+    const char* prev_name = nullptr;
+    double prev_mean = -1e9;
+    for (const auto& r : rows) {
+        if (prev_name && std::string(prev_name) != r.name) prev_mean = -1e9;  // reset per mod
+        double sum = 0.0;
+        int n = 0;
+        for (uint32_t s = 0; s < kSeeds; ++s) {
+            const float v = measureEvmSNR(r.snr, 1000u + s * 37u, payload, r.mod, r.rate);
+            if (std::isfinite(v)) { sum += v; ++n; }
+        }
+        if (n == 0) {
+            std::cout << "  " << std::setw(10) << r.name << " | " << std::setw(4)
+                      << std::setprecision(0) << r.snr << " | (no reading)  FAIL\n";
+            ++failed;
+            prev_name = r.name;
+            continue;
+        }
+        const double mean = sum / n;
+        const double bias = mean - r.snr;
+        const bool no_inflate = mean <= r.snr + kNoInflateMarginDb;
+        const bool monotonic = mean >= prev_mean - 0.5;  // non-decreasing (small slack)
+        bool ok = no_inflate && monotonic;
+        if (r.operating) ok = ok && std::abs(bias) <= tol;
+        std::cout << "  " << std::setw(10) << r.name << " | " << std::setw(4)
+                  << std::setprecision(0) << r.snr << " | " << std::setprecision(1)
+                  << std::setw(5) << mean << " " << std::showpos << std::setw(5) << bias
+                  << std::noshowpos << " | " << (r.operating ? "TRACK   " : "HEADROOM")
+                  << (ok ? " OK" : " FAIL")
+                  << (!no_inflate ? " (INFLATED!)" : "")
+                  << (!monotonic ? " (non-monotonic)" : "") << "\n";
+        if (!ok) ++failed;
+        prev_mean = mean;
+        prev_name = r.name;
+    }
+
+    std::cout << "\n";
+    if (failed == 0) {
+        std::cout << "PASS: usable-SNR EVM tracks thermal in range, never inflates, monotonic.\n";
+        return 0;
+    }
+    std::cout << "FAIL: " << failed << " row(s) failed.\n";
+    return 1;
+}

@@ -133,6 +133,8 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         result.ofdm_internal_snr_db = waveform_->estimatedSNR();
         result.has_ofdm_broadband_snr_db = waveform_->hasLastOFDMBroadbandSNREstimate();
         result.ofdm_broadband_snr_db = waveform_->getLastOFDMBroadbandSNREstimate();
+        result.has_evm_snr_db = waveform_->hasEvmSnrEstimate();
+        result.evm_snr_db = waveform_->getEvmSnrDbEstimate();
         result.lts_fading_index = waveform_->getFadingIndex();
         result.lts_timing_offset_samples = waveform_->getLastTimingOffsetSamples();
         result.pilot_frequency_cv = waveform_->getLastPilotFrequencyCV();
@@ -216,6 +218,13 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
             result.snr_source = SNRSource::OFDM_BROADBAND;
             last_ofdm_broadband_snr_db_valid_.store(true);
             last_ofdm_broadband_snr_db_.store(result.ofdm_broadband_snr_db);
+            // Radio-agnostic EVM SNR (Stage 1): capture at decode time, same as the
+            // broadband value, so it survives the per-burst demod reset. Nothing
+            // consumes the atomic yet — parallel source for tests/logging/Stage 2.
+            if (result.has_evm_snr_db) {
+                last_evm_snr_db_valid_.store(true);
+                last_evm_snr_db_.store(result.evm_snr_db);
+            }
         }
         LOG_MODEM(DEBUG, "[%s] OFDM quality: sync_quality=%.1f dB "
                   "ofdm_broadband=%s%.1f dB ofdm_internal=%.1f dB "
@@ -284,6 +293,8 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         result.lts_residual_cfo_hz = residual_cfo_hz;
         last_ofdm_broadband_snr_db_valid_.store(false);
         last_ofdm_broadband_snr_db_.store(0.0f);
+        last_evm_snr_db_valid_.store(false);
+        last_evm_snr_db_.store(0.0f);
         LOG_MODEM(DEBUG, "[%s] non-OFDM quality: sync_quality=%.1f dB "
                   "idle_in_band=%s%.1f dB routed_snr=%.1f dB (%s) windows=%zu",
                   log_prefix_.c_str(), result.sync_quality_db,

@@ -1375,6 +1375,8 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);
+    last_evm_snr_db_valid_.store(false);
+    last_evm_snr_db_.store(0.0f);
     // BUG-ANCHOR-CFO-KILL: reset() (same stored value as store(0.0f)) also clears
     // the pilot-refined mark, so the first anchor after a decoder reset keeps cold
     // chirp trust.

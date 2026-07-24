@@ -90,6 +90,12 @@ public:
     bool hasLastOFDMBroadbandSNREstimate() const;
     float getLastOFDMBroadbandSNREstimate() const;
 
+    // Radio-agnostic decision-directed EVM SNR (dB): measured from the scatter of the
+    // equalized data constellation around its own hard decisions — no reference power,
+    // no noise-shape assumption, no per-bench offset. Parallel/logged in Stage 1.
+    bool hasEvmSnr() const;
+    float getEvmSnrDb() const;
+
     // Get estimated frequency offset in Hz (from pilot phase tracking)
     float getFrequencyOffset() const;
 

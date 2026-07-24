@@ -97,6 +97,45 @@ struct OFDMDemodulator::Impl {
     bool last_snr_db_estimate_valid = false;
     float last_snr_db_estimate = 0.0f;
 
+    // ── Radio-agnostic decision-directed EVM SNR (Stage 1, 2026-07-24) ──
+    // Measured from the scatter of the equalized DATA constellation around its own
+    // hard decisions: SNR = Sum|hardDecision|^2 / Sum|equalized - hardDecision|^2 over
+    // non-erased data carriers, accumulated across a burst's data symbols. This is the
+    // demod's OWN error vector — it needs NO reference power, NO noise-shape assumption
+    // and NO per-bench offset (unlike last_snr_db_estimate, whose consumers add
+    // kOfdmLegacyAnchorScaleOffsetDb). It measures signal power empirically (Sum|decision|^2)
+    // so it is constant-free regardless of constellation normalization. Exactly what
+    // MC-DPSK's data-aided estimator does in the differential domain (multi_carrier_dpsk.hpp).
+    // Stage 1: parallel/logged only — NOT consumed by rate selection yet.
+    // GAIN-CORRECTED EVM: the MMSE equalizer leaves a scalar gain-shrinkage on the
+    // constellation, so a raw |eq - decision|^2 counts that gain error as "noise" and
+    // saturates the SNR at high true-SNR. Remove it by the least-squares fit g = S_de/S_ee
+    // (the best scalar matching eq to the decisions), leaving pure noise:
+    //   S_dd = Sum|decision|^2 ; S_ee = Sum|eq|^2 ; S_de = Sum Re(decision*conj(eq))
+    //   noise = S_dd - S_de^2/S_ee ;  SNR = S_dd / noise.
+    // A pure gain error (eq = a*ideal) yields noise=0 (not counted); only genuine scatter
+    // survives. Constant-free and radio-agnostic.
+    double evm_dd_accum_ = 0.0;   // S_dd = Sum |hard decision|^2 (signal power)
+    double evm_ee_accum_ = 0.0;   // S_ee = Sum |equalized|^2
+    double evm_de_accum_ = 0.0;   // S_de = Sum Re(decision * conj(equalized))
+    size_t evm_carrier_count_ = 0;
+    bool last_evm_snr_valid_ = false;
+    float last_evm_snr_db_ = 0.0f;
+    // EVM SNR (dB) from the LIVE accumulation (no lag); falls back to the last finalized
+    // value when nothing is currently accumulated. Zero residual clamps high (no div0).
+    float currentEvmSnrDb() const {
+        if (evm_carrier_count_ > 0 && evm_ee_accum_ > 0.0) {
+            const double noise = evm_dd_accum_ - (evm_de_accum_ * evm_de_accum_) / evm_ee_accum_;
+            if (noise <= 0.0) return 60.0f;
+            const double lin = evm_dd_accum_ / noise;
+            return 10.0f * static_cast<float>(std::log10(std::max(lin, 1.0e-9)));
+        }
+        return last_evm_snr_db_;
+    }
+    // Finalize the just-completed burst's EVM SNR (into last_evm_snr_db_ + log) and reset
+    // the accumulators. Called at the per-burst boundary (resetFailureAttributionDiagnostics).
+    void finalizeAndResetEvmSnr();
+
     // Last LTS estimate quality. False training locks on silence/noise have
     // near-zero values here even when the clipped LLR stream looks plausible.
     float last_lts_signal_power = 1.0f;

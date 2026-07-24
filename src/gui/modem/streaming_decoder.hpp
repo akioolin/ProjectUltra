@@ -90,6 +90,8 @@ struct DecodeResult {
     float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
     bool has_ofdm_broadband_snr_db = false;
     float ofdm_broadband_snr_db = 0.0f;     // Historical field name; OFDM in-band SNR.
+    bool has_evm_snr_db = false;
+    float evm_snr_db = 0.0f;                 // Radio-agnostic decision-directed EVM SNR (Stage 1).
     // #58 BUG-CONNECT-SNR-VARIANCE: both MC-DPSK in-band estimates, surfaced so
     // consumers/tests can compare spreads. training = ~170 ms preamble snapshot
     // (ONE fade state); data_aided = whole-frame differential estimate
@@ -508,6 +510,16 @@ public:
     }
     float getLastOFDMBroadbandSNREstimate() const {
         return last_ofdm_broadband_snr_db_.load();
+    }
+
+    // Radio-agnostic decision-directed EVM SNR (dB) — captured at decode time (same as
+    // the broadband value) so it survives the per-burst demod reset. Nothing consumes it
+    // yet — Stage 1 parallel source for tests/logging/Stage 2.
+    bool hasLastEvmSnr() const {
+        return last_evm_snr_db_valid_.load();
+    }
+    float getLastEvmSnrDb() const {
+        return last_evm_snr_db_.load();
     }
 
     bool hasIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.hasEstimate(); }
@@ -931,6 +943,8 @@ private:
     // Status (atomic for lock-free read from GUI)
     mutable std::atomic<float> last_snr_{0.0f};
     mutable std::atomic<bool> last_ofdm_broadband_snr_db_valid_{false};
+    mutable std::atomic<bool> last_evm_snr_db_valid_{false};
+    mutable std::atomic<float> last_evm_snr_db_{0.0f};
     // RX-SIGNAL ACTIVITY (F129): steady-clock ms of the last decoder EVIDENCE of an
     // incoming transmission (sync detection / per-frame metrics). The F129 census
     // proved the energy CCA lies in both directions on the rig (threshold learns

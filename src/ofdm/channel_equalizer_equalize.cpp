@@ -683,6 +683,33 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
 
     recordFailureAttributionSymbol(equalized, mod);
 
+    // ── Radio-agnostic decision-directed EVM SNR accumulation (Stage 1) ──
+    // Sum the gain-corrected EVM statistics (S_dd, S_ee, S_de) of the equalized data
+    // constellation against its own hard decisions, over the NON-ERASED data carriers.
+    // Always on (unlike the diagnostics above); finalized per burst in
+    // resetFailureAttributionDiagnostics. Constant-free: signal power is measured
+    // (Sum|decision|^2) and the MMSE scalar gain is fit out, so the ratio is the true
+    // usable SNR on ANY radio/noise shape — no reference level, no offset.
+    if (equalized.size() == data_carrier_indices.size()) {
+        for (size_t i = 0; i < equalized.size(); ++i) {
+            if (i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0) {
+                continue;  // deep-null carrier: not usable, excluded from the SNR
+            }
+            const Complex decision = hardDecision(equalized[i], mod);
+            const float dp = std::norm(decision);
+            if (dp <= 1.0e-9f) {
+                continue;  // no valid decision (origin / dead carrier)
+            }
+            // Gain-corrected EVM sums: S_dd, S_ee, S_de. The finalizer removes the MMSE
+            // scalar gain-shrinkage (g = S_de/S_ee) so only genuine scatter counts as noise.
+            evm_dd_accum_ += dp;                              // |decision|^2
+            evm_ee_accum_ += static_cast<double>(std::norm(equalized[i]));  // |eq|^2
+            evm_de_accum_ += static_cast<double>(decision.real() * equalized[i].real() +
+                                                 decision.imag() * equalized[i].imag());  // Re(dec*conj(eq))
+            ++evm_carrier_count_;
+        }
+    }
+
     // Coherent 8PSK/16-QAM decision-directed channel observations. The noise
     // reference is the post-equalizer carrier noise variance used by the LLRs,
     // inflated by the same CE margin as demapping. A carrier is accepted only when:

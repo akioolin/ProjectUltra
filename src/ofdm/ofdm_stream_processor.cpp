@@ -30,7 +30,24 @@ bool envFlagEnabled(const char* name) {
 
 }  // namespace
 
+void OFDMDemodulator::Impl::finalizeAndResetEvmSnr() {
+    // Radio-agnostic decision-directed EVM SNR (Stage 1): finalize the just-completed
+    // burst's gain-corrected EVM (S_dd, S_ee, S_de) into last_evm_snr_db_ + log it next to
+    // the LTS SNR line for comparison, then clear the accumulators for the next burst.
+    if (evm_carrier_count_ > 0) {
+        last_evm_snr_db_ = currentEvmSnrDb();
+        last_evm_snr_valid_ = true;
+        LOG_DEMOD(INFO, "EVM SNR estimate: %.1f dB (decision-directed, %zu carriers)",
+                  last_evm_snr_db_, evm_carrier_count_);
+    }
+    evm_dd_accum_ = 0.0;
+    evm_ee_accum_ = 0.0;
+    evm_de_accum_ = 0.0;
+    evm_carrier_count_ = 0;
+}
+
 void OFDMDemodulator::Impl::resetFailureAttributionDiagnostics() {
+    finalizeAndResetEvmSnr();  // per-burst boundary: finalize the prior burst's EVM SNR
     current_data_symbol_index_ = 0;
     failure_diag_carriers_.clear();
     failure_diag_symbols_.clear();
@@ -645,6 +662,16 @@ float OFDMDemodulator::getLastOFDMBroadbandSNREstimate() const {
     return impl_->last_snr_db_estimate;
 }
 
+// Radio-agnostic decision-directed EVM SNR (Stage 1). Live on-demand value from the
+// current burst's accumulation (no lag); no reference power / offset / noise-shape.
+bool OFDMDemodulator::hasEvmSnr() const {
+    return impl_->evm_carrier_count_ > 0 || impl_->last_evm_snr_valid_;
+}
+
+float OFDMDemodulator::getEvmSnrDb() const {
+    return impl_->currentEvmSnrDb();
+}
+
 float OFDMDemodulator::getFrequencyOffset() const {
     return impl_->freq_offset_hz;
 }
@@ -832,6 +859,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->estimated_snr_linear = 1.0f;
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
+    impl_->last_evm_snr_valid_ = false;  // fresh connection: drop any stale EVM SNR
+    impl_->last_evm_snr_db_ = 0.0f;
     impl_->noise_variance = 0.1f;
     impl_->resetPilotFadingStats();
 
@@ -1028,6 +1057,8 @@ void OFDMDemodulator::reset() {
     impl_->estimated_snr_linear = 1.0f;
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
+    impl_->last_evm_snr_valid_ = false;  // fresh connection: drop any stale EVM SNR
+    impl_->last_evm_snr_db_ = 0.0f;
     impl_->noise_variance = 0.1f;
     impl_->resetPilotFadingStats();
     impl_->last_lts_signal_power = 1.0f;

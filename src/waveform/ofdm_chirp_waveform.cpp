@@ -1044,6 +1044,14 @@ float OFDMChirpWaveform::getLastOFDMBroadbandSNREstimate() const {
     return 0.0f;
 }
 
+bool OFDMChirpWaveform::hasEvmSnrEstimate() const {
+    return demodulator_ && demodulator_->hasEvmSnr();
+}
+
+float OFDMChirpWaveform::getEvmSnrDbEstimate() const {
+    return demodulator_ ? demodulator_->getEvmSnrDb() : 0.0f;
+}
+
 float OFDMChirpWaveform::estimatedCFO() const {
     if (std::abs(last_cfo_) > 0.1f) {
         return last_cfo_;

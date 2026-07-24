@@ -100,6 +100,8 @@ public:
     float estimatedSNR() const override;
     bool hasLastOFDMBroadbandSNREstimate() const override;
     float getLastOFDMBroadbandSNREstimate() const override;
+    bool hasEvmSnrEstimate() const override;
+    float getEvmSnrDbEstimate() const override;
     float estimatedCFO() const override;
     float getFadingIndex() const override;  // From demodulator pilot variance
     float getLastPilotFrequencyCV() const override;
