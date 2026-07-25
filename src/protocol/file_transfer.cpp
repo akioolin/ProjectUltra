@@ -637,8 +637,29 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         }
         size_t staged = 0;
         for (const auto& kv : rx_prestart_chunks_) staged += kv.second.size();
-        const bool is_new = rx_prestart_chunks_.find(offset) == rx_prestart_chunks_.end();
-        if (staged + (is_new ? data_len : 0) > MAX_PRESTART_STAGE_BYTES) {
+        // NEVER-SHRINK coverage (BUG-SACK-DURABILITY-RESIDUAL root cause, F181):
+        // chunk_size_ changes on EVERY mid-stream rate/mod move, so the SAME byte
+        // offset legitimately re-arrives with a SHORTER length on the new grid. The
+        // bare `map[offset] = ...` this replaces then DESTROYED the tail of the longer
+        // staged copy — F181: a 456 B chunk at offset 0 was overwritten by era-1's
+        // re-gridded 408 B chunk, so bytes [408,456) ceased to exist; the sender's
+        // range salvage then skipped re-sending them => permanently stranded file.
+        // Offsets are absolute into ONE immutable tx_data_, so a longer chunk at a
+        // given offset is a strict SUPERSET of a shorter one: keeping the LONGEST is
+        // always byte-correct and can only ever retain MORE data. Receiver byte
+        // coverage must be MONOTONE — it may grow, never shrink.
+        auto staged_it = rx_prestart_chunks_.find(offset);
+        const size_t have_len =
+            (staged_it == rx_prestart_chunks_.end()) ? 0 : staged_it->second.size();
+        if (data_len <= have_len) {
+            // Duplicate or SHORTER re-grid of a span we already hold in full — the
+            // existing entry already covers these bytes. Drop it rather than shrink.
+            if (!more_data) rx_prestart_final_seen_ = true;
+            return true;
+        }
+        // Account only the GROWTH against the staging budget (the shared prefix is
+        // already counted in `staged`).
+        if (staged + (data_len - have_len) > MAX_PRESTART_STAGE_BYTES) {
             rx_prestart_overflow_ = true;
             LOG_MODEM(WARN,
                       "FileTransfer: pre-FILE_START staging overflow (%zu B staged); "
@@ -683,6 +704,20 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         // Out-of-order: buffer for later insertion. The bytes ARE received and kept
         // (SR-ARQ), they just can't be written until the earlier gap fills. Notify so
         // the bar reflects the true received total now, not only when the gap closes.
+        // NEVER-SHRINK coverage — same invariant as the pre-FILE_START staging map
+        // above (F181 root cause): a mid-stream rate/mod move re-grids the SAME byte
+        // offset to a SHORTER length, and a bare `map[offset] = ...` destroyed the
+        // longer copy's tail. Offsets are absolute into one immutable tx_data_, so the
+        // longest entry at an offset is a superset of every shorter one. Keep it.
+        auto pend_it = rx_pending_chunks_.find(offset);
+        if (pend_it != rx_pending_chunks_.end() && pend_it->second.size() >= data_len) {
+            LOG_MODEM(INFO,
+                      "FileTransfer: out-of-order chunk offset=%u len=%zu already covered "
+                      "by a %zu B entry — keeping the longer copy",
+                      offset, data_len, pend_it->second.size());
+            notifyProgress();
+            return true;
+        }
         rx_pending_chunks_[offset] = Bytes(data, data + data_len);
         LOG_MODEM(INFO,
                   "FileTransfer: Buffered out-of-order chunk offset=%u len=%zu (expected=%u, pending=%zu)",

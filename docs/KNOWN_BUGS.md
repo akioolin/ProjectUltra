@@ -139,8 +139,57 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   re-sent and the receiver dedups by offset — the stranded-file class is
   structurally closed. Receiver-side deliver-before-discard stays (pure
   benefit; the rate-change site now logs its salvages for forensic parity).
-- **Remaining open question (low priority):** the exact phantom-mark chain
-  (stale-epoch SACK bit surviving the era gate on slot 0).
+- **ROOT-CAUSED + FIXED 2026-07-24 — it was NOT a phantom mark.** Forensics over
+  F181_{mac,pi5}.log + code settled all three suspects:
+  - **(b) phantom/era-aliased SACK mark — REFUTED for F181.** Only 3 epoch bumps
+    (0→1→2→3), no mod-4 revisit; the deciding ACK carried epoch 0 == `tx_epoch_` 0
+    nine seconds BEFORE the first bump (so it passed the era gate legitimately), and
+    it came from the seq-verified bitmap loop, not the cumulative walk (which
+    executed zero iterations). The mark was CORRECT.
+  - **(a) receiver destroyed legitimately-SACKed bytes — CONFIRMED, this is the
+    destroyer.** `file_transfer.cpp` wrote both receive maps with a bare
+    `map[offset] = Bytes(...)`. `chunk_size_` changes on every mid-stream rate/mod
+    move, so the same byte offset re-arrives SHORTER on the new grid and the
+    assignment destroyed the longer copy's tail: a 456 B chunk at offset 0 was
+    replaced by era-1's re-gridded 408 B chunk ⇒ `[408,456)` ceased to exist ⇒ 103
+    chunks stranded behind a 48-byte hole. **This was LIVE on the default path** (no
+    knob) — the salvage only made it permanent by skipping the re-send.
+  - **(c) FILE_START/offset bookkeeping — REFUTED as cause; it is the exposure.** The
+    missing FILE_START only ROUTED the bytes into the staging map; the contiguous-edge
+    rule then stranded everything behind the hole.
+  - **FIX:** NEVER-SHRINK insert in both maps (offsets are absolute into one immutable
+    `tx_data_`, so the longest entry at an offset is a strict superset — keep it);
+    receiver byte coverage is now MONOTONE. Plus the missing slot-identity guard in the
+    ARQ cumulative walk. Regressions
+    `test_receiver_coverage_never_shrinks_on_regrid_out_of_order` +
+    `test_prestart_staging_coverage_never_shrinks_on_regrid` reproduce the stranding
+    (fail-before/pass-after proven). See docs/CHANGELOG.md 2026-07-24.
+- **`ULTRA_SACK_SALVAGE` stays DEFAULT-OFF — structural, not caution.** A sender-local
+  decision to PERMANENTLY never send a byte needs evidence that is byte-domain,
+  monotone and era-independent. `slot.acked` is frame-domain, era-relative (2-bit echo)
+  and retractable by the receiver's own discard paths; the only monotone byte-domain
+  evidence the sender holds locally is the cumulative retirement point, which IS the
+  requeue resume offset — so gating the salvage on trustworthy local evidence makes it a
+  no-op. Safety requires receiver-authored byte-domain evidence on the wire, and the
+  tone-burst payload is SATURATED at 44/44 bits (+1 bit ⇒ 5 Hamming blocks ⇒ 30→38
+  symbols ⇒ +27% ACK airtime, lockstep break) for a ~1 s/transfer prize. Not worth it;
+  the stranded-file class is closed on the receiver side instead.
+
+### BUG-TONEACK-EPOCH-UNPROTECTED: the tone-burst era echo is the only payload field outside CRC coverage
+- Status: **OPEN — found 2026-07-24 during the F181 root-cause (not yet observed in the wild).**
+- `tone_burst_constants.hpp` CRC-12 covers payload bits 0-25 + 38-39 (+42-43 under
+  `ULTRA_RX_RATE_CMD`); bits **40-41 (`move_epoch`) are NOT covered**. They sit in Hamming
+  block 3, so a double-bit error mis-corrects and can rewrite the era echo onto the
+  sender's current `tx_epoch_` **with a valid CRC** — a stale ACK then passes the era gate.
+- Related: `SelectiveRepeatARQ::reset()` zeroes `tx_epoch_` and restarts seqs at 0 under a
+  DEBUG-only log, and `Connection::clearFileTransferArqState()` calls it MID-CONNECTION —
+  a silent wrap-equivalent of the documented mod-4 residual.
+- **Cheap fixes (neither needs new wire bits):** widen the CRC message to cover bits 40-41
+  (lockstep both ends); and/or add monotone sample-index ACK freshness — `ToneBurstAckMonitor`
+  already tracks `total_samples_fed_` and per-detection sample positions, so recording
+  `epoch_bump_sample_` at every bump/reset and ignoring ACKs detected before it gives a
+  PHYSICAL ordering that cannot alias, dominating any modulo counter (~10 lines, zero wire cost).
+- Not urgent while the salvage is OFF (a stale ACK then costs at most a duplicate resend).
 
 ### BUG-DECODE-BACKLOG-COLLISIONS: under deep-fade search thrash the decoder falls 10-20 s behind LIVE audio — every receiver response (ACK, backstop, adopt) leaves stale, colliding with the sender's already-airing recovery bursts
 - Status: **OPEN — pinned 2026-07-07 (F176 rig, MPG@20).** Hard evidence: a burst

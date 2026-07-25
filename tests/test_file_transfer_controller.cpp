@@ -385,7 +385,112 @@ void test_receiver_merges_straddling_resend_and_drains_covered_buffered() {
 
 }  // namespace
 
+// BUG-SACK-DURABILITY-RESIDUAL root cause (F181, 2026-07-07; fixed 2026-07-24).
+// Receiver byte coverage MUST be MONOTONE. chunk_size_ changes on every mid-stream
+// rate/mod move, so the SAME byte offset legitimately re-arrives with a SHORTER length
+// on the new grid. Both receive maps used a bare `map[offset] = Bytes(...)`, which
+// REPLACED a longer buffered/staged copy with the shorter re-grid and DESTROYED the
+// tail bytes. In F181 a 456 B chunk at offset 0 was overwritten by era-1's re-gridded
+// 408 B chunk, so [408,456) ceased to exist; with the sender-side range salvage on,
+// those bytes were then never re-sent => permanently stranded file (900 s, 0 progress).
+// Offsets are absolute into one immutable source, so the longest entry at an offset is
+// a strict superset of every shorter one: keep it.
+void test_receiver_coverage_never_shrinks_on_regrid_out_of_order() {
+    TransferDirs dirs("ultra_file_transfer_regrid_ooo_test");
+    CHECK(dirs.ready, "create temp directories");
+
+    const Bytes original = makeIncompressiblePayload(80);  // uncompressed path
+    const std::filesystem::path src_path = dirs.tx_dir / "regrid_ooo.bin";
+    CHECK(writeFile(src_path, original), "write regrid source file");
+
+    FileTransferController tx;
+    tx.setMaxChunkPayload(25);  // 20-byte chunks: [0,20) [20,40) [40,60) [60,80)
+    CHECK(tx.startSend(src_path.string()), "start regrid send");
+    Bytes meta = tx.getNextChunk();
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(dirs.rx_dir.string());
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+
+    CHECK(rx.processPayload(meta, true), "metadata accepted");
+    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 20), true),
+          "chunk [0,20) accepted");                       // contiguous edge = 20
+    CHECK(rx.processPayload(makeFileDataPayload(original, 40, 20), true),
+          "chunk [40,60) buffered out-of-order");         // rx_pending_chunks_[40] = 20 B
+    // RATE DEMOTE: the sender re-grids to a SHORTER chunk and resends the same offset.
+    // The old code overwrote the 20 B entry with 12 B, destroying [52,60).
+    CHECK(rx.processPayload(makeFileDataPayload(original, 40, 12), true),
+          "shorter re-grid at the same offset accepted");
+    // Fill the gap: the edge advances to 40 and must drain the FULL 20 B buffered
+    // entry to 60. Under the old code it drained only 12 B (edge 52), leaving the
+    // hole [52,60) that nothing ever refills -> the file never finalizes.
+    CHECK(rx.processPayload(makeFileDataPayload(original, 20, 20), true),
+          "gap chunk [20,40) accepted");
+    CHECK(rx.processPayload(makeFileDataPayload(original, 60, 20), false),
+          "final chunk [60,80) accepted");
+
+    CHECK(callback_called, "receiver finalized (old code stranded on the [52,60) hole)");
+    CHECK(callback_success, "receive succeeded (CRC ok)");
+    CHECK(readFile(received_path) == original, "received bytes are exact");
+}
+
+// Same invariant on the OTHER map: pre-FILE_START staging (rx_prestart_chunks_).
+// This is the exact F181 site — burst data arrives before FILE_START, gets staged by
+// byte offset, and a rate demote mid-staging re-grids the same offset shorter.
+void test_prestart_staging_coverage_never_shrinks_on_regrid() {
+    TransferDirs dirs("ultra_file_transfer_regrid_prestart_test");
+    CHECK(dirs.ready, "create temp directories");
+
+    const Bytes original = makeIncompressiblePayload(80);
+    const std::filesystem::path src_path = dirs.tx_dir / "regrid_prestart.bin";
+    CHECK(writeFile(src_path, original), "write prestart source file");
+
+    FileTransferController tx;
+    tx.setMaxChunkPayload(25);
+    CHECK(tx.startSend(src_path.string()), "start prestart send");
+    Bytes meta = tx.getNextChunk();
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(dirs.rx_dir.string());
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+
+    // Data BEFORE FILE_START -> staged by absolute offset.
+    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 20), true),
+          "staged [0,20) before FILE_START");
+    // Rate demote mid-staging: same offset, SHORTER. Must not shrink coverage.
+    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 12), true),
+          "shorter re-grid of a staged offset accepted");
+    CHECK(rx.processPayload(makeFileDataPayload(original, 20, 20), true),
+          "staged [20,40)");
+    // FILE_START drains the staging map; the drain must see the FULL 20 B at offset 0.
+    CHECK(rx.processPayload(meta, true), "metadata accepted (drains staging)");
+    CHECK(rx.processPayload(makeFileDataPayload(original, 40, 20), true),
+          "chunk [40,60) accepted");
+    CHECK(rx.processPayload(makeFileDataPayload(original, 60, 20), false),
+          "final chunk [60,80) accepted");
+
+    CHECK(callback_called, "receiver finalized (old code stranded on the [12,20) hole)");
+    CHECK(callback_success, "receive succeeded (CRC ok)");
+    CHECK(readFile(received_path) == original, "received bytes are exact");
+}
+
 int main() {
+    test_receiver_coverage_never_shrinks_on_regrid_out_of_order();
+    test_prestart_staging_coverage_never_shrinks_on_regrid();
     test_compressed_final_chunk_out_of_order_finalizes();
     test_duplicate_filename_in_dotted_receive_directory();
     test_single_block_payload_round_trip();

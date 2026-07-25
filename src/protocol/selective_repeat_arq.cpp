@@ -1202,7 +1202,15 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     while (tx_in_flight_ > 0 && tx_base_seq_ != tx_next_seq_ &&
            tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
         size_t slot = seqToSlot(tx_base_seq_);
-        if (tx_window_[slot].active) {
+        // SLOT-IDENTITY guard (defense-in-depth, 2026-07-24): retire the slot only if
+        // it actually HOLDS the seq being retired. The SACK-bitmap loop below has always
+        // verified `.seq == sack_seq`; this cumulative walk checked only `.active`, so a
+        // slot occupied by a DIFFERENT seq (aliased through seqToSlot when a hole is
+        // punched inside [base,next) — reachable once the live span reaches the window
+        // size) would be retired here, firing on_send_complete_(true) and irreversibly
+        // popping the FileTransfer tx ledger for a frame the receiver never confirmed.
+        // Free to add, and it makes the two ack paths agree on what "this frame" means.
+        if (tx_window_[slot].active && tx_window_[slot].seq == tx_base_seq_) {
             maybeSampleRTT(tx_window_[slot]);
             tx_window_[slot].active = false;
             tx_window_[slot].acked = true;
