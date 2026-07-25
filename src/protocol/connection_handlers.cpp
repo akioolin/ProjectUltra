@@ -353,6 +353,49 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
+        // ── USABLE-DOMAIN ENTRY CAP (ULTRA_ENTRY_EVM_CAP, default-off, 2026-07-25) ────
+        // Rig-measured failure (MPM@20): the responder measured an HONEST data-aided
+        // SNR of 8.3 dB (mcdpsk_in_band) and still entered at QPSK R3/4, because
+        // connectSelectionSnrDb -> dialEquivalentSnrDb converts that usable reading into
+        // a ~17 dB DIAL-EQUIVALENT (and the physical entry cap did not bite: the physical
+        // meter also read 17.7, the same ~9 dB hardware-loss gap the +8.70 anchor offset
+        // papers over). QPSK R3/4 needs ~12.5 dB USABLE, so the link cratered 5 groups
+        // (0/6,0/6,0/6,0/8,0/8) and burned ~136 s before the ladder walked down to R1/4.
+        //
+        // The fix uses the anchor table that is already in USABLE units: the EVM-usable
+        // rung floors (evmUsableFloorDbForRung, measured on the OTASim AWGN sweep). The
+        // connect-time data-aided reading is ITSELF a usable-domain measurement (the
+        // MC-DPSK differential-EVM estimator — the same family as the OFDM decision-
+        // directed EVM), so it can be compared to those floors directly, with no dial
+        // conversion and no bench constant.
+        //
+        // CAP ONLY, and only on a DATA-AIDED reading: it can lower the entry rung, never
+        // raise it (a training-snapshot reading fade-crest OVER-reads, so it must never
+        // license a higher rung). Worst case is a conservative entry the ladder climbs
+        // out of in a few clean groups — vastly cheaper than 136 s of craters.
+        if (isOFDMMode(negotiated_mode_) && selection_snr_data_aided &&
+            entryEvmCapEnabled()) {
+            const uint8_t want = coherentRungIndexFor(rec_mod, rec_rate);
+            if (want != kRungIdxNone) {
+                uint8_t cap = highestRungSupportedByEvm(snr_db, kEvmDemoteHoldMarginDb);
+                const uint8_t snapped = snapRungIndexDownToEnabled(cap);
+                cap = (snapped != kRungIdxNone) ? snapped : kRungIdxQpskR14;
+                if (cap < want) {
+                    const CoherentPick capped_pick = coherentRungFromIndex(cap);
+                    LOG_MODEM(INFO,
+                              "Connection: ENTRY-EVM cap %s %s -> %s %s "
+                              "(usable data-aided SNR=%.1f dB < rung floor %.1f dB; "
+                              "selection basis was %.1f dB dial-equivalent)",
+                              modulationToString(rec_mod), codeRateToString(rec_rate),
+                              modulationToString(capped_pick.mod),
+                              codeRateToString(capped_pick.rate),
+                              snr_db, evmUsableFloorDbForRung(want), selection_snr_db);
+                    rec_mod = capped_pick.mod;
+                    rec_rate = capped_pick.rate;
+                }
+            }
+        }
+
         // ULTRA_ENTRY_QAM16_SNR (experiment): start AT 16QAM R2/3 on a strong Good-class
         // connect instead of QPSK-and-climb (the fade-riding strategy). AFTER the bootstrap
         // cap (so it overrides the QPSK R2/3 pin) and BEFORE forced overrides (so an operator

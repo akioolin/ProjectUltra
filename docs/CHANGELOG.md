@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — fix(est): un-starve the Good/Moderate discriminator + usable-domain CONNECT entry cap
+
+Two rig-driven fixes from a live MPM@20 debug where a transfer took ~136 s to move its
+first byte. Full detail in docs/KNOWN_BUGS.md (BUG-COHERENCE-ESTIMATOR-STARVED).
+
+**1. The channel-class discriminator was fed ZERO snapshots since 2026-07-06.**
+`streaming_sync_acquisition.cpp:158` is the only `addSnapshot` site; commit `1820987`
+gated it on `result.success`. On the BURST path `populateDecodeMetrics` receives a
+default-constructed metrics TEMPLATE built before the LDPC verdict exists, so
+`success` is false by construction — zero snapshots on the only path carrying file
+data, `coherenceScore()` returning a literal 0.0f, and every rate decision silently
+falling back to the blind across-carrier CV. Rig: 157/157 verdicts read `coh=0.00` on
+BOTH MPG and MPM. Fixed by passing the caller's real verdict via a new
+`channel_evidence_ok` parameter (defaults false; F142's "evidence only from successful
+decodes" contract is unchanged). VERIFIED on the faithful gate: good → +0.606 [GOOD],
+moderate → −0.285 [MODERATE/POOR], both PASS. A Stage-B attempt to route the class
+through `coherenceArea()` was built and REVERTED — it misreads a genuinely Good channel
+as MOD/POOR (logged `area=-0.461` on the passing Good run; d′≈3.0 with 12.5%
+Moderate-as-Good vs the lag-1 score's d′≈8.5).
+
+**2. CONNECT-time entry rung ignored the honest usable SNR (ULTRA_ENTRY_EVM_CAP, default-off).**
+Rig MPM@20: the responder measured a data-aided **8.3 dB** (mcdpsk_in_band) and still
+entered at **QPSK R3/4** — because `connectSelectionSnrDb` → `dialEquivalentSnrDb`
+converts that usable reading into a ~17 dB DIAL-EQUIVALENT, and the physical entry cap
+did not bite (the physical meter also read 17.7 — the same ~9 dB hardware-loss gap the
++8.70 anchor offset papers over). QPSK R3/4 needs ~12.5 dB USABLE, so the link cratered
+five consecutive groups (0/6, 0/6, 0/6, 0/8, 0/8) and burned **~136 s** before the ladder
+walked down to R1/4. The knob caps the entry rung with the EVM-usable floors
+(`evmUsableFloorDbForRung`, measured on the OTASim AWGN sweep) using the connect-time
+data-aided reading — which is ITSELF a usable-domain measurement (MC-DPSK differential
+EVM), so no dial conversion and no bench constant. CAP-ONLY and data-aided-only: it can
+lower the entry rung, never raise it. Default-off pending rig A/B.
+
+**3. Burst-group log ordinal.** The unified-seq path does `(void)group_seq`, so every
+group logged `group_seq=0` — during a live debug this reads as a WEDGED transfer. Added
+a monotonic delivered-group ordinal: `Burst #N (group_seq=0) delivered as unit: ...`.
+
+Test verification: full `ctest -j4` 87/87; faithful gate PASS on both good (2360 bps) and
+moderate (830 bps). NOTE: a concurrent heavy workflow makes `UltraTncSimAudio` flake
+(265 s vs 68 s) — run the gate on an idle machine.
+
+---
+
 ## 2026-07-24 — fix(file): receiver byte coverage must be MONOTONE — root cause of BUG-SACK-DURABILITY-RESIDUAL (live data loss, DEFAULT path)
 
 **Root-caused from the preserved F181 forensics + code. This is a LIVE data-corruption bug on the

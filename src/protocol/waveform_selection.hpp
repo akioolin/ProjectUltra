@@ -435,6 +435,17 @@ inline float evmUsableFloorDbForRung(uint8_t rung_idx) {
 // A modest fraction of the ~3 dB inter-rung EVM spacing measured on the sweep.
 inline constexpr float kEvmDemoteHoldMarginDb = 1.0f;
 
+// ULTRA_ENTRY_EVM_CAP (default-off): cap the CONNECT-time entry rung by the usable-domain
+// EVM floors above, using the data-aided connect SNR (itself a usable-domain measurement).
+// Rig evidence (MPM@20, 2026-07-25): an honest 8.3 dB usable reading entered at QPSK R3/4
+// (needs ~12.5 usable) because the selection basis is a ~17 dB dial-equivalent -> five
+// fully-cratered groups and ~136 s of dead air before the ladder walked down. Cap-only,
+// data-aided-only: it can lower the entry rung, never raise it.
+inline bool entryEvmCapEnabled() {
+    const char* e = std::getenv("ULTRA_ENTRY_EVM_CAP");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 // Highest canonical rung whose EVM-usable floor the measured usable EVM clears (with
 // a hold margin so a single noisy read does not thrash the boundary). Demote-only:
 // the caller clamps cmd = min(cmd, this). Floors at QPSK R1/4 (the lowest rung — the
