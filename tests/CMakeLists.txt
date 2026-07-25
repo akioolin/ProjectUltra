@@ -393,6 +393,10 @@ add_test(NAME WaveformLoopback COMMAND test_waveform_loopback)
 
 # Good/Moderate channel discriminator (Doppler coherence) — locks the estimator class:
 # separation, sigma ordering, and abstain-until-pooled. Header-only; needs the src/ include.
+add_executable(test_frequency_selectivity test_frequency_selectivity.cpp)
+target_include_directories(test_frequency_selectivity PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME FrequencySelectivity COMMAND test_frequency_selectivity)
+
 add_executable(test_doppler_coherence_estimator test_doppler_coherence_estimator.cpp)
 target_link_libraries(test_doppler_coherence_estimator PRIVATE ultra_core)
 target_include_directories(test_doppler_coherence_estimator PRIVATE ${CMAKE_SOURCE_DIR}/src)

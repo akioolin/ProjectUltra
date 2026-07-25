@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — feat(est): first-frame channel-class discriminator (frequency selectivity)
+
+The restored `DopplerCoherenceEstimator` works (good +0.606 vs moderate −0.285 on the faithful
+gate) but needs `kMinSnapsForReading(8) + kMinReadings(24) = 31` per-frame snapshots ≈ **40–60 s**
+before `valid()`. For an ARQ system whose cost model is "over-commit for a minute = craters +
+re-anchor", a verdict that lands after the first half of a transfer is a post-mortem. Until it
+matures, the class falls back to the blind across-carrier CV — which is at CHANCE on this
+discrimination (BUG-FADING-INDEX-BLIND). This adds a discriminator that works from **frame 1**.
+
+**The statistic** (`src/ofdm/frequency_selectivity.hpp`). For an equal-gain 2-path channel with
+differential delay D, `|H(f)|² = |a₁|²+|a₂|² + 2Re(a₁a₂*e^{−j2πfD})`. Removing the across-carrier
+MEAN leaves exactly the ripple `2|a₁||a₂|cos(2πfD+φ)`, whose normalized autocorrelation at carrier
+lag L is `E[S(L)] ∝ cos(2π·L·df·D)`. Two properties earn it over the complex-H form: it has
+**twice** the frequency sensitivity (the |H|² ripple runs at twice the rate of the H ripple), and
+normalizing by the ripple's own energy divides out the random tap-power split `r ~ U(0,1)` — the
+dominant nuisance, and why the complex form ceilings at d′≈1.9 even at INFINITE SNR. Being
+magnitude-only it is exactly invariant to timing offsets, residual CFO and warm-LTS phase
+re-anchoring; AWGN attenuates it multiplicatively without moving its ZERO, so a fixed sign
+threshold stays optimal at every SNR.
+
+**Constant-free by construction.** The lags are CCIR geometry — decision delays are the LOG-midpoints
+between adjacent classes (√(0.5·1.0)=0.707 ms, √(1·2)=1.414 ms) and the lag is the one whose cosine
+ZERO lands there: `L = 1/(4·df·D*)` ⇒ 8 and 4 at 46.875 Hz. `df` comes from the live geometry, so
+OFDM_NARROW derives its own lags. The confidence gate is the null distribution of a sample
+autocorrelation (`σ₀ = 1/√(N−L)`, `z = 1.96`) — a probability constant, same class as the project's
+existing `−ln(0.05)` chi-sq radius. **Nothing is bench-fitted.**
+
+**Sign thermometer, Moderate/Poor lag tested FIRST.** That ordering is a correctness requirement:
+`cos(2πL·df·D)` is periodic, so the Good/Moderate statistic swings positive again for D ≈ 2.3–3.8 ms
+and a 3 ms channel would read "Good" on it alone; the Poor lag is negative across that entire window
+and vetoes the alias. A flat channel (both lags inside the noise band) reports FLAT/GOOD — correct
+for AWGN and the safe direction.
+
+**Measured** (`tests/test_frequency_selectivity.cpp`, 2-path Rayleigh at production geometry —
+59 carriers, 46.875 Hz, 2-symbol LTS noise; 4000 realizations/point):
+
+| | SNR 20 | SNR 14 | SNR 8 |
+|---|---|---|---|
+| Good mean (sd) | +0.359 (0.082) | +0.327 (0.097) | +0.255 (0.120) |
+| Moderate mean (sd) | −0.675 (0.073) | −0.617 (0.122) | −0.491 (0.171) |
+| **d′** | **13.4** | **8.5** | **5.0** |
+
+Null model exact: measured σ = 0.1382 vs predicted 0.1400. Per-channel single-frame verdicts at
+14 dB: WGN→FLAT/GOOD 90%, MPG→GOOD 74%, MPM→MODERATE 96.7%, MPP→POOR 96.8%, MPD(4 ms)→never GOOD 99%.
+Per-frame SAFETY: Good-read-as-worse **0.00%**, Moderate-read-as-Good **3.00%**. Pooled over a
+5-frame burst group: Good→GOOD **100%**, Moderate→MODERATE **100%**.
+
+MPG reads GOOD on "only" 74% of single frames because its mean (+0.327) sits just above the
+single-frame confidence threshold (1.96/√51 = 0.274) — the remainder land UNDETERMINED, which
+defers harmlessly. That is the estimator being honest, and pooling resolves it completely.
+
+Full ctest 88/88. NOT yet wired to the rate ladder — this commit lands the statistic and its
+ground-truth proof; consumption is the next step (and a live behaviour change, so it gets its own
+knob + rig A/B).
+
+---
+
 ## 2026-07-25 — fix(est): un-starve the Good/Moderate discriminator + usable-domain CONNECT entry cap
 
 Two rig-driven fixes from a live MPM@20 debug where a transfer took ~136 s to move its
