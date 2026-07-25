@@ -175,6 +175,55 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   symbols ⇒ +27% ACK airtime, lockstep break) for a ~1 s/transfer prize. Not worth it;
   the stranded-file class is closed on the receiver side instead.
 
+### BUG-FADING-INDEX-BLIND: the fading index cannot distinguish Good from Moderate — it measures the wrong physical quantity, so the Moderate/Poor anchor columns are effectively unreachable
+- Status: **OPEN — measured 2026-07-25 on the IONOS rig against GROUND TRUTH.** Operator
+  confirmed the dial setting; the IONOS manual (`docs/references/teensy_ionos_hf_manual_rev_2.03.pdf`,
+  Fig 1/2 channel table) gives the physical parameters:
+  WGN 0 Hz/0 ms · **MPG 0.1 Hz/0.5 ms (Good)** · **MPM 0.5 Hz/1 ms (Moderate)** ·
+  MPP 1 Hz/2 ms · MPD 2 Hz/4 ms (spread is 2σ Doppler).
+  So MPG→MPM is **5× Doppler and 2× delay spread** — the two channels the class boundary exists to separate.
+- **MEASURED — the estimator does not separate them, and the sign is BACKWARDS:**
+
+  | basis | MPG@20 (Good) | MPM@20 (Moderate) |
+  |---|---|---|
+  | fade-averaged (used by the RX-authority verdict) | mean 0.354, max 0.48, n=91 | mean ~0.35, n=88 |
+  | single-frame (`LTS fading index`) | mean 0.686, **sd 0.875**, max 3.38, n=1309 | mean 0.526, sd 0.636, max 3.15, n=281 |
+
+- **Root cause (`src/ofdm/channel_equalizer_lts.cpp:838-851`):** the index is the
+  **across-carrier coefficient of variation of |H|** within one LTS observation
+  (`raw_cv2 = var/mean²`, noise-corrected, `fading_index = sqrt(corrected_cv2)`).
+  That is a *variance* statistic, and for a Rayleigh (Watterson) channel it converges to a
+  CONSTANT — `CV = √(2−π/2)/√(π/2) = 0.5227` — **independent of delay spread and Doppler**.
+  It answers "is this Rayleigh?", not "how dispersive / how fast". Every multipath mode is
+  Rayleigh, so every multipath mode returns the same number. Single-frame values reaching
+  3.38 (6× the physical ceiling) are estimator NOISE, not channel — sd is 1.27× the mean,
+  consistent with the existing hygiene note that ">1.5 is a tone/noise snapshot, not a channel".
+- **Consequence (this is the expensive part):** `selectCoherentOFDM` picks its anchor
+  COLUMN by fading class. With the class pinned to GOOD on every multipath channel, the
+  Moderate and Poor columns are effectively dead and the ladder uses Good-column rungs on a
+  genuinely Moderate channel = systematic over-commitment. This is a standing crater source,
+  independent of the +8.70 SNR offset. It also explains the anchor-skip gate's recorded
+  puzzle ("the IONOS rig DISPROVED a PREDICTED coherence label: a Moderate channel read
+  clean-Good for a whole ~60 s transfer") — that was NOT non-stationarity, it was this.
+- **Note on `kFadingGoodMax` = 0.76** (raised from 0.65 on 2026-07-14 as the Good/Moderate
+  ML midpoint): that change correctly killed the FALSE-Moderate flips coming from the noisy
+  single-frame tail, and should stay. But the class centers it derives from
+  (`kFadingCenterGood` 0.62, `kFadingCenterModerate` 0.90) both sit ABOVE the 0.523 Rayleigh
+  asymptote, so on the fade-averaged basis the boundary can never be crossed. Raising the
+  boundary was right; the underlying metric is the problem.
+- **FIX DIRECTION — measure correlation STRUCTURE, not variance** (both are constant-free and
+  radio-agnostic; we already hold per-frame `H` estimates from LTS + pilots):
+  1. **Doppler / coherence TIME** — correlate frame *t*'s `H` vector with frame *t+1*'s.
+     Frames are 1.27 s apart; MPG's Tc ≈ 3-4 s stays correlated while MPM's ≈ 0.6-0.9 s
+     decorrelates. This is the **5×** axis — the cleanest separation and nearly free.
+  2. **Delay spread / coherence BANDWIDTH** — correlate `H(f)` against `H(f+Δf)` and find the
+     Δf where |corr| falls to 0.5. MPG ≈ 318 Hz vs MPM ≈ 159 Hz (6.8 vs 3.4 carriers per Bc
+     at 46.9 Hz spacing) — a clean **2×**.
+- **Also validates a design choice:** the group-size gate (`ULTRA_BURST_ESC_STREAK`,
+  2026-07-24) was deliberately keyed on the delivery-driven clean-group streak rather than
+  the fading index. Had it used fading, it would have been a compile-time TRUE. Any future
+  channel-class gate must not trust this metric until it is replaced.
+
 ### BUG-TONEACK-EPOCH-UNPROTECTED: the tone-burst era echo is the only payload field outside CRC coverage
 - Status: **OPEN — found 2026-07-24 during the F181 root-cause (not yet observed in the wild).**
 - `tone_burst_constants.hpp` CRC-12 covers payload bits 0-25 + 38-39 (+42-43 under
