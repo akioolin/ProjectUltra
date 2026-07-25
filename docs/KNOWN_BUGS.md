@@ -175,6 +175,47 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   symbols ⇒ +27% ACK airtime, lockstep break) for a ~1 s/transfer prize. Not worth it;
   the stranded-file class is closed on the receiver side instead.
 
+### BUG-COHERENCE-ESTIMATOR-STARVED (FIXED 2026-07-25): the Good/Moderate discriminator fed ZERO snapshots on the burst path since 2026-07-06
+- Status: **FIXED 2026-07-25.** Root cause of the modem having no working channel-class
+  discriminator — the estimator was never broken, it was STARVED.
+- **Regression:** commit `1820987` (2026-07-06, "F142 census fixes") changed the single
+  `addSnapshot` call site (`streaming_sync_acquisition.cpp:158`) from
+  `if (std::isfinite(lts_mag) ...)` to `if (result.success && std::isfinite(lts_mag) ...)`.
+  The F142 intent was correct (tone/false-lock snapshots with across-carrier CV ~3 had
+  poisoned the score and pinned the ladder at R1/4 on a 24 dB link). But on the BURST path —
+  the wideband file path — `populateDecodeMetrics` is handed a freshly default-constructed
+  `DecodeResult` as a metrics TEMPLATE, built BEFORE the LDPC verdict exists, so
+  `result.success` is **false by construction**. Net: ZERO snapshots on the only path that
+  carries file data ⇒ `score_n_ == 0` ⇒ `coherenceScore()` returned a literal `0.0f` and
+  `valid()` stayed false ⇒ `coherenceAdjustedFadingIndex` silently fell back to the blind CV
+  for EVERY rate decision. Rig confirmation: **157/157** RX-AUTHORITY verdicts read exactly
+  `coh=0.00` on BOTH MPG and MPM.
+- **Measurement caveat worth remembering:** an earlier read of "coh mean 0.243, max 1.00" was a
+  LOG-FIELD COLLISION — `channel_equalizer_lts.cpp:441` logs an unrelated CFO correlation as
+  `coh=%.2f`. Always filter to the `RX-AUTHORITY verdict` line when reading the class input.
+- **FIX:** `populateDecodeMetrics` takes an explicit `channel_evidence_ok` (defaults false, so
+  unchanged call sites keep today's behaviour); the burst path passes its REAL per-frame
+  verdict. The gate became `(result.success || channel_evidence_ok)` — F142's contract is
+  intact (evidence still only from a successful decode), the burst path can now say so.
+- **VERIFIED end-to-end on the faithful gate** (`gui_qso_scenario.sh`, 21 KB, seed 42):
+  | channel | score | verdict | doppler | result |
+  |---|---|---|---|---|
+  | `--channel good` | **+0.606** | **[GOOD]** ✓ | 0.070 Hz (true Good ≈0.05 RMS) | PASS 2360 bps |
+  | `--channel moderate` | **−0.285** | **[MODERATE/POOR]** ✓ | 0.000 Hz | PASS 830 bps |
+  A 0.89 separation with the correct label on both, snapshots accumulating (24, 25 — was 0).
+- **Note on `coherenceArea`:** a Stage-B change to route the CLASS decision through
+  `coherenceArea()` was built and then REVERTED the same day. Independent re-simulation put it
+  at d′≈3.0 with a **12.5% Moderate-read-as-Good** rate (the over-commit direction) vs the
+  lag-1 score's d′≈8.5 — and the live Good-channel run above logged `area=-0.461 [MOD/POOR]`
+  on a genuinely Good channel, confirming the misread empirically. The estimator header's claim
+  that the area is "the radio-agnostic discriminator" is NOT supported; do not re-wire it
+  without new evidence. Its ground-truth unit test feeds synthetic snapshots DIRECTLY, so it
+  passes regardless of the production feed — it proves the maths, not the plumbing.
+- Related and still open: [[BUG-FADING-INDEX-BLIND]] — the blind CV remains the FALLBACK
+  whenever coherence is not yet valid (first ~31 frames), so a faster first-frame discriminator
+  (demeaned |H|² frequency autocorrelation, d′≈11.4 at SNR 20 and available from frame 1) is
+  still the right upgrade.
+
 ### BUG-FADING-INDEX-BLIND: the fading index cannot distinguish Good from Moderate — it measures the wrong physical quantity, so the Moderate/Poor anchor columns are effectively unreachable
 - Status: **OPEN — measured 2026-07-25 on the IONOS rig against GROUND TRUTH.** Operator
   confirmed the dial setting; the IONOS manual (`docs/references/teensy_ionos_hf_manual_rev_2.03.pdf`,

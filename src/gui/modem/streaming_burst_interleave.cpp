@@ -521,9 +521,13 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
     const int burst_group_size = std::max(2, burst_group_size_);
-    auto pushMetricTemplate = [&](float residual_cfo_hz) {
+    // channel_evidence_ok: the burst path's REAL per-frame decode verdict. The metrics
+    // template's own .success is false by construction here, so without this the coherence
+    // estimator receives nothing at all on the file path (see populateDecodeMetrics).
+    auto pushMetricTemplate = [&](float residual_cfo_hz, bool channel_evidence_ok = false) {
         DecodeResult metrics;
-        populateDecodeMetrics(metrics, protocol::isOFDMMode(mode_), residual_cfo_hz);
+        populateDecodeMetrics(metrics, protocol::isOFDMMode(mode_), residual_cfo_hz,
+                              channel_evidence_ok);
         burst_metric_templates_.push_back(metrics);
     };
 
@@ -827,7 +831,14 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     } else {
         burst_predecoded_.emplace_back();  // finalize decodes it
     }
-    pushMetricTemplate(residual_cfo);
+    // The frame DEMODULATED cleanly here (we reached the healthy push path), so its LTS
+    // channel estimate is legitimate channel evidence even though the template's .success
+    // is not yet set. Where a pre-decode ran, use its actual verdict.
+    const bool frame_evidence_ok =
+        burst_predecoded_.empty() ? true
+                                  : (!burst_predecoded_.back().valid ||
+                                     burst_predecoded_.back().result.success);
+    pushMetricTemplate(residual_cfo, frame_evidence_ok);
     accumulateBurstCarrierGamma();
     appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                    burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
@@ -1216,10 +1227,14 @@ void StreamingDecoder::finalizeBurstGroup() {
             all_ok ? std::clamp(1.0f - static_cast<float>(group_max_iters) / kIterRef,
                                 0.0f, 1.0f)
                    : 0.0f;
+        // #%u ordinal = monotonic delivered-group counter (see burst_group_ordinal_):
+        // group_seq is 0 for every group on the unified-seq path, so the ordinal is what
+        // tells you the transfer is ADVANCING rather than wedged.
+        ++burst_group_ordinal_;
         LOG_MODEM(INFO,
-                  "[%s] Burst group_seq=%u delivered as unit: %d/%d logical OK (all_ok=%d) "
+                  "[%s] Burst #%u (group_seq=%u) delivered as unit: %d/%d logical OK (all_ok=%d) "
                   "max_iters=%d quality=%.2f",
-                  log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
+                  log_prefix_.c_str(), burst_group_ordinal_, last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
         // BUG-ANCHOR-CFO-KILL: group outcome owns the warm-CFO certificate. A
         // delivered group PROVES the tracked CFO (its frames decoded with it); a

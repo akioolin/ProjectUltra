@@ -717,8 +717,15 @@ private:
     // Uses Hilbert transform → analytic signal → complex rotation → real part.
     // After pre-correction, waveform should be told CFO=0.
     // Returns the CFO value used for pre-correction (for feedback adjustment).
+    // channel_evidence_ok: the caller's REAL decode verdict for this frame, used ONLY to
+    // admit channel-statistics evidence (the Doppler-coherence snapshot). Needed because the
+    // BURST path calls this with a freshly default-constructed metrics TEMPLATE whose
+    // .success is false by construction (the LDPC verdict does not exist yet), which starved
+    // the coherence estimator to zero snapshots on the only path that carries file data.
+    // Defaults false so unchanged call sites keep exactly today's behaviour.
     void populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
-                               float residual_cfo_hz) const;
+                               float residual_cfo_hz,
+                               bool channel_evidence_ok = false) const;
     void observeIdleNoiseCandidate(const float* samples, size_t count);
     void resetFrameArrivalTrackingLocked();
     void noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs);
@@ -920,6 +927,13 @@ private:
     // measure_ack_fer) gets it without a separate enable call. The field + setter are
     // slated to fold away with the legacy windowed-file routing (R1 deletion).
     uint16_t last_burst_group_seq_ = 0;
+    // Monotonic RX-side counter of DELIVERED burst groups, for logging only. The
+    // unified-seq path ignores the descriptor's group_seq (connection.cpp does
+    // `(void)group_seq`), so last_burst_group_seq_ stays 0 for the whole transfer and
+    // every group logs as "group_seq=0" — which reads as a WEDGED transfer during a
+    // live debug (it cost real time on 2026-07-25). This ordinal makes consecutive
+    // groups distinguishable without changing any behaviour.
+    uint32_t burst_group_ordinal_ = 0;
     bool burst_transport_rx_ = true;
 
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.

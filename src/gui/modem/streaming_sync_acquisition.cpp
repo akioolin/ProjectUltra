@@ -111,7 +111,8 @@ bool connectDataAidedSnrEnabled() {
 }  // namespace
 
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
-                                             float residual_cfo_hz) const {
+                                             float residual_cfo_hz,
+                                             bool channel_evidence_ok) const {
     stampRxSignal();  // F129: decoder evidence of incoming signal (per-frame)
     // Handoff §2: per-frame physical channel SNR from the waveform (power
     // ratio over the exact training span vs THIS frame's burst-time noise
@@ -155,7 +156,18 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         // effective fading at 0.85 while the real channel read 0.15-0.5, and the
         // ladder ground to the R1/4 basement on a 24 dB link. The decode verdict
         // is the admission ticket for channel-statistics evidence.
-        if (result.success && std::isfinite(lts_mag) && lts_mag > 0.0f) {
+        // STARVATION FIX (2026-07-25): `result.success` alone is FALSE by construction on
+        // the burst path — populateDecodeMetrics is handed a default-constructed metrics
+        // TEMPLATE built BEFORE the LDPC verdict exists. Since 1820987 (2026-07-06) that
+        // starved this estimator to ZERO snapshots on the wideband file path, so
+        // coherenceScore() returned a literal 0.0f, valid() stayed false, and
+        // coherenceAdjustedFadingIndex silently fell back to the blind CV for every
+        // rate decision (rig: 157/157 verdicts read coh=0.00 on BOTH channels).
+        // `channel_evidence_ok` carries the caller's REAL verdict where one exists. The
+        // F142 hygiene contract is unchanged — evidence is still admitted ONLY on a
+        // successful decode; this just lets the burst path say so truthfully.
+        if ((result.success || channel_evidence_ok) &&
+            std::isfinite(lts_mag) && lts_mag > 0.0f) {
             doppler_coherence_.addSnapshot(lts_mag * lts_mag);
             // COH-DIAG (read-only diagnostic, env ULTRA_COH_DIAG=1, default OFF): per-frame
             // raw disc inputs for the noise-floor / Doppler-discriminator investigation —
