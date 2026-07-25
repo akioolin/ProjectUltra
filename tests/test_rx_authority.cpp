@@ -70,6 +70,12 @@ struct ConnectionAdaptiveTestAccess {
         c.updateRxAuthorityCommand(all_ok, quality, full_crater);
     }
     static uint8_t rxCmd(const Connection& c) { return c.rx_authority_cmd_; }
+    // GROUP-SIZE gate (ULTRA_BURST_ESC_STREAK): drive the clean-round streak and read
+    // back the frame budget the airtime ceiling allows.
+    static void setCleanStreak(Connection& c, int n) { c.burst_clean_group_streak_ = n; }
+    static size_t burstFrames(const Connection& c, size_t want) {
+        return c.burstAirtimeBudgetFrames(want);
+    }
     static void obey(Connection& c, uint8_t idx) { c.maybeObeyAuthorityCommand(idx); }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
     static Modulation pendingModulation(const Connection& c) { return c.pending_modulation_; }
@@ -599,6 +605,68 @@ static bool test_evm_demote_inert_when_supported() {
     return true;
 }
 
+// ── GROUP-SIZE GATE: dense-rung proxy repair (ULTRA_BURST_ESC_STREAK) ───────────
+// The burst airtime ceiling escalates 8600 -> 11500 ms (N=5 -> N=8) only on proven
+// clean delivery. Legacy gate: dense rung (>= QAM8 R2/3) + 2 clean rounds. The EVM
+// demote breaks that proxy by correctly holding a calm-channel link at QPSK, so the
+// knob lets a NON-dense rung earn the same escalation with a longer clean streak.
+// Safety property under test: the streak still gates it, so a cratering (Moderate)
+// channel — whose streak keeps resetting to 0 — never escalates.
+static bool test_group_size_gate_streak() {
+    TEST("group-size gate: non-dense rung earns escalation via clean streak");
+    auto frames = [](Modulation mod, CodeRate rate, int streak, const char* knob) -> size_t {
+        if (knob) setenv("ULTRA_BURST_ESC_STREAK", knob, 1);
+        else unsetenv("ULTRA_BURST_ESC_STREAK");
+        Connection c;
+        TA::makeConnectedOFDM(c, rate, 20.0f, 0.30f, mod);
+        TA::setCleanStreak(c, streak);
+        // Ask for far more than any ceiling allows so the AIRTIME ceiling — not the
+        // request — is what binds (the unit-test frame geometry is finer than the
+        // rig's, so a small ask fits under both ceilings and would prove nothing).
+        const size_t n = TA::burstFrames(c, 64);
+        unsetenv("ULTRA_BURST_ESC_STREAK");
+        return n;
+    };
+    // Frame AIRTIME differs per modulation at a fixed cw count, so frame counts are
+    // only comparable WITHIN one modulation. Compare each rung against itself.
+    //
+    // Legacy path intact: the DENSE rung escalates on 2 clean rounds, not on 1.
+    const size_t dense_hi = frames(Modulation::QAM8, CodeRate::R2_3, 2, nullptr);
+    const size_t dense_lo = frames(Modulation::QAM8, CodeRate::R2_3, 1, nullptr);
+    if (!(dense_hi > dense_lo))
+        FAIL("legacy dense-rung escalation broken: streak2=" + std::to_string(dense_hi) +
+             " streak1=" + std::to_string(dense_lo));
+    // The QPSK (non-dense) baseline: with the knob OFF the streak is irrelevant —
+    // byte-identical to legacy, which never escalated a non-dense rung.
+    const size_t qpsk_base = frames(Modulation::QPSK, CodeRate::R2_3, 1, nullptr);
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 6, nullptr) != qpsk_base)
+        FAIL("knob OFF: a QPSK rung must stay at the BASE ceiling at ANY streak");
+    // KNOB ON (=2): the same QPSK rung with a proven streak now earns the escalation.
+    const size_t qpsk_esc = frames(Modulation::QPSK, CodeRate::R2_3, 2, "2");
+    if (!(qpsk_esc > qpsk_base))
+        FAIL("knob ON: QPSK rung with streak 2 must escalate (got " +
+             std::to_string(qpsk_esc) + ", base=" + std::to_string(qpsk_base) + ")");
+    // ...but an UNPROVEN streak still does not — the safety property that keeps a
+    // cratering Moderate channel (streak perpetually reset to 0) on short key-downs.
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 1, "2") != qpsk_base)
+        FAIL("knob ON: streak below the threshold must NOT escalate");
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 0, "2") != qpsk_base)
+        FAIL("knob ON: a cratering channel (streak 0) must NEVER escalate");
+    // Threshold is honored: =4 rejects a streak of 3, accepts 4.
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 3, "4") != qpsk_base)
+        FAIL("knob=4: streak 3 must not clear the bar");
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 4, "4") != qpsk_esc)
+        FAIL("knob=4: streak 4 must clear the bar");
+    // Out-of-range values fall back to OFF (no accidental escalation from a typo).
+    if (frames(Modulation::QPSK, CodeRate::R2_3, 6, "99") != qpsk_base)
+        FAIL("out-of-range knob must fall back to default-OFF");
+    // The dense rung is UNAFFECTED by the knob (its own 2-streak rule still governs).
+    if (frames(Modulation::QAM8, CodeRate::R2_3, 1, "2") != dense_lo)
+        FAIL("knob must not relax the DENSE rung's own 2-clean-round requirement");
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
@@ -632,6 +700,7 @@ int main() {
     ok &= test_evm_floor_table_and_mapping();
     ok &= test_evm_demote_strips_overcommit();
     ok &= test_evm_demote_inert_when_supported();
+    ok &= test_group_size_gate_streak();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }

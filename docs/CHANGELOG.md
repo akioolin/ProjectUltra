@@ -10,6 +10,114 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-24 — fix(file): receiver byte coverage must be MONOTONE — root cause of BUG-SACK-DURABILITY-RESIDUAL (live data loss, DEFAULT path)
+
+**Root-caused from the preserved F181 forensics + code. This is a LIVE data-corruption bug on the
+default build — it needs no knob.** The `ULTRA_SACK_SALVAGE` skip was only the amplifier that turned
+a recoverable truncation into a permanently stranded file.
+
+**What was broken.** `FileTransferController` buffers received chunks in two `std::map`s keyed by
+absolute byte offset: `rx_prestart_chunks_` (data that arrives before FILE_START) and
+`rx_pending_chunks_` (out-of-order data). Both wrote with a bare `map[offset] = Bytes(...)`.
+But `chunk_size_` changes on EVERY mid-stream rate/mod move, so the SAME byte offset legitimately
+re-arrives with a SHORTER length on the new grid — and the assignment REPLACED the longer copy,
+**destroying its tail bytes**. F181: a 456 B chunk at offset 0 was overwritten by era-1's re-gridded
+408 B chunk, so bytes `[408,456)` ceased to exist; the receiver then stranded 103 chunks behind that
+48-byte hole (900+ s, zero file progress, scenario timeout) while the sender logged "Transfer
+complete". `processFileData` already computed `is_new` for the staging budget, so the same-key case
+was known — and overwritten anyway. Normally the sender re-sends the range and the straddle-merge
+heals it; with the sender-side range salvage ON, those bytes are never re-sent ⇒ permanent hole.
+
+**What changed.**
+- `src/protocol/file_transfer.cpp` (pre-FILE_START staging + out-of-order buffer): NEVER-SHRINK
+  insert. A shorter or duplicate re-grid at an offset we already cover in full is dropped instead of
+  overwriting. Staging-budget accounting now charges only the GROWTH (`data_len - have_len`), since
+  the shared prefix is already counted.
+- `src/protocol/selective_repeat_arq.cpp` `handleAckFrame` cumulative walk: added the missing
+  `tx_window_[slot].seq == tx_base_seq_` slot-identity guard (defense-in-depth). The SACK-bitmap loop
+  always verified slot identity; the cumulative walk checked only `.active`, so a slot holding a
+  DIFFERENT seq (aliased through `seqToSlot` when a hole is punched inside `[base,next)`) would be
+  retired there — firing `on_send_complete_(true)` and irreversibly popping the file ledger.
+
+**Why it's correct.** Offsets are absolute into ONE immutable `tx_data_`, so a longer chunk at a given
+offset is a strict SUPERSET of a shorter one at the same offset. Keeping the longest is always
+byte-exact and can only ever retain MORE data. Receiver byte coverage is now MONOTONE — it may grow,
+never shrink — which is the invariant the sender's requeue/salvage contract assumed all along.
+
+**Test verification.** `tests/test_file_transfer_controller.cpp` adds two regressions that reproduce
+the exact stranding, one per map:
+`test_receiver_coverage_never_shrinks_on_regrid_out_of_order` and
+`test_prestart_staging_coverage_never_shrinks_on_regrid`.
+**Proven fail-before/pass-after**: reverting ONLY the `file_transfer.cpp` fix →
+`FAIL: receiver finalized (old code stranded on the [52,60) hole)` and
+`FAIL: ... [12,20) hole` (86/88). With the fix: 92/92. Full `ctest -j4` 87/87.
+
+**Salvage stays DEFAULT-OFF — and that is now a structural conclusion, not caution.** A sender-local
+decision to PERMANENTLY never send a byte must rest on evidence that is byte-domain, monotone, and
+era-independent. `slot.acked` bits are frame-domain, era-relative (2-bit echo), and retractable by the
+receiver's own discard paths. The only monotone byte-domain evidence the sender holds locally is the
+cumulative retirement point — which IS already the requeue resume offset, so gating the salvage on
+trustworthy local evidence reduces it to a no-op. Making it safe requires receiver-authored
+byte-domain evidence on the wire, and the tone-burst payload is SATURATED at 44/44 bits (one more bit
+⇒ 5 Hamming blocks ⇒ 30→38 symbols ⇒ +27% ACK airtime, lockstep break) — for a prize the code itself
+measures at ~1 s/transfer. Not worth it. The stranded-file class is now closed on the RECEIVER side,
+where it belonged.
+
+**Residual findings filed (not fixed here, both independent of the salvage):** the tone-burst epoch
+echo (payload bits 40-41) is the only payload field OUTSIDE CRC-12 coverage, so a double-bit error can
+mis-correct the era echo onto the current `tx_epoch_` with a valid CRC; and `reset()` zeroes
+`tx_epoch_` mid-connection via `clearFileTransferArqState()` (a silent wrap-equivalent). See
+docs/KNOWN_BUGS.md.
+
+---
+
+## 2026-07-24 — feat(rate): group-size escalation earns its ceiling on delivery evidence (ULTRA_BURST_ESC_STREAK, DEFAULT-OFF)
+
+**What was broken (an architectural conflict introduced by the EVM demote).** The burst airtime
+ceiling escalates 8600 → 11500 ms (N=5 → N=8 frames per key-down, +19% cycle efficiency) only when
+`dense_rung` (rung ≥ QAM8 R2/3) AND 2 clean groups. `dense_rung` is a PROXY for "the receiver rates
+this channel calm" — the anchor columns encode fading class, so Moderate-class operation lives at QPSK
+rungs by construction. The radio-agnostic EVM demote (same day) BREAKS that proxy: it correctly holds
+the rung at QPSK when HARDWARE loss — not channel roughness — depresses usable SNR. Measured on the
+IONOS rig (run A6, MPG@20): **100% of the receiver's 19 fading verdicts were GOOD class (0.28-0.40,
+boundary 0.76)** — a calm channel all run — yet **14 of 17 groups were pinned to N=5 by this gate
+alone**. The two new levers were fighting each other.
+
+**What changed.** `src/protocol/connection.cpp` `burstAirtimeBudgetFrames`: at a NON-dense rung,
+escalation is earned by a LONGER proven clean-group streak (`ULTRA_BURST_ESC_STREAK` = required
+streak, 2..8; unset/0 = legacy dense-rung-only gate, byte-identical). The dense rung keeps its own
+2-clean-round rule unchanged.
+
+**Why the clean streak and not a fading index.** The sender CANNOT substitute its own fading reading
+here: `fading_index_` FREEZES between sparse control decodes during a burst transfer (see
+`wireFadingIndex()` — rig W5b/W8 measured peer_fading pinned for 300+ s), so it is not a live channel
+signal; re-keying the gate onto it would be a compile-time TRUE, i.e. deleting the gate. The honest,
+FRESH, sender-side evidence that long key-downs survive on this channel right now is the clean-group
+streak itself (full retire, no holes). Self-correcting by construction: any holey or zero-progress
+round resets the streak to 0, so a genuinely Moderate channel — where craters keep the streak short —
+still never escalates. That honors the 2026-07-07 moderate@16 s42 A/B (escalation ON = FAIL 690 bps
+vs OFF = PASS 1030) which motivated the dense-rung gate. What CHANGED since is cross-frame interleave
+going default-OFF (94faa1f), so a fade inside a long burst now costs only the frames it touches
+(per-frame SACK) instead of cratering the whole group — A6: 4 partial groups, 0 full craters.
+
+**Expected gain, simulated against A6's real per-group outcomes:** +6.5% at streak≥2, +4.9% at ≥3,
++3.3% at ≥4. (The ceiling if EVERY group ran N=8 is +13.9%; the streak requirement legitimately caps
+it — an earlier +14.9% estimate ignored the streak and was wrong.)
+
+**Test verification.** `tests/test_rx_authority.cpp::test_group_size_gate_streak` — legacy dense path
+intact, knob-off byte-identical at any streak, threshold honored (=4 rejects 3 / accepts 4), streak-0
+never escalates, out-of-range falls back to OFF, dense rung unaffected by the knob. RxAuthority 19/19,
+full ctest 87/87.
+
+**BEFORE any default flip (both mandatory).** (1) Interleaved same-epoch A/B at streak=2 on MPG@20.
+(2) A Moderate@16 s42 counter-run — the claim that interleave-off obsoletes the 2026-07-07 Moderate
+FAIL is a MECHANISM argument, not a measurement. (3) DUTY: measured key-down on A6 was **94.4%** of
+wall clock with 12.5-13.9 s bursts; this lever ADDS key-down. Most 100 W finals derate near ~50% duty
+for digital modes, so a real-PA trial needs a duty governor first — the IONOS bench is line-level and
+cannot show this.
+
+---
+
 ## 2026-07-24 — feat(rate): radio-agnostic EVM demote authority (ULTRA_EVM_DEMOTE, DEFAULT-OFF) — strip the +8.70 over-commit with a constant-free usable-SNR read
 
 **Stage 2 of the radio-agnostic SNR work.** Built + unit-validated + default-off; awaiting

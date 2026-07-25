@@ -5343,6 +5343,47 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     const bool dense_rung =
         coherentRungIndexFor(data_modulation_, data_code_rate_) >=
         kRungIdxQam8R23;
+    // ── DENSE-RUNG PROXY REPAIR (ULTRA_BURST_ESC_STREAK, default-off) ──────────
+    // `dense_rung` above is a PROXY for "the receiver rates this channel calm": the
+    // anchor columns encode fading class, so Moderate-class operation lives at QPSK
+    // rungs by construction. The radio-agnostic EVM demote (2026-07-24) BREAKS that
+    // proxy — it correctly holds the rung at QPSK when HARDWARE loss, not channel
+    // roughness, depresses usable SNR, so a QPSK rung no longer implies a rough
+    // channel. Measured on the IONOS rig (run A6, MPG@20): 100% of the receiver's
+    // fading verdicts were GOOD class (0.28-0.40, boundary kFadingGoodMax=0.76), yet
+    // 14 of 17 groups were pinned to the 8.6 s / N=5 ceiling by this gate alone.
+    //
+    // The sender cannot substitute a fading index here: its own fading_index_ FREEZES
+    // between sparse control decodes during a burst transfer (see wireFadingIndex() —
+    // rig W5b/W8 measured peer_fading pinned for 300+ s), so it is not a live channel
+    // reading. The honest, FRESH, sender-side evidence that long key-downs survive on
+    // this channel right now is the CLEAN-GROUP STREAK itself (full retire, no holes).
+    // So at a non-dense rung, escalate on a LONGER proven streak: the rung no longer
+    // vouches for the channel, so demand more delivery evidence in its place.
+    //
+    // Safe by construction: any holey or zero-progress round resets the streak to 0
+    // (base ceiling) exactly as before, so a genuinely Moderate channel — where craters
+    // keep the streak short — still never escalates. That honors the 2026-07-07
+    // moderate@16 A/B (escalation ON = FAIL 690 bps) which motivated the dense-rung
+    // gate; what CHANGED since is cross-frame interleave going default-OFF (2026-07-21),
+    // so a fade inside a long burst now costs only the frames it touches (per-frame SACK
+    // resend) instead of cratering the whole group — A6: 4 partial groups, 0 full craters.
+    // Simulated against A6's real per-group outcomes: +6.5% at streak>=2, +4.9% at >=3,
+    // +3.3% at >=4 (the ceiling if EVERY group ran N=8 would be +13.9% — the streak
+    // requirement legitimately caps it). Value = required streak; unset/0 = legacy.
+    // Read per call (not latched): this runs once per burst-group formation (~10 s
+    // apart), never on the audio thread, so the getenv is free — and it keeps the knob
+    // togglable mid-session for A/B and unit-testable in a single process.
+    const int kNonDenseEscalationStreak = []() {
+        const char* e = std::getenv("ULTRA_BURST_ESC_STREAK");
+        if (e == nullptr) return 0;  // default-OFF ⇒ dense-rung gate only (byte-identical)
+        const long v = std::strtol(e, nullptr, 10);
+        return (v >= 2 && v <= 8) ? static_cast<int>(v) : 0;
+    }();
+    const bool streak_proven =
+        dense_rung ? (burst_clean_group_streak_ >= 2)
+                   : (kNonDenseEscalationStreak > 0 &&
+                      burst_clean_group_streak_ >= kNonDenseEscalationStreak);
     // STREAK = 2 with rung gate + climb-carry. Measured trail: streak-2 alone
     // won +15 % paired in calm epochs but re-escalated between craters in rough
     // ones (F198-F207 cross-epoch mean 1.42 vs 1.57 — confounded by a 23 %
@@ -5350,7 +5391,7 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // The 2026-07-07 interleaved same-epoch A/B is the deciding measurement —
     // see docs/GROUP_SIZE_LEVER_2026_07_07.md addendum.
     const uint32_t ceiling_ms =
-        (kEscalationEnabled && dense_rung && burst_clean_group_streak_ >= 2)
+        (kEscalationEnabled && streak_proven)
             ? std::max(kMaxBurstAirtimeMs, kEscalatedBurstAirtimeMs)
             : kMaxBurstAirtimeMs;
     const uint32_t reanchor_ms =
