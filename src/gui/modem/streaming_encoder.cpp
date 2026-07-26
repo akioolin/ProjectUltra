@@ -647,7 +647,20 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_CLEAN_STREAK");
             return (e && *e) ? static_cast<uint32_t>(std::max(0, std::atoi(e))) : 4u;
         }();
-        if (!warm_descriptor) anchor_skip_clean_streak_ = 0;  // resend/cold/escalation -> recool
+        // RECOOL on delivery evidence only (ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH,
+        // default OFF ⇒ legacy behaviour). A resend / cold start / §16.4 escalation is
+        // genuine negative delivery evidence and must recool. A descriptor mode/rate
+        // SWITCH is a configuration event: it needs this one full anchor for the
+        // geometry change, but it says nothing about whether the channel still syncs
+        // without a chirp — and measured on the rig (2026-07-26) rate changes are the
+        // dominant streak-resetter, which is why the skip arms on only ~22-25% of
+        // bursts when the reactive gate would otherwise allow ~50% at K=2.
+        static const bool kKeepStreakOnSwitch = [] {
+            const char* e = std::getenv("ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH");
+            return e && e[0] == '1' && e[1] == '\0';
+        }();
+        const bool keep_streak = kKeepStreakOnSwitch && anchor_full_keep_streak_once_;
+        if (!warm_descriptor && !keep_streak) anchor_skip_clean_streak_ = 0;
         const bool reactive_skip_enabled =
             kAnchorSkipK > 1 && anchor_skip_clean_streak_ >= kReactiveCleanStreak;
         const uint32_t anchor_ordinal = burst_anchor_ordinal_++;
@@ -736,6 +749,10 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         force_full_preamble_once_ || force_burst_group_start_full_preamble_;
     force_full_preamble_once_ = false;
     force_burst_group_start_full_preamble_ = false;
+    // Consumed with the force latch it qualifies — a stale keep-streak mark must never
+    // survive to excuse the NEXT burst's recool (that would silently disarm the
+    // delivery-evidence gate the skip depends on for safety).
+    anchor_full_keep_streak_once_ = false;
 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)

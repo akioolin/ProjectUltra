@@ -85,6 +85,14 @@ public:
         if (streaming_encoder_) streaming_encoder_->forceNextBurstGroupStartFullPreamble();
     }
 
+    // Same, but the anchor is owed to a descriptor mode/rate SWITCH (a configuration
+    // event) rather than a resend, so the #69 anchor-skip clean streak — which is
+    // DELIVERY evidence — is preserved instead of recooled.
+    void forceNextBurstFullPreambleKeepSkipStreak() {
+        if (streaming_encoder_)
+            streaming_encoder_->forceNextBurstGroupStartFullPreambleKeepStreak();
+    }
+
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
     // Returns: preamble + raw DPSK "ULTR" bytes (no LDPC encoding)
     std::vector<float> transmitPing();

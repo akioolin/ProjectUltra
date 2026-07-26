@@ -6281,7 +6281,8 @@ void Connection::flushBurstBuffer() {
         const bool desc_switch_anchor = desc_switch_full_anchor_pending_;
         desc_switch_full_anchor_pending_ = false;
         on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0,
-                           /*force_full_preamble=*/desc_switch_anchor);  // legacy arq_ burst path
+                           /*anchor_reason=*/desc_switch_anchor ? kAnchorReasonModeSwitch
+                                                                : kAnchorReasonNone);
     } else if (on_transmit_) {
         // Fallback: send individually
         for (const auto& frame : burst_tx_buffer_) {
@@ -6336,7 +6337,8 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames (full anchor)",
               frame_data_list.size());
     on_transmit_burst_(frame_data_list, /*group_seq=*/0,
-                       /*force_full_preamble=*/true);  // full chirp re-anchor: deterministic re-acquire
+                       /*anchor_reason=*/kAnchorReasonResend);  // full chirp re-anchor +
+                                                              // recool the skip streak
     // RE-ARM the ack monitor for THIS resend's ack. The initial send arms via the
     // tx-frame-submitted hook, but a timeout RESEND comes through here (arq_ retransmit →
     // transmitDataBatch) and would otherwise leave the sender deaf after the first

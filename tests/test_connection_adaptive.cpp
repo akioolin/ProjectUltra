@@ -797,10 +797,14 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
     c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
     std::vector<bool> burst_full_anchor;
     std::vector<size_t> burst_sizes;
+    std::vector<uint8_t> burst_reasons;
     c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t /*seq*/,
-                                   bool force_full_preamble) {
+                                   uint8_t anchor_reason) {
         burst_sizes.push_back(frames.size());
-        burst_full_anchor.push_back(force_full_preamble);
+        // Any non-None reason still means "this burst carries a full anchor"; the
+        // reason only distinguishes WHY (resend vs config switch) for the skip streak.
+        burst_full_anchor.push_back(anchor_reason != Connection::kAnchorReasonNone);
+        burst_reasons.push_back(anchor_reason);
     });
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
@@ -830,6 +834,18 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
     // switch DESCRIPTOR itself must ride a full anchor — three light-descriptor
     // switches were missed on fading (25 s adoption latency each, ~130 s of the
     // 424 s transfer). Every commit now arms the full anchor.
+    // 2026-07-26 REASON PLUMBING: a descriptor mode/rate switch must be reported as
+    // kAnchorReasonModeSwitch, NOT as a resend. The encoder uses the distinction to
+    // decide whether the #69 anchor-skip clean streak (DELIVERY evidence) recools; a
+    // config switch needs the chirp but is not evidence the channel stopped syncing.
+    // Reporting it as a resend is what made rate changes the dominant streak-resetter.
+    for (size_t i = 0; i < burst_reasons.size(); ++i) {
+        if (burst_reasons[i] != Connection::kAnchorReasonNone) {
+            CHECK(burst_reasons[i] == Connection::kAnchorReasonModeSwitch,
+                  "a descriptor switch's full anchor must carry kAnchorReasonModeSwitch "
+                  "(got a resend reason -> the skip streak would recool on a config event)");
+        }
+    }
     bool full_anchor_armed_or_consumed =
         ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
     for (size_t i = 0; i < burst_full_anchor.size(); ++i) {

@@ -623,11 +623,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // Burst TX callback - encode multiple frames as a single waveform burst
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
                                               uint16_t group_seq,
-                                              bool force_full_preamble) {
+                                              uint8_t anchor_reason) {
         // §16.4 escalation: latch the full chirp+LTS group-start anchor BEFORE the
         // defer check so it survives a carrier-sense defer and is consumed by the
         // next actual encode (the encoder flag is a one-shot latch).
-        if (force_full_preamble) {
+        // The reason is forwarded because it decides whether the #69 anchor-skip
+        // clean streak (DELIVERY evidence) recools: a resend must recool it, a
+        // descriptor mode/rate switch is a configuration event and must not.
+        if (anchor_reason == protocol::Connection::kAnchorReasonModeSwitch) {
+            modem_.forceNextBurstFullPreambleKeepSkipStreak();
+        } else if (anchor_reason != protocol::Connection::kAnchorReasonNone) {
             modem_.forceNextBurstFullPreamble();
         }
         const bool in_qso_data = std::any_of(

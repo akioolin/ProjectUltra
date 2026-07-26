@@ -110,6 +110,16 @@ public:
         force_burst_group_start_full_preamble_ = true;
     }
 
+    // Same latch, but marks this full anchor as a CONFIGURATION event (a descriptor
+    // mode/rate switch) rather than delivery failure. The #69 anchor-skip clean streak
+    // is delivery evidence; a geometry change needs the chirp but does not invalidate
+    // "this channel syncs without one", so the streak survives. Consumed with the
+    // force latch. Only reached when ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH is set.
+    void forceNextBurstGroupStartFullPreambleKeepStreak() {
+        force_burst_group_start_full_preamble_ = true;
+        anchor_full_keep_streak_once_ = true;
+    }
+
     // Encode multiple frames as a single burst with one LTS preamble
     // Each frame gets its own training symbols for per-block channel estimation
     // Returns: [LTS] + [train+data_0] + [train+data_1] + ... + [train+data_N]
@@ -296,6 +306,8 @@ private:
     // Read solely by the burst group-start preamble decision; never consumed by
     // the descriptor's encodeFrame. See forceNextBurstGroupStartFullPreamble().
     bool force_burst_group_start_full_preamble_ = false;
+    // One-shot: this burst's forced full anchor is a config switch, not delivery failure.
+    bool anchor_full_keep_streak_once_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
     float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
     phy::PaprReductionMeasurement last_papr_reduction_;

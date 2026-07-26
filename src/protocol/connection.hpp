@@ -255,13 +255,25 @@ public:
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
     // group_seq stamps the burst descriptor (§14.27) for whole-burst GROUP_ACK;
     // 0 for the legacy arq_ burst path / single-shot.
-    // force_full_preamble=true asks the encoder to emit a full chirp+LTS anchor
-    // for this burst's group-start instead of warm light LTS. Set on RESENDS so
+    // anchor_reason != kAnchorReasonNone asks the encoder to emit a full chirp+LTS
+    // anchor for this burst's group-start instead of warm light LTS. Set on RESENDS so
     // a fade-hit group re-acquires deterministically (§16.4 escalation): the
     // first attempt stays light (goodput), the retry pays the chirp (reliability).
+    //
+    // The REASON matters to the #69 anchor-skip clean streak, which is DELIVERY
+    // evidence ("this channel syncs fine without a chirp"). A resend is genuine
+    // negative delivery evidence and must recool the streak. A descriptor-committed
+    // MODE/RATE SWITCH is a CONFIGURATION event — it legitimately needs one full
+    // anchor for the geometry change, but it says nothing about whether the channel
+    // still supports skipping, so erasing the streak there throws away evidence and
+    // (measured, 2026-07-26) is why the skip arms far less often than it could.
+    // uint8_t rather than an enum class so existing bool call sites still convert.
+    static constexpr uint8_t kAnchorReasonNone = 0;
+    static constexpr uint8_t kAnchorReasonResend = 1;      // delivery evidence -> recool
+    static constexpr uint8_t kAnchorReasonModeSwitch = 2;  // config event -> keep streak
     using TransmitBurstCallback =
         std::function<void(const std::vector<Bytes>&, uint16_t group_seq,
-                           bool force_full_preamble)>;
+                           uint8_t anchor_reason)>;
     void setTransmitBurstCallback(TransmitBurstCallback cb);
 
     void setConnectedCallback(ConnectedCallback cb);
