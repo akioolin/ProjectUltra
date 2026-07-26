@@ -10,6 +10,72 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — feat(rate): ULTRA_CRATER_GOODPUT_GRADE now DEFAULT-ON (rig A/B, 16 interleaved runs)
+
+Flips the goodput-graded crater predicate (landed default-off 2026-07-25, c1a8dfb) to
+default-ON; `ULTRA_CRATER_GOODPUT_GRADE=0` restores the legacy binary predicate.
+
+**Why default-on: this is a CORRECTNESS fix before it is a throughput lever.** The decoder
+assigns quality EXACTLY 0.0 to any group that is not perfect, so "7/8 frames delivered" was
+treated as identical evidence to a 0/5 total loss. That is simply not evidence that a rung
+failed, independent of any measured delta, and it contradicts the project's own doctrine that
+fading loss is irreducible and ARQ exists to absorb it.
+
+**Rig A/B — 16 interleaved same-epoch runs, 8 per arm** (MAC = receiver = rate authority;
+`/tmp/ab_crater_b1/` + `/tmp/ab_crater2/`). The epoch was DEGRADED relative to the afternoon
+baseline (EVM 5.1 dB vs ~10.5 dB), so absolute kbps is not comparable to 1.67-1.82 — only the
+interleaved pairs are.
+
+| metric | ON (treatment) | OFF | note |
+|---|---|---|---|
+| completed transfers | **8/8** | **5/8** | one-sided p = 0.100 |
+| completed-run goodput | 1689 bps | 1554 bps | **+8.7%** |
+| **pathological demotes** | **1.57/run** | **2.88/run** | **-45%**, the DIRECT causal metric |
+| craters | **1.0/run** | 2.1/run | pre-committed falsifier passed INVERTED |
+| rung changes | **5.4/run** | 8.0/run | |
+| regrades | 2.2/run | 0 | mechanism confirmed firing |
+
+Sign test on the 8 adjacent pairs: 6 positive, 1 negative, 1 tie → **p = 0.0625**, median
+paired **+29.8%**. No single metric reaches p < 0.05 on a rig with documented ±25% epoch
+noise, so the case rests on six metrics converging plus the derivation being principled
+(a spectral-efficiency ratio, not a tuned threshold).
+
+"Pathological demote" = `q == 0 && cmd < cur && raw > cmd && fading <= kFadingGoodMax` — a
+demote BELOW the rung the ladder itself picked, on a channel the fading index calls GOOD. It
+is the metric to watch because the knob causes it directly, unlike goodput which is dominated
+by which arm draws a bad fade.
+
+**TWO EARLIER HEADLINE FIGURES WERE ARTIFACTS — they are not the effect size:**
+1. **+56.4%** (batch 1) came from **timeout draws**. A timed-out run charged its full window
+   scores ~830 bps while a completed one scores 1380-2170, so ANY pair drawing one timeout
+   reads +70..110% regardless of cause.
+2. A **censored-run scoring bug of my own**: measuring an incomplete run only to its last
+   progress line EXCLUDES the stall, scoring a stalled run 1855 bps instead of 830. That
+   single error flipped an arm-mean delta from -14.7% to +24.9%. Censored runs must be
+   charged the FULL observed window.
+
+**INTERNAL VALIDITY CHECK (worth reusing).** An ON run with `regrades == 0` is byte-identical
+to OFF and is therefore a NULL CONTROL, not evidence. One occurred: it landed at 1590 bps,
+**+2.3%** vs the OFF completed mean — i.e. ~0, exactly as a null must. It also demonstrated
+the timeout-draw problem directly by scoring +89.6% against its own pair while doing nothing.
+
+**Test verification.**
+- NEW `test_crater_grading_is_default_on` pins the default: with the knob unset, two
+  consecutive 7/8 groups must HOLD; with `=0` the legacy binary predicate demotes; and a true
+  0/N crater still demotes under the default-on grading (the cliff case is untouched).
+  **Verified to catch a silent revert**: reverting the helper to default-off → 20/21.
+- `test_goodput_break_even_is_rate_ratio` (unchanged) verifies the derivation itself.
+- `ctest --test-dir build --output-on-failure -j4` → **88/88 passed** (idle machine).
+- `tools/gui_qso_scenario.sh --channel moderate --snr-db 16 --seed 42 --file-kb 21` → PASS.
+
+**Still open / not claimed.** The Q1 deficit measurement that motivated this (Q1 1386 bps vs
+Q2-Q4 2434/2826/2384 = 19% of wall clock) predicted a larger gain than +8.7%; the remaining Q1
+cost is attributed to the separate BUG-COHERENCE-THRESHOLD-PLATFORM-BROKEN and to per-burst
+sync airtime (1.41 s × every burst = 12.8% of wall clock), neither of which this change
+touches.
+
+---
+
 ## 2026-07-25 — fix(tools): analyze_transfer.py manufactured a phantom 2.5 s "standing decode latency"
 
 **What was broken.** The turnaround decomposition reported `burst-end -> RX decode done` = 2.46-2.50 s

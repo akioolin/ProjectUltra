@@ -94,8 +94,9 @@ bool evmDemoteEnabled() {
     return e && e[0] == '1' && e[1] == '\0';
 }
 
-// ULTRA_CRATER_GOODPUT_GRADE (2026-07-25, default OFF): grade the crater predicate by
-// DELIVERED FRACTION against the goodput break-even instead of the binary quality byte.
+// ULTRA_CRATER_GOODPUT_GRADE (2026-07-25; DEFAULT ON since 2026-07-26, opt out with =0):
+// grade the crater predicate by DELIVERED FRACTION against the goodput break-even instead
+// of the binary quality byte.
 //
 // The decoder assigns quality EXACTLY 0.0 to any group that is not perfect
 // (streaming_burst_interleave), so `quality <= 0` means "at least one frame of N was
@@ -113,9 +114,28 @@ bool evmDemoteEnabled() {
 // doctrine: fading loss is irreducible and ARQ is mandatory, so a group whose losses
 // the ARQ resends more cheaply than a whole rung demote is the system WORKING.
 // goodputBreakEvenDeliveredFraction() is the geometry-derived line between the two.
+//
+// DEFAULT-ON RATIONALE (rig A/B, 16 interleaved runs, 8/arm, 2026-07-26). This is a
+// CORRECTNESS fix before it is a throughput lever: "7/8 frames delivered" is simply not
+// evidence that a rung failed, so the binary predicate is wrong independent of any measured
+// delta. The A/B supports it on six independent metrics, with the honest numbers:
+//   completion            8/8 vs 5/8      (one-sided p = 0.100)
+//   completed-run goodput 1689 vs 1554 bps = +8.7%
+//   pathological demotes  1.57 vs 2.88 /run = -45%   <- the DIRECT causal metric
+//   craters               1.0 vs 2.1 /run  (the pre-committed falsifier passed INVERTED)
+//   rung changes          5.4 vs 8.0 /run
+//   sign test on 8 pairs  6 pos / 1 neg / 1 tie, p = 0.0625, median +29.8%
+// No single metric reaches p < 0.05 on a rig with documented +/-25% epoch noise, so the case
+// rests on the convergence plus the derivation. Two earlier headline figures were ARTIFACTS
+// and are not the effect size: +56% came from timeout draws (a timed-out run scores ~830 bps
+// vs 1380-2170 completed, so any pair drawing one timeout reads +70..110%), and an ON run with
+// regrades == 0 is byte-identical to OFF -- such a NULL CONTROL landed at 1590 bps, +2.3% vs
+// the OFF mean, which is the harness's internal-validity check.
+// "Pathological demote" = q == 0 && cmd < cur && raw > cmd && fading <= kFadingGoodMax: a
+// demote BELOW what the ladder itself picked, on a channel the fading index calls GOOD.
 bool craterGoodputGradeEnabled() {
     const char* e = std::getenv("ULTRA_CRATER_GOODPUT_GRADE");
-    return e && e[0] == '1' && e[1] == '\0';
+    return !(e && e[0] == '0' && e[1] == '\0');
 }
 
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {

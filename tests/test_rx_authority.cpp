@@ -69,6 +69,10 @@ struct ConnectionAdaptiveTestAccess {
     static void verdictFull(Connection& c, bool all_ok, float quality, bool full_crater) {
         c.updateRxAuthorityCommand(all_ok, quality, full_crater);
     }
+    static void verdictGraded(Connection& c, bool all_ok, float quality, bool full_crater,
+                              float delivered_fraction) {
+        c.updateRxAuthorityCommand(all_ok, quality, full_crater, delivered_fraction);
+    }
     static uint8_t rxCmd(const Connection& c) { return c.rx_authority_cmd_; }
     // GROUP-SIZE gate (ULTRA_BURST_ESC_STREAK): drive the clean-round streak and read
     // back the frame budget the airtime ceiling allows.
@@ -646,6 +650,46 @@ static bool test_goodput_break_even_is_rate_ratio() {
     return true;
 }
 
+// DEFAULT-ON PIN (2026-07-26): with the knob UNSET, two consecutive partial groups that
+// each clear the goodput break-even must NOT demote — the whole point of the fix. With
+// ULTRA_CRATER_GOODPUT_GRADE=0 the legacy binary predicate returns and the same evidence
+// demotes. This is what fails if anyone silently flips the default back.
+static bool test_crater_grading_is_default_on() {
+    TEST("goodput-graded crater is DEFAULT ON; =0 restores the legacy binary demote");
+    const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
+    // 7/8 delivered = 0.875, comfortably above the 0.75 break-even for 16QAM R2/3.
+    auto run = [&](const char* knob) {
+        if (knob) setenv("ULTRA_CRATER_GOODPUT_GRADE", knob, 1);
+        else unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+        c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdictGraded(c, /*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/false, 0.875f);
+        TA::verdictGraded(c, false, 0.0f, false, 0.875f);
+        return TA::rxCmd(c);
+    };
+    if (run(nullptr) != cur)
+        FAIL("DEFAULT (knob unset): two 7/8 groups must HOLD idx " + std::to_string(cur) +
+             ", got " + std::to_string(run(nullptr)));
+    if (run("0") >= cur)
+        FAIL("knob=0 must restore the legacy binary demote (got idx " +
+             std::to_string(run("0")) + ", want < " + std::to_string(cur) + ")");
+    // A TRUE crater still demotes with the default ON — the cliff case is untouched.
+    unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
+    {
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+        c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+        TA::verdictGraded(c, false, 0.0f, /*full_crater=*/true, 0.0f);
+        TA::verdictGraded(c, false, 0.0f, true, 0.0f);
+        if (TA::rxCmd(c) >= cur)
+            FAIL("a true 0/N crater must STILL demote under the default-on grading");
+    }
+    unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
+    PASS();
+    return true;
+}
+
 // ── GROUP-SIZE GATE: dense-rung proxy repair (ULTRA_BURST_ESC_STREAK) ───────────
 // The burst airtime ceiling escalates 8600 -> 11500 ms (N=5 -> N=8) only on proven
 // clean delivery. Legacy gate: dense rung (>= QAM8 R2/3) + 2 clean rounds. The EVM
@@ -742,6 +786,7 @@ int main() {
     ok &= test_evm_demote_strips_overcommit();
     ok &= test_evm_demote_inert_when_supported();
     ok &= test_goodput_break_even_is_rate_ratio();
+    ok &= test_crater_grading_is_default_on();
     ok &= test_group_size_gate_streak();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
