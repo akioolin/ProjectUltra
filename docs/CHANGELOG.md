@@ -10,6 +10,52 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — ULTRA_LINEAR_SNR_RING measures a WASH on the rig: stays default-off (the code fix is still correct)
+
+Rig A/B, 4 interleaved pairs, MPG@20, knob on the MAC receiver (verified present in the live
+process environment via `ps eww` BEFORE trusting the batch):
+
+| metric | ON | OFF |
+|---|---|---|
+| completed | 3/4 | **4/4** |
+| rung commands / run | **6.2** | 6.8 |
+| craters / run | 1.75 | **0.50** |
+| goodput, completed runs | 1877 bps | 1760 bps |
+| paired | **−2.5% mean / −1.3% median, sign test 2+/2− p = 0.688** | |
+
+**Verdict: no measurable effect.** p = 0.688 is indistinguishable from noise. Churn moved
+marginally the right way; craters moved the wrong way but 5 of the 7 ON-arm craters come from
+ON_1 alone, which drew a rough patch (its raw ladder pick averaged 4.7 vs 7.2 on its pair
+partner at an IDENTICAL snr_avg of 23.7 vs 23.6 — arithmetically that can only come from the
+FADING input, i.e. the channel, not the knob).
+
+**What the A/B DID confirm — the compensation is sized correctly.** On the matched first pair
+the ladder input was **snr_avg 23.7 (ON) vs 23.6 (OFF)**: the domain fix raises the ring by the
+Jensen gap and the offset reduction lowers it by 1.70 dB, and they cancel as designed. Sizing
+the compensation on the RING's own per-group samples (sd 4.36, gap 1.65 dB) rather than the
+per-frame readings (sd 5.60, gap 2.87 dB) was the decision that made this land neutral — the
+per-frame figure would have over-corrected by >1 dB and silently made the ladder more
+conservative.
+
+**Decision: default-OFF.** A correct change that delivers nothing measurable does not get
+enabled on theory. The knob stays available.
+
+**Why the code fix is still worth having.** The domain error is real and independently
+verifiable: `streaming_decoder.hpp::physicalSnrStats` averages linear power and documents that
+intent, while the rate-ladder ring summed dB, against a dial and anchor table that are both
+mean-power definitions. Keeping it behind a knob means the **anchor re-measure can be run in
+the correct domain** — per-rung floors calibrated against a dB-domain mean would bake the same
+Jensen error into the anchor table itself, which is exactly the class of compensating-constant
+mess `kOfdmLegacyAnchorScaleOffsetDb` already represents. That is a prerequisite argument, not
+a throughput argument, and it does not justify flipping the default today.
+
+**Honest limits.** 4 pairs. The batch-level snr_avg means (ON 22.5 vs OFF 23.4) differ by 0.9 dB
+where the matched pair showed 0.1 dB, so part of the batch difference is channel draw rather
+than the knob — consistent with this bench's documented ±25% epoch noise and 14.96-19.13 dB
+per-run power-mean spread.
+
+---
+
 ## 2026-07-26 — MEASURED: the Pi5→IONOS→Mac analog chain is CLEAN (retracts an attribution I made by subtraction)
 
 **What was claimed and is now retracted.** Earlier today a 5.3 dB discrepancy was attributed

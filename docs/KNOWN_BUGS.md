@@ -1477,6 +1477,15 @@ then.
 
 ## BUG-LADDER-SNR-DB-MEAN: the rate ladder's SNR ring averages dB where the dial and anchors are mean-power (open, 2026-07-26) — P1
 
+**STATUS 2026-07-26: FIX IMPLEMENTED behind `ULTRA_LINEAR_SNR_RING` (default-OFF) — rig A/B
+measured a WASH** (4 pairs: paired −2.5% mean, sign test p=0.688; churn 6.2 vs 6.8/run;
+completion 3/4 vs 4/4). The compensation sizing WAS confirmed correct (matched pair: ladder
+input snr_avg 23.7 ON vs 23.6 OFF, i.e. net neutral as designed). The bug below is therefore
+REAL and FIXED-IN-CODE but NOT ENABLED, because a correct change with no measurable benefit
+does not get switched on. Its remaining value is that the **anchor re-measure must be run in
+the correct domain** — calibrating per-rung floors against a dB-domain mean would bake this
+same Jensen error into the anchor table. See CHANGELOG 2026-07-26.
+
 **Defect.** Two SNR rings exist in this codebase and they disagree on domain:
 
 | site | code | domain |
