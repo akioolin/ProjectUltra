@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "ofdm/frequency_selectivity.hpp"
 
 namespace ultra {
 
@@ -146,6 +147,11 @@ struct OFDMDemodulator::Impl {
     // This scale feeds demapper/two-pass decisions; it is intentionally
     // separate from the public channel-quality meter below.
     float last_fading_index = 0.0f;
+    // First-frame channel-class discriminator (frequency selectivity). Measured from the
+    // same averaged LTS H as last_fading_index, but reads the ripple STRUCTURE rather than
+    // its variance, so it can separate Good from Moderate (which the CV provably cannot —
+    // BUG-FADING-INDEX-BLIND). Read-only; not consumed by any decision yet.
+    ofdm::FrequencySelectivity last_freq_selectivity{};
     // Public channel-quality fading index. Coherent modes keep this on the
     // payload-independent LTS estimate; differential modes can use pilot-only
     // frequency CV plus temporal CV.

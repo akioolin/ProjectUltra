@@ -78,8 +78,13 @@ struct FrequencySelectivity {
     float s_mp = 0.0f;      // ... at the Moderate/Poor lag
     int   lag_gm = 0;
     int   lag_mp = 0;
-    size_t carriers = 0;    // N actually used this frame (pilot gaps / band-edge drops shrink it)
-    bool  valid = false;    // enough carriers to evaluate both lags at all
+    size_t carriers = 0;    // total carriers used this frame (across all segments)
+    // Effective degrees of freedom = number of lag-L PAIRS actually summed, per lag. With a
+    // single run this is (N - lag); with the production two-segment grid (DC gap) it is
+    // sum_i (n_i - lag). The confidence gate needs the pair count, not the carrier count.
+    size_t dof_gm = 0;
+    size_t dof_mp = 0;
+    bool  valid = false;
 };
 
 // Normalized lag-L autocorrelation of the MEAN-REMOVED |H|^2 sequence.
@@ -116,20 +121,79 @@ inline float normalizedPowerAutocorr(const float* power, size_t n, int lag) {
     return static_cast<float>(s < -1.0 ? -1.0 : (s > 1.0 ? 1.0 : s));
 }
 
-inline FrequencySelectivity measureFrequencySelectivity(const float* power, size_t n,
-                                                        double carrier_spacing_hz) {
+// SEGMENTED form — the production case. The OFDM carrier grid straddles DC with the DC bin
+// unused, so the active carriers form TWO uniform runs (negative and positive frequencies)
+// rather than one. Taking only the longest run wastes half the band: measured on the rig it
+// gave N=30 of 59, which lifts the single-frame confidence threshold from 1.96/sqrt(51)=0.274
+// to 1.96/sqrt(22)=0.418 — right on top of the real MPM readings (-0.35..-0.46), so genuine
+// Moderate frames fell back to "not confident" (rig: only ~50% of frames reached a MODERATE
+// verdict even though every pooled run was correctly negative).
+//
+// Accumulating the sums ACROSS segments is exact, not an approximation: each segment
+// contributes its own lag-L pairs on the same uniform grid, and the estimator is a ratio of
+// sums. The mean is removed GLOBALLY (one channel, one mean). Effective dof is
+// sum_i (n_i - lag), which is what selectivityConfident() must be told.
+inline float normalizedPowerAutocorrSegmented(const float* const* segments,
+                                              const size_t* lengths, size_t seg_count,
+                                              int lag, size_t* dof_out = nullptr) {
+    if (dof_out) *dof_out = 0;
+    if (segments == nullptr || lengths == nullptr || lag <= 0 || seg_count == 0) return 0.0f;
+    double sum = 0.0;
+    size_t total = 0;
+    for (size_t s = 0; s < seg_count; ++s) {
+        for (size_t i = 0; i < lengths[s]; ++i) sum += static_cast<double>(segments[s][i]);
+        total += lengths[s];
+    }
+    if (total == 0) return 0.0f;
+    const double mean = sum / static_cast<double>(total);
+
+    double num = 0.0, e_lo = 0.0, e_hi = 0.0;
+    size_t dof = 0;
+    for (size_t s = 0; s < seg_count; ++s) {
+        const size_t n = lengths[s];
+        if (n <= static_cast<size_t>(lag)) continue;   // too short to contribute this lag
+        const size_t m = n - static_cast<size_t>(lag);
+        for (size_t k = 0; k < m; ++k) {
+            const double a = static_cast<double>(segments[s][k]) - mean;
+            const double b = static_cast<double>(segments[s][k + static_cast<size_t>(lag)]) - mean;
+            num += a * b;
+            e_lo += a * a;
+            e_hi += b * b;
+        }
+        dof += m;
+    }
+    if (dof_out) *dof_out = dof;
+    const double den = std::sqrt(e_lo * e_hi);
+    if (!(den > 0.0) || !std::isfinite(den)) return 0.0f;
+    const double s = num / den;
+    if (!std::isfinite(s)) return 0.0f;
+    return static_cast<float>(s < -1.0 ? -1.0 : (s > 1.0 ? 1.0 : s));
+}
+
+// Segmented entry point — USE THIS in production. `segments`/`lengths` describe the maximal
+// uniformly-spaced runs of active carriers in ascending frequency (the wideband grid has two:
+// negative and positive frequencies either side of the unused DC bin).
+inline FrequencySelectivity measureFrequencySelectivitySegmented(
+    const float* const* segments, const size_t* lengths, size_t seg_count,
+    double carrier_spacing_hz) {
     FrequencySelectivity out;
     out.lag_gm = decisionLagForDelay(carrier_spacing_hz, decisionDelayGoodModerateS());
     out.lag_mp = decisionLagForDelay(carrier_spacing_hz, decisionDelayModeratePoorS());
-    out.carriers = n;
-    if (out.lag_gm <= 0 || out.lag_mp <= 0 ||
-        n <= static_cast<size_t>(out.lag_gm) + 1) {
-        return out;
-    }
-    out.s_gm = normalizedPowerAutocorr(power, n, out.lag_gm);
-    out.s_mp = normalizedPowerAutocorr(power, n, out.lag_mp);
-    out.valid = true;
+    if (out.lag_gm <= 0 || out.lag_mp <= 0 || seg_count == 0) return out;
+    for (size_t i = 0; i < seg_count; ++i) out.carriers += lengths[i];
+    out.s_gm = normalizedPowerAutocorrSegmented(segments, lengths, seg_count, out.lag_gm,
+                                                &out.dof_gm);
+    out.s_mp = normalizedPowerAutocorrSegmented(segments, lengths, seg_count, out.lag_mp,
+                                                &out.dof_mp);
+    out.valid = (out.dof_gm > 0 && out.dof_mp > 0);
     return out;
+}
+
+inline FrequencySelectivity measureFrequencySelectivity(const float* power, size_t n,
+                                                        double carrier_spacing_hz) {
+    const float* segs[1] = {power};
+    const size_t lens[1] = {n};
+    return measureFrequencySelectivitySegmented(segs, lens, 1, carrier_spacing_hz);
 }
 
 // CONFIDENCE from the NULL distribution — no fitted constant.
@@ -141,12 +205,18 @@ inline FrequencySelectivity measureFrequencySelectivity(const float* power, size
 // Pooling M frames divides the variance by M. z = 1.96 is the two-sided alpha = 0.05 point.
 inline constexpr float kSelectivityZ = 1.96f;
 
-inline bool selectivityConfident(float s, size_t carriers, int lag, size_t frames_pooled = 1) {
-    if (lag <= 0 || carriers <= static_cast<size_t>(lag) || frames_pooled == 0) return false;
-    const double dof = static_cast<double>(carriers - static_cast<size_t>(lag)) *
-                       static_cast<double>(frames_pooled);
+// `pair_dof` = lag-L pairs summed for THIS lag in ONE frame (FrequencySelectivity::dof_*).
+inline bool selectivityConfidentDof(float s, size_t pair_dof, size_t frames_pooled = 1) {
+    if (pair_dof == 0 || frames_pooled == 0) return false;
+    const double dof = static_cast<double>(pair_dof) * static_cast<double>(frames_pooled);
     if (!(dof > 0.0)) return false;
     return std::fabs(static_cast<double>(s)) >= kSelectivityZ / std::sqrt(dof);
+}
+
+// Convenience overload for a single contiguous run of `carriers` carriers.
+inline bool selectivityConfident(float s, size_t carriers, int lag, size_t frames_pooled = 1) {
+    if (lag <= 0 || carriers <= static_cast<size_t>(lag)) return false;
+    return selectivityConfidentDof(s, carriers - static_cast<size_t>(lag), frames_pooled);
 }
 
 enum class SelectivityClass { UNDETERMINED, FLAT_OR_GOOD, GOOD, MODERATE, POOR };
@@ -163,8 +233,8 @@ enum class SelectivityClass { UNDETERMINED, FLAT_OR_GOOD, GOOD, MODERATE, POOR }
 inline SelectivityClass classifySelectivity(const FrequencySelectivity& fs,
                                             size_t frames_pooled = 1) {
     if (!fs.valid) return SelectivityClass::UNDETERMINED;
-    const bool c_mp = selectivityConfident(fs.s_mp, fs.carriers, fs.lag_mp, frames_pooled);
-    const bool c_gm = selectivityConfident(fs.s_gm, fs.carriers, fs.lag_gm, frames_pooled);
+    const bool c_mp = selectivityConfidentDof(fs.s_mp, fs.dof_mp, frames_pooled);
+    const bool c_gm = selectivityConfidentDof(fs.s_gm, fs.dof_gm, frames_pooled);
     if (!c_mp && !c_gm) return SelectivityClass::FLAT_OR_GOOD;
     if (c_mp && fs.s_mp < 0.0f) return SelectivityClass::POOR;
     if (c_gm && fs.s_gm < 0.0f) return SelectivityClass::MODERATE;

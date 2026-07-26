@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — feat(est): wire the first-frame discriminator to live LTS + RIG-VALIDATED on MPM@20
+
+Computes the frequency-selectivity statistic per frame from the live LTS channel estimate and
+logs it (read-only — not consumed by any decision yet).
+
+**RIG VALIDATION — 20 runs on operator-confirmed MPM@20 (ground truth: MODERATE), 1059 frames:**
+
+| pooled verdict | runs |
+|---|---|
+| **MODERATE** (correct) | **18/20** |
+| POOR (over-call, safe direction) | 2/20 |
+| **GOOD (dangerous)** | **0/20** |
+
+Per-FRAME across the whole batch: **1 of 1059 frames** read GOOD (0.09%). Every run's mean
+`S_gm` was negative (−0.18…−0.46) and 18/20 had `S_mp` positive — bracketing MPM's true 1.0 ms
+delay from both sides. For contrast the production fading index called this same channel GOOD
+100% of the time (BUG-FADING-INDEX-BLIND).
+
+**Carrier-grid fix (found by the rig run).** The wideband grid straddles DC with the DC bin
+unused, so active carriers form TWO uniform runs. Taking only the longest gave **N=30 of 59**,
+which raised the single-frame confidence threshold from 1.96/√51=0.274 to 1.96/√22=**0.418** —
+right on top of the real MPM readings (−0.35…−0.46), so genuine Moderate frames fell back to
+"not confident". Added `normalizedPowerAutocorrSegmented` / `measureFrequencySelectivitySegmented`
+which accumulate the autocorrelation sums ACROSS segments (exact, not an approximation: each
+segment contributes its own lag-L pairs on the same uniform grid, and the estimator is a ratio of
+sums; the mean is removed globally). `FrequencySelectivity` now carries the true per-lag pair
+count (`dof_gm`/`dof_mp`) and the confidence gate consumes that rather than a carrier count.
+Re-measured on the rig: **N=59, segs=2, dof 43** (was 22) ⇒ threshold 0.299, and MODERATE frames
+per run rose from ~50% to **72%**.
+
+Full ctest 88/88.
+
+---
+
 ## 2026-07-25 — feat(est): first-frame channel-class discriminator (frequency selectivity)
 
 The restored `DopplerCoherenceEstimator` works (good +0.606 vs moderate −0.285 on the faithful

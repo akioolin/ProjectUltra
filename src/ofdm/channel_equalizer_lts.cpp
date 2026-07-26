@@ -10,6 +10,7 @@
 #include "demodulator_constants.hpp"
 #include "sim/channel_calibration.hpp"
 #include "ultra/logging.hpp"
+#include "ofdm/frequency_selectivity.hpp"
 
 namespace ultra {
 
@@ -803,6 +804,84 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     // Compute fading index from the LTS channel estimate. Use the averaged LTS
     // H for measurement to reduce AWGN estimator variance, but keep the
+    // ── FIRST-FRAME CHANNEL-CLASS DISCRIMINATOR (frequency selectivity) ───────────
+    // Read-only measurement, computed from the SAME averaged LTS H as the fading index below.
+    // The fading index is an across-carrier CV, which converges to a constant for ANY Rayleigh
+    // channel and so cannot separate Good from Moderate (BUG-FADING-INDEX-BLIND). This measures
+    // the RIPPLE STRUCTURE instead: |H(f)|^2 of a 2-path channel ripples at cos(2 pi f D), so
+    // its normalized autocorrelation at carrier lag L reads cos(2 pi L df D) — a direct read on
+    // differential delay. See ofdm/frequency_selectivity.hpp for the derivation and the
+    // geometry-derived lags. NOT consumed by any decision yet; logged for rig validation.
+    {
+        // Build |H|^2 on a UNIFORM, ASCENDING-FREQUENCY grid. Both data and pilot carriers are
+        // used: the lag -> frequency mapping is only valid on an evenly spaced grid, and the
+        // data-only list has pilot-shaped gaps. FFT bins wrap (bins above fft_size/2 are
+        // NEGATIVE frequencies), so sort by SIGNED bin index, not by raw bin.
+        const int fft_n = static_cast<int>(config.fft_size);
+        std::vector<std::pair<int, float>> grid;  // (signed bin, |H|^2)
+        grid.reserve(data_carrier_indices.size() + pilot_carrier_indices.size());
+        auto add_carrier = [&](int bin, const Complex& h) {
+            const float p = std::norm(h);
+            if (!std::isfinite(p) || p <= 0.0f) return;
+            const int signed_bin = (bin > fft_n / 2) ? (bin - fft_n) : bin;
+            grid.emplace_back(signed_bin, p);
+        };
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            Complex h = channel_estimate[data_carrier_indices[i]];
+            if (valid_symbols > 0 && i < h_sum_data.size()) {
+                h = h_sum_data[i] / static_cast<float>(valid_symbols);
+            }
+            add_carrier(data_carrier_indices[i], h);
+        }
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            Complex h = channel_estimate[pilot_carrier_indices[i]];
+            if (valid_symbols > 0 && i < h_sum_pilot.size()) {
+                h = h_sum_pilot[i] / static_cast<float>(valid_symbols);
+            }
+            add_carrier(pilot_carrier_indices[i], h);
+        }
+        std::sort(grid.begin(), grid.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        // Split into MAXIMAL uniformly-spaced (stride-1) runs. The wideband grid straddles DC
+        // with the DC bin unused, so there are normally TWO: negative and positive frequencies.
+        // Both are passed to the segmented estimator — taking only the longest wasted half the
+        // band (rig: N=30 of 59), which raised the single-frame confidence threshold from 0.274
+        // to 0.418, right on top of the real MPM readings (-0.35..-0.46), so genuine Moderate
+        // frames fell back to "not confident".
+        std::vector<std::vector<float>> runs;
+        for (size_t i = 0; i < grid.size(); ++i) {
+            if (i == 0 || grid[i].first != grid[i - 1].first + 1) runs.emplace_back();
+            runs.back().push_back(grid[i].second);
+        }
+        std::vector<const float*> seg_ptr;
+        std::vector<size_t> seg_len;
+        seg_ptr.reserve(runs.size());
+        seg_len.reserve(runs.size());
+        for (const auto& r : runs) {
+            if (r.size() < 2) continue;  // cannot contribute any lag pair
+            seg_ptr.push_back(r.data());
+            seg_len.push_back(r.size());
+        }
+
+        const double df_hz = (fft_n > 0)
+            ? static_cast<double>(config.sample_rate) / static_cast<double>(fft_n)
+            : 0.0;
+        const auto fs = seg_ptr.empty()
+            ? ofdm::FrequencySelectivity{}
+            : ofdm::measureFrequencySelectivitySegmented(seg_ptr.data(), seg_len.data(),
+                                                         seg_ptr.size(), df_hz);
+        last_freq_selectivity = fs;
+        if (fs.valid) {
+            const auto cls = ofdm::classifySelectivity(fs);
+            LOG_DEMOD(INFO,
+                      "LTS freq-selectivity: S_gm=%+.3f (lag %d dof %zu) S_mp=%+.3f (lag %d dof %zu) "
+                      "N=%zu segs=%zu df=%.2f Hz -> class=%s",
+                      fs.s_gm, fs.lag_gm, fs.dof_gm, fs.s_mp, fs.lag_mp, fs.dof_mp,
+                      fs.carriers, seg_ptr.size(), df_hz,
+                      ofdm::selectivityClassName(cls));
+        }
+    }
+
     // last-symbol H above for equalization phase consistency. Feeds last_fading_index
     // (LLR fading scaling, DD gating).
     {
