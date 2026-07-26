@@ -15,14 +15,20 @@ USB)**. Tool: `tools/measure_analog_path.py`.
 | # | property | measured | verdict |
 |---|---|---|---|
 | 1 | TX digital scaling | peak-SCALED, 1-3 samples of >100k at ceiling | no clipping, nothing forced low |
-| 2 | OFDM payload PAPR | **9.7 dB** (theory 11.4 dB for the block length) | 1.7 dB BELOW textbook — normal |
+| 2 | OFDM payload PAPR | **13.2–15.7 dB per frame, in-band** (`build/papr_tx_measure`) | high, but inherent to 59-carrier OFDM |
 | 3 | band tilt, 486-2859 Hz | **0.7 dB** p-p | negligible |
 | 4 | analog SNDR ceiling | **30.7 dB** | costs **0.36 dB** at dial 20 |
 | 5 | Pi5 PipeWire sink volume | 1.00 | the documented "buried TX" mode is absent |
 | 6 | bandwidth referencing | ~2.8 kHz vs 3 kHz reference | **<0.6 dB** per the IONOS manual |
 
-**Reproduce (1)-(2):** generate waveforms with `./build/ultra ptx ... -o file.f32` and measure
-peak / RMS / crest. **Reproduce (3)-(4):** `tools/measure_analog_path.py` — see its docstring.
+**Reproduce (1):** generate waveforms with `./build/ultra ptx ... -o file.f32` and measure peak / RMS.
+**Reproduce (2): use `build/papr_tx_measure`** — it reports PER-FRAME IN-BAND PAPR, which is the
+figure a peak-limited stage responds to (13.23 dB anchor frame, 13.91/15.12/15.70/15.52 dB for
+data frames 1-4). ⚠ **CORRECTION 2026-07-26:** an earlier entry in this document quoted "9.7 dB,
+1.7 dB below textbook". That was measured on the COMPOSITE FILE over the FULL BAND, where the
+chirp's low crest and high RMS inflate the denominator — it is NOT comparable to the per-frame
+in-band figure and understated the real crest by ~4-6 dB. Use the tool, not an ad-hoc
+peak/RMS of a whole file. **Reproduce (3)-(4):** `tools/measure_analog_path.py` — see its docstring.
 
 ### Validity of the (3)-(4) measurement
 - Taken at the **operational level**: capture RMS **0.0924** vs **0.082** during real transfers.
@@ -60,8 +66,9 @@ means the true analog peak is **identical (~1458)** — physics does not allow o
 green indication is **misleading for a high-crest signal**.
 
 **Set levels with a SINE at the production digital peak**, not with the data waveform, and not
-with a PING (a PING's sustained crest is 3.0 dB vs the payload's 9.7 dB — a 6.7 dB difference, so
-a PING-based setup puts the payload somewhere else entirely).
+with a PING (a PING's sustained crest is 3.0 dB vs the payload's **13.2-15.7 dB per-frame in-band**
+(`build/papr_tx_measure`) — a >10 dB difference, so a PING-based setup puts the payload somewhere
+else entirely).
 
 ---
 
@@ -84,11 +91,34 @@ We **over-drive the simulator input by 1.7 dB**: true peak ~**1458 mV** vs the 1
 - **Carrier/sample-clock jitter** was NOT re-measured. `BUG-IONOS-PI5-CHEAP-DAC` recorded ±7 Hz
   jitter on the *previous* cheap USB dongle; the Fe-Pi has not been characterised for jitter.
   Only tilt, distortion and SNDR are verified here.
-- The **~5.3 dB sim-vs-rig SNR discrepancy** is **NOT explained** by anything here — the analog
-  path accounts for 0.36 dB of it. The live suspects are measurement-domain: the rig figure is a
-  **dB-mean over a ring of groups** while the sim figure is a **linear-power-mean over a seed
-  ensemble**, and Jensen's inequality alone accounts for ~1.2 dB (the sim calibration test reports
-  dB-mean 18.9 vs lin-mean 20.1 at dial 20), plus possible survivor bias since only decoded groups
-  feed the rig ring.
+- The **~5.4 dB sim-vs-rig SNR discrepancy is now DECOMPOSED (2026-07-26) and is mostly NOT
+  analog loss.** Baseline 20.1 − 14.68 = 5.42 dB. Signs: **+** explains the gap, **−** enlarges it.
+
+  | mechanism | dB | tag |
+  |---|---|---|
+  | ring averages **dB** while the dial/anchors are **mean-power** (Jensen) | **+1.74** | proven |
+  | **rung mismatch** — the sim gate is QPSK R1/4 ONLY; the rig ran QPSK R1/2·R2/3·R3/4, 8PSK R2/3, 16QAM R1/2·R2/3 (different pilot spacing) | +0.5…+1.1 | likely |
+  | **analog SNDR ceiling 30.7 dB** | **+0.36** | proven |
+  | 1200 mV clipping (structurally cancels: the two LTS symbols are identical waveforms, so a memoryless nonlinearity lands in the SIGNAL term) | +0.02…+0.10 | proven |
+  | tilt / quantization / AGC / RX gain — meter is a pure measured ratio, **level-invariant by construction**, verified bit-identical over 0.0625×–4× RX level | **+0.00** | proven |
+  | residual inter-LTS CFO inflating the **noise reference** — OUR METER, not the radio | +0.5…+2.0 | likely |
+  | guard-bin `max()` branch mix (wins ~46% in sim vs **1.1%** on the rig) | −0.5 | proven |
+  | white-noise band conversion, optimistic on band-limited noise | −0.47 | proven |
+  | **unexplained residual** | **≈2 (1.1–3.3)** | — |
+
+  **Pure statistics/reference mismatch = 2.2–2.8 dB (41–52%). Measured analog loss = 0.38–0.46 dB
+  (~8%).** So the honest open question is *"why is there still ~2 dB"*, not *"where did 5.3 dB go"*.
+  The only large remaining candidate is **crest-referenced S:N synthesis in the bench** (if its S
+  detector is quasi-peak rather than average-power, a 14 dB-crest signal is penalised) — UNMEASURED.
+  Weak supporting datum: the structurally independent MC-DPSK estimator (8 carriers, different noise
+  reference) reads **1.5–2.2 dB higher** than the 59-carrier OFDM meter on the same runs, in the
+  direction crest-referencing predicts, but far short of the crest difference and confounded by
+  MC-DPSK's own ~2 dB fade-averaging penalty.
+- **Per-run scatter:** rig power-means span **14.96–19.13 dB** across 8 nominally identical MPG@20
+  transfers. **Every single-number claim on this bench needs ±1.5 dB.**
+- **Decisive next experiment:** three signals at the SAME in-band RMS (0.082) but different crest —
+  sine (3 dB), multitone (~10 dB), real OFDM burst (14.05 dB) — through **WGN at dial 20**. If
+  delivered S/N tracks the crest difference, the bench is peak-referencing and owns the residual; if
+  it is flat within ±0.5 dB, that hypothesis is dead and the residual is ours.
 - **Superseded:** `BUG-IONOS-PI5-CHEAP-DAC`'s 14.8 dB tilt / −17.8 dB distortion figures describe
   a card no longer in the path. See the banner on that entry.

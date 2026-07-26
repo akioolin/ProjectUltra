@@ -1474,3 +1474,49 @@ threshold is documented as platform-broken), the per-event rung loss is proven, 
 aggregate throughput cost is UNMEASURED. Establish it with a proper interleaved A/B once a
 scale-invariant discriminator exists to A/B against — do not budget a gain from it before
 then.
+
+## BUG-LADDER-SNR-DB-MEAN: the rate ladder's SNR ring averages dB where the dial and anchors are mean-power (open, 2026-07-26) — P1
+
+**Defect.** Two SNR rings exist in this codebase and they disagree on domain:
+
+| site | code | domain |
+|---|---|---|
+| `connection.cpp:2500` (**feeds the rate ladder**) | `snr_sum += rx_auth_obs_db_[i]` … `/ snr_n` | **dB-domain mean** |
+| `streaming_decoder.hpp:465-470` (`physicalSnrStats`) | `lin_sum += pow(10, db/10)` … `10*log10(lin_sum/n)` | **linear-power mean** |
+
+The decoder is right and says so in its own comment ("mean is linear-domain (fade-averaged)"). The
+ladder input is the one that averages dB. Both the IONOS dial and the anchor table are **mean-power**
+definitions (`tests/test_ofdm_snr_calibration.cpp` gates on the linear/power mean), so by Jensen's
+inequality the ladder is fed a systematically LOW number on any fading channel — the more fade
+variance, the larger the error.
+
+**Measured cost: 1.74 dB** on the 2026-07-26 MPG@20 OFF arm (per-frame dB-mean 13.89 vs
+power-mean 16.42 over 1023 readings; the ring itself read 14.68). On the 2026-07-24 epoch the same
+comparison gives **2.76 dB** (13 vs 1309 readings). This is the single largest identified term in the
+~5.4 dB sim-vs-rig SNR discrepancy — see `docs/ANALOG_CHAIN_VERIFIED_2026_07_26.md` §4 for the full
+decomposition, in which measured ANALOG loss is only 0.36 dB.
+
+**⚠ THE FIX IS COUPLED — do not land it alone.** Making the ring linear RAISES the ladder's input by
+~1.7-2.8 dB. The ladder is already measured to OVER-COMMIT by ~2 rungs on this bench (2026-07-26
+offset A/B: dropping `kOfdmLegacyAnchorScaleOffsetDb` from 8.70 to 3.1 cut rung churn 65% and craters
+60%). So a lone domain fix makes over-commit WORSE. It must land together with a ~2.5 dB reduction of
+`kOfdmLegacyAnchorScaleOffsetDb` (`connection_policy.hpp:43`), or preferably as part of the §3 anchor
+re-measure that deletes that constant outright.
+
+**This also reinterprets last night's result.** The (3.1, 8.70) bracket was described as bounding
+"~5.6 dB of implementation loss". Part of that is now identified as a DOMAIN ERROR in our own
+averaging, not implementation loss at all.
+
+**Secondary defects found alongside it (same investigation):**
+- **Stale ring re-feed:** 3 of 32 verdicts carry an `inst=` identical to the previous verdict
+  (`OFF_6_mac.log` ends with `inst=29.4` four times while `snr_avg` walks 25.1 → 28.0). The ring is
+  re-fed without a fresh observation. Fix: gate on a fresh-observation sequence number — the
+  machinery already exists for the level verdict at `modem_protocol_binding.hpp:118-121`.
+- **Calibration grades the wrong branch:** the fading gate covers **QPSK R1/4 only**
+  (`test_ofdm_snr_calibration.cpp:154-155`), while the rig runs QPSK R1/2·R2/3·R3/4, 8PSK R2/3 and
+  16QAM R1/2·R2/3 — different pilot spacing. Worth 0.5-1.1 dB of the discrepancy purely as a
+  reference mismatch. Add a rung sweep.
+- **Doc bug (not code):** `rx_filter_` is constructed at `modem_engine.cpp:325` and reset at `:332`
+  and referenced NOWHERE else — only `tx_filter_` is applied (`:763`). CLAUDE.md's "in-band RMS
+  0.3048 (after 101-tap 50-2950 Hz RX FIR)" therefore describes a **noise-referencing convention**,
+  not a filter in the RX signal path. Corrected in CLAUDE.md.

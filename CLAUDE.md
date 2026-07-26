@@ -137,7 +137,9 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   three consumers ride `kOfdmLegacyAnchorScaleOffsetDb` until re-measured
   (docs/SNR_CALIBRATION_HANDOFF_2026_07_08.md §3).
 - AWGN calibration: `SimulatedChannel` AWGN sized from `encodePing()` in-band RMS
-  `0.3048` (after 101-tap 50-2950 Hz RX FIR). Watterson CFO uses an analytic-signal
+  `0.3048` — a NOISE-REFERENCING CONVENTION defined over the 50-2950 Hz band, **not** a filter
+  in the RX signal path: `rx_filter_` is constructed (`modem_engine.cpp:325`) and reset
+  (`:332`) but never applied anywhere; only `tx_filter_` is (`:763`). Verified 2026-07-26. Watterson CFO uses an analytic-signal
   (Hilbert) shifter.
 - Per-symbol pilot tracking is active in `channel_equalizer.cpp` (LS pilot H update,
   alpha-smoothed, residual CFO + timing recovery; pilots ~every 10 carriers).
