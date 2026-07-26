@@ -2802,19 +2802,73 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
         // EVM saturates at the demod ceiling), then re-snap to the enabled ladder. A
         // pure output clamp, orthogonal to the crater/penalty machinery.
         if (evmDemoteEnabled() && burst_obs_evm_snr_db_ >= 0.0f) {
+            // Feed the ring first so the confident form always sees THIS group.
+            rx_auth_evm_ring_[rx_auth_evm_next_] = burst_obs_evm_snr_db_;
+            rx_auth_evm_next_ = (rx_auth_evm_next_ + 1) % kRxAuthObsRing;
+            if (rx_auth_evm_count_ < kRxAuthObsRing) ++rx_auth_evm_count_;
+
+            // CONFIDENCE-GATED EVM DEMOTE (ULTRA_EVM_DEMOTE_CONFIDENT, default OFF).
+            //
+            // The raw clamp compares ONE per-group EVM sample against a fixed rung floor.
+            // Measured on the rig 2026-07-26: that sample has sd 3.1-4.4 dB, while adjacent
+            // rung EVM floors are only 1.2-3.1 dB apart. The noise EXCEEDS the rung
+            // spacing, so a single sample cannot resolve which rung is supported — and a
+            // noisy fast signal hard-clamping the output of the ladder's SMOOTHED snr_avg
+            // (ring of 6) saws: rung commands 15 vs 7 per run, EVM firings scattering
+            // across idx 5->4, 3->2, 7->5, 7->3, 3->1 in ONE transfer. This is an
+            // SNR-RESOLUTION error, not an estimator defect (the estimator is calibrated).
+            //
+            // Fix: demote only when the rung is UNAMBIGUOUSLY unsupported — when even the
+            // OPTIMISTIC end of the confidence interval on usable SNR still misses the
+            // floor. With mean m and standard error se = s/sqrt(N):
+            //     demote iff  m + z*se  <  floor - margin
+            // z = 1.645 (one-sided 95%) is a PROBABILITY constant, not a bench constant, so
+            // the gate stays radio-agnostic. It also self-sharpens: se shrinks as evidence
+            // accumulates, so a genuinely unsupported rung is still caught, just later and
+            // correctly. The TARGET stays the point estimate (mean), never the pessimistic
+            // bound, so a confirmed demote cannot overshoot downward on noise.
+            // Deliberately NOT a function-local static: a latched knob cannot be A/B'd
+            // within one process, which made the confidence gate untestable (the first
+            // arm's value stuck for every later arm). This runs once per burst group
+            // (~10 s), so a getenv here is free.
+            const char* kEvmConfidentEnv = std::getenv("ULTRA_EVM_DEMOTE_CONFIDENT");
+            const bool kEvmConfident =
+                kEvmConfidentEnv && kEvmConfidentEnv[0] == '1' && kEvmConfidentEnv[1] == '\0';
+            float evm_for_clamp = burst_obs_evm_snr_db_;
+            float evm_upper = burst_obs_evm_snr_db_;  // raw form: the sample IS the bound
+            if (kEvmConfident) {
+                const size_t n = rx_auth_evm_count_;
+                float sum = 0.0f;
+                for (size_t i = 0; i < n; ++i) sum += rx_auth_evm_ring_[i];
+                const float mean = sum / static_cast<float>(n);
+                float var = 0.0f;
+                for (size_t i = 0; i < n; ++i) {
+                    const float d = rx_auth_evm_ring_[i] - mean;
+                    var += d * d;
+                }
+                // Sample sd (n-1); with n<2 there is no spread estimate yet, so fall back
+                // to the measured per-group sd so a single sample can never fire the clamp.
+                constexpr float kMeasuredPerGroupSdDb = 3.1f;
+                const float sd = (n >= 2) ? std::sqrt(var / static_cast<float>(n - 1))
+                                          : kMeasuredPerGroupSdDb;
+                constexpr float kOneSidedZ95 = 1.645f;
+                const float se = sd / std::sqrt(static_cast<float>(n));
+                evm_for_clamp = mean;
+                evm_upper = mean + kOneSidedZ95 * se;
+            }
             const float cur_floor = evmUsableFloorDbForRung(cur);
             if (cur_floor < kRungDisabledDb &&
-                burst_obs_evm_snr_db_ < cur_floor - kEvmDemoteHoldMarginDb) {
+                evm_upper < cur_floor - kEvmDemoteHoldMarginDb) {
                 uint8_t evm_cap =
-                    highestRungSupportedByEvm(burst_obs_evm_snr_db_, kEvmDemoteHoldMarginDb);
+                    highestRungSupportedByEvm(evm_for_clamp, kEvmDemoteHoldMarginDb);
                 const uint8_t snapped_evm = snapRungIndexDownToEnabled(evm_cap);
                 evm_cap = (snapped_evm != kRungIdxNone) ? snapped_evm : kRungIdxQpskR14;
                 if (evm_cap < cmd) {
                     LOG_MODEM(INFO,
                               "Connection: RX-AUTHORITY EVM-DEMOTE idx %u -> %u "
-                              "(usable EVM=%.1f < rung floor=%.1f-%.1f margin)",
-                              cmd, evm_cap, burst_obs_evm_snr_db_, cur_floor,
-                              kEvmDemoteHoldMarginDb);
+                              "(usable EVM=%.1f upper=%.1f n=%zu < rung floor=%.1f-%.1f margin)",
+                              cmd, evm_cap, evm_for_clamp, evm_upper, rx_auth_evm_count_,
+                              cur_floor, kEvmDemoteHoldMarginDb);
                     cmd = evm_cap;
                 }
             }

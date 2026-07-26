@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace ultra;
 using namespace ultra::protocol;
@@ -609,6 +610,52 @@ static bool test_evm_demote_inert_when_supported() {
     return true;
 }
 
+// CONFIDENCE-GATED EVM DEMOTE (ULTRA_EVM_DEMOTE_CONFIDENT). The per-group EVM estimate
+// has measured sd 3.1-4.4 dB while adjacent rung floors are 1.2-3.1 dB apart, so ONE
+// sample cannot resolve a rung. Property under test: a single low sample must NOT fire
+// the clamp (that is the sawing the raw form produced -- 15 vs 7 rung commands/run),
+// while SUSTAINED low evidence still must (the clamp's whole purpose survives).
+static bool test_evm_demote_confidence_gate() {
+    TEST("confident EVM demote: a MARGINAL sample holds, sustained evidence still demotes");
+    const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
+    // 16QAM R2/3 floor is 16.7 dB, hold margin 1.0 => the clamp fires below 15.7.
+    // A MARGINAL reading is one inside the estimator's own noise band of that line:
+    // 13.0 dB is 2.7 dB low, well within the measured 3.1 dB per-group sd, so a single
+    // sample cannot distinguish "rung unsupported" from "noise-low sample".
+    auto run = [&](const char* confident, const std::vector<float>& samples) {
+        setenv("ULTRA_EVM_DEMOTE", "1", 1);
+        if (confident) setenv("ULTRA_EVM_DEMOTE_CONFIDENT", confident, 1);
+        else unsetenv("ULTRA_EVM_DEMOTE_CONFIDENT");
+        Connection c;
+        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+        for (float db : samples) {
+            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+            c.setBurstEvmObservation(db);
+            TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
+        }
+        return TA::rxCmd(c);
+    };
+    // RAW form (knob off): one marginal sample clamps immediately -- the documented saw.
+    if (!(run(nullptr, {13.0f}) < cur))
+        FAIL("raw EVM demote should clamp on a single marginal sample (baseline behaviour)");
+    // CONFIDENT form: one marginal sample carries no spread estimate; the optimistic
+    // bound (13.0 + 1.645*3.1 = 18.1) still clears 15.7, so it must HOLD.
+    if (run("1", {13.0f}) < cur)
+        FAIL("confident gate must NOT demote on a single marginal sample");
+    // SUSTAINED marginal evidence with realistic spread: mean ~13, se shrinks with n, the
+    // optimistic bound falls under the floor, so the clamp must still fire.
+    if (!(run("1", {11.5f, 13.0f, 14.5f, 12.0f, 14.0f, 13.0f}) < cur))
+        FAIL("confident gate must still demote once sustained evidence is unambiguous");
+    // An UNAMBIGUOUS single sample (8.0 dB = 8.7 below the floor, far outside the noise
+    // band) SHOULD still fire even at n=1 -- the gate must not be a blanket delay.
+    if (!(run("1", {8.0f}) < cur))
+        FAIL("confident gate must fire at n=1 when the sample is unambiguous");
+    unsetenv("ULTRA_EVM_DEMOTE_CONFIDENT");
+    unsetenv("ULTRA_EVM_DEMOTE");
+    PASS();
+    return true;
+}
+
 // ── GOODPUT-GRADED CRATER (ULTRA_CRATER_GOODPUT_GRADE) ─────────────────────────
 // The break-even delivered fraction is the spectral-efficiency RATIO of adjacent
 // enabled rungs, derived from constellation/code geometry alone. Verifies the
@@ -785,6 +832,7 @@ int main() {
     ok &= test_evm_floor_table_and_mapping();
     ok &= test_evm_demote_strips_overcommit();
     ok &= test_evm_demote_inert_when_supported();
+    ok &= test_evm_demote_confidence_gate();
     ok &= test_goodput_break_even_is_rate_ratio();
     ok &= test_crater_grading_is_default_on();
     ok &= test_group_size_gate_streak();

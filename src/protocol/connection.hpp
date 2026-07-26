@@ -1090,6 +1090,18 @@ private:
     uint32_t rx_auth_obs_age_ms_[kRxAuthObsRing] = {0};
     size_t rx_auth_obs_count_ = 0;
     size_t rx_auth_obs_next_ = 0;
+    // RECEIVER: ring of recent per-group EVM usable-SNR samples, for the CONFIDENCE-GATED
+    // form of the clamp (ULTRA_EVM_DEMOTE_CONFIDENT). The per-group estimate is NOISY —
+    // measured sd 3.1-4.4 dB on the rig — while adjacent rung EVM floors are only
+    // 1.2-3.1 dB apart, so a single sample cannot resolve which rung is supported
+    // (sigma/sqrt(N) <= gap/2 needs N ~= 27 at the tightest gap). Clamping on one sample
+    // therefore scatters the target across 2-3 rungs from noise alone, which is exactly
+    // what the 2026-07-26 A/B measured (rung commands 15 vs 7 per run against the
+    // ladder's SMOOTHED snr_avg). Same depth as kRxAuthObsRing so both inputs to the
+    // verdict are averaged over comparable evidence.
+    float rx_auth_evm_ring_[kRxAuthObsRing] = {0};
+    size_t rx_auth_evm_count_ = 0;
+    size_t rx_auth_evm_next_ = 0;
     // RECEIVER: per-rung crater-margin memory — the anchor map is a PRIOR; the
     // observed crater rate at a rung is the POSTERIOR (second-probe finding: at
     // avg 22 dB the map re-commanded 16QAM R2/3 after every crater — anchor 20

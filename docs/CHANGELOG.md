@@ -10,6 +10,79 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — fix(rate): EVM demote is an SNR-RESOLUTION error; add a confidence gate (ULTRA_EVM_DEMOTE_CONFIDENT, default-off)
+
+**The raw clamp measured HARMFUL, and the reason is arithmetic, not a bad estimator.**
+`ULTRA_EVM_DEMOTE` compared ONE per-group decision-directed EVM sample against a fixed rung
+floor. Rig A/B (2 interleaved pairs, knob on the MAC receiver; EVM-DEMOTE confirmed firing
+7x in the ON run so this is not a null control):
+
+| | ON | OFF |
+|---|---|---|
+| rung commands / run | **15** | 7 |
+| goodput | 1.52 / 1.29 kbps | 1.52 / (timeout) |
+
+The clamp **doubled** the churn it was meant to correct, scattering across `idx 5->4`,
+`3->2`, `7->5`, `7->3`, `3->1`, `5->3`, `3->2` in ONE transfer.
+
+**Root cause — the noise exceeds the rung spacing.** Measured per-group EVM sd on the rig:
+**3.1 / 3.4 / 4.4 dB** (n = 155-321 per run). Adjacent rung EVM-floor gaps:
+
+| step | gap |
+|---|---|
+| QPSK R2/3 -> R3/4 | 3.1 dB |
+| QPSK R3/4 -> 8PSK R2/3 | **1.2 dB** |
+| 8PSK R2/3 -> 16QAM R1/2 | **1.2 dB** |
+| 16QAM R1/2 -> R2/3 | 1.8 dB |
+
+Resolving the tightest 1.2 dB boundary at 1 sigma needs `sigma/sqrt(N) <= gap/2`, i.e.
+**N >= 27 samples** — most of a transfer. A single sample therefore cannot resolve WHICH rung
+is supported; it scatters the clamp target across 2-3 rungs from noise alone. Worse, the
+clamp is a NOISY FAST signal hard-overriding the output of the ladder's SMOOTHED `snr_avg`
+(ring of 6) — an impedance mismatch that saws by construction. `burst_obs_evm_snr_db_` was a
+raw per-group assignment with no ring, no EMA, no hysteresis, while every other verdict input
+is averaged.
+
+This is NOT an estimator defect (the EVM estimator is calibrated and cannot inflate); it is
+using a sigma≈3 dB instrument to read a 1.2 dB scale.
+
+**The fix — demote only when the rung is UNAMBIGUOUSLY unsupported.** With ring mean `m`,
+sample sd `s` and standard error `se = s/sqrt(N)`:
+
+    demote iff  m + z*se  <  floor - margin        (z = 1.645, one-sided 95%)
+
+`z` is a PROBABILITY constant, not a bench constant, so the gate stays radio-agnostic — the
+same discipline as the `-ln(0.05)` / `ln(9)` constants the project already accepts. Three
+properties fall out for free:
+- a marginal single sample HOLDS (its optimistic bound still clears the floor);
+- the gate SELF-SHARPENS — `se` shrinks as evidence accumulates, so a genuinely unsupported
+  rung is still caught, just later and correctly;
+- it is NOT a blanket delay: an UNAMBIGUOUS single sample (e.g. 8.7 dB below the floor, far
+  outside the noise band) still fires at n=1.
+The demote TARGET stays the point estimate `m`, never the pessimistic bound, so a confirmed
+demote cannot overshoot downward on noise.
+
+**Also fixed: a testability defect of mine.** The knob was first written as a function-local
+`static const`, which latches env on first call — so it could not be A/B'd within one process
+and every later test arm silently saw the first arm's value. That produced a confusing test
+failure until I traced it. It now reads `getenv` per verdict (once per burst group, ~10 s —
+free) and is honestly testable. Worth remembering for any future knob that a test needs to
+toggle.
+
+**Test verification.**
+- NEW `test_evm_demote_confidence_gate`: raw form clamps on a single marginal sample
+  (baseline); confident form HOLDS on that same sample, still DEMOTES on 6 samples of
+  realistic spread, and still fires at n=1 when unambiguous. **Fail-before proven** —
+  dropping the confidence margin (`evm_upper = mean`) fails the marginal-hold assertion.
+- `ctest --test-dir build --output-on-failure -j4` → **88/88**.
+
+**Both knobs stay default-OFF.** `ULTRA_EVM_DEMOTE` alone is now known-harmful and should
+never be enabled without `ULTRA_EVM_DEMOTE_CONFIDENT=1`. The confident form's rig A/B is
+pending. NOTE this supersedes the memory note recording "+21% on 3 earlier pairs" for the raw
+clamp — that measurement did not survive a churn-aware re-test.
+
+---
+
 ## 2026-07-26 — measured HARMFUL: ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH stays default-off PERMANENTLY
 
 The knob (4e876e8) preserved the #69 anchor-skip clean streak across a descriptor
