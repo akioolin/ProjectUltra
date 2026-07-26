@@ -10,6 +10,60 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — MEASURED: the anchor offset is the right control point, and 8.70 vs 3.1 BRACKETS the hardware-honest value
+
+The over-commit hypothesis is **confirmed at the mechanism level**, and the correction is
+**bracketed rather than solved**. 8 interleaved runs, receiver-side, `ULTRA_OFDM_ANCHOR_OFFSET_DB`
+3.1 (= 8.70 − the measured 5.6 dB residual) vs the 8.70 default:
+
+| | ON (3.1) | OFF (8.70) |
+|---|---|---|
+| rung commands / run | **2.8** | 8.0 (**−65%**) |
+| craters / run | **0.50** | 1.25 (**−60%**) |
+| completed transfers | **4/4** | 3/4 |
+| mean `snr_avg` | 15.7 | 23.4 |
+| mean RAW ladder pick | 1.9 | 6.2 |
+| mean COMMANDED rung | 2.3 | 5.3 |
+| goodput, completed runs only | 1440 bps | **1520 bps** (−5.3%) |
+| paired delta | **+18.1% mean / +18.5% median** (inflated by one OFF timeout) | |
+
+**What this proves.** The churn and craters this campaign has been chasing all night are
+LADDER OVER-COMMIT, not a defect of the crater predicate, the anchor skip, or the EVM clamp.
+Correct the ladder's INPUT and they largely vanish: churn −65%, craters −60%, 4/4 completion.
+The cleanest single indicator is that in the ON arm `raw ≈ cmd` (1.9 vs 2.3 — the command sits
+at or ABOVE the raw pick, i.e. climbing), so NO clamp fires at all; in the OFF arm raw 6.2 →
+cmd 5.3, meaning the crater/penalty machinery is continuously hauling the ladder back down
+from a rung it cannot hold. That is the whole crater/churn cycle in one line.
+
+**What this does NOT prove.** 3.1 dB OVER-corrects. The link becomes very reliable but parks
+~3 rungs too low (commanded 2.3 vs 5.3), and completed-run goodput slips 5.3%. So the residual
+is NOT purely recoverable over-commit — part of the 5.6 dB is the implementation loss the
+two-SNR model says SHOULD separate channel from usable SNR, and subtracting all of it makes
+the ladder pay for margin it does not need.
+
+**Therefore: default UNCHANGED at 8.70, and the true value is bracketed in (3.1, 8.70).**
+Finding it by A/B sweep on one channel would be fitting a BENCH CONSTANT — exactly what the
+ADAPTIVITY rule forbids, and it would not transfer to another radio. The principled resolution
+is the **§3 anchor re-measure** (docs/SNR_CALIBRATION_HANDOFF_2026_07_08.md): measure the
+per-rung floors on THIS hardware, in the usable domain, and delete
+`kOfdmLegacyAnchorScaleOffsetDb` entirely. This A/B's contribution is to show that the
+re-measure is worth doing and roughly how much is at stake (~3 rungs of commanded rate, and
+the elimination of most churn/craters).
+
+**Relationship to the rest of the night.** The goodput-graded crater predicate (shipped
+default-ON today, 8/8 vs 5/8 completion, +8.7%) treats a SYMPTOM of this over-commit — it stops
+partial groups being misread as rung failure. It remains correct and worth having on its own
+terms (7/8 delivered is genuinely not rung-failure evidence), but this measurement identifies
+the underlying cause. The EVM demote tried to correct the same over-commit on the OUTPUT and
+failed as a second driver; this shows the same correction applied to the INPUT behaves cleanly,
+which is the architectural difference the RX-authority charter is about.
+
+**Scoring notes.** The +18.1% paired figure is NOT the effect size: it is driven by OFF_7
+timing out (charged its full observed window = 835 bps per the censoring rule). Among completed
+runs the ON arm is 5.3% SLOWER. Reported both ways deliberately.
+
+---
+
 ## 2026-07-26 — the EVM demote is a DOUBLE-DRIVER problem, not a tuning problem: both knobs default-off, blocked on the anchor re-measure
 
 The confidence gate (d4c4394) fixed the wrong half. It correctly stopped the clamp firing on
