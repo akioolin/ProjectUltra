@@ -208,6 +208,8 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-reply-message <text>   Responder: send this ONCE after a message is RECEIVED (bidi/turn test)\n");
     std::printf("  --auto-cancel-file-after <s>  Cancel active file transfer N seconds after first observed\n");
     std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
+    std::printf("  --disconnect-on-file-done     Disconnect as soon as the file transfer finishes\n");
+    std::printf("                                (instead of idling until --auto-disconnect-after)\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
     std::printf("  --half-duplex                 Bidirectional role-swap: both stations send (B2F).\n");
     std::printf("                                Pass --auto-send-file on BOTH for an A->B then B->A exchange.\n");
@@ -632,6 +634,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.auto_cancel_file_after_sec = std::atoi(argv[++i]);
+        } else if (arg == "--disconnect-on-file-done") {
+            opts.disconnect_on_file_done = true;
         } else if (arg == "--auto-disconnect-after") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-disconnect-after\n");

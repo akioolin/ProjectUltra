@@ -1261,6 +1261,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
                                              const std::string& error) {
+        // --disconnect-on-file-done: the transfer is over, so end the session now rather
+        // than idling out the fixed --auto-disconnect-after timer (which a scripted run
+        // must size for the WORST case). The existing DISCONNECTED handler then does the
+        // usual grace-quit on both ends, so no separate exit path is needed.
+        if (options_.disconnect_on_file_done && scenario_active_) {
+            guiLog("[scenario] file transfer finished; disconnecting now "
+                   "(--disconnect-on-file-done)");
+            protocol_.disconnect();
+        }
         last_progress_milestone_ = 0;  // Reset for next transfer
         rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
@@ -1311,6 +1320,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
+        if (options_.disconnect_on_file_done && scenario_active_) {
+            guiLog("[scenario] file send finished; disconnecting now "
+                   "(--disconnect-on-file-done)");
+            protocol_.disconnect();
+        }
         last_progress_milestone_ = 0;  // Reset for next transfer
         rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;

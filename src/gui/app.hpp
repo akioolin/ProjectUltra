@@ -77,6 +77,13 @@ public:
                                               // (tests bidirectional reply + half-duplex turn reversal)
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
+        // --disconnect-on-file-done: end the session as soon as the file transfer finishes,
+        // instead of idling until the fixed auto_disconnect_after_sec timer. A scripted run
+        // sized that timer for the WORST-case transfer, so a fast transfer sat connected doing
+        // nothing for the remainder (measured: file complete at t~250 s with the timer at 360 =
+        // 110 s of dead air per run). The existing DISCONNECTED grace-quit then fires normally
+        // on BOTH ends, so this needs no separate exit path.
+        bool disconnect_on_file_done = false;
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
         bool half_duplex_interactive = false; // bidirectional role-swap (both stations send)
     };
