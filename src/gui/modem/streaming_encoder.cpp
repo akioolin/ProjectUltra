@@ -647,14 +647,25 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_CLEAN_STREAK");
             return (e && *e) ? static_cast<uint32_t>(std::max(0, std::atoi(e))) : 4u;
         }();
-        // RECOOL on delivery evidence only (ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH,
-        // default OFF ⇒ legacy behaviour). A resend / cold start / §16.4 escalation is
-        // genuine negative delivery evidence and must recool. A descriptor mode/rate
-        // SWITCH is a configuration event: it needs this one full anchor for the
-        // geometry change, but it says nothing about whether the channel still syncs
-        // without a chirp — and measured on the rig (2026-07-26) rate changes are the
-        // dominant streak-resetter, which is why the skip arms on only ~22-25% of
-        // bursts when the reactive gate would otherwise allow ~50% at K=2.
+        // THE RECOOL DOES DOUBLE DUTY — do not "fix" it again (2026-07-26, measured
+        // HARMFUL; CHANGELOG). ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH stays default OFF
+        // PERMANENTLY.
+        //
+        // The obvious reading is that this streak is DELIVERY evidence, so a resend must
+        // recool it while a descriptor mode/rate SWITCH — a mere configuration event —
+        // should not. That reading is true as far as it goes, and acting on it made
+        // everything worse: rig A/B (knob on the sender) measured chirp-skip rate FALLING
+        // 28.9% -> 7.7%, mean anchor prefix RISING 1.221 -> 1.733 s, craters 1.0 -> 2.0
+        // and resends 0.0 -> 1.0 per run.
+        //
+        // Because the recool is ALSO a POST-SWITCH ACQUISITION GUARD. Preserving the
+        // streak lets the skip fire on the very NEXT burst after a geometry change
+        // (measured distance-to-first-skip 1 burst, vs 4-5 with the recool) — the riskiest
+        // possible moment to omit a chirp, since the receiver must re-acquire on a new
+        // constellation/rate. Those groups crater, the crater forces a resend, and the
+        // resend recools the streak anyway: strictly more craters AND less skipping.
+        //
+        // Any future attempt at this lever MUST add an explicit post-switch skip holdoff.
         static const bool kKeepStreakOnSwitch = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH");
             return e && e[0] == '1' && e[1] == '\0';

@@ -10,6 +10,61 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — measured HARMFUL: ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH stays default-off PERMANENTLY
+
+The knob (4e876e8) preserved the #69 anchor-skip clean streak across a descriptor
+mode/rate switch, on the argument that the streak is DELIVERY evidence and a config
+switch says nothing about whether the channel still syncs without a chirp. **That
+argument is true in isolation and still wrong**, and the rig said so on every metric.
+
+**Rig A/B (interleaved, knob on the PI5 sender — this is a sender-side knob; env
+plumbing verified through `/proc/PID/environ` before trusting the batch). Stopped after
+2 pairs on the pre-committed falsifier:**
+
+| metric | ON | OFF | |
+|---|---|---|---|
+| n=5 chirp SKIP rate | **7.7%** | 28.9% | mechanism went BACKWARDS |
+| mean anchor prefix | **1.733 s** | 1.221 s | worse, not the predicted 0.810 s |
+| craters / run | **2.0** | 1.0 | **falsifier fired** |
+| resends / run | **1.0** | 0.0 | **falsifier fired** |
+| max clean streak | 8 | 14 | lower despite "preserving" it |
+
+**ROOT CAUSE — the recool was doing DOUBLE DUTY, and only one duty was understood.**
+Distance in bursts from a DOUBLE-anchor burst (an extra chirp = a geometry change) to the
+next SKIP:
+
+```
+OFF: 5, 5, 4      <- the streak had to rebuild from 0 (kReactiveCleanStreak = 4)
+ON:  6, 1         <- ON_4 = FFFFFDFDDDS : skipped ONE burst after a geometry change
+```
+
+Preserving the streak lets the skip fire on the very next burst after a rate/constellation
+change — the single riskiest moment to omit a chirp, because the receiver must re-acquire
+on new geometry. Those groups crater, the crater forces a resend, and the resend recools
+the streak anyway. So the knob produces BOTH more craters AND *less* skipping than leaving
+it alone: a strictly worse outcome, self-inflicted.
+
+So `if (!warm_descriptor) anchor_skip_clean_streak_ = 0;` is correct for a SECOND,
+independent reason that the original comment never states: beyond being delivery evidence,
+it is a **post-switch acquisition guard**. The 4-group recool is what keeps the skip off
+while the receiver settles onto the new geometry.
+
+**Decision: default-off permanently.** The code stays behind the knob (the reason-plumbing
+half — `anchor_reason` None/Resend/ModeSwitch — is a genuine clarity improvement and is
+what made this measurable at all), but the streak-preservation behaviour must not ship. Any
+future attempt at this lever MUST add an explicit post-switch skip holdoff, and that is more
+machinery than the remaining ~6.6% justifies given this result. This also re-confirms the
+2026-06-17 verdict (short anchors gave NO gain: ON 1.157 vs OFF 1.187 kbps) from a different
+angle — the chirp is buying fade/acquisition margin that the reactive gate alone cannot price.
+
+**Honest limits.** 2 interleaved pairs, so the crater/resend deltas are small-sample. What
+makes this conclusive rather than suggestive is that the MECHANISM metric moved backwards
+with a directly observed causal path (skip at distance 1 vs 4-5 from a geometry change), not
+just a noisy goodput reading. Goodput itself was a wash (ON 1.82/1.99 vs OFF 1.57/1.94) —
+which is exactly why goodput was not the primary metric.
+
+---
+
 ## 2026-07-26 — measured: ULTRA_TX_ACK_LEADIN_MS=30 is a WASH on the rig (default UNCHANGED)
 
 **Hypothesis.** The ACK's 150 ms lead-in is pure SILENCE sitting in the half-duplex
