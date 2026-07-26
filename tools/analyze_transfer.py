@@ -53,7 +53,10 @@ SENDER_PATTERNS = {
     'ack_seen':    re.compile(r'ToneBurstAck monitor: detected'),
     'arq_ack':     re.compile(r'SR-ARQ: ACK seq=(?P<seq>\d+) bitmap=(?P<bm>0x[0-9A-Fa-f]+) \(base=(?P<base>\d+), in_flight=(?P<inf>\d+)\)'),
     'sack_conf':   re.compile(r'SR-ARQ: SACK seq=(?P<seq>\d+) confirmed received'),
-    'requeue':     re.compile(r'FileTransfer: Re-queued (?P<n>\d+) pending chunks after ARQ abort \(acked=(?P<acked>\d+), resume_offset=(?P<off>\d+)\)'),
+    # requeued_bytes is the exact span put back on the air; requeued CHUNKS over-counts
+    # the true waste ~3x because most re-queued chunks are genuine holes. Optional so
+    # logs from before the byte-pricing patch still parse.
+    'requeue':     re.compile(r'FileTransfer: Re-queued (?P<n>\d+) pending chunks after ARQ abort \(acked=(?P<acked>\d+), resume_offset=(?P<off>\d+)(?:, requeued_bytes=(?P<bytes>\d+))?\)'),
     'epoch':       re.compile(r'MOVE-EPOCH bumped to (?P<e>\d+)'),
     'obey':        re.compile(r'RX-AUTHORITY obey .*?-> (?P<rung>\S+ \S+)'),
     'commit':      re.compile(r'DESC-SWITCH commit (?P<rung>\S+ \S+)'),
@@ -66,6 +69,8 @@ SENDER_PATTERNS = {
 }
 
 RECEIVER_PATTERNS = {
+    'regrade':     re.compile(r'RX-AUTHORITY crater REGRADED to hold \(idx (?P<idx>\d+) delivered=(?P<deliv>[0-9.]+) >= break-even=(?P<be>[0-9.]+)'),
+
     'group':       re.compile(r'Burst (?:#(?P<ord>\d+) )?\(?group_seq=(?P<g>\d+)\)? delivered as unit: (?P<ok>\d+)/(?P<tot>\d+) logical OK \(all_ok=(?P<all>\d)\) max_iters=(?P<it>\d+) quality=(?P<q>[\d.]+)'),
     'frame':       re.compile(r'Burst logical frame (?P<i>\d+)/(?P<n>\d+): (?P<res>OK|FAIL)'),
     'ack_tx':      re.compile(r'TX ToneBurstAck: group_seq=(?P<g>\d+) type=(?P<ty>\S+) frame_mask=(?P<fm>0x[0-9A-Fa-f]+) samples=(?P<s>\d+)'),
@@ -233,7 +238,49 @@ def main():
               f"  max {delays[-1]:+.2f}   (POSITIVE = receiver waited for TX to stop = correct)")
     print(f"  (bursts checked: {len(windows)}; receiver ACKs: {len(acktx)}; guard {GUARD}s)")
 
-    # ---------- RETRANSMISSIONS ----------
+    # ---------- TURNAROUND DECOMPOSITION ----------
+    # The gap between the sender's last data sample and its next key-down is the single
+    # largest addressable loss (measured 31-36% of cycle). Break it into its parts so the
+    # attack targets the right one instead of the whole blob.
+    print("\n## TURNAROUND DECOMPOSITION  (end-of-TX -> next key-down)")
+    print(f"  {'#':>3} {'txEnd':>8} {'rxDecode':>9} {'ackTX':>7} {'ackSeen':>8} {'nextTX':>7} {'gap':>6}")
+    seg = {'rx_latency': [], 'ack_air': [], 'detect': [], 'rekey': [], 'gap': []}
+    for i, (t0, _) in enumerate(txs):
+        t_end = t0 + keydowns[i]
+        t1 = txs[i + 1][0] if i + 1 < len(txs) else None
+        g = next((t for t, _ in groups if t >= t_end - 2.0), None)
+        atx = next((t for t, _ in acktx if g is not None and t >= g - 0.5), None)
+        sn = next((x for x in seen if atx is not None and x > atx), None)
+        if t1 is None:
+            continue
+        seg['gap'].append(t1 - t_end)
+        if g is not None:
+            seg['rx_latency'].append(g - t_end)          # burst end -> receiver finishes decode
+        if g is not None and atx is not None:
+            seg['ack_air'].append(atx - g)               # decode -> ACK on air
+        if atx is not None and sn is not None:
+            seg['detect'].append(sn - atx)               # ACK on air -> sender detects it
+        if sn is not None:
+            seg['rekey'].append(t1 - sn)                 # sender detects -> next key-down
+        if i < 6:
+            print(f"  {i+1:>3} {t_end:8.2f} "
+                  f"{(g-t_end) if g is not None else float('nan'):9.2f} "
+                  f"{(atx-g) if (g is not None and atx is not None) else float('nan'):7.2f} "
+                  f"{(sn-atx) if (atx is not None and sn is not None) else float('nan'):8.2f} "
+                  f"{(t1-sn) if sn is not None else float('nan'):7.2f} {t1-t_end:6.2f}")
+    def med(v):
+        return sorted(v)[len(v)//2] if v else float('nan')
+    tot = med(seg['gap'])
+    print(f"\n  MEDIAN turnaround budget (total {tot:.2f}s):")
+    for name, label in (('rx_latency', 'burst-end -> RX decode done '),
+                        ('ack_air',    'RX decode -> ACK on air     '),
+                        ('detect',     'ACK on air -> sender detects'),
+                        ('rekey',      'sender detects -> next TX   ')):
+        v = med(seg[name])
+        pct = (100.0 * v / tot) if (tot and tot == tot and v == v) else float('nan')
+        print(f"     {label} {v:6.2f}s  ({pct:5.1f}% of the gap)  n={len(seg[name])}")
+
+
     print("\n## RETRANSMISSIONS — what and why")
     rq = [(t, d) for t, k, d in Sa if k == 'requeue']
     craters = [t for t, k, _ in R if k == 'crater']
@@ -410,6 +457,8 @@ def main():
                 'groups_sent': len(txs), 'groups_decoded': len(groups),
                 'collisions': len(collisions),
                 'requeues': len(rq), 'requeued_chunks': sum(int(x['n']) for _, x in rq),
+                'requeued_bytes': sum(int(x['bytes']) for _, x in rq if x.get('bytes')),
+                'crater_regrades': len([1 for _, k, _ in R if k == 'regrade']),
                 'partial_groups': len(partials), 'full_craters': len(zeros),
                 'mean_cycle_s': (sum(cycles)/len(cycles)) if cycles else None,
                 'duty_pct': (100.0*kd_tot/span) if span > 0 else None,

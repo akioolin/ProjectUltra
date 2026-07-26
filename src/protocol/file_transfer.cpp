@@ -243,6 +243,12 @@ void FileTransferController::requeuePendingChunks() {
     }
 
     const uint32_t pending = chunks_sent_ - chunks_acked_;
+    // Price the rewind in BYTES, not chunks: `pending` over-counts the true waste
+    // by ~3x because most re-queued chunks are genuine holes that had to be re-sent
+    // anyway. requeued_bytes = the exact span this rewind will put back on the air,
+    // which is the only number that can settle whether interior-skip is worth
+    // building. Measurement only — no behaviour change.
+    const uint32_t frontier = tx_offset_;
     if (tx_pending_ledger_.empty() || tx_pending_ledger_.front().metadata) {
         // Empty ledger with pending counts means the count/ledger bookkeeping
         // diverged (identity-blind acks) — restart from scratch. A rewind is
@@ -259,9 +265,11 @@ void FileTransferController::requeuePendingChunks() {
     chunks_sent_ = chunks_acked_;
     skipDeliveredRanges();  // F163 FIX-4: don't re-send peer-confirmed bytes
 
+    const uint32_t requeued_bytes = (frontier > tx_offset_) ? (frontier - tx_offset_) : 0u;
     LOG_MODEM(WARN,
-              "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, resume_offset=%u)",
-              pending, chunks_acked_, tx_offset_);
+              "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, "
+              "resume_offset=%u, requeued_bytes=%u)",
+              pending, chunks_acked_, tx_offset_, requeued_bytes);
     notifyProgress();
 }
 

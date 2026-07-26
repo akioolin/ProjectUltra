@@ -539,6 +539,48 @@ inline uint8_t snapRungIndexDownToEnabled(uint8_t idx) {
     return kRungIdxNone;
 }
 
+// Spectral efficiency of a rung, in information bits per data-carrier symbol:
+// modulation bits x code rate. Pure constellation/code geometry — no bench
+// constant, no channel assumption, defined for every rung in the family.
+inline float rungSpectralEfficiency(uint8_t idx) {
+    const CoherentPick p = coherentRungFromIndex(idx);
+    return static_cast<float>(getBitsPerSymbol(p.mod)) * getCodeRateValue(p.rate);
+}
+
+// GOODPUT BREAK-EVEN DELIVERED FRACTION — the threshold that decides whether a
+// lossy group is EVIDENCE THE RUNG IS TOO HIGH, or just the irreducible fading
+// loss ARQ exists to absorb.
+//
+// Derivation (airtime to deliver one payload frame): on rung r with per-group
+// delivered fraction f, a frame needs ~1/f transmissions and each transmission
+// costs airtime ~1/eta_r, so airtime ~ 1/(f * eta_r). The rung with the larger
+// (f * eta) therefore wins on goodput. Comparing the current rung against the
+// first ENABLED rung below it, and crediting that lower rung the most optimistic
+// f_below = 1 (deliberately conservative: it makes demoting EASIER, never
+// harder), staying is right while
+//
+//     f_cur * eta_cur  >=  1 * eta_below     <=>     f_cur >= eta_below / eta_cur
+//
+// so the break-even IS the spectral-efficiency ratio of adjacent enabled rungs.
+// It is derived from ladder geometry alone, so it is correct for the whole rung
+// family by construction and adapts automatically when anchor-table holes move
+// the demote target (that is why it snaps through snapRungIndexDownToEnabled —
+// the threshold must be measured against the rung we would ACTUALLY land on,
+// not idx-1, which may be a hole; F145).
+//
+// Worked values on the current ladder: 16QAM R2/3 -> 16QAM R1/2 = 0.75 (a 7/8
+// group is a WIN and must hold); QPSK R3/4 -> R2/3 = 0.889; QPSK R2/3 -> R1/2
+// = 0.75; QPSK R1/2 -> R1/4 = 0.50. Returns 0 at the floor (nothing below to
+// demote to, so no delivered fraction can be rung-failure evidence there).
+inline float goodputBreakEvenDeliveredFraction(uint8_t cur) {
+    if (cur <= kRungIdxQpskR14 || cur >= kRungIdxCount) return 0.0f;
+    const uint8_t below = snapRungIndexDownToEnabled(static_cast<uint8_t>(cur - 1));
+    if (below == kRungIdxNone || below >= cur) return 0.0f;
+    const float eta_cur = rungSpectralEfficiency(cur);
+    if (eta_cur <= 0.0f) return 0.0f;
+    return rungSpectralEfficiency(below) / eta_cur;
+}
+
 // ULTRA_RX_RATE_AUTHORITY (2026-07-05, default ON): receiver-commanded absolute
 // rung selection — the receiver maps ITS fresh per-group channel measurements
 // through selectCoherentOFDM and commands the sender's next rung on every group

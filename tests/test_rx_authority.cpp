@@ -605,6 +605,47 @@ static bool test_evm_demote_inert_when_supported() {
     return true;
 }
 
+// ── GOODPUT-GRADED CRATER (ULTRA_CRATER_GOODPUT_GRADE) ─────────────────────────
+// The break-even delivered fraction is the spectral-efficiency RATIO of adjacent
+// enabled rungs, derived from constellation/code geometry alone. Verifies the
+// derivation (not a memorised table), the floor case, and that a true 0/N crater
+// is still evidence at every rung.
+static bool test_goodput_break_even_is_rate_ratio() {
+    TEST("goodput break-even == spectral-efficiency ratio of adjacent enabled rungs");
+    // eta = modulation bits x code rate, computed independently of the helper.
+    auto eta = [](Modulation m, CodeRate r) {
+        return static_cast<float>(getBitsPerSymbol(m)) * getCodeRateValue(r);
+    };
+    if (std::fabs(rungSpectralEfficiency(kRungIdxQam16R23) - eta(Modulation::QAM16, CodeRate::R2_3)) > 1e-4f)
+        FAIL("rungSpectralEfficiency disagrees with bits x rate");
+    // 16QAM R2/3 (eta 8/3) over 16QAM R1/2 (eta 2) = 0.75: a 7/8 group (0.875) is a
+    // WIN and must not read as rung failure; 5/8 (0.625) is a genuine loss.
+    const float be16 = goodputBreakEvenDeliveredFraction(kRungIdxQam16R23);
+    if (std::fabs(be16 - 0.75f) > 1e-3f)
+        FAIL("16QAM R2/3 break-even must be 0.75 (= eta(16QAM R1/2)/eta(16QAM R2/3))");
+    if (!(0.875f >= be16)) FAIL("7/8 delivery must clear the 16QAM R2/3 break-even");
+    if (!(0.625f < be16)) FAIL("5/8 delivery must fall below the 16QAM R2/3 break-even");
+    // QPSK R3/4 over R2/3 = (2*2/3)/(2*3/4) = 0.889 — a stricter line than the dense
+    // rung, exactly as geometry demands (the step down is smaller, so holding needs
+    // a higher delivered fraction to pay).
+    const float beq = goodputBreakEvenDeliveredFraction(kRungIdxQpskR34);
+    if (std::fabs(beq - (eta(Modulation::QPSK, CodeRate::R2_3) /
+                         eta(Modulation::QPSK, CodeRate::R3_4))) > 1e-3f)
+        FAIL("QPSK R3/4 break-even must equal its adjacent-rung rate ratio");
+    if (!(beq > be16)) FAIL("a smaller rung step must demand a HIGHER delivered fraction");
+    // Floor: nothing below QPSK R1/4, so no delivered fraction is demote evidence.
+    if (goodputBreakEvenDeliveredFraction(kRungIdxQpskR14) != 0.0f)
+        FAIL("the floor rung must have no break-even (nothing below to demote to)");
+    // A true crater is evidence at every rung: 0 delivered < every positive break-even.
+    for (uint8_t i = kRungIdxQpskR12; i < kRungIdxCount; ++i) {
+        const float be = goodputBreakEvenDeliveredFraction(i);
+        if (be > 0.0f && !(0.0f < be))
+            FAIL("a 0/N crater must remain rung-failure evidence at every rung");
+    }
+    PASS();
+    return true;
+}
+
 // ── GROUP-SIZE GATE: dense-rung proxy repair (ULTRA_BURST_ESC_STREAK) ───────────
 // The burst airtime ceiling escalates 8600 -> 11500 ms (N=5 -> N=8) only on proven
 // clean delivery. Legacy gate: dense rung (>= QAM8 R2/3) + 2 clean rounds. The EVM
@@ -700,6 +741,7 @@ int main() {
     ok &= test_evm_floor_table_and_mapping();
     ok &= test_evm_demote_strips_overcommit();
     ok &= test_evm_demote_inert_when_supported();
+    ok &= test_goodput_break_even_is_rate_ratio();
     ok &= test_group_size_gate_streak();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;

@@ -6,6 +6,7 @@
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <limits>
 #include <filesystem>
@@ -90,6 +91,30 @@ bool denseFastDemoteEnabled() {
 // penalty machinery: a pure output clamp so the A/B reads its effect cleanly.
 bool evmDemoteEnabled() {
     const char* e = std::getenv("ULTRA_EVM_DEMOTE");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
+// ULTRA_CRATER_GOODPUT_GRADE (2026-07-25, default OFF): grade the crater predicate by
+// DELIVERED FRACTION against the goodput break-even instead of the binary quality byte.
+//
+// The decoder assigns quality EXACTLY 0.0 to any group that is not perfect
+// (streaming_burst_interleave), so `quality <= 0` means "at least one frame of N was
+// lost" — NOT "the rung failed". Measured on the MPG@20 rig (3 transfers, 64 groups):
+// 21 groups fed crater evidence, but only 6 were true 0/N craters; the other 15 (71%)
+// delivered a MEAN of 67% of their frames, including 7/8 (88%) and 4/5 (80%) groups
+// counted identically to total loss. Two such groups in a row ratchet the rung down one
+// step, and since climbing needs clean groups plus cooldowns, the fast-down/slow-up
+// asymmetry walks a healthy link to the floor: run 2 spent t=48..127 s ratcheting
+// idx 4 -> 1 while snr_avg ROSE to 22 dB and the ladder's own pick was idx 8, then
+// delivered 3111/4842 bps once it climbed back. That first quartile ran at 54% of the
+// rest of the transfer = 19% of wall clock.
+//
+// Treating "not perfect" as rung failure also contradicts the project's own physics
+// doctrine: fading loss is irreducible and ARQ is mandatory, so a group whose losses
+// the ARQ resends more cheaply than a whole rung demote is the system WORKING.
+// goodputBreakEvenDeliveredFraction() is the geometry-derived line between the two.
+bool craterGoodputGradeEnabled() {
+    const char* e = std::getenv("ULTRA_CRATER_GOODPUT_GRADE");
     return e && e[0] == '1' && e[1] == '\0';
 }
 
@@ -2401,7 +2426,8 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
 //     says (the map's fading class lags a fresh trough).
 //   - CLEAN group: never command BELOW the current rung (the rung is proven
 //     working THIS group; a stale-low SNR reading must not thrash it downward).
-void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater) {
+void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater,
+                                          float delivered_fraction) {
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
         rx_authority_cmd_ = kRungIdxNone;
@@ -2507,7 +2533,26 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     // requeue-rewind tax every ~28 s). Only CONSECUTIVE craters demote and charge
     // the rung's margin memory (+2 dB, cap 6; posterior beats prior). Every clean
     // group decays all penalties (0.25 dB) — the fade epoch ends, evidence expires.
-    const bool crater = (quality <= 0.0f && !all_ok);
+    bool crater = (quality <= 0.0f && !all_ok);
+    // GOODPUT-GRADED CRATER (ULTRA_CRATER_GOODPUT_GRADE): the binary quality byte
+    // cannot tell 7/8 from 0/8. Re-grade against the geometry-derived break-even —
+    // a lossy group is rung-failure evidence only when this rung's delivered
+    // fraction no longer beats a PERFECT run at the rung below. A true 0/N crater
+    // is always evidence (fraction 0 < any positive break-even), so the cliff case
+    // is unchanged; only the "ARQ is absorbing it cheaply" middle is reclassified.
+    // Requires a real measurement: with no frame count (delivered_fraction < 0) the
+    // predicate falls through to the legacy binary form untouched.
+    if (crater && craterGoodputGradeEnabled() && delivered_fraction >= 0.0f) {
+        const float break_even = goodputBreakEvenDeliveredFraction(cur);
+        if (break_even > 0.0f && delivered_fraction >= break_even) {
+            LOG_MODEM(INFO,
+                      "Connection: RX-AUTHORITY crater REGRADED to hold (idx %u "
+                      "delivered=%.2f >= break-even=%.2f vs rung below) — ARQ "
+                      "absorbs this cheaper than a demote",
+                      cur, delivered_fraction, break_even);
+            crater = false;
+        }
+    }
     if (crater) ++rx_auth_crater_streak_;
     else if (all_ok) rx_auth_crater_streak_ = 0;
     if (all_ok) ++rx_auth_clean_streak_;
@@ -2761,11 +2806,19 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     static_assert(kRungIdxCount <= 24, "rung index would alias the rebase voice");
     rx_authority_cmd_ = cmd;
     if (cmd != cur) {
+        // Print the rung actually COMMANDED, not the raw ladder pick: `mapped` is
+        // the pre-clamp selection and `cmd` is rewritten by the crater/hold/floor/
+        // snap/EVM clamps below it, so the two disagree whenever a clamp fires.
+        // Logging `mapped` here made the printed modulation contradict the printed
+        // index and corrupted offline rung-trajectory analysis. `raw` is kept so a
+        // clamped decision stays diagnosable (raw != idx means a clamp moved it).
+        const CoherentPick commanded = coherentRungFromIndex(cmd);
+        const uint8_t raw_idx = coherentRungIndexFor(mapped.mod, mapped.rate);
         LOG_MODEM(INFO,
-                  "Connection: RX-AUTHORITY verdict %s %s (idx %u -> %u) "
+                  "Connection: RX-AUTHORITY verdict %s %s (idx %u -> %u raw=%u) "
                   "snr_avg=%.1f (inst=%.1f n=%d) fading=%.2f coh=%.2f q=%.2f",
-                  modulationToString(mapped.mod), codeRateToString(mapped.rate),
-                  cur, cmd, snr_avg, burst_obs_snr_db_, snr_n, eff_fading,
+                  modulationToString(commanded.mod), codeRateToString(commanded.rate),
+                  cur, cmd, raw_idx, snr_avg, burst_obs_snr_db_, snr_n, eff_fading,
                   burst_obs_coh_score_, quality);
     } else if (crater_confirmed && ema_supports_cur) {
         // Made-visible: a confirmed crater that would have demoted but the EMA still
@@ -3765,7 +3818,17 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // rung verdict for this group BEFORE its ACK emits — the command rides THIS
         // ACK. Hard no-op while the knob is OFF.
         if (rxRateAuthorityEnabled()) {
-            updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0);
+            // Delivered fraction for the goodput-graded crater predicate: frame_mask
+            // bits are the DELIVERED frames of this group (the full-crater arm below
+            // reads mask==0 as zero delivered), so popcount/group_size is the measured
+            // per-group delivery. Only meaningful with a known group size — pass -1
+            // otherwise so the predicate keeps its legacy binary form.
+            const float delivered_fraction =
+                (group_size > 0)
+                    ? static_cast<float>(std::popcount(frame_mask)) / static_cast<float>(group_size)
+                    : -1.0f;
+            updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0,
+                                     delivered_fraction);
         }
         // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
         // accumulated LOW-level streak — those readings were fade-trough artifacts,

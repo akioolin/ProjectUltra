@@ -10,6 +10,89 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — fix(rate): grade the crater predicate by delivered fraction, not the binary quality byte (ULTRA_CRATER_GOODPUT_GRADE, default-off)
+
+**What was broken.** The RX-authority crater predicate is `quality <= 0 && !all_ok`, but the
+decoder assigns quality **exactly 0.0 to any group that is not perfect**
+(`streaming_burst_interleave.cpp`). So `q=0.00` means "at least one frame of N was lost", NOT
+"the rung failed". Two such groups in a row demote a rung; climbing needs clean groups plus
+cooldowns, so the fast-down/slow-up asymmetry walks a healthy link to the floor.
+
+**Measured (MPG@20 rig, 3 transfers, 64 groups, `tools/analyze_transfer.py`):**
+
+| | count | share |
+|---|---|---|
+| groups feeding crater evidence (`q=0.00`) | 21 | 33% of all groups |
+| of which TRUE 0/N craters | 6 | 29% of those |
+| of which PARTIAL (mislabelled) | **15** | **71%**, mean delivered **67%** |
+
+Groups delivering **7/8 (88%)** and **4/5 (80%)** were counted identically to a 0/5 total loss.
+
+**Consequence — this is the first-quartile deficit.** Per-quartile goodput over the 3 runs:
+
+| | Q1 | Q2 | Q3 | Q4 |
+|---|---|---|---|---|
+| mean bps | **1386** | 2434 | 2826 | 2384 |
+
+Q1 runs at **54%** of the rest = **19% of wall clock**. Run 2 is the clean case: t=48→127 s
+ratcheting idx 4 → 1 *while `snr_avg` ROSE to 22 dB and the ladder's own pick was idx 8*, then
+3111/4842 bps once it climbed back. Time-to-reach-the-supported-rung rank-correlates perfectly
+with Q1 speed across all 3 runs (idx 8 at t=86 s → 2010 bps; idx 7 at t=127 s → 1340; idx 5 at
+t=164 s → 807).
+
+Treating "not perfect" as rung failure also contradicts the project's own physics doctrine:
+fading loss is irreducible and ARQ is mandatory, so a group whose losses ARQ resends more
+cheaply than a whole rung demote is the system **working**.
+
+**The fix — a break-even DERIVED from ladder geometry, not a tuned threshold.** On rung r with
+delivered fraction f, a payload frame needs ~1/f transmissions at ~1/eta_r airtime each, so
+airtime ∝ 1/(f·eta_r) and the larger (f·eta) wins. Against the first ENABLED rung below,
+credited the most optimistic f_below = 1 (deliberately conservative — it makes demoting
+*easier*, never harder):
+
+    f_cur · eta_cur >= 1 · eta_below   <=>   f_cur >= eta_below / eta_cur
+
+The break-even **is the spectral-efficiency ratio of adjacent enabled rungs** — pure
+constellation/code geometry (eta = modulation bits x code rate), correct for the whole rung
+family by construction, with no bench constant. It snaps through `snapRungIndexDownToEnabled`
+so the threshold is measured against the rung we would ACTUALLY land on, not idx-1 which may be
+an anchor-table hole (F145). Ties hold (a switch costs a real re-anchor).
+
+Worked values: 16QAM R2/3 → R1/2 = **0.75** (a 7/8 group is a WIN and must hold); QPSK R3/4 →
+R2/3 = **0.889** (a smaller step demands a higher delivered fraction — as geometry requires);
+QPSK R1/2 → R1/4 = **0.50**. Floor rung returns 0 (nothing below to demote to). A true 0/N
+crater stays evidence at every rung (0 < every positive break-even), so the cliff case is
+unchanged — only the "ARQ is absorbing it cheaply" middle is reclassified.
+
+**Files.** `src/protocol/waveform_selection.hpp` (`rungSpectralEfficiency`,
+`goodputBreakEvenDeliveredFraction`), `src/protocol/connection.cpp`
+(`craterGoodputGradeEnabled`, regrade in `updateRxAuthorityCommand`, delivered fraction from
+`popcount(frame_mask)/group_size` at the call site), `src/protocol/connection.hpp`.
+
+**Also fixed — RX-AUTHORITY verdict log was lying.** It printed `mapped.mod/rate` (the
+**pre-clamp** ladder pick) next to the **post-clamp** index `cmd`, which is rewritten by 13
+clamp sites between them. Label and index therefore disagreed whenever any clamp fired, which
+corrupts offline rung-trajectory analysis (it is what made the trajectories look incoherent
+during this investigation). Now prints the rung actually COMMANDED plus `raw=` so a clamped
+decision stays diagnosable. Diagnostic-only, no behaviour change.
+
+**Also added — requeue waste priced in BYTES.** `requeuePendingChunks` logged chunk counts
+only; chunks over-count true waste ~3x because most re-queued chunks are genuine holes.
+Now emits `requeued_bytes` (the exact span put back on the air). Measurement only.
+
+**Test verification.**
+- `tests/test_rx_authority.cpp::test_goodput_break_even_is_rate_ratio` — verifies the
+  derivation against an independently computed eta (not a memorised table), the floor case, the
+  monotonicity requirement (smaller step ⇒ higher break-even), and that 0/N stays evidence at
+  every rung. **Fail-before proven**: pinning the return to 1.0 (legacy binary semantics) →
+  19/20; with the fix → **20/20**.
+- `ctest --test-dir build --output-on-failure -j4` → **88/88 passed** (idle machine).
+- Rig A/B: pending (interleaved same-epoch, knob on the MAC receiver = rate authority).
+
+**Default OFF** pending rig validation.
+
+---
+
 ## 2026-07-25 — fix(est): correct the mean-removal bias in the selectivity statistic + MPG@20 validation
 
 **MPG@20 (GOOD channel) validation, 19 runs / 706 frames — the false-positive direction:**
