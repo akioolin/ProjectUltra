@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — fix(est): correct the mean-removal bias in the selectivity statistic + MPG@20 validation
+
+**MPG@20 (GOOD channel) validation, 19 runs / 706 frames — the false-positive direction:**
+
+| truth | → Good-ish | → Mod/Poor | → Undet |
+|---|---|---|---|
+| **GOOD (MPG@20)** | 16 | 3 | 0 |
+| **MODERATE (MPM@20)** | **0** | **20** | 0 |
+
+Per-frame: a Good channel read MODERATE **0 / 706 (0.00%)**; a Moderate channel read GOOD
+**2 / 1090 (0.18%)**. The dangerous (over-commit) direction is clean in both batches.
+
+17 of 20 MPG runs pooled to clearly POSITIVE statistics (S_gm +0.03…+0.14, S_mp +0.15…+0.41) —
+exactly what the CCIR 0.5 ms model predicts. (An earlier note in this log claiming MPG "reads ~0,
+not positive" was WRONG: it quoted a per-frame MEDIAN from one run dominated by early flat frames,
+not the pooled mean.) The 3 outlier runs had BOTH lags negative together — the signature of a
+genuinely longer delay, not noise, which moves the two lags independently — and were also the
+three longest/slowest transfers of the batch.
+
+**Bias fix.** A sample autocorrelation on MEAN-REMOVED data is not centred on zero under H0:
+removing the sample mean forces the deviations to sum to zero, inducing a small NEGATIVE
+correlation at every lag, `E[r_L] ≈ −1/(N−1)` (predicted −0.0172 at N=59; the null simulation
+measures −0.0160). This matters because POOLING shrinks the confidence threshold as 1/√M without
+shrinking a systematic bias: on the rig, a Good channel's S_mp settled at ~−0.027 — pure bias —
+and once pooled over ~88 frames the threshold fell to 0.029, so the bias itself read as
+"confidently negative". `meanRemovalBias()` is now subtracted before BOTH the confidence gate and
+the sign test. It is a derived statistical property, not a fitted constant.
+
+Effect (unit test): MPG→GOOD **74.3% → 83.5%**, WGN→FLAT/GOOD 90.0% → 91.5%, MPM/MPP unchanged
+at ~96%, per-frame Good-read-as-worse still **0.00%**. On the replayed rig data it eliminated all
+4 UNDETERMINED runs (12→16 correct on MPG).
+
+Full ctest 88/88 (`UltraTncSimAudio` flakes under concurrent CPU load — 357 s gate vs 57.5 s
+standalone pass; run gates on an idle machine).
+
+---
+
 ## 2026-07-25 — feat(est): wire the first-frame discriminator to live LTS + RIG-VALIDATED on MPM@20
 
 Computes the frequency-selectivity statistic per frame from the live LTS channel estimate and

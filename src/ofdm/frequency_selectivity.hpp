@@ -196,6 +196,22 @@ inline FrequencySelectivity measureFrequencySelectivity(const float* power, size
     return measureFrequencySelectivitySegmented(segs, lens, 1, carrier_spacing_hz);
 }
 
+// MEAN-REMOVAL BIAS. A sample autocorrelation computed on MEAN-REMOVED data is not centred on
+// zero even under H0: subtracting the sample mean forces the deviations to sum to zero, which
+// induces a small NEGATIVE correlation at every lag. The standard result is E[r_L] ~= -1/(N-1).
+// Predicted -0.0172 at N=59; the null simulation in test_frequency_selectivity measures -0.0160.
+//
+// This matters because POOLING shrinks the confidence threshold as 1/sqrt(M) without shrinking a
+// systematic bias. Measured on the rig (MPG@20, a GOOD channel): S_mp settled at ~-0.027 — pure
+// bias — and once pooled over ~88 frames the threshold fell to 0.029, so the bias itself read as
+// "confidently negative" and tripped the POOR branch on 3 of 19 runs. Correcting for the bias is
+// therefore required for pooling to be sound, and it is a DERIVED statistical property, not a
+// fitted constant.
+inline double meanRemovalBias(size_t carriers) {
+    if (carriers < 3) return 0.0;
+    return -1.0 / static_cast<double>(carriers - 1);
+}
+
 // CONFIDENCE from the NULL distribution — no fitted constant.
 // Under H0 (flat channel: AWGN, or a momentary single-path fade) the mean-removed sequence is
 // driven purely by per-carrier estimation noise, i.i.d. across carriers. The lag-L sample
@@ -206,17 +222,22 @@ inline FrequencySelectivity measureFrequencySelectivity(const float* power, size
 inline constexpr float kSelectivityZ = 1.96f;
 
 // `pair_dof` = lag-L pairs summed for THIS lag in ONE frame (FrequencySelectivity::dof_*).
-inline bool selectivityConfidentDof(float s, size_t pair_dof, size_t frames_pooled = 1) {
+// `carriers` is needed to remove the mean-removal bias (see meanRemovalBias) — without that,
+// pooling drives the threshold below the bias and a FLAT channel reads as confidently negative.
+inline bool selectivityConfidentDof(float s, size_t pair_dof, size_t carriers,
+                                    size_t frames_pooled = 1) {
     if (pair_dof == 0 || frames_pooled == 0) return false;
     const double dof = static_cast<double>(pair_dof) * static_cast<double>(frames_pooled);
     if (!(dof > 0.0)) return false;
-    return std::fabs(static_cast<double>(s)) >= kSelectivityZ / std::sqrt(dof);
+    const double dev = static_cast<double>(s) - meanRemovalBias(carriers);
+    return std::fabs(dev) >= kSelectivityZ / std::sqrt(dof);
 }
 
 // Convenience overload for a single contiguous run of `carriers` carriers.
 inline bool selectivityConfident(float s, size_t carriers, int lag, size_t frames_pooled = 1) {
     if (lag <= 0 || carriers <= static_cast<size_t>(lag)) return false;
-    return selectivityConfidentDof(s, carriers - static_cast<size_t>(lag), frames_pooled);
+    return selectivityConfidentDof(s, carriers - static_cast<size_t>(lag), carriers,
+                                   frames_pooled);
 }
 
 enum class SelectivityClass { UNDETERMINED, FLAT_OR_GOOD, GOOD, MODERATE, POOR };
@@ -233,12 +254,17 @@ enum class SelectivityClass { UNDETERMINED, FLAT_OR_GOOD, GOOD, MODERATE, POOR }
 inline SelectivityClass classifySelectivity(const FrequencySelectivity& fs,
                                             size_t frames_pooled = 1) {
     if (!fs.valid) return SelectivityClass::UNDETERMINED;
-    const bool c_mp = selectivityConfidentDof(fs.s_mp, fs.dof_mp, frames_pooled);
-    const bool c_gm = selectivityConfidentDof(fs.s_gm, fs.dof_gm, frames_pooled);
+    const bool c_mp = selectivityConfidentDof(fs.s_mp, fs.dof_mp, fs.carriers, frames_pooled);
+    const bool c_gm = selectivityConfidentDof(fs.s_gm, fs.dof_gm, fs.carriers, frames_pooled);
+    // Sign is taken on the BIAS-CORRECTED deviation for the same reason the gate is: the
+    // no-delay expectation is meanRemovalBias(N), not 0.
+    const double bias = meanRemovalBias(fs.carriers);
+    const double d_mp = static_cast<double>(fs.s_mp) - bias;
+    const double d_gm = static_cast<double>(fs.s_gm) - bias;
     if (!c_mp && !c_gm) return SelectivityClass::FLAT_OR_GOOD;
-    if (c_mp && fs.s_mp < 0.0f) return SelectivityClass::POOR;
-    if (c_gm && fs.s_gm < 0.0f) return SelectivityClass::MODERATE;
-    if (c_gm && fs.s_gm >= 0.0f) return SelectivityClass::GOOD;
+    if (c_mp && d_mp < 0.0) return SelectivityClass::POOR;
+    if (c_gm && d_gm < 0.0) return SelectivityClass::MODERATE;
+    if (c_gm && d_gm >= 0.0) return SelectivityClass::GOOD;
     return SelectivityClass::UNDETERMINED;
 }
 
