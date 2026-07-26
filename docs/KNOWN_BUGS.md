@@ -1436,6 +1436,21 @@ per-frame Good->MODERATE 0/706.
 Moderate-read-as-Good; a passing Good run logged area=-0.461). See
 project_channel_class_discriminator_2026_07_25.
 
-**Cost estimate.** Whenever it fires the ladder loses ~5 rungs. In OFF_3 it held for the
-last 4 of 9 verdicts; in OFF_2, 2 of 5. This is a strong candidate for the largest single
-remaining throughput lever on the rig.
+**Cost NOT yet established — an initial claim here was overstated and is retracted.**
+Whenever it fires the ladder loses ~5 rungs (in OFF_3 it held for the last 4 of 9
+verdicts; in OFF_2, 2 of 5), so the per-event cost is real. But a dose-response test over
+8 interleaved runs does NOT support it being the dominant throughput driver:
+
+| pins (fading=0.85 verdicts) | mean bps | n |
+|---|---|---|
+| <= 1 | 1567 | 5 |
+| >= 2 | 1197 | 3 |
+
+Pearson r(pins, bps) = **-0.40** (n=8, not significant, p ~0.32), and the WORST run of the
+batch (OFF_6, 823 bps) had **zero** pins — which alone refutes "pin count drives
+throughput". The naive <=1 vs >=2 split suggests ~24% but is confounded by exactly that
+run. So: the defect is proven (0.85 is a literal constant, not a measurement, and the
+threshold is documented as platform-broken), the per-event rung loss is proven, and the
+aggregate throughput cost is UNMEASURED. Establish it with a proper interleaved A/B once a
+scale-invariant discriminator exists to A/B against — do not budget a gain from it before
+then.
