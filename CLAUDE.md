@@ -304,6 +304,8 @@ unvalidated on hardware" caveat.
 
 **Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 
+**Priority 2.5 (measured truth — read before theorising):** `docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md` — per-rung FER on ITU Good (= MPG). **Answers "why not 3000 bps": the best rung anywhere in the sweep is 8PSK R2/3 at ~2754 bps @24 dB, ~2450 @20 dB. 3000 is a CHANNEL limit, not a tuning problem.** Also: 8PSK R3/4's demanded fading validation was RUN and FAILED (38.9% FER @24 dB — keep it disabled), and 16QAM R2/3's Good anchor of 20.0 measures **51.4% FER** — that one wrong anchor is the mechanism behind the crater/churn behaviour. Reproduce: `tools/sweep_fading_anchors.sh`.
+
 **Priority 2.5 (hardware truth):** `docs/ANALOG_CHAIN_VERIFIED_2026_07_26.md` — the Pi5→IONOS→Mac
 analog chain MEASURED CLEAN (tilt 0.7 dB, SNDR 30.7 dB = 0.36 dB at dial 20, PAPR 9.7 dB normal).
 **Read this before blaming hardware for an SNR shortfall** — it exists because 5.3 dB was once
