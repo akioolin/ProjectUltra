@@ -302,6 +302,11 @@ unvalidated on hardware" caveat.
 
 **Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 
+**Priority 2.5 (hardware truth):** `docs/ANALOG_CHAIN_VERIFIED_2026_07_26.md` — the Pi5→IONOS→Mac
+analog chain MEASURED CLEAN (tilt 0.7 dB, SNDR 30.7 dB = 0.36 dB at dial 20, PAPR 9.7 dB normal).
+**Read this before blaming hardware for an SNR shortfall** — it exists because 5.3 dB was once
+attributed to hardware by subtraction, wrongly. Re-runnable via `tools/measure_analog_path.py`.
+
 **Priority 3 (reference):** `docs/ADDING_NEW_WAVEFORM.md` · `docs/GIT_WORKFLOW.md` · `docs/PERFORMANCE_HISTORY.md` (floor/calibration archive) · `docs/README.md`
 
 ---
@@ -329,6 +334,7 @@ mkdir build && cd build && cmake .. && make -j4
 | `tools/gui_qso_scenario.sh` | **PRIMARY** full protocol + **faithful fade/throughput gate** (two real GUI stations) | `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21 --out /tmp/X` |
 | `measure_ack_fer` | ACK/FER measurement (real StreamingEncoder/Decoder) | `./build/measure_ack_fer ...` |
 | `tests/regression_matrix.sh` | CTest wrapper | `./tests/regression_matrix.sh --quick` |
+| `tools/measure_analog_path.py` | **Measure the ANALOG path** (band tilt / distortion / SNDR) — settles hardware-vs-software SNR questions with data instead of subtraction | `tools/measure_analog_path.py generate --peak 0.38` then `... analyze --rx cap.f32 --sim-snr-db 40` |
 
 ---
 

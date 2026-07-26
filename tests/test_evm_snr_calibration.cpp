@@ -101,7 +101,7 @@ double ltsDataSectionRms(const Bytes& serialized, Modulation mod, CodeRate rate)
 
 // One trial's EVM SNR reading (NaN if the decoder never produced one).
 float measureEvmSNR(float snr_db, uint32_t seed, const Bytes& payload,
-                    Modulation mod, CodeRate rate) {
+                    Modulation mod, CodeRate rate, bool fading = false) {
     auto frame = v2::makeFixedDataFrame("ALPHA", "BRAVO", 7, payload, rate);
     const Bytes serialized = frame.serialize();
 
@@ -122,12 +122,26 @@ float measureEvmSNR(float snr_db, uint32_t seed, const Bytes& payload,
 
     auto audio = withSilence(samples);
 
-    ultra::ota_channel_core::SimulatedChannel channel;
-    channel.setSeed(seed);
-    channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
-    channel.setTxBurstNormalizationEnabled(false);
-    channel.transmitFromA(audio);
-    audio = channel.receiveForB(audio.size());
+    if (fading) {
+        // ITU-R F.1487 Good = 0.1 Hz Doppler / 0.5 ms delay Watterson — the SAME channel
+        // the IONOS bench calls MPG. Same known-truth noise convention as the AWGN arm, so
+        // the only difference between the two sections is the fading itself: any bias delta
+        // is attributable to fading and nothing else. One seed samples ONE fade state; the
+        // ENSEMBLE across seeds is the fade average (ergodicity). Readings are recorded even
+        // for frames that fail to decode, so there is no survivor bias (unlike the live ring).
+        ultra::ota_channel_core::WattersonChannelModel model(
+            ultra::ota_channel_core::itu_r_f1487::good(snr_db), seed);
+        std::vector<float> faded;
+        model.process(audio, 0, faded);
+        audio = std::move(faded);
+    } else {
+        ultra::ota_channel_core::SimulatedChannel channel;
+        channel.setSeed(seed);
+        channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+        channel.setTxBurstNormalizationEnabled(false);
+        channel.transmitFromA(audio);
+        audio = channel.receiveForB(audio.size());
+    }
 
     StreamingDecoder decoder;
     decoder.setLogPrefix("EVMCAL");
@@ -240,6 +254,64 @@ int main() {
     }
 
     std::cout << "\n";
+    // ── FADING ENSEMBLE (2026-07-26) ──────────────────────────────────────────────
+    // WHY: the whole table above is AWGN-only. The live rig reports EVM "usable" ~10 dB
+    // while the IONOS dial says 20 on MPG (= ITU Good), and that 10 dB gap was being
+    // attributed to hardware/implementation loss. A decision-directed estimator is
+    // EXPECTED to read low on fading (wrong decisions feed back into the error vector, and
+    // the error vector blows up in fades so the average is dominated by the worst moments),
+    // so the gap must be decomposed before any of it is called real loss.
+    // The linear (power) mean over the seed ensemble is the fade average; the dB-mean sits
+    // below it by Jensen. Reported, and gated only loosely, because the point is the NUMBER.
+    std::cout << "\n== FADING (ITU Good = 0.1 Hz / 0.5 ms = IONOS MPG) ==\n";
+    std::cout << "  mod        | dial | lin-mean  bias | dB-mean  bias | n\n";
+    std::vector<std::pair<std::string, double>> fading_bias;
+    for (const auto& fr : std::vector<Row>{
+             {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  10.f, true},
+             {Modulation::QPSK,  CodeRate::R1_4, "QPSK R1/4",  20.f, true},
+             {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2", 20.f, true}}) {
+        double lin = 0.0, dbs = 0.0;
+        int n = 0;
+        for (uint32_t s2 = 0; s2 < 16; ++s2) {
+            const float v = measureEvmSNR(fr.snr, 0x9000u + s2 * 104729u, payload,
+                                          fr.mod, fr.rate, /*fading=*/true);
+            if (std::isfinite(v)) { lin += std::pow(10.0, v / 10.0); dbs += v; ++n; }
+        }
+        const double lin_db = n ? 10.0 * std::log10(lin / n) : std::nan("");
+        const double db_mean = n ? dbs / n : std::nan("");
+        std::cout << "  " << std::left << std::setw(10) << fr.name << std::right
+                  << " | " << std::setw(4) << (int)fr.snr << " | " << std::fixed
+                  << std::setprecision(1) << std::setw(8) << lin_db << " "
+                  << std::showpos << std::setw(5) << (lin_db - fr.snr) << std::noshowpos
+                  << " | " << std::setw(7) << db_mean << " " << std::showpos
+                  << std::setw(5) << (db_mean - fr.snr) << std::noshowpos
+                  << " | " << n << "\n";
+        if (std::isfinite(lin_db))
+            fading_bias.emplace_back(std::string(fr.name) + "@" + std::to_string((int)fr.snr),
+                                     lin_db - fr.snr);
+    }
+    // GATE (2026-07-26): the MEASURED fading bias is -1.8 dB at dial 10 and -5.2..-6.8 dB
+    // at dial 20 (16-seed ensembles). Two properties are pinned:
+    //   (a) NEVER INFLATES on fading either -- the estimator's core safety claim must hold
+    //       on a fading channel, not just AWGN;
+    //   (b) the bias must not DEGRADE past -9 dB, which would mean the estimator has become
+    //       useless on the channel class the rig actually runs.
+    // This CHARACTERISES a known bias rather than validating accuracy: a decision-directed
+    // estimator genuinely reads low on fading. It exists so the bias cannot silently grow,
+    // and so nobody again reads a fading EVM number as if it were the true usable SNR.
+    for (const auto& fb : fading_bias) {
+        if (!(fb.second <= kNoInflateMarginDb)) {
+            ++failed;
+            std::cout << "  FAIL: fading bias " << fb.first << " = " << fb.second
+                      << " dB INFLATES (must stay <= +" << kNoInflateMarginDb << ")\n";
+        }
+        if (!(fb.second >= -9.0)) {
+            ++failed;
+            std::cout << "  FAIL: fading bias " << fb.first << " = " << fb.second
+                      << " dB degraded past the -9 dB floor\n";
+        }
+    }
+
     if (failed == 0) {
         std::cout << "PASS: usable-SNR EVM tracks thermal in range, never inflates, monotonic.\n";
         return 0;

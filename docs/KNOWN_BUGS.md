@@ -799,6 +799,26 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - **Remaining before default-ON (RESOLVED 2026-07-07 by STAGE 1.5 — kept for history):** flipping `ULTRA_ROBUST_IDLE_PING` default-ON REGRESSES the faithful sim gate at good@20 — the near-silent HIGH-SNR PONG's residual pushes the data/train ratio just above 0.5 (data_bearing) with low LLR + a real chirp, so the robust emit fires SPURIOUSLY → PING/PONG churn (11/9) → ~30 s connect → gate overrun. Isolation-proven: same build with `=0` → good@20 PASS (1860 bps); STAGE2 alone is clean. FIX NEEDED: a high-SNR-safe emit gate (e.g. a higher data_bearing floor separating a noise-FLOODED low-SNR PING (ratio 0.68–0.88) from high-SNR PONG residual (~0.5–0.6)). Also: throughput below ~8 dB is a separate lever (#71), not this bug.
 
 ### BUG-IONOS-PI5-CHEAP-DAC: Pi5→Mac handshake one-way — cheap-card carrier JITTER (root cause REFINED 2026-06-15) — partial software mitigation landed
+> **⚠ SUPERSEDED IN PART — 2026-07-26. The card described below is NO LONGER IN THE PATH and its
+> measured figures MUST NOT be cited as current.** The Pi5 now runs an **Fe-Pi Audio / sgtl5000**
+> codec HAT (confirmed via `aplay -l` and `wpctl`). That path was measured directly with
+> `tools/measure_analog_path.py` (16-tone multitone, Pi5 → IONOS WGN@40 → Mac, at the operational
+> RX level — capture RMS 0.0924 vs 0.082 in real transfers):
+>
+> | metric | this entry's cheap USB dongle | **Fe-Pi, measured 2026-07-26** |
+> |---|---|---|
+> | band tilt | 14.8 dB | **0.7 dB** |
+> | analog SNDR ceiling | (implied by −17.8 dB distortion) | **30.7 dB** |
+> | cost at dial 20 | — | **0.36 dB** |
+>
+> A 30.7 dB ceiling costs 0.36 dB at a 20 dB dial, so **the analog chain is clean and cannot
+> explain the ~5.3 dB sim-vs-rig SNR discrepancy** that was briefly (and wrongly) attributed to
+> it. See CHANGELOG 2026-07-26. The BURST_ERASURE level-relative fix below remains valid on its
+> own merits — a level-relative gate is correct regardless of which card is attached — but the
+> "~6× lower RX operating level" premise should be re-measured before being relied on again.
+> What is still genuinely open from this entry: nothing hardware-side has been re-verified for
+> JITTER; only tilt, distortion and SNDR were measured.
+
 - Status: **OPEN (hardware), root cause REFINED + software mitigation landed 2026-06-15.** First
   Mac↔IONOS↔Pi5 bringup. After the CONNECT-decode code fix (CHANGELOG 2026-06-14), Mac→Pi5 completes
   (CONNECT decodes 4/4, Pi5 CONNECTED) but Pi5→Mac CONNECT_ACK never decodes → initiator never

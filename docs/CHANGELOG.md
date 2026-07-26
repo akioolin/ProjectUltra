@@ -10,6 +10,81 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — MEASURED: the Pi5→IONOS→Mac analog chain is CLEAN (retracts an attribution I made by subtraction)
+
+**What was claimed and is now retracted.** Earlier today a 5.3 dB discrepancy was attributed
+to "real analog loss ... not our software": the OFDM broadband/LTS in-band SNR estimator
+reads **20.1 dB** (bias +0.1, 16 seeds) through the simulated ITU-Good channel at dial 20,
+but only ~**14.7 dB** on the rig at the same dial and channel. The 5.3 dB was assigned to
+hardware **purely by subtraction — the analog path had never actually been measured.**
+It has now been measured, and the attribution was wrong.
+
+**Method** (`tools/measure_analog_path.py`, committed so this is re-runnable, not prose):
+a 16-tone multitone at IRREGULAR bin spacing across 300-2900 Hz, Pi5 → IONOS (WGN, S:N=40,
+non-fading) → Mac, 12 s capture, averaged periodograms. Irregular spacing is essential —
+with arithmetic spacing the intermodulation products land on other tones and hide; here they
+fall into bins we can read. Per-tone amplitude gives band tilt; the empty bins give the
+noise+distortion floor. The simulator's own 40 dB noise is de-embedded arithmetically.
+
+**Results.**
+
+| quantity | measured |
+|---|---|
+| band tilt, 486-2859 Hz | **0.7 dB** peak-to-peak |
+| in-band SNDR (raw) | 30.2 dB |
+| **analog path SNDR ceiling** (S:N de-embedded) | **30.7 dB** |
+| cost at dial 10 / 14 / 20 / 24 dB | 0.04 / 0.09 / **0.36** / 0.84 dB |
+
+**A 30.7 dB ceiling degrades a 20 dB signal to 19.64 dB — a 0.36 dB loss.** That is an order
+of magnitude too small to explain 5.3 dB. **The analog chain cannot be the cause.**
+
+**Validity checks.** Capture RMS was **0.0924** vs **0.082** measured during real file
+transfers, so this was taken at the operational level, not an artificial one. The operator's
+panel read **Lvl ~650 mV p-p (green), CF 2.10 / 6.5 dB** against a predicted ~790 mV / CF
+2.2, confirming the probe sat in the simulator's linear range with no clipping to confound
+tilt or distortion. The probe was deliberately run at digital peak 0.38, NOT the production
+0.70, for exactly that reason.
+
+**This supersedes the older band-tilt claim.** `BUG-IONOS-PI5-CHEAP-DAC` recorded a Pi5 TX
+path with **14.8 dB band tilt**, -17.8 dB distortion and ±7 Hz jitter, measured on a cheap
+USB dongle. The Pi5 now runs an **Fe-Pi Audio / sgtl5000** codec HAT, and on that card the
+tilt is **0.7 dB** — a 14 dB improvement. The old figures describe hardware that is no
+longer in the path and must not be cited as current.
+
+**What is now proven clean and should not be re-litigated:**
+1. **TX digital chain** — every waveform is peak-SCALED, not clipped (1-3 samples of >100k
+   touch the ceiling); nothing is forced low.
+2. **PAPR** — 9.7 dB measured on the OFDM payload vs 11.4 dB Rayleigh-envelope theory for
+   that block length, i.e. 1.7 dB BELOW textbook. Normal physics of summing 59 carriers.
+3. **Band tilt** — 0.7 dB.
+4. **Analog SNDR** — 30.7 dB, costing 0.36 dB at dial 20.
+5. **Level does not set SNR on this bench** — the IONOS synthesises noise from the dialled
+   S:N ("Adjusting the S:N lower should increase the noise"), so it has no fixed noise floor
+   our signal must climb above. Consequently PAPR is a REAL-RADIO lever (peak-limited PA),
+   NOT a throughput lever here. An earlier claim that PAPR reduction was "worth more than
+   every scheduling lever" is retracted for this bench.
+
+**The one real analog defect found:** the modem over-drives the simulator's input. A 1500 Hz
+sine at the production digital peak 0.70 reads **Lvl 1458 mV p-p (RED)** against the
+manual's 1200 mV ceiling. The OFDM payload at the same digital peak displays ~1100 mV
+(green) but that is a SMOOTHED peak — same digital peak and same gain means the true analog
+peak is also ~1458, so **the green indication is misleading for a high-crest signal**.
+Hard-limiting at 1200 mV clips 0.58% of payload samples for a 37.3 dB SNDR ceiling: real,
+but far above the operating SNR, so minor. Worth fixing because it is free (reduce CH-IN
+~3 dB, which costs no SNR on an S:N machine, rather than cutting tx_drive which would throw
+away average power) and because the manual's 200-1200 window exists specifically "to
+accommodate fading and peaking in multipath modeling" — at 1458 there is no room for that.
+
+**Where the 5.3 dB actually has to be.** Not the analog path. The remaining candidates are
+measurement-domain: the rig figure is a **dB-mean over a ring of groups** while the sim
+figure is a **linear-power-mean over a seed ensemble**, and Jensen's inequality alone
+accounts for ~1.2 dB (the sim test itself reports dB-mean 18.9 vs lin-mean 20.1 at dial 20);
+plus possible survivor bias, since only decoded groups feed the rig ring. If those dominate,
+the true residual loss is ~1-2 dB rather than 5.3, and the defect was comparing two
+incompatible statistics. Open.
+
+---
+
 ## 2026-07-26 — MEASURED: the anchor offset is the right control point, and 8.70 vs 3.1 BRACKETS the hardware-honest value
 
 The over-commit hypothesis is **confirmed at the mechanism level**, and the correction is
