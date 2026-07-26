@@ -164,10 +164,14 @@ void test_coherent_ladder_selection() {
           "AWGN in-band SNR=10 promotes to coherent QPSK R1/2");
 
     // --- GOOD class (0.15 <= fading < 0.76): R1/2 (>=10), R2/3 (>=15), R3/4 (>=20) ---
+    // 2026-07-26 ANCHORS RE-MEASURED ON FADING (docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md).
+    // Good@20 used to select 16QAM R2/3 on a G20 anchor. That anchor measured **51.4% FER** on
+    // ITU Good and 16QAM R2/3 NEVER overtakes 8PSK R2/3 in 16-24 dB (delivered @20: 1890 vs
+    // 2450). Its Good anchor moved 20 -> 26, so Good@20 now correctly selects 8PSK R2/3.
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
-    CHECK(mod == Modulation::QAM16, "good fading in-band SNR=20 selects 16QAM (R2/3 Good rung, default ladder)");
+    CHECK(mod == Modulation::QAM8, "good fading in-band SNR=20 selects 8PSK (measured best rung on fading)");
     CHECK(rate == CodeRate::R2_3,
-          "good fading in-band SNR=20 -> 16QAM R2/3 (G20 anchor; DEFAULT ladder = psk8-exp 2026-07-05)");
+          "good fading in-band SNR=20 -> 8PSK R2/3 (16QAM R2/3 measured 51.4% FER at this SNR)");
 
     recommendDataMode(15.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
@@ -181,9 +185,13 @@ void test_coherent_ladder_selection() {
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
           "good fading in-band SNR=14 promotes to QPSK R1/2");
 
+    // 8PSK R2/3's Good anchor moved 19 -> 17: the MEASURED throughput crossover where it
+    // overtakes QPSK R3/4 on fading (delivered @16 1686 vs 1499, @18 1914 vs 2106). The anchor
+    // belongs at the crossover, not the FER<=10% floor -- a denser rung carrying more retx
+    // still wins while rate x (1-FER) is higher.
     recommendDataMode(17.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "good fading in-band SNR=17 is coherent QPSK R2/3 (above the R2/3 gate)");
+    CHECK(mod == Modulation::QAM8 && rate == CodeRate::R2_3,
+          "good fading in-band SNR=17 selects 8PSK R2/3 (measured crossover vs QPSK R3/4)");
 
     recommendDataMode(9.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_4,

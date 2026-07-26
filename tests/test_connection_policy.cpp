@@ -494,8 +494,11 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto -> 16QAM (default ladder = psk8-exp 2026-07-05)");
-    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto -> 16QAM R2/3 (G20 anchor)");
+    // 2026-07-26: anchors re-measured on ITU Good fading. 16QAM R2/3's G20 anchor measured
+    // 51.4% FER and never beats 8PSK R2/3 in 16-24 dB, so it moved to G26; 8PSK R2/3 moved to
+    // G17 (its measured crossover vs QPSK R3/4). Good@20 therefore selects 8PSK R2/3.
+    CHECK(mod == Modulation::QAM8, "GOOD fading SNR20 auto -> 8PSK (measured best rung on fading)");
+    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto -> 8PSK R2/3 (G17 anchor, measured crossover)");
 
     // fading 0.79 is MODERATE class (>= kFadingGoodMax 0.76). R2/3 is now ENABLED on moderate at >= 20 dB
     // (measured 2026-06-09: genuine moderate R2/3 9/9 PASS @20-24 dB) — so a moderate-classified

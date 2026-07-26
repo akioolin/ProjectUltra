@@ -124,18 +124,24 @@ static bool test_verdict_maps_snr_to_rung() {
              " (want ONE enabled rung up = QAM8 R2/3 = " +
              std::to_string(kRungIdxQam8R23) + ")");
     // Each further step must ITSELF clear anchor + 2.5 dB margin (the old code
-    // proved "some climb" then jumped to the raw map target — the crest-jump
-    // hole). At 21 dB the ladder tops out at 16QAM R1/2: 16QAM R2/3 (the F149
-    // cratering rung) is not margin-proof there and must NOT be commanded.
+    // proved "some climb" then jumped to the raw map target — the crest-jump hole).
+    // 2026-07-26 ANCHORS RE-MEASURED ON FADING: at 21 dB Good the ladder now TOPS OUT at
+    // 8PSK R2/3. 16QAM R2/3's Good anchor moved 20 -> 26 (it measured 51.4% FER at 20 on
+    // ITU Good and never beats 8PSK R2/3 in 16-24 dB), and 16QAM R1/2 is now unreachable
+    // because it is STRICTLY DOMINATED: identical spectral efficiency (eta = 2.0) but a
+    // denser constellation AND non-constant envelope, while 8PSK R2/3 sits at a LOWER
+    // anchor (17) and precedes it in the table. At equal eta, prefer the lower order.
+    // The property under test is unchanged: the climb must not over-run the ladder top.
     TA::adoptCmd(c);
-    TA::verdict(c, true, 0.9f);  // idx 5 -> 7 (16QAM R1/2; idx 6 disabled)
-    if (TA::rxCmd(c) != kRungIdxQam16R12)
+    TA::verdict(c, true, 0.9f);
+    if (TA::rxCmd(c) != kRungIdxQam8R23)
         FAIL("second step was idx " + std::to_string(TA::rxCmd(c)) +
-             " (want 16QAM R1/2 = " + std::to_string(kRungIdxQam16R12) + ")");
+             " (want the ladder top on Good = QAM8 R2/3 = " +
+             std::to_string(kRungIdxQam8R23) + ")");
     TA::adoptCmd(c);
-    TA::verdict(c, true, 0.9f);  // idx 7: 16QAM R2/3 not margin-proof at 21 dB
-    if (TA::rxCmd(c) != kRungIdxQam16R12)
-        FAIL("21 dB over-climbed past 16QAM R1/2 to idx " +
+    TA::verdict(c, true, 0.9f);
+    if (TA::rxCmd(c) != kRungIdxQam8R23)
+        FAIL("21 dB over-climbed past the measured ladder top to idx " +
              std::to_string(TA::rxCmd(c)) + " (margin-proof ladder must hold)");
 
     Connection d;
@@ -158,7 +164,7 @@ static bool test_confirmed_crater_arms_climb_dwell() {
 
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
     TA::verdict(c, false, 0.0f);  // crater #1 — hold
     TA::verdict(c, false, 0.0f);  // crater #2 — confirmed: demote + dwell armed
     const uint8_t demoted = TA::rxCmd(c);
@@ -169,7 +175,7 @@ static bool test_confirmed_crater_arms_climb_dwell() {
     // Fade-crest reads right after the demote: climbs must stay blocked for a
     // full ring turnover even though the map screams UP.
     for (int i = 0; i + 1 < TA::climbDwell(); ++i) {
-        c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(36.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, true, 0.95f);
         if (TA::rxCmd(c) > demoted)
             FAIL("climb re-armed after only " + std::to_string(i + 1) +
@@ -177,7 +183,11 @@ static bool test_confirmed_crater_arms_climb_dwell() {
                  std::to_string(TA::climbDwell()) + ")");
     }
     // Ring turned over: the next clean verdict may climb (one rung).
-    c.setBurstChannelObservation(32.0f, 0.20f, 0.9f, true, 0.1f);
+    // 36 dB, not 32: the re-climb must clear anchor + crater penalty + margin, and 16QAM
+    // R2/3's Good anchor moved 20 -> 26 (2026-07-26 fading re-measure). 26 + 4 (confirmed-
+    // crater penalty) + 2.5 (climb margin) = 32.5, so 32 dB is now CORRECTLY refused. The
+    // dwell property under test is unchanged; only the SNR that clears the new requirement.
+    c.setBurstChannelObservation(36.0f, 0.20f, 0.9f, true, 0.1f);
     TA::verdict(c, true, 0.95f);
     if (TA::rxCmd(c) <= demoted)
         FAIL("climb still blocked after the dwell expired");
@@ -236,10 +246,15 @@ static bool test_predictive_direct_jump() {
     TEST("2 calm snapshots let one verdict jump QPSK R2/3 -> 16QAM R2/3");
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R2_3, 24.0f, 0.05f, Modulation::QPSK);
-    std::vector<float> calm(51, std::pow(10.0f, 26.0f / 10.0f));  // 26 dB flat
+    // 30 dB flat, not 26: the predictive jump must clear the TARGET rung's requirement with
+    // margin, and 16QAM R2/3's Good anchor moved 20 -> 26 in the 2026-07-26 fading re-measure.
+    // At 26 dB flat the evidence exactly equals the anchor with no margin, so the jump is
+    // correctly refused. The property under test (>=2 calm snapshots authorise a DIRECT
+    // multi-rung jump) is unchanged.
+    std::vector<float> calm(51, std::pow(10.0f, 30.0f / 10.0f));  // 30 dB flat
     c.setBurstCarrierGammas(calm);
     c.setBurstCarrierGammas(calm);
-    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
     TA::verdict(c, true, 0.95f);
     if (TA::rxCmd(c) != kRungIdxQam16R23)
         FAIL("verdict was idx " + std::to_string(TA::rxCmd(c)) +
@@ -257,7 +272,7 @@ static bool test_predictive_direct_jump() {
     }
     d.setBurstCarrierGammas(calm);
     d.setBurstCarrierGammas(notch);
-    d.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    d.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
     TA::verdict(d, true, 0.95f);
     if (TA::rxCmd(d) >= kRungIdxQam16R23)
         FAIL("a notched snapshot in the window must veto the 16QAM R2/3 jump "
@@ -273,7 +288,7 @@ static bool test_two_crater_rule() {
 
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);  // map says stay high
+    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);  // map says stay high
     const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
 
     TA::verdict(c, /*all_ok=*/false, /*quality=*/0.0f);  // crater #1
@@ -306,7 +321,7 @@ static bool test_two_crater_rule() {
     }
 
     // A clean group resets the streak: the next single crater holds again.
-    c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
     TA::verdict(c, true, 0.9f);
     TA::verdict(c, false, 0.0f);
     const uint8_t cur2 = coherentRungIndexFor(c.getDataModulation(), c.getDataCodeRate());
@@ -444,12 +459,12 @@ static bool test_ema_hold_absorbs_supported_crater() {
         Connection c;
         TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
         for (int i = 0; i < 4; ++i) {  // clean history keeps the ring average high
-            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+            c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
             TA::verdict(c, true, 0.95f);
         }
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, false, 0.0f);  // crater #1
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
         const uint8_t cmd = TA::rxCmd(c);
         setenv("ULTRA_RX_EMA_HOLD", "0", 1);  // restore the suite baseline (off)
@@ -472,7 +487,7 @@ static bool test_ema_hold_still_demotes_sustained_failure() {
     Connection c;
     TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
     for (int i = 0; i < 3; ++i) {  // brief clean history
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, true, 0.95f);
     }
     // Sustained craters: each failed group is censored toward the rung floor, so the
@@ -480,7 +495,7 @@ static bool test_ema_hold_still_demotes_sustained_failure() {
     // number of groups (strict '>' breaks the censor==anchor equality latch).
     int demoted_at = -1;
     for (int k = 1; k <= 10; ++k) {
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdict(c, false, 0.0f);
         if (TA::rxCmd(c) < kRungIdxQam16R23) { demoted_at = k; break; }
     }
@@ -504,7 +519,7 @@ static bool test_dense_fast_demote_full_crater() {
         Connection c;
         TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
         for (int i = 0; i < 3; ++i) {  // clean history at 16QAM R2/3
-            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+            c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
             TA::verdict(c, true, 0.95f);
         }
         c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
@@ -710,7 +725,7 @@ static bool test_crater_grading_is_default_on() {
         else unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
         Connection c;
         TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdictGraded(c, /*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/false, 0.875f);
         TA::verdictGraded(c, false, 0.0f, false, 0.875f);
         return TA::rxCmd(c);
@@ -726,7 +741,7 @@ static bool test_crater_grading_is_default_on() {
     {
         Connection c;
         TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        c.setBurstChannelObservation(22.0f, 0.20f, 0.9f, true, 0.1f);
+        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
         TA::verdictGraded(c, false, 0.0f, /*full_crater=*/true, 0.0f);
         TA::verdictGraded(c, false, 0.0f, true, 0.0f);
         if (TA::rxCmd(c) >= cur)
