@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — measured: ULTRA_TX_ACK_LEADIN_MS=30 is a WASH on the rig (default UNCHANGED)
+
+**Hypothesis.** The ACK's 150 ms lead-in is pure SILENCE sitting in the half-duplex
+turnaround, ahead of a 408 ms information-bearing tone burst. Cutting it to 30 ms was
+predicted to save ~0.12 s/cycle (~1.3%). Zero code — the knob already exists
+(`modem_engine.cpp:712`, default -1 = use the global lead-in).
+
+**Result — the mechanism moves, but ~4x less than predicted, and the effect is
+unmeasurable.** 3 interleaved same-epoch pairs (6 transfers, all CRC-clean, MAC = the
+ACK-emitting station):
+
+| arm | turnaround (median-of-run, mean) | goodput mean |
+|---|---|---|
+| ON (30 ms) | **1.740 s** | 1777 bps |
+| OFF (150 ms) | **1.777 s** | 1707 bps |
+
+Turnaround saved = **0.037 s**, against a predicted 0.120 s — i.e. only ~31% of the
+lead-in reduction reaches the turnaround, so the 150 ms is largely NOT on the critical
+path. The remaining `ACK on air -> sender detects` cost (1.44-1.86 s) is dominated by
+capture-period granularity and detection, not by the lead-in silence. 0.037 s on an ~11 s
+cycle is **0.33%** — an order of magnitude below this rig's documented ±25% epoch noise,
+so the +4.1% goodput reading is noise, not signal.
+
+**Falsifier: not triggered, but the test had NO POWER.** Zero resends / RTOs / missed-ACKs
+in BOTH arms. The detector is known-good (it finds `Resend` in the crater-A/B logs), so
+this epoch (1.22-2.19 kbps, the channel had recovered) was simply too clean to stress the
+ACK path. A 0-vs-0 comparison cannot discriminate, so this is NOT evidence that 30 ms is
+safe.
+
+**Decision: default UNCHANGED (still -1 = global 150 ms).** Two reasons, both independent
+of the wash: (1) 0.33% does not justify any change to a conservative default; (2) the
+real-radio risk cannot be validated here at all — a 100 W final's ALC settling and PA ramp
+are exactly what the cheap-card rig does not model (CLAUDE.md simulator-fidelity rule), and
+while 30 ms is still ~1.5x a real T/R relay (IC-7300 ~15 ms, FT-891 ~20 ms), that margin is
+unproven for ALC. The knob stays available for anyone with a real rig to measure.
+
+**Recorded so it is not re-litigated:** the ACK lead-in is not a throughput lever on this
+hardware. The turnaround's compressible remainder lives in the capture period (the Mac
+inherits the Pi5 dongle's 8192-sample / 170 ms period, crossed twice per cycle), not in the
+lead-in.
+
+---
+
 ## 2026-07-26 — feat(rate): ULTRA_CRATER_GOODPUT_GRADE now DEFAULT-ON (rig A/B, 16 interleaved runs)
 
 Flips the goodput-graded crater predicate (landed default-off 2026-07-25, c1a8dfb) to
