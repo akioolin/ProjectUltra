@@ -10,6 +10,62 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-26 — the EVM demote is a DOUBLE-DRIVER problem, not a tuning problem: both knobs default-off, blocked on the anchor re-measure
+
+The confidence gate (d4c4394) fixed the wrong half. It correctly stopped the clamp firing on
+noise, and it still made things worse:
+
+| metric | ON (confident) | OFF | raw-clamp baseline |
+|---|---|---|---|
+| rung commands / run | **17.0** | 7.5 | 15 vs 7 |
+| EVM firings / run | 8.0 | 0 | 7 |
+| clamp DEPTH (rungs) | **2,2,2,4,2,2,2,2 / 2,2,5,4,4,3,3,3** | — | — |
+| craters / run | 1.0 | 1.0 | 2.0 |
+
+Churn did not improve — it got slightly worse than the raw clamp. Craters did improve
+(2.0 -> 1.0), confirming the gate does suppress false positives, but the clamp still yanks
+**2-5 rungs** every time it fires and the ladder climbs straight back.
+
+**ROOT CAUSE — the two verdict inputs are on DIFFERENT SCALES.** Measured over these 4 runs:
+
+| run | ladder `snr_avg` | EVM usable | disagreement |
+|---|---|---|---|
+| OFF_2 | 23.9 | 7.5 | 16.4 dB |
+| OFF_3 | 24.5 | 9.3 | 15.2 dB |
+| ON_1 | 21.9 | 8.2 | 13.7 dB |
+| ON_4 | 23.1 | 11.1 | 12.0 dB |
+
+**Mean disagreement 14.3 dB** — larger than `kOfdmLegacyAnchorScaleOffsetDb` (+8.70) alone,
+so the residual is real hardware loss on top of the marking offset. The ladder steers on
+dial-equivalent SNR; the EVM clamp reads usable dB. They are not two measurements of the same
+quantity, so the clamp is not *correcting* the ladder — it is a **SECOND DRIVER with an
+irreconcilable input**, and its target sits ~4-5 rungs below the ladder's by construction.
+That is exactly the F128 double-driver failure the RX-authority charter exists to prevent
+("one decision-maker").
+
+No amount of gating fixes this. Gating changes WHEN the clamp fires; the 14.3 dB scale gap
+determines WHERE it points, and that is what produces the sawing.
+
+**Decision: `ULTRA_EVM_DEMOTE` and `ULTRA_EVM_DEMOTE_CONFIDENT` both stay default-OFF.** The
+EVM path is BLOCKED on reconciling the scales — i.e. the §3 anchor re-measure and deletion of
+`kOfdmLegacyAnchorScaleOffsetDb` (docs/SNR_CALIBRATION_HANDOFF_2026_07_08.md). Once the ladder
+is steered by honest usable dB, the EVM estimator stops being a second driver and becomes the
+ladder's own input — which is the architecture that was always intended. Until then, an EVM
+clamp bolted onto a differently-scaled controller cannot help.
+
+**KEEP the confidence machinery.** `mean + 1.645*se < floor - margin` over a ring is correct
+and reusable: it is the right form for ANY rung decision fed by a sigma≈3 dB estimator against
+1.2-3.1 dB rung spacing, and it is what will be needed when the EVM becomes the primary input.
+The 2026-07-24 memory note recording "+21% on 3 pairs" for the raw clamp is SUPERSEDED and
+should not be re-used as evidence.
+
+**Also note:** `ULTRA_ENTRY_EVM_CAP` reads the same usable-EVM scale against the same rung
+floors, so it inherits the same scale mismatch at connect time. Do not A/B it as a throughput
+lever before the anchor re-measure; its earlier rig observation (honest 8.3 dB still entering
+at QPSK R3/4) is a symptom of the same 14 dB gap.
+
+---
+
 ## 2026-07-26 — fix(rate): EVM demote is an SNR-RESOLUTION error; add a confidence gate (ULTRA_EVM_DEMOTE_CONFIDENT, default-off)
 
 **The raw clamp measured HARMFUL, and the reason is arithmetic, not a bad estimator.**
