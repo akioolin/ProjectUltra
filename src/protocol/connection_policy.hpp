@@ -64,7 +64,41 @@ inline constexpr float kOfdmLegacyAnchorScaleOffsetDb = 8.70f;
 // double driver (14.3 dB scale gap ⇒ its target sat 4-5 rungs below the ladder's; see
 // CHANGELOG 2026-07-26). This knob exists to MEASURE the over-commit, not to become a
 // second tuned constant — the durable fix is still the §3 anchor re-measure.
+// ULTRA_LINEAR_SNR_RING (2026-07-26, default OFF ⇒ byte-identical): make the RX-authority
+// SNR ring average LINEAR POWER instead of dB, and compensate the anchor offset in the SAME
+// switch so the two can never be separated.
+//
+// THE DEFECT. Two SNR rings exist and disagree on domain: streaming_decoder.hpp's
+// physicalSnrStats averages linear power (and says so — "mean is linear-domain
+// (fade-averaged)"), while connection.cpp's rate-ladder ring sums dB. The IONOS dial and the
+// anchor table are BOTH mean-power definitions (test_ofdm_snr_calibration gates on the linear
+// mean), so by Jensen's inequality the ladder is fed a systematically LOW number on fading —
+// worse the more fade variance there is.
+//
+// WHY THEY ARE COUPLED. Fixing the domain RAISES the ladder's input. The ladder is already
+// measured to OVER-COMMIT by ~2 rungs on this bench (2026-07-26 offset A/B: 8.70 → 3.1 cut
+// rung churn 65% and craters 60%). A lone domain fix therefore makes over-commit WORSE. So
+// this knob applies both halves at once and the compensation is not independently settable.
+//
+// SIZING THE COMPENSATION — measured, not chosen. The gap must be computed on the RING's OWN
+// samples, not on per-frame readings: per-frame in-band readings have dB sd 5.60 and a Jensen
+// gap of 2.87 dB (n=2772, three epochs), but the ring is fed per-GROUP observations whose sd
+// is 4.36, giving a gap of 1.65 dB (n=75). Compensating with the per-frame 2.87 would
+// OVER-correct by >1 dB. An independent audit computing it a different way (ring value vs
+// per-frame power-mean) obtained 1.74 dB. Both land on ~1.7.
+inline constexpr float kLinearRingJensenCompensationDb = 1.70f;
+
+inline bool linearSnrRingEnabled() {
+    const char* e = std::getenv("ULTRA_LINEAR_SNR_RING");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 inline float ofdmAnchorScaleOffsetDb() {
+    // An explicit override always wins, so the offset stays independently sweepable for the
+    // anchor re-measure; otherwise the linear ring carries its own compensation with it.
+    if (std::getenv("ULTRA_OFDM_ANCHOR_OFFSET_DB") == nullptr && linearSnrRingEnabled()) {
+        return kOfdmLegacyAnchorScaleOffsetDb - kLinearRingJensenCompensationDb;
+    }
     const char* e = std::getenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
     if (e && *e) {
         // strtod, NOT atof: atof("garbage") returns 0.0, which is a LEGITIMATE value here

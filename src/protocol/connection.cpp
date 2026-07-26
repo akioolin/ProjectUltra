@@ -2495,15 +2495,29 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     float snr_sum = 0.0f;
     float fading_sum = 0.0f;
     int snr_n = 0;
+    // ULTRA_LINEAR_SNR_RING: average LINEAR POWER, not dB. The dial and the anchor table are
+    // mean-power definitions, so a dB-domain mean reads systematically LOW on fading (Jensen)
+    // — measured 1.65 dB on this ring's own samples. streaming_decoder.hpp::physicalSnrStats
+    // already does it this way and documents the intent; this ring was the odd one out.
+    // The knob also carries the compensating anchor-offset reduction (see
+    // connection_policy.hpp::ofdmAnchorScaleOffsetDb) because fixing the domain ALONE raises
+    // the ladder's input on a path already measured to over-commit ~2 rungs.
+    const bool linear_ring = connection_policy::linearSnrRingEnabled();
+    double snr_lin_sum = 0.0;
     for (size_t i = 0; i < rx_auth_obs_count_; ++i) {
         if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
             snr_sum += rx_auth_obs_db_[i];
+            snr_lin_sum += std::pow(10.0, static_cast<double>(rx_auth_obs_db_[i]) / 10.0);
             fading_sum += rx_auth_fading_ring_[i];
             ++snr_n;
         }
     }
-    const float snr_avg = (snr_n > 0) ? (snr_sum / static_cast<float>(snr_n))
-                                      : burst_obs_snr_db_;
+    const float snr_avg =
+        (snr_n > 0)
+            ? (linear_ring ? static_cast<float>(
+                                 10.0 * std::log10(snr_lin_sum / static_cast<double>(snr_n)))
+                           : (snr_sum / static_cast<float>(snr_n)))
+            : burst_obs_snr_db_;
     const float fading_avg = (snr_n > 0)
         ? (fading_sum / static_cast<float>(snr_n)) : inst_fading;
     // STICKY CLASS (F123): the anchor table's three fading columns are cliffs and

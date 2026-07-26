@@ -1293,6 +1293,34 @@ void test_anchor_offset_override() {
     unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
 }
 
+// ULTRA_LINEAR_SNR_RING: the domain fix and its compensating offset reduction are ONE knob.
+// Splitting them is the documented footgun -- fixing the ring domain alone RAISES the ladder
+// input ~1.7 dB on a path already measured to over-commit ~2 rungs.
+void test_linear_ring_couples_offset_compensation() {
+    unsetenv("ULTRA_LINEAR_SNR_RING");
+    unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
+    CHECK(!linearSnrRingEnabled(), "linear ring must default OFF (byte-identical)");
+    CHECK(ofdmAnchorScaleOffsetDb() == kOfdmLegacyAnchorScaleOffsetDb,
+          "knob off: offset must be the untouched legacy constant");
+
+    setenv("ULTRA_LINEAR_SNR_RING", "1", 1);
+    CHECK(linearSnrRingEnabled(), "knob on must enable the linear ring");
+    // THE COUPLING: enabling the ring must ALSO pull the offset down by the measured
+    // Jensen compensation, with no second knob required.
+    CHECK(std::fabs(ofdmAnchorScaleOffsetDb() -
+                    (kOfdmLegacyAnchorScaleOffsetDb - kLinearRingJensenCompensationDb)) < 1e-4f,
+          "knob on must carry its own offset compensation (the two are inseparable)");
+    CHECK(ofdmAnchorScaleOffsetDb() < kOfdmLegacyAnchorScaleOffsetDb,
+          "compensation must REDUCE the offset, never raise it");
+
+    // An explicit override still wins, so the offset stays sweepable for the anchor re-measure.
+    setenv("ULTRA_OFDM_ANCHOR_OFFSET_DB", "4.0", 1);
+    CHECK(std::fabs(ofdmAnchorScaleOffsetDb() - 4.0f) < 1e-4f,
+          "an explicit offset override must still win over the coupled default");
+    unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
+    unsetenv("ULTRA_LINEAR_SNR_RING");
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
@@ -1340,6 +1368,7 @@ int main() {
     test_connect_fading_pool_aggregate();
     test_connect_pick_defer_semantics();
     test_anchor_offset_override();
+    test_linear_ring_couples_offset_compensation();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)
