@@ -887,8 +887,25 @@ void StreamingDecoder::searchForSync() {
                       sync_controller_.consecutiveSyncMisses(),
                       sync_controller_.frameArrivalConfidence());
         }
-        const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
-        observeIdleNoiseCandidate(search_buffer.data(), idle_count);
+        // IDLE-NOISE ADMISSION GATE (2026-07-25). This branch runs when the sync search found
+        // NO frame — which during an ACTIVE exchange does not mean the air is quiet. The buffer
+        // can hold this station's own tone-burst ACK tail, the multipath echo of the burst just
+        // received, or a burst the search simply failed to lock. Feeding those in as "idle
+        // noise" put SIGNAL into the floor: rig xfer_1 ratcheted the reference to 0.1380 —
+        // +24.5 dB above what a 20 dB S:N channel can physically produce — and pinned the ALC
+        // at a false LOW for the whole transfer, which drives the sender to ramp TX drive into
+        // compression on a real radio.
+        //
+        // Only observe when the decoder has seen NO RX activity recently. stampRxSignal() is
+        // stamped on every sync/frame event, so this is decoder EVIDENCE of quiet, not a guess.
+        // The window is one burst cycle (~12 s) so it also covers our own ACK and its echo.
+        // Site 1 above is already guarded this way in spirit ("BOOT-ONLY ... a prefix can
+        // contain an undetected earlier transmission's tail, which would over-read the floor").
+        constexpr int64_t kIdleQuietMs = 12000;
+        if (!rxSignalActiveWithin(kIdleQuietMs)) {
+            const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
+            observeIdleNoiseCandidate(search_buffer.data(), idle_count);
+        }
     }
 }
 

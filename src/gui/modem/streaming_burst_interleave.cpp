@@ -891,8 +891,29 @@ void StreamingDecoder::computeBurstLevelVerdict() {
     // inside the FIR passband, so the mismatch only OVERSTATES headroom when the chain
     // carries out-of-band noise — i.e. it fails toward OK/hold (never asks for drive
     // the link doesn't need).
+    // NOISE REFERENCE = the FLOOR (min over the estimator's last kFloorWindowCount windows),
+    // not the latest window. `normalized_noise_rms` is whatever the MOST RECENT window measured,
+    // so a single contaminated window becomes the reference instantly and sticks.
+    //
+    // Measured 2026-07-25 (rig, MPG@20, xfer_1): data_rms held rock-steady at 0.073-0.085 while
+    // the reference ratcheted 0.0295 -> 0.0826 -> 0.0699 -> 0.1380 and LATCHED at 0.1380 for 18
+    // of 25 groups, driving headroom to -4.4 dB and a permanent false LOW verdict. At
+    // data_rms=0.0824 on a 20 dB S:N channel the true noise is ~0.0082, so 0.1380 was +24.5 dB
+    // above anything the channel could produce — it was SIGNAL: the contaminating windows come
+    // from the un-gated idle observation during an active transfer (own ACK tail, multipath echo
+    // of the burst just received, or a burst the search failed to lock). Cross-checked against
+    // the other meters on the same transfer: LTS usable 10.6-18.5 dB and EVM median 9.9 dB both
+    // healthy; the ALC was the only meter claiming a problem.
+    //
+    // A noise FLOOR is the correct statistic for exactly this reason: contamination can only ADD
+    // power, so it can never pull a minimum down. The estimator already computes it
+    // (Snapshot::floor_noise_rms); this simply consumes the right field. Fall back to the legacy
+    // field before the ring has populated. Erring toward OK is also the safe direction — a false
+    // LOW makes the sender ramp drive into compression on a real radio, which actively harms.
+    const float alc_noise_ref = (idle.floor_noise_rms > 0.0f) ? idle.floor_noise_rms
+                                                              : idle.normalized_noise_rms;
     const float headroom_db = 20.0f * std::log10(
-        data_rms / std::max(idle.normalized_noise_rms, 1e-9f));
+        data_rms / std::max(alc_noise_ref, 1e-9f));
     const float cf_db = 20.0f * std::log10(
         std::max(burst_level_peak_, 1e-9f) / data_rms);
 
@@ -912,9 +933,9 @@ void StreamingDecoder::computeBurstLevelVerdict() {
 
     // Per-group measurement line (rig-greppable A/B trace).
     LOG_MODEM(INFO,
-              "[%s] [ALC-RX] data_rms=%.4f noise_rms=%.4f headroom_db=%.1f "
+              "[%s] [ALC-RX] data_rms=%.4f noise_rms=%.4f (latest %.4f) headroom_db=%.1f "
               "cf_db=%.1f peak=%.3f samples=%zu verdict=%s",
-              log_prefix_.c_str(), data_rms, idle.normalized_noise_rms, headroom_db,
+              log_prefix_.c_str(), data_rms, alc_noise_ref, idle.normalized_noise_rms, headroom_db,
               cf_db, burst_level_peak_, burst_level_sample_count_,
               verdict == alc::RxLevelVerdict::CLIPPED ? "CLIPPED"
               : verdict == alc::RxLevelVerdict::LOW   ? "LOW"

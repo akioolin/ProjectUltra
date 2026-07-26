@@ -175,6 +175,45 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   symbols ⇒ +27% ACK airtime, lockstep break) for a ~1 s/transfer prize. Not worth it;
   the stranded-file class is closed on the receiver side instead.
 
+### BUG-ALC-NOISE-REF-CONTAMINATED (FIXED 2026-07-25): the RX level meter measured SIGNAL as noise and pinned a false LOW, ramping TX drive into compression
+- Status: **FIXED 2026-07-25.** Two independent defects; the meter was wrong, the rig levels were fine.
+- **Symptom (rig, MPG@20, xfer_1):** `[ALC-RX] headroom_db` sat at **-4.4 dB** (median) — signal
+  apparently BELOW the noise floor — for 18 of 25 groups, producing a permanent `verdict=LOW`.
+- **The signal was never the problem.** `data_rms` held rock-steady at 0.073-0.085, `cf_db`
+  11.0-11.3 (healthy crest factor, no clipping), `peak` ~0.30. Only the NOISE reference moved:
+  it ratcheted `0.0295 -> 0.0826 -> 0.0699 -> 0.1380` and LATCHED at 0.1380.
+- **The arithmetic that settles it:** at `data_rms = 0.0824` on a 20 dB S:N channel, true noise
+  is `0.0824/10 = 0.0082`. The meter used **0.1380 — +24.5 dB above anything the dial can
+  physically produce.** That is not a channel; it is signal. Cross-check on the same transfer:
+  LTS usable SNR 10.6-18.5 dB and decision-directed EVM median 9.9 dB, both healthy. The ALC was
+  the only meter claiming a fault.
+- **Defect 1 — wrong statistic.** `streaming_burst_interleave.cpp` used
+  `IdleNoiseSNREstimator::Snapshot::normalized_noise_rms`, which is literally THE MOST RECENT
+  window: one contaminated window becomes the reference instantly and persists. The estimator
+  already computes `floor_noise_rms` (min over the last `kFloorWindowCount`=15 windows) — the
+  correct statistic, because contamination can only ADD power and so can never pull a minimum
+  down. Now consumed; the latest-window value is still logged alongside so contamination stays
+  visible in a rig trace.
+- **Defect 2 — contaminated input.** `streaming_sync_acquisition.cpp:891` fed the raw
+  `search_buffer` into `observeIdleNoiseCandidate()` on the branch taken when the sync search
+  found NO frame. Mid-transfer that does NOT mean the air is quiet: the buffer can hold this
+  station's own tone-burst ACK tail, the multipath echo of the burst just received, or a burst
+  the search failed to lock. Now gated on `!rxSignalActiveWithin(12 s)` — decoder EVIDENCE of
+  quiet, covering a full burst cycle. (The sibling call site was already guarded in spirit: its
+  comment warns "a prefix can contain an undetected earlier transmission's tail, which would
+  over-read the floor".)
+- **Why it mattered on real hardware:** the false LOW drives the sender's software-ALC to ramp
+  `tx_drive` 0.500 -> 0.700 (**+2.9 dB**). On IONOS that is merely useless (an S:N machine — the
+  noise tracks the drive, so measured EVM moved 11.04 -> 11.00 dB, i.e. ZERO gain), but on a real
+  radio it pushes the PA into ALC compression and actively degrades the link. Latent hardware bug.
+- **VERIFIED live on the rig after the fix:** noise reference **0.0302** (stable, was 0.1380
+  latched), headroom **+8.4..+9.0 dB** (was -4.4), `data_rms`/`cf_db`/`peak` unchanged —
+  confirming the signal was always healthy. Transfer 51200 B CRC-clean, 1.67 kbps, md5 match.
+  Full ctest 88/88.
+- **Residual (not fixed here):** the verdict still prints LOW because `alcLowHeadroomDb()` sits
+  above ~9 dB. That is now an HONEST reading of genuinely modest headroom rather than a
+  fabricated one; whether that threshold is correctly placed is a separate open question.
+
 ### BUG-COHERENCE-ESTIMATOR-STARVED (FIXED 2026-07-25): the Good/Moderate discriminator fed ZERO snapshots on the burst path since 2026-07-06
 - Status: **FIXED 2026-07-25.** Root cause of the modem having no working channel-class
   discriminator — the estimator was never broken, it was STARVED.
