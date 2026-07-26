@@ -1382,3 +1382,60 @@ Current blockers:
 
 For full details and commit-level history, use:
 - `docs/CHANGELOG.md`
+
+## BUG-COHERENCE-THRESHOLD-PLATFORM-BROKEN (open, 2026-07-25) — P1
+
+**Symptom.** On the IONOS rig the RX-authority raw ladder pick oscillates between idx 8
+(16QAM R2/3) and idx 3/2 (QPSK R2/3 / R1/2) on a **22-26 dB** channel — a 5-rung swing.
+Measured across 3 A/B runs (both arms, so it is NOT the crater knob):
+
+```
+raw seq: 8 8 3 8 3        (OFF_2)
+raw seq: 8 8 8 8 8 3 3 3 3 (OFF_3)
+raw seq: 8 8 2 8 3 8      (ON_1)
+```
+
+**Every** low pick carries `fading=0.85` **exactly**; every idx-8 pick has fading <= 0.73.
+The class boundary is `kFadingGoodMax = 0.76`.
+
+**Root cause.** 0.85 is not a measurement — it is the literal constant
+`kRepresentativeModerateFadingIndex` (`connection_policy.hpp:318`), returned by
+`coherenceAdjustedFadingIndex()` when `coherence_score <= kCoherenceModerateThreshold`
+(0.30). That threshold is **SIM-scale**, and the code comment directly above it already
+says so:
+
+> "The legacy lag-1 score above is SIM-calibrated and platform-broken (needs ~0.045 on
+> the IONOS rig, ~0.30 on sim — a flat re-base would break sim)."
+
+Every coherence score observed on the rig is <= 0.11 (measured: 0.00, 0.08, 0.09, 0.11,
+-0.11, -0.15, -0.18, -0.23, -0.27, -0.29). So on this platform
+`score <= 0.30` is **always true** once the estimator goes valid, and the channel is
+pinned to the representative-Moderate fading index for the rest of the transfer. The
+Good column of the anchor table becomes unreachable and the ladder drops ~5 rungs on a
+channel whose own SNR estimate says 22-26 dB.
+
+This is the same family as BUG-MPG20-OVER-DEMOTE-R14 (a class-boundary defect starving
+the rate ladder), but the mechanism is different: there the boundary constant was
+mis-placed; here a sim-calibrated THRESHOLD is applied to rig-scale data, so the override
+fires unconditionally.
+
+**Why it was invisible.** The verdict log printed the PRE-clamp pick's modulation next to
+the POST-clamp index, so the trajectory looked incoherent rather than bimodal. The `raw=`
+field added 2026-07-25 (same-day CHANGELOG entry) is what exposed it.
+
+**Do NOT fix by re-tuning the threshold.** The comment is right that a flat re-base breaks
+sim; a per-platform constant is exactly the bench constant the ADAPTIVITY rule forbids.
+The fix must be a statistic that is scale-invariant BY CONSTRUCTION. Candidate already
+built and rig-validated: the demeaned |H|^2 frequency-autocorrelation discriminator
+(`src/ofdm/frequency_selectivity.hpp`, `test_frequency_selectivity.cpp`), whose decision
+threshold is 0 with a null sigma of 1/sqrt(N-L) — a probability constant, not a bench
+constant. Rig validation: MPM 18/20 MODERATE and 0/20 GOOD; MPG 16/19 Good-ish with
+per-frame Good->MODERATE 0/706.
+
+**Also note** `coherenceArea` is NOT a valid substitute here (d' ~3.0, 12.5%
+Moderate-read-as-Good; a passing Good run logged area=-0.461). See
+project_channel_class_discriminator_2026_07_25.
+
+**Cost estimate.** Whenever it fires the ladder loses ~5 rungs. In OFF_3 it held for the
+last 4 of 9 verdicts; in OFF_2, 2 of 5. This is a strong candidate for the largest single
+remaining throughput lever on the rig.
