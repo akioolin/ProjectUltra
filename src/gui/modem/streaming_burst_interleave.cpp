@@ -506,7 +506,7 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
         // kOfdmLegacyAnchorScaleOffsetDb: the EESM anchor table was measured on
         // the pre-2026-07-07 estimator scale (see connection_policy.hpp).
         const float med_db = bb[bb.size() / 2] +
-            protocol::connection_policy::kOfdmLegacyAnchorScaleOffsetDb;
+            protocol::connection_policy::ofdmAnchorScaleOffsetDb();
         const double target = std::pow(10.0, static_cast<double>(med_db) / 10.0);
         const double mean_lin = sum_all / static_cast<double>(mean.size());
         if (mean_lin > 1e-12) {

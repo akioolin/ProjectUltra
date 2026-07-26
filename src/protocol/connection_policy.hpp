@@ -42,6 +42,45 @@ namespace connection_policy {
 // anchor re-measure replaces the whole quarantine.
 inline constexpr float kOfdmLegacyAnchorScaleOffsetDb = 8.70f;
 
+// ULTRA_OFDM_ANCHOR_OFFSET_DB — override the marking offset for the RATE-RELEVANT
+// consumers (default = kOfdmLegacyAnchorScaleOffsetDb ⇒ byte-identical).
+//
+// WHY THIS IS OVERRIDABLE. The +8.70 above is a self-consistent pair with the anchor
+// table: the new estimator reads 8.70 dB below the scale the anchors were measured on,
+// so adding it back is correct BY CONSTRUCTION. But the anchors were measured where
+// IMPLEMENTATION loss is small (OTASim/bench), and on real hardware there is more of it.
+// Measured on the IONOS rig 2026-07-26 over 4 transfers: the ladder's marked-up snr_avg
+// exceeds the decision-directed EVM USABLE estimate by a mean of 14.3 dB
+// (16.4/15.2/13.7/12.0). Subtracting the deliberate 8.70 leaves
+//     broadband(channel) − EVM(usable) ≈ 5.6 dB.
+// Per the two-SNR model that residual is EXPECTED — channel SNR exceeds usable SNR by
+// the implementation loss BY DESIGN — but it means the anchor table is optimistic on THIS
+// hardware by roughly that much, i.e. the ladder over-commits by ~2 rungs. That
+// over-commit is the disease behind the crater/churn cycle; the goodput-graded crater
+// predicate (2026-07-26) treats a SYMPTOM of it.
+//
+// Correcting it on the INPUT keeps ONE decision-maker, which is why this is the right
+// place: the EVM demote tried to correct the same thing on the OUTPUT and failed as a
+// double driver (14.3 dB scale gap ⇒ its target sat 4-5 rungs below the ladder's; see
+// CHANGELOG 2026-07-26). This knob exists to MEASURE the over-commit, not to become a
+// second tuned constant — the durable fix is still the §3 anchor re-measure.
+inline float ofdmAnchorScaleOffsetDb() {
+    const char* e = std::getenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
+    if (e && *e) {
+        // strtod, NOT atof: atof("garbage") returns 0.0, which is a LEGITIMATE value here
+        // (the honest scale), so a typo would silently un-calibrate the rate ladder rather
+        // than fall back. Require the whole string to parse.
+        char* end = nullptr;
+        const double d = std::strtod(e, &end);
+        if (end != e && *end == '\0') {
+            const float v = static_cast<float>(d);
+            // Sanity range: reject nonsense so a fat-fingered value cannot wreck the ladder.
+            if (v >= -20.0f && v <= 20.0f) return v;
+        }
+    }
+    return kOfdmLegacyAnchorScaleOffsetDb;
+}
+
 
 inline constexpr uint32_t kOFDMSampleRate = 48000;
 inline constexpr uint32_t kWideOFDMFFTSamples = 1024;

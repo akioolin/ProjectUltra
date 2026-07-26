@@ -131,7 +131,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
                 // anchor table is re-measured (see connection_policy.hpp).
                 protocol.setBurstChannelObservation(
                     modem.getLastOFDMBroadbandSNR() +
-                        protocol::connection_policy::kOfdmLegacyAnchorScaleOffsetDb,
+                        protocol::connection_policy::ofdmAnchorScaleOffsetDb(),
                     modem.getFadingIndex(),
                     modem.getDopplerCoherenceScore(), modem.getDopplerCoherenceValid(),
                     modem.getDopplerCoherenceDopplerHz());

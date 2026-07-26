@@ -1272,6 +1272,27 @@ void test_connect_pick_defer_semantics() {
 
 }  // namespace
 
+// ULTRA_OFDM_ANCHOR_OFFSET_DB: the marking offset must be overridable for the rig
+// over-commit measurement, must DEFAULT to the calibrated constant (byte-identical),
+// and must REJECT nonsense so a typo cannot silently un-calibrate the rate ladder.
+void test_anchor_offset_override() {
+    unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
+    CHECK(ofdmAnchorScaleOffsetDb() == kOfdmLegacyAnchorScaleOffsetDb,
+          "unset must return the calibrated constant (byte-identical default)");
+    setenv("ULTRA_OFDM_ANCHOR_OFFSET_DB", "3.1", 1);
+    CHECK(std::fabs(ofdmAnchorScaleOffsetDb() - 3.1f) < 1e-4f,
+          "a valid override must be honoured");
+    setenv("ULTRA_OFDM_ANCHOR_OFFSET_DB", "0", 1);
+    CHECK(ofdmAnchorScaleOffsetDb() == 0.0f, "zero is a legitimate override (honest scale)");
+    setenv("ULTRA_OFDM_ANCHOR_OFFSET_DB", "999", 1);
+    CHECK(ofdmAnchorScaleOffsetDb() == kOfdmLegacyAnchorScaleOffsetDb,
+          "out-of-range must fall back to the constant, never un-calibrate the ladder");
+    setenv("ULTRA_OFDM_ANCHOR_OFFSET_DB", "garbage", 1);
+    CHECK(ofdmAnchorScaleOffsetDb() == kOfdmLegacyAnchorScaleOffsetDb,
+          "unparseable must fall back to the constant");
+    unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
@@ -1318,6 +1339,7 @@ int main() {
     test_connect_snr_pool_wire_freshness();
     test_connect_fading_pool_aggregate();
     test_connect_pick_defer_semantics();
+    test_anchor_offset_override();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)
