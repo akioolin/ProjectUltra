@@ -568,6 +568,17 @@ inline float rungSpectralEfficiency(uint8_t idx) {
 // the threshold must be measured against the rung we would ACTUALLY land on,
 // not idx-1, which may be a hole; F145).
 //
+// TWO APPROXIMATIONS, IN OPPOSITE DIRECTIONS — stated rather than fudged (a
+// correction factor here would be exactly the tuned constant this derivation
+// exists to avoid; the rig A/B is the arbiter):
+//   (a) Airtime-only. A resend also consumes a share of a half-duplex turnaround,
+//       which this ignores => it UNDER-prices staying high. Partly self-limiting:
+//       SACK resends ride along in the next burst rather than buying their own
+//       turnaround, so the share is amortised, not doubled.
+//   (b) f_below = 1. The rung below will not really deliver perfectly, which
+//       => OVER-prices demoting.
+// (a) and (b) push the threshold opposite ways and partially cancel.
+//
 // Worked values on the current ladder: 16QAM R2/3 -> 16QAM R1/2 = 0.75 (a 7/8
 // group is a WIN and must hold); QPSK R3/4 -> R2/3 = 0.889; QPSK R2/3 -> R1/2
 // = 0.75; QPSK R1/2 -> R1/4 = 0.50. Returns 0 at the floor (nothing below to
