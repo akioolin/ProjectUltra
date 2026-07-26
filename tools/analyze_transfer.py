@@ -46,8 +46,18 @@ def parse(path, patterns):
     return out
 
 
+# postProcessTx prepends a fixed lead-in and appends a tail to every keyed transmission
+# (ULTRA_TX_LEADIN_MS / ULTRA_TX_TAIL_MS, defaults 150/50 ms). The emitted sample count
+# logged by 'TX Burst' is the modulated burst only, so the lead-in is added back here.
+LEAD_IN_S = 0.150
+
 SENDER_PATTERNS = {
     'tx_burst':    re.compile(r'TX Burst descriptor: group=(?P<n>\d+) cw/frame=(?P<cw>\d+) (?P<mod>\S+) (?P<rate>\S+)'),
+    # GROUND TRUTH for key-down: the sender's own emitted sample count for the whole
+    # burst (chirp + LTS + descriptor + N data frames). Modelling it as
+    # anchor + N*frame_ms understates it by ~1.2 s because the descriptor block is
+    # omitted and the light-anchor branch assumes a handoff that does not happen.
+    'tx_samples':  re.compile(r'TX Burst: (?P<n>\d+) frames -> (?P<samples>\d+) samples'),
     'flush':       re.compile(r'Flushing burst of (?P<n>\d+) frames'),
     'monitor_arm': re.compile(r'ToneBurstAckMonitor armed'),
     'ack_seen':    re.compile(r'ToneBurstAck monitor: detected'),
@@ -104,10 +114,20 @@ def align(sender, receiver):
     gp = [t for t, k, _ in receiver if k == 'group']
     if not tx or not gp:
         return 0.0, 'none (missing anchors)'
-    # First decode happens ~one burst airtime after the first TX starts.
-    burst_airtime = 9.0
+    # First decode happens ~one burst airtime after the first TX starts. Use the
+    # sender's OWN emitted sample count for that first burst -- a hardcoded nominal
+    # (this was 9.0 s against a real 7.74 s) biases the offset by the difference and
+    # dumps it straight into the rx_latency bucket, manufacturing a phantom
+    # "standing decode latency" identical across runs.
+    smp = [d for _, k, d in sender if k == 'tx_samples']
+    if smp:
+        burst_airtime = int(smp[0]['samples']) / 48000.0 + LEAD_IN_S
+        how = f'measured first-burst airtime {burst_airtime:.2f}s'
+    else:
+        burst_airtime = 9.0
+        how = f'ASSUMED {burst_airtime:.1f}s airtime (no TX-samples line; offset unreliable)'
     off = (gp[0] - burst_airtime) - tx[0]
-    return off, f'first TX {tx[0]:.2f}s -> first group {gp[0]:.2f}s (assumed {burst_airtime:.1f}s airtime)'
+    return off, f'first TX {tx[0]:.2f}s -> first group {gp[0]:.2f}s ({how})'
 
 
 def main():
@@ -175,8 +195,17 @@ def main():
     #   airtime = anchor + N * per-frame data_ms
     # per-frame comes from the sender's own "ARQ window=... data=NNNms" line; the anchor is the
     # full chirp+LTS (~1200 ms) or the warm light-LTS (~200 ms), whichever that burst emitted.
-    FULL_ANCHOR_MS, LIGHT_ANCHOR_MS = 1200.0, 200.0
+    # Key-down comes from the sender's OWN emitted sample count, which already
+    # includes chirp + LTS + the 1.410 s descriptor block + N data frames. The old
+    # model (anchor + N*frame_ms with FULL/LIGHT_ANCHOR_MS = 1200/200) understated
+    # every burst by ~1.2 s: it omits the descriptor entirely and believes in a
+    # light-LTS handoff the descriptor path never takes (measured: 64/64 bursts
+    # emitted a full chirp). Both errors are one-sided and landed in rx_latency.
     cfgs = [(t, float(d['data_ms'])) for t, k, d in Sa if k == 'arqcfg']
+    samples = [(t, int(d['samples'])) for t, k, d in Sa if k == 'tx_samples']
+    # Kept for the airtime-budget report AND as the #69 anchor-skip metric: the skip
+    # is default-ON (ULTRA_ANCHOR_SKIP_K=2) but measured 0/64 on this rig, so the
+    # full/light split is how we tell whether it ever actually fires.
     fulls = [t for t, k, _ in Sa if k == 'full_chirp']
     lights = [t for t, k, _ in Sa if k == 'light_lts']
 
@@ -185,12 +214,17 @@ def main():
         return prior[-1] if prior else 1272.0
 
     keydowns = []
+    kd_measured = 0
     for t0, d0 in txs:
         n = int(d0['n'])
-        nf = next((x for x in fulls if t0 - 0.5 <= x <= t0 + 2.0), None)
-        nl = next((x for x in lights if t0 - 0.5 <= x <= t0 + 2.0), None)
-        anchor = FULL_ANCHOR_MS if nf is not None else (LIGHT_ANCHOR_MS if nl is not None else FULL_ANCHOR_MS)
-        keydowns.append((anchor + n * frame_ms_at(t0)) / 1000.0)
+        near = [(abs(ts - t0), sv) for ts, sv in samples if t0 - 0.5 <= ts <= t0 + 2.0]
+        if near:
+            keydowns.append(min(near)[1] / 48000.0 + LEAD_IN_S)
+            kd_measured += 1
+        else:
+            # Fallback only: flagged in the report so a modelled number is never
+            # mistaken for a measured one.
+            keydowns.append((1200.0 + n * frame_ms_at(t0)) / 1000.0)
 
     # ---------- COLLISION CHECK ----------
     # The sender's key-down ENDS when its last sample lands at the receiver. The receiver
@@ -271,6 +305,19 @@ def main():
     def med(v):
         return sorted(v)[len(v)//2] if v else float('nan')
     tot = med(seg['gap'])
+    # SANITY GUARD (2026-07-25): burst-end -> RX-decode is bounded by ONE frame
+    # airtime -- the receiver is arrival-gated and cannot decode a group before its
+    # last sample lands, but it also cannot lag a whole frame without the load-shed
+    # firing. A larger value means the key-down model is wrong (it previously
+    # hardcoded a 9.0 s nominal airtime and a 1200/200 ms anchor, understating
+    # key-down by ~1.2 s and manufacturing a phantom 2.5 s "standing decode
+    # latency"). Fail loudly rather than report a fabricated lever.
+    if seg['rx_latency'] and med(seg['rx_latency']) > 1.5:
+        print(f"\n  !! WARNING: burst-end -> RX-decode median {med(seg['rx_latency']):.2f}s exceeds one frame "
+              f"airtime. The key-down model is probably wrong -- do NOT treat this as a\n"
+              f"     real lever until the TX-samples line is being parsed "
+              f"(kd_measured={kd_measured}/{len(txs)}).")
+
     print(f"\n  MEDIAN turnaround budget (total {tot:.2f}s):")
     for name, label in (('rx_latency', 'burst-end -> RX decode done '),
                         ('ack_air',    'RX decode -> ACK on air     '),

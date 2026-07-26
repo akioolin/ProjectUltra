@@ -10,6 +10,59 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-25 — fix(tools): analyze_transfer.py manufactured a phantom 2.5 s "standing decode latency"
+
+**What was broken.** The turnaround decomposition reported `burst-end -> RX decode done` = 2.46-2.50 s
+across three independent runs (81-88% of the turnaround gap, ~20-26% of wall clock) and it was ranked
+as the largest single throughput lever on the modem. **It does not exist.** Two one-sided modelling
+errors both landed in that one bucket:
+
+1. `align()` hardcoded `burst_airtime = 9.0` s to place the sender clock; the real first burst is
+   **7.74 s** (measured from the sender's own emitted sample count) => **-1.06 s** bias.
+2. `keydowns` modelled airtime as `anchor + N x frame_ms` with `FULL/LIGHT_ANCHOR_MS = 1200/200`.
+   That omits the **1.410 s descriptor block** entirely => **-1.18 s** bias.
+
+1.06 + 1.18 = **2.24 s of the reported 2.50 s**, which is why the "standing offset" was suspiciously
+identical in three runs — it was a subtraction of two constants, not a measurement. Its proximity to
+`CHIRP_MAX_SEARCH` (2.5 s) was coincidence.
+
+**Corroboration that the receiver is live-paced, not lagging:** burst frames demodulate one frame
+airtime apart (median 1.197-1.201 s vs 1.237 s airtime); `Burst group complete -> TX ToneBurstAck` is
+**6 ms**; LOAD-SHED fires 1-2x per 245-400 s transfer. `BUG-DECODE-BACKLOG-COLLISIONS` is not active.
+
+**The fix.** Key-down now comes from the sender's own `TX Burst: N frames -> S samples` line
+(ground truth: chirp + LTS + descriptor + N data frames), and `align()` uses the measured first-burst
+airtime. Added a **sanity guard** that prints a loud warning if `burst-end -> RX-decode` exceeds one
+frame airtime — the receiver is arrival-gated and physically cannot lag that far without the
+load-shed firing, so any such value means the key-down model is wrong again.
+
+**Corrected budget** (run 1, was 31-36% turnaround): median turnaround **1.79 s**, of which
+`burst-end -> RX decode` **0.04 s (2.2%)**, `ACK on air -> sender detects` **1.69 s (94.4%)`.
+Independently confirmed by the sender's own clock with no cross-log alignment: 1.65-1.82 s, flat in
+absolute terms across group size = a fixed per-turnaround cost. Irreducible floor is ~0.59 s on a real
+radio (the 408 ms ACK tone is information-bearing and already SNR-staircased), so ~0.6-0.9 s/cycle is
+recoverable — real, but roughly a third of what was claimed, and NOT the largest lever.
+
+**NEW FINDING enabled by the fix — rung churn is buying extra full chirps and starving the #69
+anchor-skip.** Per-burst anchor prefixes are bimodal: **1410 ms** (always logged with
+`s16-warm-handoff: light LTS preamble`) or **2610 ms** (never warm, always `streak=0/4`) — a full extra
+chirp+LTS block (57600 samples). 23 of 64 bursts pay the extra. In run 1, **6 of 8** extra anchors
+land within 2 s of a rung change (`desc_switch_full_anchor_pending_` forces a full anchor AND resets
+`anchor_skip_clean_streak_`) = **7.2 s/transfer = 2.9% of wall clock**. Worse, the reset keeps the
+streak below `kReactiveCleanStreak = 4`, so `reactive=OFF` on **64/64** bursts and the default-ON
+anchor skip (`ULTRA_ANCHOR_SKIP_K=2`) has never fired on this rig. (Note: an earlier analysis of the
+same data attributed the reset to `app.cpp:804 setDataTurnAcquiredCallback`; that is wired only under
+`--half-duplex`, which is OFF here — 0 occurrences in the log. The cause is the rate-change path.)
+
+This makes the goodput-graded crater fix (same date) compounding: cutting spurious churn should also
+recover the extra chirps and let the skip finally arm.
+
+**Test verification.** `python3 tools/analyze_transfer.py /tmp/xfer_1_pi5.log /tmp/xfer_1_mac.log` —
+`rx_latency` 2.46 s -> **0.04 s**; turnaround share 31-36% -> **18-19%**; guard silent. Sanity guard
+verified to fire on the old model.
+
+---
+
 ## 2026-07-25 — fix(rate): grade the crater predicate by delivered fraction, not the binary quality byte (ULTRA_CRATER_GOODPUT_GRADE, default-off)
 
 **What was broken.** The RX-authority crater predicate is `quality <= 0 && !all_ok`, but the
