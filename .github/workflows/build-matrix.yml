@@ -23,6 +23,9 @@ jobs:
   test:
     name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # Measured worst case is Windows at ~59 min; 90 leaves headroom for a slow runner
+    # while still failing fast instead of riding GitHub's 6-hour default on a hang.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +165,7 @@ jobs:
   sanitizer:
     name: Sanitizer (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 75  # measured ~37 min
 
     steps:
       - name: Checkout
@@ -213,6 +217,7 @@ jobs:
   coverage:
     name: Coverage (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 75  # measured ~38 min
 
     steps:
       - name: Checkout
@@ -251,6 +256,11 @@ jobs:
       - sanitizer
       - coverage
     runs-on: ${{ matrix.os }}
+    # Measured: linux ~4 min, macos ~3 min, windows ~12 min. A Windows vcpkg/Qt GUI
+    # dependency install HUNG here for >1h30m on 2026-07-26 (run 30201252621) while every
+    # test job passed; with no timeout it rides GitHub's 6-hour default and burns runner
+    # minutes for nothing. 45 is ~4x the observed Windows worst case.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -414,6 +424,7 @@ jobs:
     name: Publish Release Assets
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: build
     permissions:
       contents: write
