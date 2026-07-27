@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+
 // LDPCCodec - ICodec wrapper for existing LDPC encoder/decoder
 //
 // This wrapper allows the existing LDPC implementation to be used through
@@ -83,7 +85,20 @@ public:
 
     // Get recommended max iterations for a code rate
     // Higher rates (less redundancy) need more iterations to converge
+    //
+    // ULTRA_LDPC_MAX_ITERS overrides the table for ALL rates (unset = table, byte-identical).
+    // Measured 2026-07-27 on the rig: EVERY failed burst group stopped at the cap — 21 of 26
+    // at exactly 70, which is the R2/3 entry — while CLEAN groups converged at a median of 4
+    // iterations. Failures are bimodal: converge almost immediately, or run to the wall. The
+    // cap is not protecting a real-time budget on this hardware (decode measured ~1 ms for 8
+    // frames against 1237 ms of frame airtime, ~1000x headroom), so it is worth measuring
+    // whether codewords stuck at the wall are converging slowly or are in a trapping set and
+    // will never converge. This knob exists to answer that by sweep, not to be guessed at.
     static int getRecommendedIterations(CodeRate rate) {
+        if (const char* e = std::getenv("ULTRA_LDPC_MAX_ITERS")) {
+            const int v = std::atoi(e);
+            if (v >= 10 && v <= 1000) return v;
+        }
         switch (rate) {
             case CodeRate::R3_4: return 60;  // Least redundancy, most iterations
             case CodeRate::R2_3: return 70;
