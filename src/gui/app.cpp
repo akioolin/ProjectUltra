@@ -1261,14 +1261,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
                                              const std::string& error) {
-        // --disconnect-on-file-done: the transfer is over, so end the session now rather
-        // than idling out the fixed --auto-disconnect-after timer (which a scripted run
-        // must size for the WORST case). The existing DISCONNECTED handler then does the
-        // usual grace-quit on both ends, so no separate exit path is needed.
+        // --disconnect-on-file-done: REQUEST the disconnect via an atomic; do NOT call
+        // protocol_ here. This callback runs under ProtocolEngineMutex, so re-entering the
+        // protocol engine self-deadlocks — the app freezes and the only visible symptom is
+        // an endless "AudioEngine: RX buffer overrun" spam, which reads like a thermal or
+        // CPU problem. That is a KNOWN trap in this codebase and it bit again on 2026-07-26.
+        // tickScenario() consumes the flag outside the lock.
         if (options_.disconnect_on_file_done && scenario_active_) {
-            guiLog("[scenario] file transfer finished; disconnecting now "
-                   "(--disconnect-on-file-done)");
-            protocol_.disconnect();
+            file_done_disconnect_pending_.store(true, std::memory_order_relaxed);
         }
         last_progress_milestone_ = 0;  // Reset for next transfer
         rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
@@ -1320,10 +1320,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
+        // Same rule as the receive path: request only, never call protocol_ from here.
         if (options_.disconnect_on_file_done && scenario_active_) {
-            guiLog("[scenario] file send finished; disconnecting now "
-                   "(--disconnect-on-file-done)");
-            protocol_.disconnect();
+            file_done_disconnect_pending_.store(true, std::memory_order_relaxed);
         }
         last_progress_milestone_ = 0;  // Reset for next transfer
         rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
@@ -3013,6 +3012,16 @@ void App::tickScenario() {
     if (!scenario_started_) {
         scenario_start_ = now;
         scenario_started_ = true;
+    }
+    // --disconnect-on-file-done: consume the request HERE, outside ProtocolEngineMutex. The
+    // file-complete callbacks only set the flag; calling protocol_ from inside them
+    // self-deadlocks (freeze whose only symptom is endless RX-buffer-overrun spam).
+    if (file_done_disconnect_pending_.exchange(false, std::memory_order_relaxed)) {
+        if (!scenario_disconnect_issued_) {
+            guiLog("[scenario] file transfer finished; disconnecting now "
+                   "(--disconnect-on-file-done)");
+            protocol_.disconnect();
+        }
     }
 
     // Hard exit timer so a scripted run self-terminates and logs can be collected.

@@ -239,6 +239,11 @@ private:
     bool scenario_file_cancel_timer_started_ = false;
     bool scenario_file_cancel_issued_ = false;
     bool scenario_disconnect_issued_ = false;
+    // --disconnect-on-file-done handshake. SET in the file-complete callbacks (which run
+    // under ProtocolEngineMutex, so they must NOT touch protocol_) and CONSUMED in
+    // tickScenario() outside the lock. Atomic because the setter and consumer are
+    // different threads.
+    std::atomic<bool> file_done_disconnect_pending_{false};
     std::chrono::steady_clock::time_point scenario_start_;
     std::chrono::steady_clock::time_point scenario_connected_first_at_;
     std::chrono::steady_clock::time_point scenario_connected_at_;
