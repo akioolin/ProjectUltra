@@ -191,8 +191,19 @@ static bool test_confirmed_crater_arms_climb_dwell() {
     TA::verdict(c, true, 0.95f);
     if (TA::rxCmd(c) <= demoted)
         FAIL("climb still blocked after the dwell expired");
-    if (TA::rxCmd(c) > demoted + 2)
-        FAIL("post-dwell climb jumped more than one enabled rung");
+    // Assert against the next ENABLED rung, not a raw index delta: the ladder has holes
+    // (QAM8 R3/4 auto-disabled, and 16QAM R1/2 disabled 2026-07-26 as dominated), so a
+    // single ENABLED step can span several indices. A fixed "+2" silently encoded the old
+    // hole layout and broke when the layout changed.
+    uint8_t next_enabled = demoted;
+    for (uint8_t i = static_cast<uint8_t>(demoted + 1); i < kRungIdxCount; ++i) {
+        const CoherentPick p = coherentRungFromIndex(i);
+        if (coherentRungLocallyEnabled(p.mod, p.rate)) { next_enabled = i; break; }
+    }
+    if (TA::rxCmd(c) > next_enabled)
+        FAIL("post-dwell climb jumped past the next ENABLED rung (got idx " +
+             std::to_string(TA::rxCmd(c)) + ", next enabled above " +
+             std::to_string(demoted) + " is " + std::to_string(next_enabled) + ")");
     PASS();
     return true;
 }
@@ -304,10 +315,11 @@ static bool test_two_crater_rule() {
     // the rung the ladder proved on the way up. The old cur-2 stride snapped
     // through the QAM8 R3/4 hole to idx 5 = a 3-rung collapse the one-rung
     // climb repaid across 3 switches.
-    if (TA::rxCmd(c) != kRungIdxQam16R12)
+    if (TA::rxCmd(c) != kRungIdxQam8R23)
         FAIL("confirmed crater demoted to idx " + std::to_string(TA::rxCmd(c)) +
-             " (want first enabled below = 16QAM R1/2 = " +
-             std::to_string(kRungIdxQam16R12) + ")");
+             " (want first enabled below = QAM8 R2/3 = " +
+             std::to_string(kRungIdxQam8R23) + "; 16QAM R1/2 is disabled as dominated, and "
+             "idx 5 carries the SAME eta = 2.0)");
     // ENABLED-LADDER pin (F145 deadlock): the raw cur-2 stride from QAM16 R2/3
     // (idx 8) lands on QAM8 R3/4 (idx 6) — a fully-disabled anchor row. The
     // command must snap to an ENABLED rung (idx 5, QAM8 R2/3) or the sender's
@@ -596,8 +608,11 @@ static bool test_evm_demote_strips_overcommit() {
     if (run(true, 13.0f) != kRungIdxQam8R23)
         FAIL("knob ON, EVM 13 dB: must demote 16QAM R2/3 -> 8PSK R2/3");
     // Knob ON, usable EVM 14 dB: clears 16QAM R1/2 (13.9) but not R2/3 → one rung down.
-    if (run(true, 14.0f) != kRungIdxQam16R12)
-        FAIL("knob ON, EVM 14 dB: must demote 16QAM R2/3 -> 16QAM R1/2");
+    // 16QAM R1/2 is disabled as dominated (2026-07-26), so the clamp snaps to the first
+    // ENABLED rung at or below the EVM-supported one: 8PSK R2/3, which carries the SAME
+    // eta = 2.0, so no rate is given up by the snap.
+    if (run(true, 14.0f) != kRungIdxQam8R23)
+        FAIL("knob ON, EVM 14 dB: must demote 16QAM R2/3 -> QAM8 R2/3 (16QAM R1/2 disabled)");
     // Knob OFF: the clamp is inert — the clean high-SNR group holds the top rung.
     if (run(false, 13.0f) < kRungIdxQam16R23)
         FAIL("knob OFF: EVM demote must be inert (no clamp below 16QAM R2/3)");
