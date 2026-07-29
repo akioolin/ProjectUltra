@@ -109,10 +109,13 @@ inline const char* modulationToString(Modulation mod) {
 }
 
 // Cyclic prefix modes for adaptive overhead
+// NOTE: these are BASE values for a 512-point FFT. getCyclicPrefix() scales them by
+// (fft_size / 512), so at the DEFAULT 1024 FFT every value below DOUBLES. Pinned by
+// tests/test_cyclic_prefix_geometry.cpp — do not restate CP lengths in prose without it.
 enum class CyclicPrefixMode : uint8_t {
-    SHORT = 0,   // 32 samples (0.67ms) - good conditions, minimal multipath
-    MEDIUM = 1,  // 48 samples (1.0ms)  - moderate conditions
-    LONG = 2,    // 64 samples (1.33ms) - poor conditions, strong multipath
+    SHORT = 0,   // base 32 samples (0.67ms @512) ->  64 / 1.33ms @1024 - minimal multipath
+    MEDIUM = 1,  // base 48 samples (1.00ms @512) ->  96 / 2.00ms @1024 - moderate
+    LONG = 2,    // base 64 samples (1.33ms @512) -> 128 / 2.67ms @1024 - strong multipath
 };
 
 // Speed profiles balancing throughput vs robustness
@@ -273,7 +276,11 @@ struct ModemConfig {
     uint32_t num_carriers = 59;        // Number of data carriers (2.8 kHz)
 
     // Adaptive cyclic prefix (key performance lever!)
-    // MEDIUM at 1024 FFT = 256 samples = 5.3ms (good for HF multipath)
+    // MEDIUM at 1024 FFT = 96 samples = 2.00 ms.
+    // CORRECTED 2026-07-28: this comment previously claimed "256 samples = 5.3ms" — wrong by
+    // 2.67x. getCyclicPrefix() computes base_cp * (fft_size/512) = 48*2 = 96. The false 5.3 ms
+    // figure matters: ITU Poor has a 2.0 ms second path, so production actually runs at ZERO
+    // CP margin there, not the ~3 ms of headroom the old comment implied.
     CyclicPrefixMode cp_mode = CyclicPrefixMode::MEDIUM;
     uint32_t symbol_guard = 0;         // No extra guard needed with longer CP
 
@@ -413,7 +420,7 @@ inline ModemConfig conservative() {
 // Uses 1024 FFT / 59 carriers (46.875 Hz spacing) for fading resilience
 inline ModemConfig balanced() {
     ModemConfig cfg;  // Inherits 1024 FFT, 59 carriers, DQPSK, no pilots
-    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 256 samples = 5.3ms at 1024 FFT
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 96 samples = 2.00 ms at 1024 FFT
     cfg.modulation = Modulation::DQPSK;        // Differential for HF
     cfg.code_rate = CodeRate::R1_2;            // R1/2 for typical conditions
     cfg.speed_profile = SpeedProfile::BALANCED;
@@ -423,7 +430,7 @@ inline ModemConfig balanced() {
 // Turbo: Maximum speed for excellent conditions (30+ dB SNR)
 inline ModemConfig turbo() {
     ModemConfig cfg;
-    cfg.cp_mode = CyclicPrefixMode::SHORT;     // 32 samples = 0.67ms
+    cfg.cp_mode = CyclicPrefixMode::SHORT;     // 64 samples = 1.33 ms at the default 1024 FFT
     cfg.symbol_guard = 0;                       // No guard - tight timing
     cfg.pilot_spacing = 2;                      // Dense pilots required for HF fading
     cfg.modulation = Modulation::QAM256;
