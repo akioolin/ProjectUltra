@@ -603,6 +603,13 @@ void StreamingDecoder::processBuffer() {
         // crashes in HilbertTransform::process when ALPHA adapts its rate.
         applyPendingConnectedOFDMMode();
         applyPendingDescriptorDataMode();
+
+        // BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV: release waveforms retired by a
+        // setMode() swap on the protocol/GUI thread. THIS is the only safe point —
+        // we are on the decode thread, at the top of the iteration, so no
+        // waveform->... call can be in flight. Normally empty; at most one entry
+        // per mode change.
+        retired_waveforms_.clear();
     }
 
     // ===== [RXLAG-DIAG] TEMPORARY RX-processing-lag instrumentation (ULTRA_RX_LAG_DIAG=1) =====
@@ -750,6 +757,31 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     }
 
     if (waveform_mode_changed) {
+        // BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (root-caused 2026-07-29): assigning to
+        // waveform_ here DESTROYS the object the RX decode thread may be executing inside.
+        // setMode() runs on the protocol/GUI thread (e.g. modem_mode.cpp disconnect:
+        // reset() -> setMode(MC_DPSK,false) -> setDataMode()), while rxDecodeLoop is in
+        // searchForSync() -> detectFullAnchorFallback() -> waveform->detectDataSync()
+        // (sync_controller.cpp:793) through a RAW IWaveform* and WITHOUT holding
+        // ring_.buffer_mutex_. That mutex guards the ring buffer, not this pointer, so it
+        // provides no protection: the decode thread lands in freed memory and null-derefs
+        // in HilbertTransform::process (ips 2026-07-28-220448, and the §14.36 crash before it).
+        //
+        // FIX = DEFERRED RECLAMATION, deliberately the smallest correct change. The swap
+        // itself still takes effect immediately, so mode-switch SEMANTICS ARE UNCHANGED —
+        // we only postpone the free. Any in-flight call keeps running on the old object
+        // (which is what happens today anyway, minus the use-after-free), and the retired
+        // objects are released at the top of processBuffer, on the decode thread, where no
+        // waveform call can be in flight.
+        //
+        // Deliberately NOT the alternatives: restructuring the swap into the
+        // pending_*/apply* deferral would change WHEN the mode takes effect and risks
+        // breaking disconnect/session teardown, which is far worse than this crash;
+        // holding buffer_mutex_ across detectDataSync would serialise the decode thread
+        // against audio ingest and risk stalls.
+        if (waveform_) {
+            retired_waveforms_.push_back(std::move(waveform_));
+        }
         if (mode == protocol::WaveformMode::MC_DPSK) {
             waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         } else {

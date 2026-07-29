@@ -945,6 +945,20 @@ private:
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;
+
+    // BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (2026-07-29). setMode() runs on the
+    // protocol/GUI thread and replaces waveform_ while the RX decode thread may be
+    // executing INSIDE that object — detectFullAnchorFallback (sync_controller.cpp:793)
+    // calls waveform->detectDataSync() through a raw IWaveform* and does NOT hold
+    // ring_.buffer_mutex_, so the mutex setMode takes protects the ring buffer, not this
+    // pointer. Destroying it there is a use-after-free that null-derefs in
+    // HilbertTransform::process.
+    //
+    // Retired objects park here instead of being freed at the swap, and are released at
+    // the top of processBuffer() on the DECODE thread, where no waveform call can be in
+    // flight. Swap semantics are unchanged — only the free is postponed. Bounded: at most
+    // one entry per mode change, cleared on the next decode iteration.
+    std::vector<std::unique_ptr<IWaveform>> retired_waveforms_;
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
     // #70: see setBareChirpExpected. Default TRUE so an idle receiver (the common
