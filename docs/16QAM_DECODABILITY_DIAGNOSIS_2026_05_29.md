@@ -270,6 +270,30 @@ to nail it definitively.
 - **Next, if pursued:** build the data-aided per-symbol genie for the definitive
   estimation-vs-demap split, then attack the estimator (the likely lever).
 
+## ⛔ CORRECTION 2026-07-29 — the data-aided genie is NOT the unconfounded test this doc hoped for
+
+This document repeatedly nominates `H[k] = Y[k]/X_true[k]` as "the one unconfounded test" that
+would finally split estimation from post-equalization. **It is confounded, and worse than the
+proxies it was meant to replace.** The alignment was fixed on 2026-07-29 and the arm then ran —
+but `channel_equalizer_equalize.cpp:526` sets `Ĥ = Y/X` and the MMSE equalizer at `:644`
+computes `conj(Ĥ)·Y/(|Ĥ|²+nv)`, which with `Ĥ = Y/X` collapses to
+
+```
+X · |Y|² / (|Y|² + nv·|X|²)
+```
+
+— the transmitted symbol EXACTLY in direction with the additive noise divided out. It is
+circular (use X to get Ĥ, use Ĥ to get X back): a **noiseless symbol oracle**, not perfect CSI.
+Proof by capacity: at −6 dB in-band it decoded QPSK R3/4 (1.5 info bits/carrier) where Shannon
+allows 0.32 — ~4.7x capacity. Per CLAUDE.md's category-error guard that is a bug, not a result.
+
+**So this doc's central open question remains open**, and its own noise-preserving evidence is
+still the best available: LTS-freeze (true full-band frequency CSI) measured 44 vs pilot-interp
+45 here, and 2/30 vs a 14/30 baseline when re-run on 2026-07-29. **Perfect frequency-domain
+channel knowledge does not unlock 16QAM.** The convergent "16QAM tracks H-estimate quality"
+verdict below stands on the three noise-preserving estimates; the data-aided arm must be
+excluded from it. See docs/CHANGELOG.md 2026-07-29 RETRACTION.
+
 ## Data-aided per-symbol genie (H=Y/X) — BUILT, alignment UNSOLVED (WIP)
 
 Built the unconfounded genie: the OFDM modulator captures the exact transmitted

@@ -10,7 +10,85 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — ⛔ RETRACTION: `ULTRA_GENIE_DATA_AIDED` is a NOISELESS SYMBOL ORACLE, not perfect CSI. "The wall is channel estimation" is NOT ESTABLISHED.
+
+**This retracts the headline of the entry immediately below, and every number in it.** The
+underlying FER *baseline* measurements stand; the *interpretation* does not.
+
+### The defect
+
+`src/ofdm/channel_equalizer_equalize.cpp:526` sets `channel_estimate[idx] = freq_domain[idx] /
+tx->x[idx]`, i.e. `Ĥ = Y/X`. The MMSE equalizer at `:644` then computes
+`conj(Ĥ)·Y / (|Ĥ|² + nv)`. Substituting `Ĥ = Y/X`:
+
+```
+conj(Y/X)·Y / (|Y/X|² + nv)  =  X · |Y|² / (|Y|² + nv·|X|²)
+```
+
+**That is the transmitted symbol X times a positive real scalar — exact in direction, with the
+additive noise divided out.** The arm is circular: it uses X to compute Ĥ, then uses Ĥ to
+recover X. It hands the demapper a noiseless symbol. It does NOT model a receiver that knows
+the channel.
+
+### The independent proof — the capacity guard fires
+
+`data4_full`, ITU Good, seed 7, n=30, QPSK R3/4 (needs **1.5 information bits per data carrier
+per symbol**):
+
+| in-band SNR | baseline pass | genie pass | per-carrier Shannon capacity |
+|---|---|---|---|
+| 12 dB | 14/30 | 29/30 | 2.00 bits |
+| 6 dB | 0/30 | 29/30 | 2.32 bits |
+| **0 dB** | 0/30 | **24/30** | **1.00 bits** |
+| **−6 dB** | 0/30 | **10 of the 12 that synced** | **0.32 bits** |
+
+At −6 dB the arm decodes at **~4.7× Shannon capacity**, on a *fading* channel where capacity is
+lower still. Per CLAUDE.md's information-theoretic category-error guard, **a result above
+capacity is a bug, not a measurement.** The 0 dB row alone (1.5 needed vs 1.00 available) is
+already conclusive.
+
+### What this invalidates
+
+- ❌ "The wall is CHANNEL ESTIMATION" — **not established.**
+- ❌ The flat ~99.8 ceiling. It is flat because the oracle removes the noise, not because
+  estimation is the sole limiter.
+- ❌ Every `genie ON` column and every `gain` column in the entry below, and the claim that the
+  penalty scales with spectral efficiency *because of estimation*. The oracle's headroom
+  `C − A` is modulation-dependent for reasons unrelated to estimation: the MMSE shrink
+  `1/(1+nv/|H|²)` is a uniform per-carrier gain that walks 16QAM's absolute ring threshold
+  (`soft_demap.hpp:95`), while QPSK/8PSK are amplitude-blind. So it is not comparable across
+  the family — exactly what a whole-family statistic requires.
+- ❌ **The magnitude of the estimation opportunity is UNMEASURED.**
+
+### What survives
+
+- ✅ The **baseline** (genie-OFF) FER table across the whole family. Real measurement.
+- ✅ The demapper / LDPC / interleaver are not grossly broken — they reach ~99% when handed
+  clean symbols. That was always the weaker claim and it is the one that holds.
+- ✅ Everything measured independently of the oracle: the CP geometry error, the disconnect
+  use-after-free and its fix, the 16QAM R1/2 "strictly dominated" contradiction, the
+  FrameInterleaver structural blocker, the inter-frame common-phase measurement.
+
+### The noise-preserving evidence points the OTHER way
+
+`ULTRA_GENIE_LTS_FREEZE` supplies genuinely perfect **full-band frequency-domain CSI** with the
+noise intact. Good@20 seed 7: **2/30 with the genie vs 14/30 baseline** — worse. The 2026-05-29
+diagnosis measured the same shape (44 vs pilot-interp 45). **Perfect frequency-domain channel
+knowledge does not unlock 16QAM.** That reopens the estimation-vs-post-equalization question
+which that diagnosis had already flagged as unsettled.
+
+### Lesson recorded
+
+The oracle was accepted because its result looked decisive. The capacity check that killed it
+takes one line of arithmetic and should be the FIRST thing applied to any result that looks too
+good — CLAUDE.md lists it as a hard physical constraint precisely for this.
+
+---
+
 ## 2026-07-29 — FULL-FAMILY GENIE SWEEP: the estimator penalty scales with SPECTRAL EFFICIENCY, and the ceiling is flat
+> ⛔ **HEADLINE RETRACTED — see the entry above.** The `genie ON` columns measure a noiseless
+> symbol oracle (`Ĥ = Y/X` collapses the MMSE output to X exactly), not perfect CSI. The
+> genie-OFF baseline columns remain valid.
 
 **What this settles.** Why the ladder tops out where it does, and that channel estimation is
 not a "16QAM problem" but a DENSITY problem visible at every rung.

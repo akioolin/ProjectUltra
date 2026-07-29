@@ -4,14 +4,34 @@
 // ULTRA_ITERATIVE_CHEST — POST-FEC DATA-AIDED CHANNEL ESTIMATION (default OFF)
 // ============================================================================
 //
-// WHY. The 2026-07-28 data-aided genie (H[k] = Y[k]/X_TRUE[k]) showed that EVERY
-// rung at EVERY SNR decodes at 98-100% given the exact channel, while production
-// reads 93.5 (QPSK R3/4 @20), 82.3 (8PSK R2/3 @20), 51.0 (16QAM R2/3 @20), 27.8
-// (16QAM R3/4 @20). The wall is CHANNEL ESTIMATION, not the channel, the demap or
-// the LDPC. The genie cheats by knowing X. This knob buys the achievable part of
-// that: after LDPC parity AND the frame CRC accept a frame, the receiver knows
+// ⛔ WHY — RETRACTED 2026-07-29. READ THIS BEFORE USING THE RATIONALE BELOW.
+//
+// The original justification was: "the 2026-07-28 data-aided genie showed EVERY rung
+// decodes at 98-100% given the exact channel, so the wall is CHANNEL ESTIMATION."
+// **That is not established.** `ULTRA_GENIE_DATA_AIDED` sets Ĥ = Y/X
+// (channel_equalizer_equalize.cpp:526) and the MMSE equalizer at :644 then computes
+// conj(Ĥ)·Y/(|Ĥ|²+nv), which with Ĥ = Y/X collapses to
+//     X · |Y|² / (|Y|² + nv·|X|²)
+// — the transmitted symbol EXACTLY in direction, with the additive noise divided out.
+// It is circular (use X to get Ĥ, use Ĥ to get X back) and is a NOISELESS SYMBOL
+// ORACLE, not perfect CSI. Proof by capacity: at −6 dB in-band it decoded QPSK R3/4
+// (1.5 info bits/carrier) where Shannon allows 0.32 — ~4.7x capacity, which per
+// CLAUDE.md's category-error guard is a bug, not a measurement. See docs/CHANGELOG.md
+// 2026-07-29 RETRACTION.
+//
+// Noise-preserving evidence points the OTHER way: ULTRA_GENIE_LTS_FREEZE (genuinely
+// perfect full-band frequency CSI, noise intact) measures 2/30 vs a 14/30 baseline at
+// Good@20 s7, and the 2026-05-29 diagnosis measured 44 vs pilot-interp 45. Perfect
+// frequency-domain channel knowledge does NOT unlock 16QAM.
+//
+// WHAT STILL JUSTIFIES THIS KNOB. Not the retracted ceiling. It stands on its own
+// mechanism: after LDPC parity AND the frame CRC accept a frame, the receiver knows
 // EXACTLY what was transmitted, so re-encoding + re-modulating recovers X and
-// H_dd = Y/X becomes an exact (noise-limited, model-free) channel observation.
+// H_dd = Y/X is an exact, model-free, NOISE-LIMITED channel observation — genuinely
+// more information than a pilot LS sample, and unlike the genie it is achievable.
+// It is also, as measured, a NULL: it recovers ~none of the (now unquantified) gap.
+// Kept default-OFF for its two findings (the FrameInterleaver blocker and the
+// inter-frame common phase), not as a pending win.
 //
 // WHAT IT IS NOT. This is NOT the existing pre-FEC decision-directed tracker
 // (`dd_qam16_*`, ULTRA_COHERENT_DD_OFF). That one hard-decides X from Y/H_hat, so
