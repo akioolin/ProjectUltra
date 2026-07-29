@@ -493,8 +493,37 @@ void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts
 
 // === Estimator NMSE against simulator truth -- NOT YET TRUSTWORTHY ==========
 //
-// STATUS 2026-07-29: this measures, but its NMSE is NOT a usable number yet. Read
-// the obstruction below before quoting anything it prints.
+// STATUS 2026-07-29: THE TOOL IS WRONG. Do not quote its NMSE. Proved by its own
+// identity-channel control, which is the first thing any future work here must run:
+//
+//   ULTRA_CHANNEL_DELAY_MS=0 ULTRA_CHANNEL_DOPPLER_HZ=0 measure_ack_fer \
+//       --snr 20 --config data4_full --channel good --mod qam16 --rate r2_3 \
+//       --seed 7 --n 20 --chest-nmse 1
+//
+// With both overrides the Watterson taps collapse to 1 and multipath is disabled, so
+// the channel is LITERALLY IDENTITY -- truth H is the constant 1 at every carrier,
+// confirmed by the dump (|truth| = 1 exactly). Decode is 20/20 PERFECT. A receiver
+// cannot decode 16QAM R2/3 flawlessly on an identity channel with a bad channel
+// estimate, so the estimate is good by construction. This comparison nevertheless
+// reports NMSE 4.40 (+6.4 dB). Therefore the fault is in THIS CODE, not the
+// estimator and not the channel.
+//
+// What the dump shows on that identity channel: |est| is flat to about +/-15%
+// (consistent with estimation noise), but arg(est/truth) scatters by tens of degrees
+// in a pattern no single delay reproduces. Since a delay is the only mechanism that
+// produces smooth phase progression across carriers, the residual is NOT a window
+// offset -- and note the delay search already scans a full alias period, so it would
+// have found one. Plumbing the receiver's absolute FFT-window index out (the
+// remaining Phase 0 item) would therefore NOT fix this.
+//
+// Live candidates, none yet eliminated: the frequency smoothing applied to
+// channel_estimate immediately before the capture site (channel_equalizer_lts.cpp,
+// "LTS H freq-smooth"); whether the stored H is in the flat/de-sloped domain rather
+// than the raw Y/X domain; and whether pilot-bearing carriers are stored under a
+// different convention from data carriers.
+//
+// The identity-channel control is the cheap gate: get it to report NMSE ~ 1/SNR
+// (about 0.01 at 20 dB) BEFORE trusting any reading on a real channel.
 //
 // WHAT IT DOES ESTABLISH (both real, both reproducible with --chest-nmse 1 and
 // ULTRA_CHEST_NMSE_DUMP=1, on a static two-path channel via ULTRA_CHANNEL_DOPPLER_HZ=0):

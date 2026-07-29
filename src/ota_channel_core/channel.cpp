@@ -175,6 +175,21 @@ void SimulatedChannel::rebuildModels() {
         // e.g. 0 for a STATIC-multipath test that freezes the fading drift so a
         // frozen channel estimate is exactly perfect — isolates temporal H-tracking
         // (estimation) from post-equalization. Default: keep the model's Doppler.
+        // 2026-07-29 diag (ULTRA_CHANNEL_DELAY_MS): override the multipath delay
+        // spread. Setting it to 0 collapses the model to a SINGLE tap, so the true
+        // channel is FLAT across frequency. That turns an estimate-vs-truth
+        // comparison into a machinery check with no notch, no frequency
+        // selectivity and no delay ramp to confound it -- if the comparison is
+        // still wrong there, the fault is in the tool, not the channel.
+        if (const char* env = std::getenv("ULTRA_CHANNEL_DELAY_MS")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v >= 0.0f && v < 20.0f) {
+                cfg.delay_spread_ms = v;
+                if (v <= 0.0f) {
+                    cfg.multipath_enabled = false;
+                }
+            }
+        }
         if (const char* env = std::getenv("ULTRA_CHANNEL_DOPPLER_HZ")) {
             const float v = static_cast<float>(std::atof(env));
             if (v >= 0.0f && v < 50.0f) {
