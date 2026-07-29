@@ -10,6 +10,82 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — MODERATE breaks the frequency-only abstraction: an SNR-independent FER floor
+
+### 1. Why this matters more than another calibration row
+
+The Phase 5 calibration (previous entry) was fitted on AWGN + ITU Good and predicted both to
+within 0.1-5.9 points. Adding ITU Moderate was expected to be more of the same. It is not: it
+exposes a STRUCTURAL gap in the abstraction, and it does so in the dangerous direction.
+
+### 2. The AWGN+Good table does NOT extrapolate to Moderate
+
+`calibration/ofdm_per_v1.csv` scored against Moderate (a channel class absent from the fit),
+seed 23 (absent from the fit), n=40:
+
+| rung | SNR | predicted PER | actual PER | error | confident-but-failed |
+|---|---|---|---|---|---|
+| QPSK R1/2 | 18 | 0.023 | 0.125 | -0.102 | 5/39 |
+| QPSK R1/2 | 22 | 0.003 | 0.225 | **-0.222** | 9/39 |
+| QPSK R2/3 | 18 | 0.029 | 0.225 | -0.196 | 8/39 |
+| QPSK R2/3 | 22 | 0.024 | 0.250 | **-0.226** | 10/39 |
+
+13-26% of frames predicted at <=10% PER actually FAILED, against the plan's <5% bound. The bias
+is OPTIMISTIC, i.e. it would command rungs that crater. **A selector actuating on this table
+would be actively harmful on Moderate.**
+
+### 3. Root cause: an SNR-INDEPENDENT FER FLOOR
+
+Sweep data, Moderate, seeds 7+11, n=80 per point:
+
+| rung | 6 dB | 10 | 12 | 14 | 18 | 20 | 24 | 28 |
+|---|---|---|---|---|---|---|---|---|
+| QPSK R1/2 | 0.750 | 0.238 | **0.137** | 0.137 | 0.162 | 0.188 | 0.188 | 0.188 |
+| QPSK R2/3 | 0.863 | 0.675 | 0.438 | 0.287 | **0.188** | 0.200 | 0.213 | 0.213 |
+| QPSK R3/4 | 0.938 | 0.775 | 0.650 | 0.512 | 0.225 | **0.213** | 0.213 | 0.225 |
+
+FER bottoms out near 12-18 dB and then PLATEAUS — mildly non-monotonic thereafter. **22 dB of
+additional SNR cannot get QPSK R1/2 below ~14%.** ITU Good over the same rungs falls
+monotonically (R1/2 reaches 0.050 by 16 dB).
+
+This is a TIME-SELECTIVITY limit. Moderate is 0.5 Hz Doppler against Good's 0.1 Hz — five times
+faster — so the channel decorrelates WITHIN a frame. CLAUDE.md's "fading loss is irreducible:
+deep nulls destroy frames regardless of estimator quality" made quantitative, and it is a floor
+no rung and no estimator can cross.
+
+### 4. What this says about the abstraction
+
+EESM over the per-carrier grid captures FREQUENCY selectivity. It has NO term for TIME
+selectivity, and the grid is sampled once, at the LTS, at the START of the frame. So on a
+fast-fading channel the predictor sees a healthy grid and cannot know the channel will have moved
+by the last symbol. That is precisely the observed optimism.
+
+**Consequences, recorded so they are not rediscovered:**
+- The frequency-only formulation is sufficient for AWGN and Good and INSUFFICIENT for Moderate.
+  Do not paper over this by fitting a Moderate-specific calibration — that reintroduces the
+  channel-class label the whole exercise exists to remove, and the label depends on a
+  known-open discriminator bug.
+- The predictor needs a measured TIME-selectivity input alongside the frequency grid. Candidates
+  already in the receiver: the pilot-based fading index, the Doppler-coherence estimator, and
+  per-symbol pilot residuals (the per-symbol LTS/pilot difference is a direct decorrelation
+  measure over a known interval).
+- The FER FLOOR is itself actionable and independent of the predictor: on Moderate, no rung
+  reaches a 10% PER target at any SNR in 6-28 dB. A reliability-constrained selector with a 10%
+  ceiling correctly returns "no pick" there, and the caller must hold rather than climb. The
+  production ladder's mostly-disabled Moderate column is arguably right, for a reason it never
+  states.
+
+### 5. Status
+
+`calibration/ofdm_per_v1.csv` is unchanged and remains valid for AWGN and Good, with its header
+caveat extended to record that it must NOT be applied to Moderate or faster fading. Phase 7
+actuation is further away than the previous entry implied: it needs the time-selectivity term
+first, not merely better per-decile calibration.
+
+Nothing actuates. `ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — Phase 5 + 6: calibrated PER predictor works, and it catches the ladder's worst rung
 
 ### 1. What was built

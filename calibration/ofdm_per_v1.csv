@@ -17,6 +17,16 @@
 # AGREEMENT is good; absolute per-decile calibration is not yet good enough to
 # command a rate. Use for SHADOW scoring (Phase 6) only.
 #
+# DO NOT APPLY TO MODERATE OR FASTER FADING (measured 2026-07-29). Scored against
+# ITU Moderate, this table under-predicts PER by 10-23 points and 13-26% of frames it
+# calls <=10% PER actually fail. Cause: Moderate has an SNR-INDEPENDENT FER FLOOR
+# (QPSK R1/2 bottoms at ~14% near 12 dB and plateaus ~19% to 28 dB) because 0.5 Hz
+# Doppler decorrelates the channel WITHIN a frame. EESM over the per-carrier grid
+# models FREQUENCY selectivity only, and the grid is sampled once at the LTS, so it
+# cannot see the channel move. A time-selectivity input is required; a
+# Moderate-specific calibration is NOT the fix (it reinstates the channel-class label
+# this work exists to remove). See docs/CHANGELOG.md 2026-07-29.
+#
 # gamma convention: RAW getCarrierGammaSnapshot() = |H|^2/noise_variance, NOT the
 # renormalized group mean from finalizeGroupCarrierGammas(). A constant scale bias
 # cancels because the fit and the prediction share it; a different gamma definition
