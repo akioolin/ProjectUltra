@@ -10,6 +10,90 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Moderate IN training fixes the safety failure; my time-selectivity model is refuted
+
+### 1. Including Moderate in the calibration fixes the dangerous failure
+
+Refit on all three channel classes (AWGN + Good + Moderate), held out by SEED (23) rather than by
+channel. 4 rungs, 5 SNR points, 3 seeds, n=40, 7083 frames.
+
+| rung | held-out pred/act | error | confident-but-failed |
+|---|---|---|---|
+| QPSK R3/4 | 0.194/0.194 | -0.000 | 13/363 |
+| 8PSK R2/3 | 0.379/0.370 | +0.009 | 4/257 |
+| QPSK R1/2 | 0.070/0.079 | -0.010 | 18/478 |
+| 16QAM R2/3 | 0.582/0.561 | +0.021 | 6/179 |
+
+Aggregate held-out error <=2 points, and catastrophic overcommits fall from **18.8% to 3.2%** —
+now under the plan's <5% bound. Answering the question directly: Moderate MUST be in the
+calibration set, not held out as extrapolation.
+
+### 2. But a single parameter set is AVERAGING, not modelling
+
+Per-channel bias on the held-out seed:
+
+```
+16QAM R2/3   awgn +0.093   good +0.055   moderate -0.084
+8PSK  R2/3   awgn +0.017   good +0.097   moderate -0.088
+QPSK  R1/2   awgn +0.013   good +0.050   moderate -0.092
+QPSK  R3/4   awgn +0.065   good +0.054   moderate -0.119
+```
+
+AWGN and Good are systematically PESSIMISTIC, Moderate systematically OPTIMISTIC, a ~15-20 point
+spread. The aggregate looks excellent because the errors cancel. That is not a model of the
+channel, it is a compromise between three of them, and the optimistic side is the one that costs
+goodput.
+
+### 3. RETRACTED: the kappa*cv^2 self-noise model
+
+Proposed model, treating intra-frame decorrelation as a self-noise floor adding in inverse SINR:
+
+    1/gamma_total = 1/gamma_eesm + kappa * cv^2
+
+with cv the CV across data symbols of the per-symbol mean pilot magnitude
+(`last_pilot_symbol_mean_cv`). Physically motivated — it produces the CEILING a frequency-only
+model cannot express.
+
+**It does not work. kappa fits to exactly 0.0 on three of four rungs** (QPSK R1/2 got 0.5), i.e.
+the likelihood prefers to ignore the term, and the frequency-only baseline is identical to within
+rounding on every rung.
+
+Two separate findings from that:
+- **First attempt was structurally void.** Fitting on AWGN+Good and treating Moderate as
+  extrapolation gave kappa = 0.0 for ALL rungs. Neither training channel HAS an SNR-independent
+  floor (Good falls monotonically to 0.05), so nothing in the likelihood rewards a floor term.
+  You cannot fit a parameter for a mechanism absent from your training set. Recorded because it
+  looks like a null result about the physics and is actually a null result about the experiment.
+- **Even with Moderate in training, kappa stays ~0.** So the formulation is wrong, not just
+  under-trained.
+
+### 4. Why it probably failed — the next hypothesis, stated so it can be tested
+
+The feature is a MAGNITUDE CV. Coherent demodulation is destroyed by PHASE decorrelation, and
+|H| variance is blind to it: a channel can rotate substantially at near-constant magnitude. This
+also shows in the feature's own weak separation — measured mean cv is AWGN 0.032, Good 0.160,
+Moderate 0.214, so Good to Moderate is only 1.34x while their FER floors differ enormously
+(Good reaches 0.05, Moderate floors at ~0.19).
+
+The candidate replacement is a PHASE-decorrelation measure over a known symbol interval — the
+per-symbol pilot phase residual, which `channel_equalizer_pilot.cpp` already computes for its CPE
+correction. Untested; stated as a hypothesis, not a plan.
+
+### 5. Status
+
+`calibration/ofdm_per_v1.csv` (AWGN+Good, frequency-only) is UNCHANGED and still carries its
+do-not-apply-to-Moderate header. No three-channel table is shipped: aggregate calibration is good
+enough to consider, per-channel bias is not good enough to command, and shipping a table whose
+errors cancel would hide exactly the optimism that craters rungs.
+
+The time-selectivity capture (`genie_true_h::capturedSymbolMeanCv()`, the `--gamma-csv` cv column)
+is KEPT — the plumbing is correct and reusable for the phase-based feature; only the model built
+on top of it is refuted.
+
+Nothing actuates. `ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — MODERATE breaks the frequency-only abstraction: an SNR-independent FER floor
 
 ### 1. Why this matters more than another calibration row

@@ -539,6 +539,11 @@ float OFDMDemodulator::Impl::computePilotFadingIndexFromStats() const {
     last_pilot_frequency_cv = freq_cv;
     last_pilot_temporal_cv = temporal_cv;
     last_pilot_symbol_mean_cv = symbol_mean_cv_raw;
+    // Phase 5 diag: publish the intra-frame time-selectivity measure. LAST-write-wins
+    // is correct here (the stats accumulate across the frame); see genie_true_h.hpp.
+    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Capture) {
+        ultra::ofdm::genie_true_h::capturedSymbolMeanCv() = symbol_mean_cv_raw;
+    }
     if (phyDiagnosticsEnabled()) {
         char line[768];
         std::snprintf(line, sizeof(line),

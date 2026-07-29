@@ -71,6 +71,32 @@ inline float& capturedNoiseVar() {
     return nv;
 }
 
+// Intra-frame TIME-selectivity measure: the CV across data symbols of the per-symbol
+// mean pilot magnitude (channel_equalizer_pilot.cpp, last_pilot_symbol_mean_cv). On a
+// static channel this is ~0 (noise only); under fast fading the channel gain moves
+// symbol to symbol within the frame and it grows.
+//
+// WHY IT IS NEEDED. EESM over the per-carrier grid models FREQUENCY selectivity only,
+// and the grid is sampled ONCE at the LTS. On ITU Moderate (0.5 Hz Doppler, 5x Good)
+// the channel decorrelates WITHIN a frame, producing an SNR-INDEPENDENT FER FLOOR
+// (QPSK R1/2 bottoms at ~14% near 12 dB and plateaus ~19% out to 28 dB). A
+// frequency-only predictor sees a healthy grid, cannot see the channel move, and is
+// consequently OPTIMISTIC by 10-23 PER points there. This is the missing input.
+//
+// CAPTURE RULE IS THE OPPOSITE OF buffer()'s. The pilot statistics ACCUMULATE across
+// the frame's data symbols, so the value is only complete at the END: here we want
+// LAST-write-wins. buffer() wants FIRST-write-wins because a later write belongs to a
+// different (speculative) decode pass. Do not "unify" these two rules.
+//
+// CAUSALITY, for anyone taking this to production: the current frame's CV is not
+// available before decoding that frame. A live selector must use the PREVIOUS
+// group's value. Doppler is stationary over seconds so that should hold, but it is a
+// separate claim and must be measured, not assumed.
+inline float& capturedSymbolMeanCv() {
+    static float cv = 0.0f;
+    return cv;
+}
+
 // Instrumentation. An oracle that silently fails to engage reports "no effect",
 // which is indistinguishable from "perfect CSI does not help" -- the exact trap
 // that produced two invalid oracles before this one. Always check these counters

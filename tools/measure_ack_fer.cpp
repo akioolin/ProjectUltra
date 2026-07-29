@@ -916,7 +916,8 @@ Counts measure(const Args& args) {
                                                         dlog, plog, isp, pseq);
                 gamma_out << args.snr_db << ',' << args.channel_name << ','
                           << args.mod_name << ',' << args.rate_name << ','
-                          << args.seed << ',' << i << ',' << (ok ? 1 : 0);
+                          << args.seed << ',' << i << ',' << (ok ? 1 : 0)
+                          << ',' << gtrue::capturedSymbolMeanCv();
                 for (int idx : data) {
                     if (static_cast<size_t>(idx) < est.size()) {
                         gamma_out << ',' << (std::norm(est[idx]) / nv);
