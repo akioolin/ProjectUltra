@@ -417,6 +417,13 @@ if(TARGET measure_ack_fer)
     set_tests_properties(ChestNmseProvenance PROPERTIES TIMEOUT 900)
 endif()
 
+# Phase 5: link-abstraction primitives. Tests the MATH and the API contracts
+# (EESM limits, no-underflow, PER sign, and that an uncalibrated or stale-version
+# rung can never be selected) independent of any fitted calibration.
+add_executable(test_link_abstraction test_link_abstraction.cpp)
+target_link_libraries(test_link_abstraction PRIVATE ultra_core)
+add_test(NAME LinkAbstraction COMMAND test_link_abstraction)
+
 add_executable(test_channel_noise_contract test_channel_noise_contract.cpp)
 target_link_libraries(test_channel_noise_contract PRIVATE ota_channel_core)
 add_test(NAME ChannelNoiseContract COMMAND test_channel_noise_contract)
