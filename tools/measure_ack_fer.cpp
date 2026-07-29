@@ -2,6 +2,7 @@
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
 #include "ofdm/genie_tx_capture.hpp"
+#include "ofdm/genie_true_h.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -60,6 +61,17 @@ struct Args {
     bool burst_interleave = true; // cross-frame deep interleave ON/OFF (the A/B)
     bool burst_descriptor = false; // §14.17: emit BURST_HEADER descriptor + mis-set
                                    // decoder group size to prove the descriptor fixes it
+    // 2026-07-29 diag: perfect-CSI bound. Runs every frame TWICE -- once through a
+    // shadow channel with the same seed at very high SNR (so its LTS estimate is
+    // the true H), then through the real channel with that H injected. Both passes
+    // are pumped by an identical, fixed sample budget so the two fade trajectories
+    // stay in lockstep for the whole run. See src/ofdm/genie_true_h.hpp.
+    bool genie_true_h = false;
+    // Shadow-channel SNR. Setting this EQUAL to --snr is the oracle's own null
+    // control: same seed + same SNR => bit-identical signal => both passes sync
+    // identically => injection must be a no-op and reproduce baseline exactly.
+    // Any deviation there is a defect in the oracle, not a channel finding.
+    float genie_clean_snr_db = 60.0f;
     int ldpc_z = 27;               // LDPC lifting size: 27 (N=648) or 81 (N=1944, burst
                                    // long-LDPC keystone). Sets the encoder member via
                                    // setLDPCLiftingZ so the codeword size AND the
@@ -200,6 +212,10 @@ Args parseArgs(int argc, char** argv) {
             args.burst_interleave = std::stoi(requireValue("--burst-interleave")) != 0;
         } else if (key == "--burst-descriptor") {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
+        } else if (key == "--genie-true-h") {
+            args.genie_true_h = std::stoi(requireValue("--genie-true-h")) != 0;
+        } else if (key == "--genie-clean-snr") {
+            args.genie_clean_snr_db = std::stof(requireValue("--genie-clean-snr"));
         } else if (key == "--ldpc-z") {
             args.ldpc_z = std::stoi(requireValue("--ldpc-z"));
         } else if (key == "--help" || key == "-h") {
@@ -353,7 +369,13 @@ TrialOutcome runFrame(gui::StreamingDecoder& decoder,
                       const std::vector<float>& tx_samples,
                       bool full_preamble,
                       bool reset_decoder,
-                      bool expect_full_anchor) {
+                      bool expect_full_anchor,
+                      // 2026-07-29 diag: when true, pump the FULL sample budget
+                      // regardless of early success. The genie mode runs two
+                      // channels with the same seed and they only stay in
+                      // lockstep if both are advanced by identical sample counts;
+                      // the normal early-break would desynchronize their fades.
+                      bool fixed_budget = false) {
     if (reset_decoder) {
         decoder.reset();
     }
@@ -384,13 +406,15 @@ TrialOutcome runFrame(gui::StreamingDecoder& decoder,
         outcome.sync_seen = outcome.sync_seen || decoder.isSynced();
         drainDecoder(decoder, outcome, initial_frames_failed);
 
-        if (outcome.saw_result && outcome.result.success) {
+        if (!fixed_budget && outcome.saw_result && outcome.result.success) {
             break;
         }
         received += take;
     }
 
-    for (int i = 0; i < 8 && !(outcome.saw_result && outcome.result.success); ++i) {
+    for (int i = 0;
+         i < 8 && (fixed_budget || !(outcome.saw_result && outcome.result.success));
+         ++i) {
         auto rx = channel.receiveForB(kPumpChunkSamples);
         decoder.feedAudio(rx.data(), rx.size());
         decoder.processBuffer();
@@ -469,6 +493,22 @@ Counts measure(const Args& args) {
     channel.setSeed(args.seed);
     channel.configure(args.snr_db, args.channel);
 
+    // 2026-07-29 diag: shadow channel + decoder for the perfect-CSI bound. Same
+    // seed and channel type => same fade realization; kGenieCleanSnrDb is high
+    // enough that the LTS estimate taken from it is the true H to well below any
+    // level that could matter. Noise is left ENABLED rather than switched off so
+    // the model draws the same number of RNG samples per call as the real
+    // channel, which is what keeps the two fade trajectories aligned.
+    std::unique_ptr<gui::StreamingDecoder> clean_decoder;
+    std::unique_ptr<ultra::ota_channel_core::SimulatedChannel> clean_channel;
+    if (args.genie_true_h) {
+        clean_decoder = std::make_unique<gui::StreamingDecoder>();
+        configureDecoder(*clean_decoder, args);
+        clean_channel = std::make_unique<ultra::ota_channel_core::SimulatedChannel>();
+        clean_channel->setSeed(args.seed);
+        clean_channel->configure(args.genie_clean_snr_db, args.channel);
+    }
+
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     Counts counts;
 
@@ -491,10 +531,44 @@ Counts measure(const Args& args) {
         // decode-diversity from light-sync acquisition). AckFull uses the cold
         // setMode path and does not need anchor admission.
         const bool expect_anchor = args.config == MeasureConfig::Data4Full;
+
+        // 2026-07-29 diag: clean pass first -- capture the noiseless H over this
+        // frame's fade realization -- then the real pass with that H injected.
+        if (args.genie_true_h) {
+            // NB: alias must not be named `genie` -- ultra::genie already exists
+            // (genie_tx_capture.hpp) and would shadow-collide here.
+            namespace gtrue = ultra::ofdm::genie_true_h;
+            gtrue::buffer().clear();
+            gtrue::mode() = gtrue::Mode::Capture;
+            runFrame(*clean_decoder, *clean_channel, trial.tx_samples, full_preamble,
+                     /*reset_decoder=*/true, /*expect_full_anchor=*/expect_anchor,
+                     /*fixed_budget=*/true);
+            gtrue::mode() = gtrue::Mode::Inject;
+            auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
+                                    /*reset_decoder=*/true,
+                                    /*expect_full_anchor=*/expect_anchor,
+                                    /*fixed_budget=*/true);
+            gtrue::mode() = gtrue::Mode::Off;
+            classify(outcome, trial.frame_bytes, counts);
+            continue;
+        }
+
         auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
                                 /*reset_decoder=*/true,
                                 /*expect_full_anchor=*/expect_anchor);
         classify(outcome, trial.frame_bytes, counts);
+    }
+
+    // 2026-07-29 diag: null control. If captures or injections is 0 the oracle
+    // never engaged and any "no effect" reading is meaningless.
+    if (args.genie_true_h) {
+        const auto& s = ultra::ofdm::genie_true_h::stats();
+        std::cerr << "# genie_true_h: captures=" << s.captures
+                  << " injections=" << s.injections
+                  << " misses=" << s.misses
+                  << " mean_nmse_vs_replaced="
+                  << (s.nmse_count ? s.nmse_sum / static_cast<double>(s.nmse_count) : -1.0)
+                  << "\n";
     }
 
     return counts;

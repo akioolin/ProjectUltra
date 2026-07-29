@@ -10,6 +10,110 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — BOTH channel-estimation oracles are invalid (follow-up to the same-day RETRACTION)
+
+### 1. What was broken
+
+The 2026-07-29 RETRACTION established that `ULTRA_GENIE_DATA_AIDED` is circular (Ĥ=Y/X makes the
+MMSE combiner return X exactly, noise divided out; it decoded at ~4.7x Shannon capacity). It then
+leaned on `ULTRA_GENIE_LTS_FREEZE` as the "noise-preserving" counter-evidence — "genuinely perfect
+full-band frequency CSI" measuring WORSE than baseline, therefore perfect CSI does not help.
+
+**That counter-evidence is also invalid.** LTS-freeze is not perfect CSI. Its own apply-site comment
+states the validity condition — *"On a noiseless frozen channel the stored LTS H is the exact true
+H, so this is a true genie"* — and it is run at finite SNR on a fading channel. It holds ONE noisy
+LTS snapshot across the whole frame in place of per-symbol pilot tracking, which gets fresh pilots
+every symbol and averages estimation noise down. Its harm is that lost averaging.
+
+Staleness is excluded quantitatively: at ITU Good's 0.1 Hz Doppler, channel correlation across a
+0.35 s frame is `J0(2*pi*0.1*0.35) ~= 0.988`.
+
+**Net: "perfect CSI does not help" was never measured. The estimator question is open in BOTH
+directions.** Neither oracle may be cited.
+
+### 2. What was changed
+
+- `src/ofdm/iterative_chest.hpp` — the retraction header cited LTS-freeze as valid counter-evidence;
+  corrected, with the controls and the reason a cross-pass oracle cannot work.
+- `docs/MODEM_INFRASTRUCTURE_MAP.md` — same false claim in the `ULTRA_ITERATIVE_CHEST` row; corrected.
+  Two new rows: `ULTRA_CHEST_NOISE_SCALE` and `genie_true_h`.
+- `src/ofdm/channel_equalizer_lts.cpp` — new **`ULTRA_CHEST_NOISE_SCALE`** (default-OFF, non-latching).
+- `src/ofdm/genie_true_h.hpp` (new), capture in `channel_equalizer_lts.cpp`, inject in
+  `channel_equalizer_pilot.cpp`, `--genie-true-h` / `--genie-clean-snr` + fixed-budget pumping in
+  `tools/measure_ack_fer.cpp` — the attempted valid oracle, inert by default (`mode()` = `Off`).
+
+### 3. Findings
+
+**(a) The 3.01 dB decode-path noise-scale error is real but costs nothing.** `lts_noise_var` holds
+`E|h1-h0|^2/4 = sigma^2_bin/2` — the AVERAGED estimate's variance — while its consumers (MMSE
+denominator `channel_equalizer_equalize.cpp:612,639`, LLR sigma^2 `:619,690`, erasure gate `:541`)
+all want the per-symbol `sigma^2_bin`. The METER path already compensates (`channel_equalizer_lts.cpp:751`,
+`2.0f * lts_noise_var`); the decode path does not, so the two disagree by 2x. Measured a **wash**, so
+the MMSE regulariser is not the binding constraint. Knob kept default-OFF to document it.
+
+**(b) Four-arm discriminating run** (ITU Good @20, seeds 7/11/23/42, n=100, `--config data4_full`):
+
+| mod | rate | A base | B noise-fix | C LTS-freeze | D fix+freeze |
+|---|---|---|---|---|---|
+| QPSK | R3/4 | 93.5 | 93.5 | 76.8 | 76.5 |
+| 8PSK | R2/3 | 82.2 | 81.0 | 59.8 | 60.2 |
+| 16QAM | R2/3 | 51.0 | 49.8 | 27.2 | 25.0 |
+| 16QAM | R3/4 | 27.8 | 26.8 | 12.0 | 10.0 |
+
+D ~= C refutes the hypothesis that a 2x-mis-scaled denominator is why perfect-CSI-shaped input hurts.
+
+**(c) Control proving the freeze plumbing is sound.** On AWGN@25 the channel is CONSTANT, so freezing
+is exactly correct. LTS-freeze is then **byte-identical to baseline** (19/20 at both QPSK R3/4 and
+16QAM R2/3). The machinery is fine; the fading harm is genuine estimation noise. Corollary worth
+keeping: **per-symbol pilot tracking is worth ~16 FER points at QPSK and about half of 16QAM.**
+
+**(d) The valid-oracle attempt failed, for a general and reusable reason.** `--genie-true-h` runs each
+frame through a shadow channel (same seed, high SNR) and injects that H. It engaged correctly
+(captures=19, injections=1083, misses=0) yet scored **0/20 against a 19/20 baseline on AWGN@25**, a
+channel with no fading. It kills DQPSK, D8PSK and 16QAM identically => phase/timing, not amplitude
+scale. The oracle's own **null control** — shadow SNR == real SNR, so both channels emit a
+bit-identical signal and injection MUST be a no-op — still scored 0/20 with
+`mean_nmse_vs_replaced = 1.67`, the value for two uncorrelated vectors.
+
+**Root cause: H is only valid inside the FFT window it was measured in.** `data4_full` sends a full
+chirp anchor plus the measured frame; each syncs at its own sample offset, stamping a different
+`exp(-j*2*pi*k*delta/N)` ramp across carriers. Cross-frame/cross-pass injection is invalid unless the
+sync offsets coincide — which is exactly why LTS-freeze is sound: it never leaves its own frame.
+(`data4_light` cannot serve as the single-frame control: 20/20 sync_fail standalone.)
+
+**Next step:** suppress channel noise over the preamble+LTS span only, so the LTS estimate is noiseless
+WITHIN the single real pass. That reuses the proven in-frame freeze plumbing and has no cross-pass
+domain problem.
+
+**(e) The LTS residual-CFO gate is NOT a defect in sim.** It blocks correction unless
+`trusted_cfo_seed || flat_lts_channel`, and on fading neither can hold (across-carrier CV converges to
+~0.52 for any Rayleigh vs a 0.20 threshold; the chirp reports ~0 Hz so the seed gate fails) — hence
+0 corrections in 48 frames. But `ota_channel_core/channel.cpp:173` sets `cfg.cfo_hz = 0.0f` and the
+harness never calls `setTxCFO`, so **the true offset is exactly zero**: every "residual" on ITU Good is
+a fading-induced false positive and the gate is correctly suppressing 31% of them. Applying them would
+inject up to 0.91 Hz of error into a channel with none.
+
+Two caveats recorded rather than acted on: (i) on the RIG the two stations' clocks genuinely differ, so
+the gate may be over-restrictive there — this harness cannot answer that; (ii) the gate's stated
+justification is wrong on the physics — `h1*conj(h0)` per carrier gives `|H|^2`, real and positive, so
+frequency selectivity cancels EXACTLY. `lts_channel_cv` gates on frequency selectivity when the actual
+corruption axis is TIME selectivity; `cfo_coherence` is the correct and already-present test.
+
+### 4. Test verification
+
+```
+cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4   # 92/92 pass
+```
+
+Production is unaffected: `ULTRA_CHEST_NOISE_SCALE` is default-OFF and `genie_true_h::mode()` defaults
+to `Off`. Oracle controls reproduced with:
+```
+./build/measure_ack_fer --snr 25 --config data4_full --channel awgn --mod qam16 --rate r2_3 \
+    --seed 7 --n 20 --genie-true-h 1 --genie-clean-snr 25
+```
+
+---
+
 ## 2026-07-29 — ⛔ RETRACTION: `ULTRA_GENIE_DATA_AIDED` is a NOISELESS SYMBOL ORACLE, not perfect CSI. "The wall is channel estimation" is NOT ESTABLISHED.
 
 **This retracts the headline of the entry immediately below, and every number in it.** The

@@ -11,12 +11,23 @@
 #include "sim/channel_calibration.hpp"
 #include "ultra/logging.hpp"
 #include "ofdm/frequency_selectivity.hpp"
+#include "ofdm/genie_true_h.hpp"
 
 namespace ultra {
 
 using namespace demod_constants;
 
 namespace {
+
+// ULTRA_CHEST_NOISE_SCALE — corrects the 3.01 dB decode-path noise-scale error (see the
+// derivation at the assignment site). DEFAULT-OFF. Deliberately NOT a function-local
+// `static const`: that latches the env on first call, so one process could only ever see one
+// value and an A/B test in a single binary would be impossible. This is read once per LTS
+// estimate, never on a per-symbol hot path.
+bool chestNoiseScaleFixEnabled() {
+    const char* e = std::getenv("ULTRA_CHEST_NOISE_SCALE");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+}
 
 bool cfoDebugLogEnabled() {
     static const bool enabled = [] {
@@ -667,6 +678,21 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         genie_lts_h_ = channel_estimate;
     }
 
+    // 2026-07-29 diag (genie_true_h): on the CLEAN pass the received signal is
+    // H(x)X with negligible noise, so this LTS estimate IS the true H, already
+    // in the equalizer's own domain and scaling. Store it for the noisy pass.
+    // See src/ofdm/genie_true_h.hpp for why the two older oracles are invalid.
+    // FIRST capture per frame only. The clean pass is pumped for a fixed budget
+    // and re-syncs several times per frame (~4.5 measured), so a last-wins buffer
+    // ends up holding an H from the trailing dead air -- which, injected into
+    // every data symbol, destroys decoding even when the two passes are fed a
+    // bit-identical signal. The harness clears the buffer at each frame boundary.
+    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Capture &&
+        ultra::ofdm::genie_true_h::buffer().empty()) {
+        ultra::ofdm::genie_true_h::buffer() = channel_estimate;
+        ++ultra::ofdm::genie_true_h::stats().captures;
+    }
+
     // Compute average channel response for logging
     Complex h_avg(0, 0);
     float h_mag_sum = 0;
@@ -731,7 +757,32 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             float lts_snr = lts_signal_power / std::max(lts_noise_var, 1e-10f);
             lts_snr = std::max(3.16f, std::min(10000.0f, lts_snr));
 
-            noise_variance = lts_noise_var;
+            // ULTRA_CHEST_NOISE_SCALE (2026-07-29, DEFAULT-OFF) — the 3.01 dB scale error.
+            //
+            // `lts_noise_var` is NOT the per-symbol data noise. With h0 = H + n0 and
+            // h1 = H + n1 (E|n|² = σ²_bin each), diff = n1 - n0 so E|diff|² = 2σ²_bin, and
+            // dividing by 4 gives σ²_bin/2 — which is exactly var((n0+n1)/2), the error
+            // variance of the AVERAGED two-LTS channel estimate (σ²_Havg). The meter path
+            // already knows this and doubles it (`lts_diff_single_symbol_var` below). The
+            // DECODE path does not, so every consumer receives a value 3.01 dB optimistic:
+            //   equalize.cpp:612,639  MMSE denominator h_power + noise_variance  (under-
+            //                         regularised, worst exactly in the nulls that matter)
+            //   equalize.cpp:619,690  carrier_noise_var -> LLR sigma^2  (over-confident LLRs)
+            //   equalize.cpp:541      reliability_noise_var -> softGrayZone + erasure gate
+            // All three want single-symbol sigma^2_bin = 2 * lts_noise_var.
+            //
+            // WHY THIS MIGHT MATTER MORE THAN IT LOOKS: it makes the MMSE denominator
+            // INTERNALLY INCONSISTENT with its numerator. That is a candidate explanation
+            // for the standing anomaly that ULTRA_GENIE_LTS_FREEZE — genuinely perfect
+            // full-band frequency CSI — measures WORSE than baseline (2/30 vs 14/30,
+            // Good@20 s7): supplying an exact H while the noise term stays mis-scaled by 2x
+            // leaves conj(H)Y/(|H|^2+nv) using a denominator that no longer matches. Fixing
+            // the scale and re-running LTS-freeze is the discriminating experiment.
+            //
+            // The no-second-LTS fallback at :774 (signal_power / DEFAULT_SNR_LINEAR) already
+            // carries data-noise semantics and is untouched.
+            noise_variance = chestNoiseScaleFixEnabled() ? (2.0f * lts_noise_var)
+                                                         : lts_noise_var;
             estimated_snr_linear = lts_snr;
             // NOISE SOURCE (external review 2026-07-10, finding 1): the meter
             // must measure noise IN THE OCCUPIED BAND. The guard bins sit just

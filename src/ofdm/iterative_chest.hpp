@@ -19,10 +19,27 @@
 // CLAUDE.md's category-error guard is a bug, not a measurement. See docs/CHANGELOG.md
 // 2026-07-29 RETRACTION.
 //
-// Noise-preserving evidence points the OTHER way: ULTRA_GENIE_LTS_FREEZE (genuinely
-// perfect full-band frequency CSI, noise intact) measures 2/30 vs a 14/30 baseline at
-// Good@20 s7, and the 2026-05-29 diagnosis measured 44 vs pilot-interp 45. Perfect
-// frequency-domain channel knowledge does NOT unlock 16QAM.
+// The counter-evidence that was cited here is ALSO invalid (established 2026-07-29,
+// same CHANGELOG entry). ULTRA_GENIE_LTS_FREEZE was described as "genuinely perfect
+// full-band frequency CSI, noise intact". It is not. Its own apply-site comment states
+// the validity condition — "on a NOISELESS frozen channel the stored LTS H is the exact
+// true H" — and it is run at finite SNR on a fading channel, where it holds ONE noisy
+// LTS snapshot across the whole frame in place of per-symbol pilot tracking that gets
+// fresh pilots every symbol and averages estimation noise down. Its harm is that lost
+// averaging, not a statement about perfect CSI. Staleness is excluded quantitatively:
+// at ITU Good's 0.1 Hz Doppler the channel correlation over a 0.35 s frame is
+// J0(2*pi*0.1*0.35) ~= 0.988. Controls (Good@20, seeds 7/11/23/42, n=100): freeze scores
+// 76.8 vs 93.5 baseline at QPSK R3/4 and 27.2 vs 51.0 at 16QAM R2/3; on AWGN@25, where
+// the channel is CONSTANT so freezing is exactly correct, it is byte-identical to
+// baseline (19/20 both) — which proves the freeze PLUMBING is sound and localizes the
+// fading harm to estimation noise.
+//
+// NET: BOTH oracles in this tree are invalid, so "perfect CSI does not help" was never
+// measured and the estimator question is open in BOTH directions. Do not cite either
+// oracle as evidence. A valid perfect-CSI bound needs a NOISELESS LTS taken in the SAME
+// decode pass (see src/ofdm/genie_true_h.hpp for the design and for why the obvious
+// cross-pass construction fails: H is only valid inside the FFT window it was measured
+// in, so a different sync offset stamps a exp(-j*2*pi*k*delta/N) ramp across carriers).
 //
 // WHAT STILL JUSTIFIES THIS KNOB. Not the retracted ceiling. It stands on its own
 // mechanism: after LDPC parity AND the frame CRC accept a frame, the receiver knows

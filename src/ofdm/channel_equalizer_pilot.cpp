@@ -11,6 +11,7 @@
 #include "demodulator_constants.hpp"
 #include "pilot_pattern.hpp"
 #include "wiener_interpolator.hpp"
+#include "ofdm/genie_true_h.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/phy_diagnostics.hpp"
 
@@ -1328,6 +1329,35 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // channel the stored LTS H is the exact true H, so this is a true genie.
     if (genieLtsFreezeEnabled() && genie_lts_h_.size() == channel_estimate.size()) {
         channel_estimate = genie_lts_h_;
+    }
+
+    // 2026-07-29 diag (genie_true_h): overwrite the data-symbol estimate with the
+    // NOISELESS H captured from the clean pass over the same fade realization.
+    // Unlike GENIE_LTS_FREEZE above, the stored H here carries no estimation
+    // noise, so this is a genuine perfect-CSI bound. The data path's own noise is
+    // untouched. See src/ofdm/genie_true_h.hpp.
+    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Inject) {
+        if (ultra::ofdm::genie_true_h::haveTrueH(channel_estimate.size())) {
+            // Diagnostic: how far is the injected H from the estimate it replaces?
+            // Under the null control (identical signal) this must be ~0. A large
+            // value means the two are in different representations, not merely
+            // different realizations.
+            double num = 0.0;
+            double den = 0.0;
+            for (size_t gi = 0; gi < channel_estimate.size(); ++gi) {
+                const auto d = ultra::ofdm::genie_true_h::buffer()[gi] - channel_estimate[gi];
+                num += static_cast<double>(std::norm(d));
+                den += static_cast<double>(std::norm(channel_estimate[gi]));
+            }
+            if (den > 0.0) {
+                ultra::ofdm::genie_true_h::stats().nmse_sum += num / den;
+                ++ultra::ofdm::genie_true_h::stats().nmse_count;
+            }
+            channel_estimate = ultra::ofdm::genie_true_h::buffer();
+            ++ultra::ofdm::genie_true_h::stats().injections;
+        } else {
+            ++ultra::ofdm::genie_true_h::stats().misses;
+        }
     }
 
     if (have_qam16_dd) {
