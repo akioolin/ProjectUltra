@@ -358,14 +358,31 @@ Key files: `src/sync/chirp_sync.hpp` (dual-chirp detect + CFO), `src/gui/modem/m
 
 ## Key Specifications
 
-| Parameter | Standard | NVIS |
-|-----------|----------|------|
+**CORRECTED 2026-07-29** — the old table listed "Standard = FFT 512 / 30 carriers" as
+though it were the shipped wideband geometry. It is not. Both GUI construction sites
+(`modem_engine.cpp:43`, `app.cpp:456`) use `presets::balanced()`, which inherits the
+**1024 / 59** defaults (`types.hpp:275-276`), and `StreamingDecoder` always passes an
+explicit config. 512/30 exists only in the `OFDMChirpWaveform` DEFAULT constructor
+(`ofdm_chirp_waveform.cpp:142-148`), reachable via `WaveformFactory::create(OFDM_CHIRP)` —
+no live caller found. Pinned by CTest `OFDMCarrierOrdering`.
+
+| Parameter | Wideband (production) | Narrowband (OFDM_NARROW) |
+|-----------|----------------------|--------------------------|
 | Sample rate | 48 kHz | 48 kHz |
 | Center freq | 1500 Hz | 1500 Hz |
-| Bandwidth | ~2.8 kHz | ~2.8 kHz |
-| FFT size | 512 | 1024 |
-| Carriers | 30 | 59 |
-| Max throughput | 3.4 kbps | 7.2 kbps |
+| FFT size | **1024** | 2048 |
+| Carriers | **59** | 21 |
+| Carrier spacing | 46.875 Hz | 23.4375 Hz |
+| Occupied band | 140.625 – 2906.25 Hz | 1265.625 – 1757.8125 Hz |
+| Occupied FFT bins | 1–30, 995–1023 | 1–11, 2038–2047 |
+| Max throughput | 3.4 kbps | ~450 bps |
+
+**Carrier ordering contract** (`src/ofdm/pilot_pattern.hpp`, CTest `OFDMCarrierOrdering`):
+carriers run `k = -floor(Nc/2) … +ceil(Nc/2)` **skipping k = 0** (DC is never occupied);
+`fft_idx = (k + fft_size) % fft_size`, so LOGICAL index is monotonic in frequency but FFT
+BIN NUMBER is not; `f = center_freq + k·fs/fft_size` via `carrierFrequencyHz()`. Odd carrier
+count means one more carrier above DC than below (29/30), so the band is **not** centred on
+1500 Hz — its midpoint is half a bin above.
 
 ## Waveform Summary
 

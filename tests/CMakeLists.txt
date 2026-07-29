@@ -387,6 +387,29 @@ add_test(NAME CyclicPrefixGeometry COMMAND test_cyclic_prefix_geometry)
 # channel model's actual sample-domain filter, and PINS the domain contract (fit
 # out one global delay before comparing). Exists because two channel-estimation
 # oracles were believed without ever being checked against ground truth.
+# Phase 0 acceptance (EFFECTIVE_SINR handoff §9): the AWGN noise-referencing
+# convention, measured end to end within 0.25 dB. Every SNR number in the project
+# is quoted against this convention.
+# Phase 0 (EFFECTIVE_SINR handoff §9): pins the physical/logical carrier ordering,
+# the DC gap, and the carrier->Hz mapping. A truth-vs-estimate comparison made in
+# the wrong domain looks like a RESULT, not a bug -- that is how two invalid
+# channel-estimation oracles survived for months.
+# Phase 0 (EFFECTIVE_SINR handoff §9): names the four noise-variance conventions and
+# pins their conversions -- including sigma_bin^2 = fft_size * sigma_t^2, which rests
+# on the forward FFT being UNNORMALIZED (a third-party property nothing was checking;
+# a normalizing FFT would move every noise-referenced quantity by 30.1 dB at N=1024).
+add_executable(test_noise_variance_contract test_noise_variance_contract.cpp)
+target_link_libraries(test_noise_variance_contract PRIVATE ultra_core)
+add_test(NAME NoiseVarianceContract COMMAND test_noise_variance_contract)
+
+add_executable(test_ofdm_carrier_ordering test_ofdm_carrier_ordering.cpp)
+target_link_libraries(test_ofdm_carrier_ordering PRIVATE ultra_core)
+add_test(NAME OFDMCarrierOrdering COMMAND test_ofdm_carrier_ordering)
+
+add_executable(test_channel_noise_contract test_channel_noise_contract.cpp)
+target_link_libraries(test_channel_noise_contract PRIVATE ota_channel_core)
+add_test(NAME ChannelNoiseContract COMMAND test_channel_noise_contract)
+
 add_executable(test_channel_truth_h test_channel_truth_h.cpp)
 target_link_libraries(test_channel_truth_h PRIVATE ota_channel_core)
 add_test(NAME ChannelTruthH COMMAND test_channel_truth_h)

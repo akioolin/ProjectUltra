@@ -10,6 +10,103 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Phase 0 COMPLETE: carrier ordering, noise contract, symbol timing
+
+Completes the EFFECTIVE_SINR handoff §9 Phase 0 deliverable list. No production behavior
+change: two const helpers, one linkage change, three header-only contracts, three new CTests.
+
+### 1. Carrier ordering + the carrier->Hz mapping (new CTest `OFDMCarrierOrdering`)
+
+**Nothing in the tree converted a carrier to a frequency.** The mapping lived implicitly in the
+mixer and IFFT conventions and was re-derived by hand each time — exactly the gap that lets a
+truth-vs-estimate comparison be made in the wrong domain, which does not look like a bug, it
+looks like a RESULT. Added `signedCarrierIndex()`, `carrierFrequencyHz()` and
+`carrierFrequencyHzForLogical()` to `src/ofdm/pilot_pattern.hpp`.
+
+Contract pinned: carriers run `k = -floor(Nc/2) .. +ceil(Nc/2)` **skipping k = 0** (DC never
+occupied); `fft_idx = (k + fft_size) % fft_size`; `f = center_freq + k*fs/fft_size`. LOGICAL index
+is monotonic in frequency, FFT BIN NUMBER is not. Over one pilot period every one of the 59
+carriers is sounded at least once (verified, not assumed — the pilot branch initially SKIPPED
+silently because `presets::balanced()` ships `use_pilots=false`, so the test now builds the
+pilot-bearing config explicitly).
+
+**CLAUDE.md's "Key Specifications" table was STALE and is corrected.** It listed
+"Standard = FFT 512 / 30 carriers" as the shipped geometry. Production is **1024 / 59**: both GUI
+sites (`modem_engine.cpp:43`, `app.cpp:456`) use `presets::balanced()` and `StreamingDecoder`
+always passes an explicit config. 512/30 exists only in the `OFDMChirpWaveform` default ctor,
+reachable via `WaveformFactory::create(OFDM_CHIRP)` — no live caller found.
+
+### 2. Noise-variance contract (new header + CTest `NoiseVarianceContract`)
+
+`src/ofdm/noise_variance_contract.hpp` names the four quantities that were all called "noise
+variance" and all stored as bare float — `RealSampleVariance` (sigma_t^2), `BinVariancePerSymbol`
+(sigma_bin^2 = fft_size * sigma_t^2), `BinVarianceAveraged` (sigma_bin^2 / M), and
+`PerRealComponentVariance` (sigma_bin^2 / 2) — with conversions, and a REGISTER of which
+file:line produces or consumes which.
+
+The test measures the load-bearing link against the project's own FFT: **the forward transform is
+UNNORMALIZED, so E|X_k|^2 = N * sigma_t^2** (measured +0.012 dB). That rests on a third-party
+header property nothing was checking; a normalizing FFT would move every noise-referenced
+quantity by 30.1 dB at N=1024.
+
+Two inconsistencies documented (both measured harmless, neither fixed — Phase 0 is no-behavior-
+change): **I1** the decode path consumes the AVERAGED variance where it wants per-symbol (the
+3.01 dB error; meter compensates at `lts.cpp:802`, decode does not); **I2** the two producers of
+`noise_variance` disagree with each other — `lts.cpp:784` yields sigma_bin^2/2 while the 1-LTS
+fallback at `:825` yields per-symbol data-noise at a FIXED 15 dB assumption, so whichever branch
+ran last sets the convention for the whole frame.
+
+### 3. AWGN noise reference measured end to end (new CTest `ChannelNoiseContract`)
+
+Phase 0's acceptance bar is 0.25 dB. Measured:
+
+| link | measured | expected | delta |
+|---|---|---|---|
+| injected per-real-sample noise power | -20.681 dB | -20.677 dB | -0.004 |
+| bandpass retains kModemInBandNoisePowerFraction | -9.656 dB | -9.642 dB | -0.014 |
+| in-band SNR of a reference-RMS signal == requested --snr | +20.018 dB | +20.000 | **+0.018** |
+| same closure at a second operating point | +8.009 dB | +8.000 | +0.009 |
+
+So `--snr` IS the in-band SNR, confirmed by measurement rather than by the algebra cancelling on
+paper. `modemBandpassFirCoefficients()` moved out of an anonymous namespace to make the
+convention testable (linkage change only; body unchanged).
+
+**Also established: noise is injected AFTER the multipath filter.** Through a channel whose |H|
+varies 10.20 dB, the noise floor is flat to 0.68 dB. This is what makes per-carrier SINR scale as
+|H(f)|^2; had noise been injected upstream it would be |H|^2-shaped and deep fades would cost
+nothing. Measuring it required Welch segmentation — a single long correlation is a one-bin
+periodogram whose variance stays at 100% of its mean however long the record, and measured that
+way this test first read a 31 dB "spread" across a band that is flat.
+
+### 4. Symbol timing + estimator reset rules (`src/ofdm/symbol_timing_contract.hpp`)
+
+`abs_fft_start(s) = A_frame + (T + s) * S + CP`, matching the production form at
+`channel_equalizer_equalize.cpp:466-469`. Documents every estimator reset site and three caveats
+that will silently corrupt a truth-vs-estimate comparison: **C1** the RX sync convention is up to
+~0.7 symbol off the TX grid (measured +796 samples on ITU Good, `equalize.cpp:462-465`) with no
+per-symbol timing recovery to remove it — this is the timing ramp that made the cross-pass genie
+read 0/20; **C2** the Wiener time axis is frame-relative, restarting at 0 every frame
+(`wiener_symbol_base_` is 0 unless ULTRA_ITERATIVE_CHEST); **C3** `total_fed_` rewinds to 0 on
+reset, so absolute indices are per-epoch, not session-monotone. Plus the known gap that
+`setAbsoluteTrainingPosition()` is not called on the burst-continuation path, so the anchor is
+correct only for group-head frames.
+
+### 5. Test verification — read this honestly
+
+95 of 96 tests pass. **`UltraTncSimAudio` is intermittent on this machine and I did not clear my
+changes of it at high confidence.** Measured: current tree **1 pass / 5 runs**; HEAD with the
+production-path changes stashed **1 pass / 1 run**. The current tree DOES pass, which rules out a
+deterministic regression, but 1/5 vs 1/1 does not distinguish the rates at these sample sizes.
+
+Mitigating: it is a 265 s real-time wall-clock audio session against a 300 s TIMEOUT (13% margin);
+this machine ran parallel workflows, repeated full builds and 2M-sample Monte-Carlo tests
+throughout; the failing run transferred its file successfully and CRC-clean at 51.8 s before
+stalling; and the same test is documented at `docs/CHANGELOG.md:959` as failing 2/2 with the
+change of the day STASHED. Mechanistically none of today's changes touch the production signal
+path. **Re-run it on a quiet machine before trusting any gate that includes it.**
+
+---
+
 ## 2026-07-29 — Phase 0: simulator truth H[k,t] exposed and VALIDATED, domain contract pinned
 
 ### 1. What was broken

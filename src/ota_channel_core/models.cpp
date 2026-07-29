@@ -102,10 +102,6 @@ float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
            std::pow(10.0f, -broadband_snr_db / 20.0f);
 }
 
-std::vector<float> modemBandpassFirCoefficients() {
-    const auto& coeffs = ultra::sim::referenceBandFirCoefficients();
-    return std::vector<float>(coeffs.begin(), coeffs.end());
-}
 
 float processFirSample(float sample,
                        const std::vector<float>& coeffs,
@@ -243,6 +239,11 @@ std::runtime_error realHfLoopWavError(std::string_view path,
 }
 
 }  // namespace
+
+std::vector<float> modemBandpassFirCoefficients() {
+    const auto& coeffs = ultra::sim::referenceBandFirCoefficients();
+    return std::vector<float>(coeffs.begin(), coeffs.end());
+}
 
 float modemReferenceNoiseStddev(float snr_db) {
     return modemReferenceBroadbandNoiseStddev(

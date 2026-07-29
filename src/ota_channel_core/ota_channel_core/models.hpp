@@ -44,6 +44,16 @@ struct ChannelConfig {
 };
 
 float modemReferenceNoiseStddev(float snr_db);
+
+// The FIR that DEFINES the in-band noise reference. Exposed 2026-07-29 (Phase 0)
+// so the noise convention is testable rather than asserted: kModemInBandNoise-
+// PowerFraction is the fraction of broadband white-noise power this filter
+// retains, and kModemBroadbandToInBandSnrOffsetDb is 10*log10 of its reciprocal.
+//
+// IMPORTANT: this is a NOISE-REFERENCING CONVENTION, not a stage in the RX signal
+// path. ModemEngine constructs and resets an rx_filter_ but never applies it; only
+// tx_filter_ is applied. Do not mistake this for receive filtering.
+std::vector<float> modemBandpassFirCoefficients();
 const char* channelTypeName(ChannelType type);
 std::optional<ChannelType> parseChannelType(std::string_view value);
 std::vector<float> loadRealHfLoopNoiseBedWav(std::string_view path);

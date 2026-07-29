@@ -75,6 +75,45 @@ inline size_t logicalForFftIndex(const ModemConfig& config, int fft_idx) {
     return static_cast<size_t>(-1);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 0 (EFFECTIVE_SINR handoff §9): the carrier -> FREQUENCY contract.
+//
+// Until 2026-07-29 nothing in the tree converted a carrier to Hz -- the mapping
+// lived implicitly in the mixer + IFFT convention and had to be re-derived by
+// hand every time. That is precisely the kind of gap that lets a comparison be
+// made in the wrong domain without anyone noticing, so it is now a function with
+// a test (`OFDMCarrierOrdering`).
+//
+// THE CONTRACT, verified against buildCarrierPattern() below:
+//   * carriers run k = -floor(Nc/2) .. +ceil(Nc/2), SKIPPING k = 0 (the DC bin is
+//     never occupied and never carries a channel estimate);
+//   * fft_idx = (k + fft_size) % fft_size, so negative k wrap to the FFT's upper
+//     half -- bin NUMBER is not monotonic in frequency, but LOGICAL index is;
+//   * TX mixes UP by center_freq (modulator.cpp:343, NCO e^{+j2*pi*f/fs}) and RX
+//     mixes down by its exact conjugate (channel_equalizer_baseband.cpp:124-125),
+//     so bin k is baseband +k*fs/N on both ends;
+//   * therefore f_passband = center_freq + k * sample_rate / fft_size.
+//
+// For odd num_carriers there is one MORE positive-frequency carrier than negative
+// (59 -> 29 below, 30 above), so the occupied band is NOT centred on center_freq;
+// its midpoint sits half a bin above.
+inline int signedCarrierIndex(const ModemConfig& config, int fft_idx) {
+    const int n = static_cast<int>(config.fft_size);
+    const int k = (fft_idx <= n / 2) ? fft_idx : fft_idx - n;
+    return k;
+}
+
+inline float carrierFrequencyHz(const ModemConfig& config, int fft_idx) {
+    return static_cast<float>(config.center_freq) +
+           static_cast<float>(signedCarrierIndex(config, fft_idx)) *
+               static_cast<float>(config.sample_rate) /
+               static_cast<float>(config.fft_size);
+}
+
+inline float carrierFrequencyHzForLogical(const ModemConfig& config, size_t logical) {
+    return carrierFrequencyHz(config, fftIndexForLogical(config, logical));
+}
+
 inline bool isPilotLogical(const ModemConfig& config,
                            size_t logical,
                            size_t symbol_index) {
