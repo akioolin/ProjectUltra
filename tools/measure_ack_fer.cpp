@@ -4,6 +4,7 @@
 #include "ofdm/genie_tx_capture.hpp"
 #include "ofdm/genie_true_h.hpp"
 #include "ofdm/pilot_pattern.hpp"
+#include "protocol/link_abstraction.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -83,6 +84,11 @@ struct Args {
     // Phase 5: dump the per-frame per-carrier gamma grid paired with the decode
     // outcome. This is the training data for the EESM/PER link abstraction.
     std::string gamma_csv;
+    // Phase 6 shadow selector: load a calibration table, score EVERY candidate against
+    // the measured grid, and report predicted-vs-actual plus what the selector would
+    // have chosen. Scores only -- it never changes the transmitted rung.
+    std::string calib_path;
+    double shadow_max_per = 0.10;
     // 2026-07-29 Phase 0 payoff: measure the LTS channel estimate against
     // SIMULATOR TRUTH and report NMSE. Requires ULTRA_CHANNEL_DOPPLER_HZ=0 so the
     // taps are frozen and truth H is time-invariant -- otherwise the tap state
@@ -230,6 +236,10 @@ Args parseArgs(int argc, char** argv) {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
         } else if (key == "--genie-true-h") {
             args.genie_true_h = std::stoi(requireValue("--genie-true-h")) != 0;
+        } else if (key == "--calib") {
+            args.calib_path = requireValue("--calib");
+        } else if (key == "--shadow-max-per") {
+            args.shadow_max_per = std::stod(requireValue("--shadow-max-per"));
         } else if (key == "--gamma-csv") {
             args.gamma_csv = requireValue("--gamma-csv");
         } else if (key == "--cp") {
@@ -512,6 +522,77 @@ void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts
 }
 
 
+
+// === Phase 6: shadow selector evaluation ====================================
+//
+// Scores every calibrated candidate against the measured per-carrier grid, then
+// compares (a) the predicted PER of the rung that was ACTUALLY transmitted against
+// what that rung actually did -- the calibration check -- and (b) what a
+// reliability-constrained selector WOULD have chosen. It never changes the
+// transmitted rung; Phase 7 handles actuation, and only after this evidence exists.
+namespace la = ultra::protocol::link_abstraction;
+
+la::CalibrationTable loadCalibration(const std::string& path) {
+    la::CalibrationTable t;
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("cannot open calibration table: " + path);
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::vector<std::string> f;
+        std::string cur;
+        for (char c : line) {
+            if (c == ',') { f.push_back(cur); cur.clear(); }
+            else { cur.push_back(c); }
+        }
+        f.push_back(cur);
+        if (f.size() == 2 && f[0] == "version") {
+            t.version = std::stoi(f[1]);
+            continue;
+        }
+        if (f.size() == 2 && f[0] == "provenance") {
+            t.provenance = f[1];
+            continue;
+        }
+        if (f.size() < 8) {
+            continue;
+        }
+        la::RungCalibration c;
+        if (!la::parseModulation(f[0], c.mod) || !la::parseCodeRate(f[1], c.rate)) {
+            continue;
+        }
+        c.beta = std::stod(f[2]);
+        c.midpoint_db = std::stod(f[3]);
+        c.slope = std::stod(f[4]);
+        c.valid = (f[5] == "1" || f[5] == "true");
+        c.n_frames = std::stoi(f[6]);
+        c.fit_rms_error = std::stod(f[7]);
+        t.rungs.push_back(c);
+    }
+    return t;
+}
+
+struct ShadowAccum {
+    long frames = 0;
+    double pred_per_sum = 0.0;   // predicted PER of the TRANSMITTED rung
+    long actual_fail = 0;        // what it actually did
+    long shadow_same = 0;        // selector agreed with the transmitted rung
+    long shadow_lower = 0;       // selector would have chosen a slower rung
+    long shadow_higher = 0;      // selector would have chosen a faster rung
+    long shadow_none = 0;        // nothing cleared the reliability ceiling
+    double shadow_eff_sum = 0.0; // efficiency the selector would have commanded
+    double actual_eff = 0.0;
+    // Catastrophic overcommit: predicted <=10% PER but the frame failed. The plan's
+    // Phase 5 acceptance bounds this ("no candidate predicted at <=10% FER that
+    // measures >=30% FER"), and it is the failure mode that actually costs goodput.
+    long confident_but_failed = 0;
+    long confident_total = 0;
+};
+
 // === Estimator NMSE against simulator truth -- NOT YET TRUSTWORTHY ==========
 //
 // STATUS 2026-07-29 (updated): the tool's PROFILE provenance bug is FIXED; its
@@ -725,6 +806,16 @@ Counts measure(const Args& args) {
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     Counts counts;
     ChestNmseAccum chest_acc;
+    la::CalibrationTable shadow_table;
+    ShadowAccum shadow;
+    if (!args.calib_path.empty()) {
+        shadow_table = loadCalibration(args.calib_path);
+        if (!shadow_table.usable()) {
+            throw std::runtime_error(
+                "calibration table unusable (version mismatch or empty): " +
+                args.calib_path + " -- refusing to score against a stale table");
+        }
+    }
     std::ofstream gamma_out;
     if (!args.gamma_csv.empty()) {
         gamma_out.open(args.gamma_csv, std::ios::app);
@@ -833,6 +924,52 @@ Counts measure(const Args& args) {
                 }
                 gamma_out << '\n';
             }
+
+            // Phase 6 shadow scoring on the SAME grid, raw (un-renormalized) gamma.
+            if (shadow_table.usable() && !est.empty()) {
+                const auto cfg2 = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                std::vector<int> a2, d2, p2;
+                std::vector<size_t> dl2, pl2;
+                std::vector<bool> ip2;
+                std::vector<ultra::Complex> ps2;
+                ultra::ofdm_pilots::buildCarrierPattern(cfg2, 0, a2, d2, p2, dl2, pl2,
+                                                        ip2, ps2);
+                std::vector<float> grid;
+                grid.reserve(d2.size());
+                for (int idx : d2) {
+                    if (static_cast<size_t>(idx) < est.size()) {
+                        grid.push_back(std::norm(est[idx]) / nv);
+                    }
+                }
+                if (!grid.empty()) {
+                    const auto scored = la::scoreAll(shadow_table, grid);
+                    const auto* txc = shadow_table.find(args.mod, args.rate);
+                    if (txc != nullptr && txc->valid) {
+                        const double geff =
+                            la::toDb(la::effectiveSnrEesm(grid, txc->beta));
+                        const double pper = la::predictPer(*txc, geff);
+                        shadow.pred_per_sum += pper;
+                        shadow.actual_fail += ok ? 0 : 1;
+                        ++shadow.frames;
+                        shadow.actual_eff = la::bitsPerCarrier(args.mod, args.rate);
+                        if (pper <= 0.10) {
+                            ++shadow.confident_total;
+                            if (!ok) ++shadow.confident_but_failed;
+                        }
+                        const auto* pick =
+                            la::selectUnderReliability(scored, args.shadow_max_per);
+                        if (pick == nullptr) {
+                            ++shadow.shadow_none;
+                        } else {
+                            shadow.shadow_eff_sum += pick->efficiency;
+                            const double txe = shadow.actual_eff;
+                            if (std::abs(pick->efficiency - txe) < 1e-6) ++shadow.shadow_same;
+                            else if (pick->efficiency < txe) ++shadow.shadow_lower;
+                            else ++shadow.shadow_higher;
+                        }
+                    }
+                }
+            }
             classify(outcome, trial.frame_bytes, counts);
             continue;
         }
@@ -868,6 +1005,21 @@ Counts measure(const Args& args) {
 
     // 2026-07-29 diag: null control. If captures or injections is 0 the oracle
     // never engaged and any "no effect" reading is meaningless.
+    if (shadow.frames > 0) {
+        const double pred = shadow.pred_per_sum / static_cast<double>(shadow.frames);
+        const double act = static_cast<double>(shadow.actual_fail) /
+                           static_cast<double>(shadow.frames);
+        std::cerr << "# shadow frames=" << shadow.frames
+                  << " pred_per=" << pred << " actual_per=" << act
+                  << " calib_err=" << (pred - act)
+                  << " agree=" << shadow.shadow_same
+                  << " would_demote=" << shadow.shadow_lower
+                  << " would_promote=" << shadow.shadow_higher
+                  << " no_pick=" << shadow.shadow_none
+                  << " confident_but_failed=" << shadow.confident_but_failed
+                  << "/" << shadow.confident_total
+                  << "\n";
+    }
     if (args.chest_nmse) {
         const double mean = chest_acc.frames
             ? chest_acc.sum_nmse / static_cast<double>(chest_acc.frames) : -1.0;

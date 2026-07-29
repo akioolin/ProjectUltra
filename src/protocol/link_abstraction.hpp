@@ -239,4 +239,32 @@ inline const CandidateScore* selectUnderReliability(
     return best;
 }
 
+// ---------------------------------------------------------------------------
+// PERSISTENCE. The plan requires calibration tables to be versioned and persisted
+// ("record calibration provenance and version"). Keeping them as DATA rather than
+// compiled-in constants matters for a reason this project has learned the hard way:
+// a fitted number embedded in source acquires the authority of code, and nobody
+// re-derives it. A loaded table carries its version, its frame count and its
+// held-out error with it, and a version mismatch refuses to load at all.
+//
+// Format, one row per rung:
+//   mod,rate,beta,midpoint_db,slope,valid,n_frames,holdout_mae
+// with a leading "version,<n>" line and optional "#" comments.
+inline bool parseModulation(const std::string& s, Modulation& out) {
+    if (s == "qpsk")  { out = Modulation::QPSK;  return true; }
+    if (s == "dqpsk") { out = Modulation::DQPSK; return true; }
+    if (s == "qam8")  { out = Modulation::QAM8;  return true; }
+    if (s == "d8psk") { out = Modulation::D8PSK; return true; }
+    if (s == "qam16") { out = Modulation::QAM16; return true; }
+    return false;
+}
+
+inline bool parseCodeRate(const std::string& s, CodeRate& out) {
+    if (s == "r1_4") { out = CodeRate::R1_4; return true; }
+    if (s == "r1_2") { out = CodeRate::R1_2; return true; }
+    if (s == "r2_3") { out = CodeRate::R2_3; return true; }
+    if (s == "r3_4") { out = CodeRate::R3_4; return true; }
+    return false;
+}
+
 }  // namespace ultra::protocol::link_abstraction
