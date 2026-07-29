@@ -80,6 +80,12 @@ private:
     std::mt19937 awgn_rng_{42};
     std::normal_distribution<float> noise_dist_{0.0f, 1.0f};
     std::mutex rng_mutex_;
+    // 2026-07-29 Phase 0 diag accessor (declared public below via friend-free
+    // getter); kept adjacent to the member it exposes.
+public:
+    const IChannelModel* modelAToBForDiagnostics() const { return channel_a_to_b_.get(); }
+
+private:
     std::unique_ptr<IChannelModel> channel_a_to_b_;
     std::unique_ptr<IChannelModel> channel_b_to_a_;
 

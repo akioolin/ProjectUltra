@@ -261,6 +261,9 @@ public:
 
     const WattersonChannel::Config& config() const;
 
+    // 2026-07-29 Phase 0 diag: reach the tap state so truth H[k,t] can be read.
+    const WattersonChannel& channelForDiagnostics() const { return channel_; }
+
 private:
     WattersonChannel channel_;
 };

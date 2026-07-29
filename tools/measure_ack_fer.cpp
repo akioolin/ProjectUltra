@@ -3,6 +3,7 @@
 #include "ota_channel_core/channel.hpp"
 #include "ofdm/genie_tx_capture.hpp"
 #include "ofdm/genie_true_h.hpp"
+#include "ofdm/pilot_pattern.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -72,6 +73,11 @@ struct Args {
     // identically => injection must be a no-op and reproduce baseline exactly.
     // Any deviation there is a defect in the oracle, not a channel finding.
     float genie_clean_snr_db = 60.0f;
+    // 2026-07-29 Phase 0 payoff: measure the LTS channel estimate against
+    // SIMULATOR TRUTH and report NMSE. Requires ULTRA_CHANNEL_DOPPLER_HZ=0 so the
+    // taps are frozen and truth H is time-invariant -- otherwise the tap state
+    // read after the frame is not the state the LTS saw.
+    bool chest_nmse = false;
     int ldpc_z = 27;               // LDPC lifting size: 27 (N=648) or 81 (N=1944, burst
                                    // long-LDPC keystone). Sets the encoder member via
                                    // setLDPCLiftingZ so the codeword size AND the
@@ -214,6 +220,8 @@ Args parseArgs(int argc, char** argv) {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
         } else if (key == "--genie-true-h") {
             args.genie_true_h = std::stoi(requireValue("--genie-true-h")) != 0;
+        } else if (key == "--chest-nmse") {
+            args.chest_nmse = std::stoi(requireValue("--chest-nmse")) != 0;
         } else if (key == "--genie-clean-snr") {
             args.genie_clean_snr_db = std::stof(requireValue("--genie-clean-snr"));
         } else if (key == "--ldpc-z") {
@@ -482,6 +490,181 @@ void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts
     }
 }
 
+
+// === Estimator NMSE against simulator truth -- NOT YET TRUSTWORTHY ==========
+//
+// STATUS 2026-07-29: this measures, but its NMSE is NOT a usable number yet. Read
+// the obstruction below before quoting anything it prints.
+//
+// WHAT IT DOES ESTABLISH (both real, both reproducible with --chest-nmse 1 and
+// ULTRA_CHEST_NMSE_DUMP=1, on a static two-path channel via ULTRA_CHANNEL_DOPPLER_HZ=0):
+//   * MAGNITUDE tracks truth to about +/-12% across the whole 140-2906 Hz band.
+//   * The estimate CANNOT follow truth into a deep null -- at f=984 Hz truth is
+//     0.0347 while the scaled estimate sits near 0.20. That is correct behaviour
+//     for a noise-limited estimator, not a defect.
+//
+// THE OBSTRUCTION (proved, not suspected). The receiver's FFT-window offset is
+// UNOBSERVABLE MODULO fft_size from the carrier grid. A delay of exactly N samples
+// is a circular shift, so exp(-j*2*pi*k*N/N) = 1 for every integer bin k. Measured
+// with ULTRA_CHEST_DELAY_SCAN=1: the residual is exactly periodic in 1024 samples --
+// identical to six significant figures at d = -1920, -896, 128, 1152, 2176 (all
+// 7.49705) and at d = -2048, -1024, 0, 1024, 2048 (all 24.1742). The documented RX
+// sync offset is up to ~0.7 symbol (~796 samples, equalize.cpp:462-465), i.e. inside
+// one alias period and NOT recoverable by search.
+//
+// Even at the best in-period delay the residual stays near 3.0 (the value for
+// roughly uncorrelated phase), so a SECOND misalignment remains unisolated --
+// candidates: the frequency-smoothing applied to channel_estimate just before the
+// capture site, and whether the stored H is in the flat/de-sloped domain.
+//
+// TO FINISH: export the receiver's actual absolute FFT-window sample index (and the
+// smoothing state) alongside the captured estimate instead of inferring the ramp.
+// The symbol-timing formula is already written down in
+// src/ofdm/symbol_timing_contract.hpp; what is missing is plumbing the live value out.
+//
+// === Phase 0 payoff: estimator NMSE against simulator truth =================
+//
+// THE question the whole estimator thread turns on: how far is our channel
+// estimate from the true channel? Two oracles tried to answer it indirectly and
+// both were invalid. This measures it directly.
+//
+// DOMAIN CONTRACT (pinned by tests/test_channel_truth_h.cpp): remove a global
+// complex scale and a linear phase ramp, and NOTHING more. Those two are what an
+// OFDM receiver absorbs (phase reference, FFT-window timing). Removing less
+// reports a wrong answer; removing more hides real estimator error.
+struct ChestNmseAccum {
+    double sum_nmse = 0.0;
+    double sum_delay = 0.0;
+    long frames = 0;
+};
+
+const ultra::ota_channel_core::WattersonChannel* wattersonOf(
+    const ultra::ota_channel_core::SimulatedChannel& channel) {
+    const auto* model = channel.modelAToBForDiagnostics();
+    const auto* watterson =
+        dynamic_cast<const ultra::ota_channel_core::WattersonChannelModel*>(model);
+    return watterson ? &watterson->channelForDiagnostics() : nullptr;
+}
+
+void accumulateChestNmse(const ultra::ota_channel_core::SimulatedChannel& channel,
+                         const ultra::ModemConfig& cfg,
+                         ChestNmseAccum& acc) {
+    namespace gtrue = ultra::ofdm::genie_true_h;
+    const auto& est = gtrue::buffer();
+    if (est.empty()) {
+        return;
+    }
+    const auto* w = wattersonOf(channel);
+    if (w == nullptr) {
+        return;  // AWGN path is not a Watterson model; no taps to read.
+    }
+
+    std::vector<int> all, data, pilot;
+    std::vector<size_t> dlog, plog;
+    std::vector<bool> ispilot;
+    std::vector<ultra::Complex> pseq;
+    ultra::ofdm_pilots::buildCarrierPattern(cfg, 0, all, data, pilot, dlog, plog,
+                                            ispilot, pseq);
+
+    std::vector<double> freqs;
+    std::vector<std::complex<double>> e, t;
+    for (int idx : all) {
+        if (static_cast<size_t>(idx) >= est.size()) {
+            return;  // geometry mismatch; refuse to report a number
+        }
+        const float f = ultra::ofdm_pilots::carrierFrequencyHz(cfg, idx);
+        const auto th = w->trueFrequencyResponse(f);
+        if (std::abs(th) < 1e-9f || std::abs(est[idx]) < 1e-12f) {
+            continue;
+        }
+        freqs.push_back(static_cast<double>(f));
+        e.emplace_back(est[idx].real(), est[idx].imag());
+        t.emplace_back(th.real(), th.imag());
+    }
+    if (freqs.size() < 8) {
+        return;
+    }
+    if (acc.frames == 0 && std::getenv("ULTRA_CHEST_NMSE_DUMP")) {
+        std::cerr << "# chest dump: est.size=" << est.size()
+                  << " cfg.fft=" << cfg.fft_size << " Nc=" << cfg.num_carriers
+                  << " carriers_used=" << freqs.size() << "\n";
+        for (size_t i = 0; i < freqs.size(); i += 6) {
+            std::cerr << "#   f=" << freqs[i]
+                      << "  |est|=" << std::abs(e[i])
+                      << "  |truth|=" << std::abs(t[i])
+                      << "  arg(est/truth)=" 
+                      << std::arg(e[i] / t[i]) * 180.0 / M_PI << " deg\n";
+        }
+    }
+
+    // Remove the linear phase ramp by SEARCHING over candidate delays.
+    //
+    // An unwrap-based fit CANNOT work here and that is not a tuning detail: the RX
+    // sync convention sits up to ~0.7 symbol off the TX grid (measured +796 samples
+    // on ITU Good, channel_equalizer_equalize.cpp:462-465). At 46.875 Hz carrier
+    // spacing, 800 samples is 2*pi*800/1024 = 4.9 rad of phase step PER CARRIER --
+    // more than a full turn -- so the ramp aliases and no unwrapping can recover it.
+    // Measured that way this returned NMSE +15.1 dB (estimate and truth unrelated).
+    // A search over delay is immune to the aliasing.
+    auto residualForDelay = [&](double d_samples, std::complex<double>* alpha_out) {
+        std::complex<double> snum(0, 0);
+        double sden = 0.0;
+        std::vector<std::complex<double>> aligned(freqs.size());
+        for (size_t i = 0; i < freqs.size(); ++i) {
+            const double a = -2.0 * M_PI * freqs[i] * d_samples / 48000.0;
+            aligned[i] = e[i] * std::complex<double>(std::cos(-a), std::sin(-a));
+            snum += std::conj(t[i]) * aligned[i];
+            sden += std::norm(t[i]);
+        }
+        if (sden <= 0.0) {
+            return 1e30;
+        }
+        const std::complex<double> alpha = snum / sden;
+        if (std::abs(alpha) < 1e-12) {
+            return 1e30;
+        }
+        double num = 0.0, dnm = 0.0;
+        for (size_t i = 0; i < freqs.size(); ++i) {
+            const std::complex<double> scaled = aligned[i] / alpha;
+            num += std::norm(scaled - t[i]);
+            dnm += std::norm(t[i]);
+        }
+        if (alpha_out) {
+            *alpha_out = alpha;
+        }
+        return num / dnm;
+    };
+
+    // Coarse sweep over +/- one symbol (fft + CP), then refine.
+    double best_d = 0.0;
+    double best_r = 1e30;
+    if (std::getenv("ULTRA_CHEST_DELAY_SCAN")) {
+        std::cerr << "# delay scan (residual vs candidate delay):\n";
+        for (double d = -2560.0; d <= 2560.0; d += 64.0) {
+            std::cerr << "#   d=" << d << "  resid=" << residualForDelay(d, nullptr)
+                      << "\n";
+        }
+    }
+    for (double d = -1200.0; d <= 1200.0; d += 0.5) {
+        const double r = residualForDelay(d, nullptr);
+        if (r < best_r) {
+            best_r = r;
+            best_d = d;
+        }
+    }
+    for (double d = best_d - 1.0; d <= best_d + 1.0; d += 0.02) {
+        const double r = residualForDelay(d, nullptr);
+        if (r < best_r) {
+            best_r = r;
+            best_d = d;
+        }
+    }
+
+    acc.sum_nmse += best_r;
+    acc.sum_delay += best_d;
+    ++acc.frames;
+}
+
 Counts measure(const Args& args) {
     gui::StreamingEncoder encoder;
     configureEncoder(encoder, args);
@@ -511,6 +694,7 @@ Counts measure(const Args& args) {
 
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     Counts counts;
+    ChestNmseAccum chest_acc;
 
     for (int i = 0; i < args.n; ++i) {
         if (ultra::genie::txCapture().enabled) {
@@ -553,6 +737,19 @@ Counts measure(const Args& args) {
             continue;
         }
 
+        if (args.chest_nmse) {
+            namespace gtrue = ultra::ofdm::genie_true_h;
+            gtrue::buffer().clear();
+            gtrue::mode() = gtrue::Mode::Capture;   // capture only; never inject
+            auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
+                                    /*reset_decoder=*/true,
+                                    /*expect_full_anchor=*/expect_anchor);
+            gtrue::mode() = gtrue::Mode::Off;
+            accumulateChestNmse(channel, makeOFDMConfig(args.mod, args.rate), chest_acc);
+            classify(outcome, trial.frame_bytes, counts);
+            continue;
+        }
+
         auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
                                 /*reset_decoder=*/true,
                                 /*expect_full_anchor=*/expect_anchor);
@@ -561,6 +758,18 @@ Counts measure(const Args& args) {
 
     // 2026-07-29 diag: null control. If captures or injections is 0 the oracle
     // never engaged and any "no effect" reading is meaningless.
+    if (args.chest_nmse) {
+        const double mean = chest_acc.frames
+            ? chest_acc.sum_nmse / static_cast<double>(chest_acc.frames) : -1.0;
+        std::cerr << "# chest_nmse frames=" << chest_acc.frames
+                  << " mean_nmse=" << mean
+                  << " mean_nmse_db=" << (mean > 0 ? 10.0 * std::log10(mean) : 0.0)
+                  << " mean_fitted_delay_samples="
+                  << (chest_acc.frames
+                          ? chest_acc.sum_delay / static_cast<double>(chest_acc.frames)
+                          : 0.0)
+                  << "\n";
+    }
     if (args.genie_true_h) {
         const auto& s = ultra::ofdm::genie_true_h::stats();
         std::cerr << "# genie_true_h: captures=" << s.captures
