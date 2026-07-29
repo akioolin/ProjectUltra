@@ -42,7 +42,53 @@ switch, not a descriptor switch. The rig log ends:
 - **BUT** in the real GUI a disconnect does not quit the app, so this would crash a live
   station on disconnect. User-facing, which is why it is filed rather than ignored.
 
-**ATTRIBUTION: UNRESOLVED. Do not blame a specific change on this evidence.**
+### ✅ ROOT CAUSE FOUND 2026-07-29 (by code audit, after the statistics said "unresolved")
+
+**`StreamingDecoder::setMode()` swaps the waveform INLINE while the RX decode thread is using
+it.** `src/gui/modem/streaming_decoder.cpp:729-758`:
+
+```cpp
+void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    ...
+    if (waveform_mode_changed) {
+        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);   // <-- destroys the
+    }                                                                //     object in use
+```
+
+The disconnect path calls it from the protocol/GUI thread (`modem_mode.cpp:222-231`:
+`reset()` → `setMode(MC_DPSK,false)` → `setDataMode(DQPSK,R1_4)`), while:
+
+```
+protocol/GUI thread                   RX decode thread (rxDecodeLoop)
+setMode(MC_DPSK,false)                searchForSync()
+  lock(ring_.buffer_mutex_)             detectFullAnchorFallback(waveform_, ...)
+  waveform_ = createMCDPSK(...)           waveform->detectDataSync(...)   <-- NO LOCK HELD
+  ^ unique_ptr assign DESTROYS it           HilbertTransform::process()   <-- freed memory
+```
+
+`detectFullAnchorFallback` (`sync_controller.cpp:793`) calls through a raw `IWaveform*`
+**without holding `buffer_mutex_`**. That mutex guards the ring buffer, not the waveform
+pointer — so it provides no protection here at all. Classic use-after-free; the null deref at
+`0x0` is the destroyed object's vtable/member.
+
+**⇒ This is PRE-EXISTING.** Both `setMode` and the disconnect path that calls it are
+long-standing. Tonight's work is NOT implicated, which supersedes the statistical
+"unresolved" below (kept for the record, and as a reminder that 1-in-8 could not have
+settled it either way — the code audit did).
+
+**FIX DIRECTION.** The codebase already has the correct pattern: defer the swap to the decode
+thread, exactly like the connected-OFDM path does
+(`setConnectedOFDMMode` → `pending_connected_ofdm_change_` → `applyPendingConnectedOFDMMode()`
+at the top of the next `processBuffer`, `streaming_decoder.cpp:604/1000`). The §14.36 comment
+exists because doing it inline caused this same crash before. Do NOT instead take
+`buffer_mutex_` across `detectDataSync` — that would serialise the decode thread against audio
+ingest and risk stalls. **Also audit `setDataMode` and `reset()` on the same path for the same
+inline-swap hazard.**
+
+---
+
+**Original statistical attribution (superseded by the root cause above):**
 
 | arm | runs | crashes |
 |---|---|---|
