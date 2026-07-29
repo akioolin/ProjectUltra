@@ -10,6 +10,7 @@
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
 #include "protocol/connection_policy.hpp"
+#include "ofdm/genie_tx_capture.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/phy_diagnostics.hpp"
@@ -394,6 +395,16 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
                        : prefer_short_anchor ? waveform_->generateShortAnchorPreamble()
                                              : waveform_->generatePreamble();
 
+    // DIAGNOSTIC (ULTRA_GENIE_DATA_AIDED, default off): tell the genie capture where
+    // this frame's data symbols land in the transmitted stream, so the receiver can
+    // address them by absolute sample position. genie_stream_base_ is the offset of
+    // THIS call's output within the stream the caller is assembling (0 for a
+    // standalone frame; set by encodeBurstLight for the in-burst descriptor).
+    if (ultra::genie::txCapture().enabled) {
+        ultra::genie::txCapture().frame_data_base =
+            genie_stream_base_ + static_cast<long long>(preamble.size());
+    }
+
     // Modulate
     Samples modulated = waveform_->modulate(encoded);
 
@@ -451,6 +462,12 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     Bytes encoded = encodeFrameBytes(frame_data);
 
     Samples preamble = connectedDataPreambleForFrame();
+
+    // DIAGNOSTIC (ULTRA_GENIE_DATA_AIDED, default off) — see encodeFrame().
+    if (ultra::genie::txCapture().enabled) {
+        ultra::genie::txCapture().frame_data_base =
+            genie_stream_base_ + static_cast<long long>(preamble.size());
+    }
 
     // Modulate
     Samples modulated = waveform_->modulate(encoded);
@@ -724,9 +741,13 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                       waveform_->getMode(), modulation_, code_rate_);
         const bool descriptor_short_anchor =
             warm_descriptor && waveform_ && waveform_->shortAnchorEnabled() && short_anchor_gate;
+        // DIAGNOSTIC (ULTRA_GENIE_DATA_AIDED, default off): the descriptor is emitted
+        // INTO result, so its data symbols sit at result.size() + its own preamble.
+        genie_stream_base_ = static_cast<long long>(result.size());
         std::vector<float> descriptor_samples =
             encodeFrame(descriptor_bytes, descriptor_short_anchor && !skip_chirp_descriptor,
                         /*light_preamble=*/skip_chirp_descriptor);
+        genie_stream_base_ = 0;
         if (kAnchorSkipK > 1 || kReactiveShortChirp) {
             const char* anchor_kind = skip_chirp_descriptor ? "LIGHT(no-chirp)"
                                     : (descriptor_short_anchor ? "SHORT-chirp" : "FULL-chirp");
@@ -849,6 +870,14 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             markFirstLTSSymbolForBurstGroup(preamble, ofdm_config_.getSymbolDuration());
             LOG_MODEM(INFO, "[%s] LTS marker: negated first symbol for frame %zu (group start)",
                       log_prefix_.c_str(), i);
+        }
+
+        // DIAGNOSTIC (ULTRA_GENIE_DATA_AIDED, default off): absolute offset of this
+        // frame's first data symbol in the burst stream = current fill + preamble.
+        // The preamble is appended AFTER modulate() below, hence the explicit add.
+        if (ultra::genie::txCapture().enabled) {
+            ultra::genie::txCapture().frame_data_base =
+                static_cast<long long>(result.size() + preamble.size());
         }
 
         // Modulate data

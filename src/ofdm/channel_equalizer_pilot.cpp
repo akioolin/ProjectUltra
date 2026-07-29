@@ -103,6 +103,14 @@ void OFDMDemodulator::Impl::resetWienerPilotHistory() {
     wiener_time_symbol_index_ = -999999;
 }
 
+int OFDMDemodulator::Impl::signedBinForLogicalCarrier(size_t logical_carrier) const {
+    if (logical_carrier >= all_carrier_fft_indices.size()) return 0;
+    const int fft_idx = all_carrier_fft_indices[logical_carrier];
+    const int half_fft = static_cast<int>(config.fft_size / 2);
+    return (fft_idx <= half_fft) ? fft_idx
+                                 : fft_idx - static_cast<int>(config.fft_size);
+}
+
 void OFDMDemodulator::Impl::addWienerPilotObservation(size_t logical_carrier,
                                                       int64_t symbol_index,
                                                       Complex h,
@@ -110,6 +118,15 @@ void OFDMDemodulator::Impl::addWienerPilotObservation(size_t logical_carrier,
     if (logical_carrier >= config.num_carriers ||
         !std::isfinite(h.real()) || !std::isfinite(h.imag())) {
         return;
+    }
+    // FLAT STORAGE DOMAIN (ULTRA_ITERATIVE_CHEST only). Observations that will be
+    // read by a LATER frame must not carry this frame's LTS timing ramp, so store
+    // them already de-sloped; estimateWienerChannel() then skips its de-slope and
+    // re-slopes only at the target. Off => untouched => byte-identical.
+    if (wiener_history_flat_) {
+        const float phase =
+            -lts_phase_slope * static_cast<float>(signedBinForLogicalCarrier(logical_carrier));
+        h *= Complex(std::cos(phase), std::sin(phase));
     }
     if (wiener_pilot_history_.size() != config.num_carriers) {
         wiener_pilot_history_.resize(config.num_carriers);
@@ -131,8 +148,78 @@ void OFDMDemodulator::Impl::addWienerPilotObservation(size_t logical_carrier,
     wiener_time_symbol_index_ = -999999;
 }
 
+// ---------------------------------------------------------------------------
+// COMMON-PHASE RE-REFERENCING for carried channel observations
+// (ULTRA_ITERATIVE_CHEST only; called just before the new frame's LTS seed).
+//
+// Each frame is acquired independently: its mixer is reset, its CFO phase
+// reference is re-derived from the frame's own absolute position, and its timing
+// is re-solved from its own LTS. So the channel estimate of frame k and frame k+1
+// describe the SAME physical channel in two different phase references:
+//
+//     H_k(f) = H_true(f) * exp(j*phi_k)      phi_k arbitrary per frame
+//
+// De-sloping removes the part of that which is LINEAR in carrier index (the
+// timing ramp). It does NOT remove the COMMON phase, and averaging observations
+// that differ by an unknown common phase destroys the estimate rather than
+// improving it — the carried sample becomes confidently wrong, which is exactly
+// what 16QAM's absolute-amplitude ring bit cannot absorb.
+//
+// The correction is the maximum-likelihood estimate of that single unknown:
+// phi = arg( sum_k H_new(k) * conj(H_carried(k)) ) over every carrier where both
+// exist. One complex accumulator, one atan2 — a 1-parameter LS fit, no threshold,
+// no tuned constant, no per-modulation branch. Degenerate case (|sum| == 0, i.e.
+// no overlap or a dead band) leaves the history untouched.
+void OFDMDemodulator::Impl::rereferenceCarriedHistoryPhase() {
+    if (wiener_pilot_history_.empty()) return;
+    const size_t n = std::min<size_t>(config.num_carriers, all_carrier_fft_indices.size());
+    Complex acc(0.0f, 0.0f);
+    size_t overlap = 0;
+    for (size_t logical = 0; logical < n && logical < wiener_pilot_history_.size();
+         ++logical) {
+        const auto& hist = wiener_pilot_history_[logical];
+        if (hist.empty()) continue;
+        const int idx = all_carrier_fft_indices[logical];
+        Complex h_new = channel_estimate[idx];
+        if (wiener_history_flat_) {
+            const float phase =
+                -lts_phase_slope * static_cast<float>(signedBinForLogicalCarrier(logical));
+            h_new *= Complex(std::cos(phase), std::sin(phase));
+        }
+        acc += h_new * std::conj(hist.back().h);
+        ++overlap;
+    }
+    const float mag = std::abs(acc);
+    if (!(mag > 0.0f) || overlap == 0) return;
+    const Complex rot = acc / mag;
+
+    static int log_count = 0;
+    if (log_count < 12) {
+        LOG_DEMOD(INFO,
+                  "ITERATIVE_CHEST: re-referencing %zu carried carriers by %+.1f deg "
+                  "(|sum|=%.4f)",
+                  overlap, std::arg(acc) * 180.0f / static_cast<float>(M_PI), mag);
+        ++log_count;
+    }
+
+    for (auto& hist : wiener_pilot_history_) {
+        for (auto& sample : hist) {
+            sample.h *= rot;
+        }
+    }
+    wiener_time_symbol_index_ = -999999;  // invalidate the cached time stage
+}
+
 void OFDMDemodulator::Impl::seedWienerPilotHistoryFromCurrentChannel(int64_t symbol_index) {
-    resetWienerPilotHistory();
+    // With the carry armed (ULTRA_ITERATIVE_CHEST) the previous frame's verified
+    // data-aided observations are the whole point — do NOT wipe them here; the new
+    // LTS simply joins the history as the freshest observation and the Wiener's own
+    // rho(dt) decides how much each one is worth. Unarmed => reset as before.
+    if (!wiener_carry_armed_) {
+        resetWienerPilotHistory();
+    } else {
+        rereferenceCarriedHistoryPhase();
+    }
     const size_t n = std::min<size_t>(config.num_carriers, all_carrier_fft_indices.size());
     for (size_t logical = 0; logical < n; ++logical) {
         const int idx = all_carrier_fft_indices[logical];
@@ -273,6 +360,19 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
         wiener_time_symbol_index_ = symbol_index;
     }
 
+    // ULTRA_PILOT_DFT_INTERP: the frequency axis of the separable Wiener is where
+    // the reconstruction filter lives. Default (OFF) positions observations by
+    // LOGICAL carrier index and correlates with sinc(pi*df*tau) — the transform of a
+    // flat CONTINUOUS delay window, and blind to the DC gap (logical delta 1 across
+    // k=-1 -> k=+1 is really 2 carriers of frequency). ON positions them by PHYSICAL
+    // carrier index k and correlates with the Dirichlet kernel of an integer-sample
+    // delay window: the exact "IDFT -> truncate CIR to its support -> DFT back"
+    // operator for this (non-uniform, DC-gapped) pilot geometry, in closed form.
+    // The time axis and the observation set are untouched, so the knob is a clean
+    // reconstruction-filter A/B.
+    const bool use_delay_domain =
+        delay_domain_interp_ && delay_domain_window_.valid();
+
     std::vector<ofdm_wiener::Observation1D> freq_obs;
     freq_obs.reserve(config.num_carriers);
     const int half_fft = static_cast<int>(config.fft_size / 2);
@@ -287,27 +387,43 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
         const int k = (fft_idx <= half_fft)
             ? fft_idx
             : fft_idx - static_cast<int>(config.fft_size);
+        // Samples stored in the FLAT domain were already de-sloped at capture (see
+        // addWienerPilotObservation) — de-sloping again would inject the ramp twice.
         const float phase = -lts_phase_slope * static_cast<float>(k);
         const Complex desloped =
-            wiener_time_estimate_[logical] *
-            Complex(std::cos(phase), std::sin(phase));
+            wiener_history_flat_
+                ? wiener_time_estimate_[logical]
+                : wiener_time_estimate_[logical] *
+                      Complex(std::cos(phase), std::sin(phase));
         freq_obs.push_back(ofdm_wiener::Observation1D{
-            static_cast<float>(logical),
+            use_delay_domain ? static_cast<float>(k)
+                             : static_cast<float>(logical),
             desloped,
             std::max(noise_norm, wiener_time_error_var_[logical])});
     }
 
-    const auto freq_estimate = ofdm_wiener::estimate1D(
-        freq_obs,
-        static_cast<float>(logical_carrier),
-        kWienerMaxFreqObs,
-        [&](float delta_logical) {
-            const float delay = wiener_params_override_active_
-                                    ? wiener_delay_spread_s_override_
-                                    : robustDelaySpreadS();
-            return ofdm_wiener::frequencyCorrelation(
-                delta_logical, carrier_spacing_hz, delay);
-        });
+    const int target_fft_for_pos = all_carrier_fft_indices[logical_carrier];
+    const int target_k_for_pos = (target_fft_for_pos <= half_fft)
+        ? target_fft_for_pos
+        : target_fft_for_pos - static_cast<int>(config.fft_size);
+
+    const auto freq_estimate = use_delay_domain
+        ? ofdm_cir::reconstruct(freq_obs,
+                                static_cast<float>(target_k_for_pos),
+                                delay_domain_window_.taps,
+                                config.fft_size,
+                                kWienerMaxFreqObs)
+        : ofdm_wiener::estimate1D(
+              freq_obs,
+              static_cast<float>(logical_carrier),
+              kWienerMaxFreqObs,
+              [&](float delta_logical) {
+                  const float delay = wiener_params_override_active_
+                                          ? wiener_delay_spread_s_override_
+                                          : robustDelaySpreadS();
+                  return ofdm_wiener::frequencyCorrelation(
+                      delta_logical, carrier_spacing_hz, delay);
+              });
     if (!freq_estimate.valid) {
         if (out_error_var) {
             *out_error_var = 1.0f;
@@ -315,11 +431,7 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
         return fallback;
     }
 
-    const int target_fft = all_carrier_fft_indices[logical_carrier];
-    const int target_k = (target_fft <= half_fft)
-        ? target_fft
-        : target_fft - static_cast<int>(config.fft_size);
-    const float phase = lts_phase_slope * static_cast<float>(target_k);
+    const float phase = lts_phase_slope * static_cast<float>(target_k_for_pos);
     if (out_error_var) {
         *out_error_var = freq_estimate.error_var;
     }
@@ -671,11 +783,17 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     float signal_power = signal_power_sum / pilot_carrier_indices.size();
     const float wiener_noise_norm =
         noise_variance / std::max(signal_power, MIN_CARRIER_NOISE_VAR);
+    // Data-aided observations must be pushed on the SAME normalisation as the pilot
+    // observations they will be combined with, or the Wiener's relative weighting is
+    // meaningless. Latch the pilot-referenced value; the per-carrier 1/|X|^2 factor
+    // is applied at ingest (iterative_chest.hpp).
+    da_noise_norm_ = wiener_noise_norm;
     for (size_t i = 0;
          i < h_ls_all.size() && i < pilot_logical_carrier_indices.size();
          ++i) {
         addWienerPilotObservation(pilot_logical_carrier_indices[i],
-                                  static_cast<int64_t>(current_data_symbol_index_),
+                                  wiener_symbol_base_ +
+                                      static_cast<int64_t>(current_data_symbol_index_),
                                   h_ls_all[i],
                                   wiener_noise_norm);
         // F166 Stage B: persist the RAW observation power (pre-Wiener) — the
@@ -942,6 +1060,58 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         dd_qam16_channel_observations_.size() == config.fft_size &&
         dd_qam16_measurement_var_.size() == config.fft_size &&
         dd_qam16_reliability_.size() == config.fft_size;
+
+    // ULTRA_PILOT_DFT_INTERP (default OFF): delay-domain (CIR) reconstruction of the
+    // data-carrier channel. Re-read every symbol (NOT a latching `static const`) so a
+    // single binary can run both arms of an A/B. One getenv per OFDM symbol, matching
+    // the dd_force_off / dd_fading_max idiom directly above; the per-CARRIER hot loop
+    // never touches the environment.
+    delay_domain_interp_ = []() {
+        if (const char* env = std::getenv("ULTRA_PILOT_DFT_INTERP")) {
+            return std::atoi(env) == 1;
+        }
+        return false;
+    }();
+    if (delay_domain_interp_) {
+        // Window span = the SAME channel delay assumption the Wiener frequency prior
+        // uses (sinc(pi*df*tau) is the transform of a flat delay window of width tau),
+        // so the knob swaps the RECONSTRUCTION FILTER and not the channel model:
+        // channel-class override when the decoder has a Doppler-coherence verdict,
+        // else ULTRA_WIENER_DELAY_SPREAD_S / 1 ms. ULTRA_PILOT_DFT_SPAN_MS overrides
+        // it for sweeping the window independently of the Wiener prior.
+        float span_s = wiener_params_override_active_
+                           ? wiener_delay_spread_s_override_
+                           : robustDelaySpreadS();
+        if (const char* env = std::getenv("ULTRA_PILOT_DFT_SPAN_MS")) {
+            const float ms = static_cast<float>(std::atof(env));
+            if (ms > 0.0f && ms < 20.0f) {
+                span_s = ms * 1.0e-3f;
+            }
+        }
+        delay_domain_window_ = ofdm_cir::chooseDelayWindow(
+            span_s, config.sample_rate, config.fft_size,
+            config.pilot_spacing, config.getCyclicPrefix());
+        static int window_log_count = 0;
+        if (window_log_count < 3) {
+            LOG_DEMOD(INFO,
+                      "Delay-domain pilot interp: span=%.2f ms -> W=%d taps "
+                      "(+-%.2f ms), alias_clamped=%d cp_clamped=%d, "
+                      "unambiguous=%d samples (fft=%u, pilot_spacing=%u, cp=%u)",
+                      span_s * 1.0e3f, delay_domain_window_.taps,
+                      1.0e3f * delay_domain_window_.half_taps /
+                          static_cast<float>(config.sample_rate),
+                      delay_domain_window_.alias_clamped ? 1 : 0,
+                      delay_domain_window_.cp_clamped ? 1 : 0,
+                      config.pilot_spacing > 0
+                          ? static_cast<int>(config.fft_size / config.pilot_spacing)
+                          : static_cast<int>(config.fft_size),
+                      config.fft_size, config.pilot_spacing,
+                      config.getCyclicPrefix());
+            ++window_log_count;
+        }
+    } else {
+        delay_domain_window_ = ofdm_cir::DelayWindow{};
+    }
     {
         // Coherent pilot interpolation: phase-slope-compensated complex interpolation
         // (OFDM is coherent-only; the differential magnitude-only branch was removed).
@@ -967,6 +1137,29 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
         const bool use_wiener_interpolation =
             ofdm_pilots::scatteredPilotsActive(config);
+
+        // ULTRA_PILOT_DFT_INTERP: when the Wiener path is NOT active (non-scattered
+        // pilots / differential modulation), the reconstruction filter is the plain
+        // linear interpolation above. Replace it with the delay-domain MMSE fit over
+        // THIS symbol's de-sloped pilots, positioned by PHYSICAL carrier index so the
+        // DC gap (k = -1 -> +1 is two carriers, not one) is honoured.
+        // When the Wiener path IS active the swap happens inside
+        // estimateWienerChannel() instead — same kernel, richer observation set
+        // (time-extrapolated per-carrier estimates rather than one symbol's pilots).
+        delay_domain_pilot_obs_.clear();
+        if (delay_domain_interp_ && delay_domain_window_.valid() &&
+            !use_wiener_interpolation && pilot_carrier_indices.size() >= 2) {
+            delay_domain_pilot_obs_.reserve(pilot_carrier_indices.size());
+            for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                const int fft_idx = pilot_carrier_indices[i];
+                const int k = (fft_idx <= half_fft) ? fft_idx
+                                                    : fft_idx - config.fft_size;
+                delay_domain_pilot_obs_.push_back(ofdm_wiener::Observation1D{
+                    static_cast<float>(k),
+                    pilot_desloped[i],
+                    wiener_noise_norm});
+            }
+        }
 
         for (size_t dc = 0; dc < interp_table.size(); ++dc) {
             const auto& info = interp_table[dc];
@@ -1003,16 +1196,35 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             // Re-slope at data carrier position
             int k = (info.fft_idx <= half_fft) ? info.fft_idx : info.fft_idx - config.fft_size;
             float phase = lts_phase_slope * k;
-            Complex pilot_h = interp_h * Complex(std::cos(phase), std::sin(phase));
+            const Complex reslope(std::cos(phase), std::sin(phase));
+            Complex pilot_h = interp_h * reslope;
             float wiener_error_var = 1.0f;
+            bool have_model_error_var = false;
             if (use_wiener_interpolation &&
                 dc < data_logical_carrier_indices.size()) {
                 pilot_h = estimateWienerChannel(
                     data_logical_carrier_indices[dc],
-                    static_cast<int64_t>(current_data_symbol_index_),
+                    wiener_symbol_base_ +
+                        static_cast<int64_t>(current_data_symbol_index_),
                     wiener_noise_norm,
                     pilot_h,
                     &wiener_error_var);
+                have_model_error_var = true;
+            } else if (!delay_domain_pilot_obs_.empty()) {
+                const auto est = ofdm_cir::reconstruct(
+                    delay_domain_pilot_obs_,
+                    static_cast<float>(k),
+                    delay_domain_window_.taps,
+                    config.fft_size,
+                    delay_domain_pilot_obs_.size());
+                if (est.valid && std::isfinite(est.value.real()) &&
+                    std::isfinite(est.value.imag())) {
+                    // Reconstructed in the de-sloped domain; re-slope like the
+                    // linear path it replaces.
+                    pilot_h = est.value * reslope;
+                    wiener_error_var = est.error_var;
+                    have_model_error_var = true;
+                }
             }
 
             // 2026-06-12 Phase 2b: persist the per-carrier normalized H-estimate error
@@ -1023,7 +1235,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             if (info.fft_idx >= 0 &&
                 static_cast<size_t>(info.fft_idx) < per_carrier_h_error_var_.size()) {
                 per_carrier_h_error_var_[info.fft_idx] =
-                    use_wiener_interpolation
+                    have_model_error_var
                         ? std::clamp(wiener_error_var, 0.0f, 1.0f)
                         : 0.04f;
             }
@@ -1055,7 +1267,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                     std::max(std::abs(prior_h), std::abs(pilot_h)));
                 const float process_sigma = kGoodDopplerSigmaFrac * h_ref_mag;
                 const float process_var = process_sigma * process_sigma;
-                const float pilot_interp_sigma = use_wiener_interpolation
+                const float pilot_interp_sigma = have_model_error_var
                     ? std::sqrt(std::clamp(wiener_error_var, 0.0f, 1.0f)) * h_ref_mag
                     : 0.20f * h_ref_mag;
                 const float pilot_measurement_var =
@@ -1319,6 +1531,74 @@ void OFDMDemodulator::Impl::interpolateChannel() {
             channel_estimate[all_carrier_fft_indices[i]] = H_clean[i];
         }
     }
+}
+
+// =============================================================================
+// POST-FEC DATA-AIDED CHANNEL OBSERVATIONS (ULTRA_ITERATIVE_CHEST, default OFF)
+// =============================================================================
+//
+// x_grid is the EXACT transmitted data-carrier constellation of the frame whose
+// receive grid is retained here, recovered by re-encoding the frame's verified
+// bytes and replaying the production transmit chain (see
+// OFDMChirpWaveform::remodulateDataCarrierSymbols). H_dd = Y/X is then the exact
+// per-carrier per-symbol channel, noise-limited and model-free — the achievable
+// form of the 2026-07-28 genie.
+//
+// Every safety property lives here or in the caller:
+//   * caller gates on LDPC parity for EVERY codeword AND the frame CRC (an
+//     LDPC false positive is a LEGAL but wrong codeword, i.e. confident poison);
+//   * expect_origin must match the retained grid's origin, so a stale Y can never
+//     be divided by a fresh X;
+//   * geometry must match symbol-for-symbol and carrier-for-carrier;
+//   * |X|^2 > 0 (skips masked carriers and the last symbol's zero pad);
+//   * the noise weight is DERIVED (noise_norm/|X|^2), not branched per modulation.
+// Any failure leaves the production estimate untouched: degrade to baseline,
+// never to garbage.
+size_t OFDMDemodulator::Impl::ingestDataAidedGrid(const Symbol& x_grid,
+                                                  long long expect_origin) {
+    if (!data_aided_enabled_ || da_rx_grid_.empty()) return 0;
+    if (da_grid_origin_ < 0 || da_grid_origin_ != expect_origin) return 0;
+
+    // The transmit grid is symbol-major with a CONSTANT number of data carriers per
+    // symbol (the scattered pattern rotates position, never count), so the receive
+    // grid's own per-symbol width is the only legal stride.
+    const size_t carriers = da_rx_grid_[0].size();
+    if (carriers == 0) return 0;
+    const size_t tx_symbols = x_grid.size() / carriers;
+    if (tx_symbols == 0 || x_grid.size() % carriers != 0) return 0;
+
+    // A short transmit grid means the re-encode produced fewer symbols than were
+    // demodulated (or vice versa) — a geometry disagreement, not a partial frame.
+    const size_t n = std::min(tx_symbols, da_rx_grid_.size());
+
+    size_t pushed = 0;
+    for (size_t s = 0; s < n; ++s) {
+        const auto& y = da_rx_grid_[s];
+        const auto& logical = da_logical_[s];
+        if (y.size() != carriers || logical.size() != carriers) break;
+        const int64_t sym_index = wiener_symbol_base_ + static_cast<int64_t>(s);
+        for (size_t c = 0; c < carriers; ++c) {
+            const Complex x = x_grid[s * carriers + c];
+            const float x_pow = std::norm(x);
+            if (!(x_pow > 1.0e-12f)) continue;  // masked carrier / trailing zero pad
+            const Complex h = y[c] / x;
+            if (!std::isfinite(h.real()) || !std::isfinite(h.imag())) continue;
+            // ADAPTIVITY: H_dd = H + N/X, so the observation noise scales by
+            // 1/|X|^2. Every constellation in mapBits() is unit-AVERAGE-power, so
+            // this single expression is exactly right for QPSK/8PSK (unit modulus,
+            // factor 1) and for the 16/32/64/256-QAM rings (+7.0 dB on the 16QAM
+            // inner points, -2.6 dB on its corners) with no per-modulation branch.
+            const float noise_norm = da_noise_norm_ / x_pow;
+            addWienerPilotObservation(logical[c], sym_index, h, noise_norm);
+            ++pushed;
+        }
+    }
+    // One generation only: the grid is consumed so a frame can never be fed back
+    // twice, and a later frame's ingest cannot resurrect this one's Y.
+    da_rx_grid_.clear();
+    da_logical_.clear();
+    da_grid_origin_ = -1;
+    return pushed;
 }
 
 } // namespace ultra

@@ -363,10 +363,25 @@ add_executable(test_ofdm_carrier_mask_plumbing test_ofdm_carrier_mask_plumbing.c
 target_link_libraries(test_ofdm_carrier_mask_plumbing PRIVATE ultra_core)
 add_test(NAME OFDMCarrierMaskPlumbing COMMAND test_ofdm_carrier_mask_plumbing)
 
+# ULTRA_ITERATIVE_CHEST: pins encode -> decode -> re-encode -> re-modulate == the
+# original transmitted X, bit-exactly, across the whole modulation/rate/interleaver
+# family. This is the correctness foundation of post-FEC data-aided channel
+# estimation — a mis-mapping there yields a confident, geometry-valid, WRONG channel
+# that parity gating cannot catch.
+add_executable(test_iterative_chest_remod test_iterative_chest_remod.cpp)
+target_link_libraries(test_iterative_chest_remod PRIVATE ultra_core)
+add_test(NAME IterativeChestRemod COMMAND test_iterative_chest_remod)
+
 # Current waveform/rate policy and factory coverage
 add_executable(test_waveform_policy test_waveform_policy.cpp)
 target_link_libraries(test_waveform_policy PRIVATE ultra_core)
 add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
+
+# Pins CP geometry so prose cannot drift from the arithmetic (2026-07-28: three comments
+# claimed MEDIUM@1024 = "256 samples / 5.3ms"; actual is 96 / 2.00 ms).
+add_executable(test_cyclic_prefix_geometry test_cyclic_prefix_geometry.cpp)
+target_link_libraries(test_cyclic_prefix_geometry PRIVATE ultra_core)
+add_test(NAME CyclicPrefixGeometry COMMAND test_cyclic_prefix_geometry)
 
 add_executable(test_rate_controller test_rate_controller.cpp)
 target_link_libraries(test_rate_controller PRIVATE ultra_core)
@@ -383,6 +398,10 @@ add_test(NAME OFDMPilotPattern COMMAND test_ofdm_pilot_pattern)
 add_executable(test_ofdm_wiener_interpolator test_ofdm_wiener_interpolator.cpp)
 target_link_libraries(test_ofdm_wiener_interpolator PRIVATE ultra_core)
 add_test(NAME OFDMWienerInterpolator COMMAND test_ofdm_wiener_interpolator)
+
+add_executable(test_ofdm_delay_domain_interpolator test_ofdm_delay_domain_interpolator.cpp)
+target_link_libraries(test_ofdm_delay_domain_interpolator PRIVATE ultra_core)
+add_test(NAME OFDMDelayDomainInterpolator COMMAND test_ofdm_delay_domain_interpolator)
 
 # Clean baseband loopback for maintained OFDM waveform wrappers. This verifies
 # sync detection, training handoff, demodulation, and soft-bit extraction without
@@ -412,6 +431,22 @@ target_include_directories(test_streaming_config PRIVATE
 )
 target_link_libraries(test_streaming_config PRIVATE ultra_core ota_channel_core)
 add_test(NAME StreamingConfig COMMAND test_streaming_config)
+
+# BUG-BURST-STALE-GEOMETRY (2026-07-28): both defects on the burst group-start path.
+# Runs the knob=0 (pre-fix) and knob=1 (fixed) arms IN ONE PROCESS — which only works
+# because streaming_decode_policy::commandedGeometryEnabled() reads the env fresh
+# instead of latching it in a function-local static. Do not "optimize" that away.
+add_executable(test_burst_stale_geometry
+    test_burst_stale_geometry.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_burst_stale_geometry PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_burst_stale_geometry PRIVATE ultra_core ota_channel_core)
+add_test(NAME BurstStaleGeometry COMMAND test_burst_stale_geometry)
+set_tests_properties(BurstStaleGeometry PROPERTIES TIMEOUT 180)
 
 add_executable(test_streaming_buffer_policy test_streaming_buffer_policy.cpp)
 target_include_directories(test_streaming_buffer_policy PRIVATE
@@ -802,12 +837,14 @@ ultra_enable_test_warnings(
     test_frame_v2.cpp
     test_carrier_ldpc_interleaver.cpp
     test_ofdm_carrier_mask_plumbing.cpp
+    test_iterative_chest_remod.cpp
     test_waveform_policy.cpp
     test_ofdm_link_adaptation.cpp
     test_waveform_loopback.cpp
     test_streaming_config.cpp
     test_streaming_buffer_policy.cpp
     test_streaming_decode_policy.cpp
+    test_burst_stale_geometry.cpp
     test_streaming_frame_policy.cpp
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp

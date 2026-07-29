@@ -694,6 +694,27 @@ std::vector<float> ModemEngine::transmitToneBurstAck(
                   log_prefix_.c_str());
         return {};
     }
+    // BUG-BURST-STALE-GEOMETRY (2026-07-28): snoop the rung WE are commanding.
+    // Under RX rate authority this ack IS the sender's next rung command, so the
+    // receiver knows the sender's next frame geometry before the sender does. Hand
+    // the canonical index to the decoder so a MISSED BURST_HEADER can be sliced with
+    // the commanded rung instead of the latched (previous) one.
+    // No protocol-layer change: connection.cpp already stamped these five bits.
+    // This is the single point every ToneBurstAckPayload passes through from BOTH
+    // frontends (GUI app + ultra_tnc), and ModemEngine owns both encoder and decoder.
+    // Four mandatory rejects, all present: authority OFF (the bits then mean a
+    // quantized quality + a RELATIVE demote — reconstructing an index is garbage),
+    // kRungCmdReserved (the WAITING-REBASE voice, which would decode as index 24),
+    // kRungIdxNone (no command), and out-of-range.
+    if (streaming_decoder_ && protocol::rxRateAuthorityEnabled() &&
+        payload.rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdReserved) {
+        const uint8_t rung_idx = static_cast<uint8_t>(
+            (payload.rate_hint & 0x7) | ((payload.rung_cmd & 0x3) << 3));
+        if (rung_idx != protocol::kRungIdxNone && rung_idx < protocol::kRungIdxCount) {
+            streaming_decoder_->setCommandedRungIndex(rung_idx);
+        }
+    }
+
     auto samples = streaming_encoder_->encodeToneBurstAck(payload, symbol_ms);
     LOG_MODEM(INFO,
               "[%s] TX ToneBurstAck: group_seq=%u type=%s frame_mask=0x%04X "

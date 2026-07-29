@@ -474,10 +474,7 @@ Counts measure(const Args& args) {
 
     for (int i = 0; i < args.n; ++i) {
         if (ultra::genie::txCapture().enabled) {
-            if (std::getenv("ULTRA_GENIE_DEBUG") && !ultra::genie::txCapture().symbols.empty()) {
-                std::cerr << "[genie] prev frame pushed=" << ultra::genie::txCapture().symbols.size()
-                          << " read=" << ultra::genie::txCapture().read_index << "\n";
-            }
+            ultra::genie::txCapture().reportIfDebug("prev frame");
             ultra::genie::txCapture().reset();
         }
         const auto trial = makeFrame(encoder, args, payload_rng, i);
@@ -534,10 +531,7 @@ BurstCounts measureBurst(const Args& args) {
         // Fresh capture per chunk: encoder pushes during encode, decoder reads in the
         // same data-symbol order during decode.
         if (ultra::genie::txCapture().enabled) {
-            if (std::getenv("ULTRA_GENIE_DEBUG") && !ultra::genie::txCapture().symbols.empty()) {
-                std::cerr << "[genie] prev chunk pushed=" << ultra::genie::txCapture().symbols.size()
-                          << " read=" << ultra::genie::txCapture().read_index << "\n";
-            }
+            ultra::genie::txCapture().reportIfDebug("prev chunk");
             ultra::genie::txCapture().reset();
         }
         // Fresh encoder + decoder per chunk → each chunk starts from idle, so
@@ -552,7 +546,16 @@ BurstCounts measureBurst(const Args& args) {
         configureDecoder(decoder, args);  // connected path (BurstChunk != AckFull)
         decoder.setBurstInterleave(args.burst_interleave);
         decoder.setBurstInterleaveGroupSize(group);
-        decoder.expectFullOFDMAnchorOnce();
+        // ULTRA_MEASURE_BURST_NO_ANCHOR_WAIT=1 (default OFF, diagnostic): skip the
+        // full-anchor demand so the LIGHT-LTS marked group start (data-sync corr
+        // ~0.26, below the 0.52 full-anchor threshold) is accepted and burst
+        // accumulation can arm on the production warm-handoff preamble.
+        {
+            const char* e = std::getenv("ULTRA_MEASURE_BURST_NO_ANCHOR_WAIT");
+            if (!(e != nullptr && e[0] == '1')) {
+                decoder.expectFullOFDMAnchorOnce();
+            }
+        }
 
         // §14.17 self-describing burst: when enabled, the encoder emits a full-anchor
         // BURST_HEADER descriptor declaring the group params. To prove the descriptor
@@ -595,6 +598,35 @@ BurstCounts measureBurst(const Args& args) {
             expected.push_back(std::move(ser));
         }
 
+        // HARNESS FIDELITY (2026-07-29): FULL chirp+LTS anchor at the group start.
+        //
+        // Without this the harness could never exercise the burst-transport RX path
+        // at all. encodeBurstLight's default group-start preamble is the §16.8
+        // warm-handoff LIGHT LTS, whose data-sync correlation reads ~0.26 — below the
+        // 0.52 full-anchor threshold that decoder.expectFullOFDMAnchorOnce() (set
+        // above, per chunk) enforces. So the marked group-start frame was REJECTED
+        // three times and the decoder instead accepted a LATER, unmarked member frame
+        // (corr 0.95). wasBurstInterleaved() is therefore false at the burst_marker
+        // test (streaming_ofdm_decode.cpp:1568), "entering accumulation" never fires,
+        // and every frame is decoded as an isolated frame — measured: 0 "Burst frame
+        // N/M demodulated" lines in a full DEBUG trace of a burst_chunk run.
+        //
+        // Production does not have this problem: it forces the full anchor on the
+        // session's first burst (forceNextFrameFullPreamble on entering connected
+        // OFDM) and on every resend. Each chunk here builds a FRESH encoder, i.e. a
+        // fresh session, so the production-equivalent latch must be armed per chunk.
+        // Uses the group-start-specific latch, which the BURST_HEADER descriptor's
+        // encodeFrame cannot consume.
+        //
+        // Env-gated (ULTRA_MEASURE_BURST_FULL_ANCHOR=1, default OFF) so the historical
+        // burst_chunk numbers stay reproducible and the two regimes can be A/B'd.
+        {
+            const char* e = std::getenv("ULTRA_MEASURE_BURST_FULL_ANCHOR");
+            if (e != nullptr && e[0] == '1') {
+                encoder.forceNextBurstGroupStartFullPreamble();
+            }
+        }
+
         const auto tx = encoder.encodeBurstLight(frames);
         if (tx.empty()) {
             throw std::runtime_error("burst encoder produced no samples");
@@ -603,7 +635,47 @@ BurstCounts measureBurst(const Args& args) {
 
         std::vector<Bytes> recovered;
         bool any_sync = false;
-        const size_t target = tx.size() + 8 * kPumpChunkSamples;
+
+        // HARNESS FIDELITY (2026-07-29): COLLECT THE BURST-TRANSPORT DELIVERY.
+        //
+        // finalizeBurstGroup routes decoded frames two different ways
+        // (streaming_burst_interleave.cpp:1244): with burst_transport_rx_ set — the
+        // production default, and the ONLY regime in which the burst-transport RX
+        // path runs at all — successful logical frames are collected into
+        // burst_group_frames and delivered SOLELY through burst_group_callback_; the
+        // per-frame frame_queue_ push is deliberately suppressed so the file group is
+        // not double-processed through onRxData. This harness never set that callback,
+        // so every burst-delivered frame was dropped on the floor and
+        // frames_recovered read 0 no matter how well the group decoded. Measured:
+        // AWGN@60 16QAM R2/3, --burst-descriptor 1 → 60 "decode SUCCESS" / 0 "decode
+        // FAILED" in the DEBUG trace, and frames_recovered = 0/32. The decode was
+        // perfect; the harness was not listening.
+        decoder.setBurstGroupCallback(
+            [&recovered](uint16_t /*group_seq*/, const std::vector<Bytes>& group_frames,
+                         bool /*all_ok*/, float /*quality*/, uint16_t /*frame_mask*/,
+                         bool /*interleaved*/, uint8_t /*group_size*/) {
+                for (const auto& f : group_frames) {
+                    recovered.push_back(f);
+                }
+            });
+
+        // HARNESS FIDELITY (2026-07-28): two floors on how long we pump.
+        //
+        // (1) kFullSearchSamples. The full-anchor chirp search refuses to run until it
+        //     has 2.5 s of unsearched audio ("searchForSync: SKIP unsearched<min"), so a
+        //     short burst (e.g. --frame-cw 1, 121344 samples) never got searched at all
+        //     and reported chunk_sync_fail on EVERY chunk. Measured 5/5 -> 0/5.
+        //
+        // (2) The trailing allowance. The burst decoder re-decodes each frame several
+        //     times (control-first peek, header peek, authoritative pass, sync-recovery
+        //     retries) and runs behind live, so it still emits frames well after the
+        //     last transmitted sample. The old 8 chunks (0.8 s) truncated that backlog
+        //     and UNDER-REPORTED recovery. Measured, QPSK R3/4 Good@60 seed 7 n=10:
+        //     8 -> 60/80, 16 -> 70/80, and 32/64/128/256 -> 70/80 (saturated). 16 it is
+        //     — a measurement floor, not a tuning knob.
+        constexpr size_t kTrailingPumpChunks = 16;
+        const size_t target = std::max(tx.size() + kTrailingPumpChunks * kPumpChunkSamples,
+                                       kFullSearchSamples + kTrailingPumpChunks * kPumpChunkSamples);
         size_t received = 0;
         while (received < target) {
             const size_t take = std::min(kPumpChunkSamples, target - received);

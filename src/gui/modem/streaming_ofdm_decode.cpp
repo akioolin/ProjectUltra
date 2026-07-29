@@ -1,5 +1,6 @@
 // StreamingDecoder module
 
+#include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_control_profile.hpp"
@@ -356,6 +357,152 @@ bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
     return waveform_->process(samples);
 }
 
+// ============================================================================
+// BUG-BURST-STALE-GEOMETRY (2026-07-28) — commanded-geometry resolver
+// ============================================================================
+
+uint64_t StreamingDecoder::absoluteForSyncPosition() {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    return static_cast<uint64_t>(
+        sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_));
+}
+
+void StreamingDecoder::seedRungGeometryForTesting(Modulation mod, CodeRate rate,
+                                                 int cw, int lifting_z) {
+    learnRungGeometry(mod, rate, cw, lifting_z);
+}
+
+void StreamingDecoder::learnRungGeometry(Modulation mod, CodeRate rate, int cw,
+                                         int lifting_z) {
+    const uint8_t idx = protocol::coherentRungIndexFor(mod, rate);
+    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return;
+    if (cw < 1) return;
+    learned_rung_geometry_[idx].cw_per_frame =
+        static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(cw));
+    learned_rung_geometry_[idx].lifting_z =
+        static_cast<uint8_t>((lifting_z == 81) ? 81 : 27);
+}
+
+// ADOPTION EVIDENCE (2026-07-28). A decoded descriptor is the sender telling us, on
+// the wire, which rung it is ACTUALLY transmitting. Compare it against our standing
+// command: equal ⇒ adopted; different ⇒ the sender has NOT taken the command (it is
+// deferring an UP to a clean boundary, has a legacy exchange in flight, snapped the
+// index to its own enabled ladder, or has rate adaptation pinned). Without this the
+// resolver treats "we asked" as "it happened" and destroys groups that decode fine
+// today — the single most damaging thing this feature could do.
+void StreamingDecoder::noteDescriptorRungObserved(Modulation mod, CodeRate rate) {
+    const uint8_t cmd = commanded_rung_idx_.load(std::memory_order_relaxed);
+    if (cmd == protocol::kRungIdxNone) return;
+    const uint8_t seen = protocol::coherentRungIndexFor(mod, rate);
+    commanded_rung_declined_.store(seen != cmd, std::memory_order_relaxed);
+}
+
+// The group's BURST_HEADER descriptor was NOT decoded (missed full dual-chirp
+// anchor -> connected DATA-sync fallback). Today the decoder arms accumulation
+// from the LATCHED fixed_frame_codewords_/mod/rate, which after a rung switch is
+// the PREVIOUS rung: wrong constellation on every frame (0/N CWs) AND a wrong
+// stride, so the group's air-end is short and the half-duplex ack interlock opens
+// INTO the sender's own key-down.
+//
+// The receiver is the rate AUTHORITY: it commanded the sender's next rung in its
+// own last tone-burst ack, so it already knows the geometry. But "we commanded X"
+// is NOT "the sender is at X" — a wrong arm destroys a group that decodes fine
+// today (the bug report's own xfer_3 burst#26 is exactly that case). THREE
+// independent conditions must hold, each derived from the sender's actual code
+// rather than tuned:
+//   1. DID IT HEAR US?  The command rides in the tone-burst ack; a lost ack costs
+//      the sender its full ARQ RTO, so a resend cannot arrive inside the
+//      steady-state cadence  ->  the arrival-cadence guard.
+//   2. WOULD IT OBEY?    Connection::maybeObeyAuthorityCommand DEFERS a faster
+//      (UP) command while its TX window drains and re-checks on every re-carried
+//      ACK copy, but obeys a DEMOTE immediately ("a failing window never drains").
+//      So only a demote is promptly adopted  ->  the demote-only gate.
+//   3. HAS IT OBEYED?    Every decoded descriptor announces the rung actually being
+//      transmitted; one that disagrees with our standing command is direct wire
+//      evidence of non-adoption  ->  the declined gate (noteDescriptorRungObserved).
+StreamingDecoder::CommandedGeometry
+StreamingDecoder::resolveCommandedGeometry(bool is_ofdm, bool burst_latched) {
+    CommandedGeometry cg;
+    if (!decode_policy::commandedGeometryEnabled()) return cg;   // opt-out
+    if (!waveform_ || !is_ofdm || !connected_ || !burst_latched) return cg;
+    if (mode_ != protocol::WaveformMode::OFDM_CHIRP) return cg;  // wideband scope
+    if (!(use_burst_interleave_ || burst_transport_rx_)) return cg;  // burst regime
+    // A descriptor for THIS group WAS consumed -> nothing to reconstruct.
+    if (pending_total_cw_ > 0) return cg;
+    if (sync_controller_.have_burst_descriptor_) return cg;
+    // Without RX rate authority the ack's five bits are a quantized quality +
+    // RELATIVE demote, not an absolute rung index — reconstructing one is garbage.
+    if (!protocol::rxRateAuthorityEnabled()) return cg;
+
+    const uint8_t idx = commanded_rung_idx_.load(std::memory_order_relaxed);
+    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return cg;
+    // GATE 3 — the sender has told us on the wire that it is NOT on this rung.
+    if (commanded_rung_declined_.load(std::memory_order_relaxed)) return cg;
+    const auto& learned = learned_rung_geometry_[idx];
+    if (learned.cw_per_frame < 1) return cg;  // table miss -> today's behaviour
+
+    const auto pick = protocol::coherentRungFromIndex(idx);
+    // Inert in steady state: only a genuine switch boundary is worth arming. If the
+    // commanded rung IS what we are already configured for, the latched geometry is
+    // already correct and this must be a byte-identical no-op.
+    if (pick.mod == current_modulation_ && pick.rate == code_rate_ &&
+        static_cast<int>(learned.cw_per_frame) == fixed_frame_codewords_) {
+        return cg;
+    }
+
+    // GATE 2 — DEMOTE ONLY. This is the sender's own obey asymmetry, not a heuristic:
+    // maybeObeyAuthorityCommand computes `faster = isFasterMode(cmd, current)` and,
+    // when faster, RETURNS WITHOUT ARMING DEDUP while its TX window has bytes in
+    // flight — an UP command can therefore stand un-adopted for many groups while the
+    // receiver keeps re-stamping it, which is precisely the state in which arming it
+    // would destroy a healthy group. A demote has no such path ("a failing window
+    // never drains — waiting would deadlock"), so it is on the air by the next group.
+    // Same predicate, same epsilon, as the sender: isFasterMode(), connection.cpp.
+    // Physics corroborates the asymmetry: a demote is issued INTO a degrading channel
+    // (where anchors are actually missed), while a climb is committed at a clean,
+    // freshly-turned-around boundary where the anchor is most likely to be heard.
+    constexpr float kModeEfficiencyEpsilonBps = 0.05f;  // isFasterMode's epsilon
+    const bool commanded_is_faster =
+        protocol::estimateWideOFDMRawBps(pick.mod, pick.rate) >
+        protocol::estimateWideOFDMRawBps(current_modulation_, code_rate_) +
+            kModeEfficiencyEpsilonBps;
+    if (commanded_is_faster) return cg;
+
+    // CADENCE GUARD. The command rides in the tone-burst ack. If that ack was LOST
+    // the sender never switched and is resending the OLD geometry — applying the
+    // commanded rung there would mirror the very bug we are fixing. A lost ack costs
+    // the sender its full ARQ RTO, so the resend cannot arrive inside the
+    // steady-state cadence. Measured 2026-07-28: steady-state 7.00-13.33 s (n=24)
+    // vs post-RTO 19.43/20.01 s (n=2) — disjoint populations, threshold between.
+    //   no reference (first group of a session, or just after a reset) -> allow: we
+    //   cannot be resending a command we never sent (commanded_rung_idx_ is still
+    //   kRungIdxNone then). reset() CLEARS last_group_start_abs_ precisely so that
+    //   branch is taken deliberately — reset() also rewinds total_fed_ to 0, and a
+    //   stale-high stamp would otherwise make `now_abs > last` false for minutes of
+    //   audio, silently disabling this discriminator (2026-07-28 review fix). The
+    //   strict '>' additionally prevents the unsigned underflow that would fake a
+    //   giant gap.
+    const uint64_t now_abs = absoluteForSyncPosition();
+    if (last_group_start_abs_ != 0 && now_abs > last_group_start_abs_ &&
+        (now_abs - last_group_start_abs_) >
+            decode_policy::kBurstCadenceRtoGapSamples) {
+        return cg;  // post-RTO: keep the latched geometry (today's behaviour)
+    }
+
+    cg.armed = true;
+    cg.mod = pick.mod;
+    cg.rate = pick.rate;
+    cg.cw = static_cast<int>(learned.cw_per_frame);
+    cg.lifting_z = static_cast<int>(learned.lifting_z);
+    cg.frame_samples = static_cast<size_t>(ofdm_link_adaptation::minSamplesForCWCount(
+        cg.cw, cg.mod, cg.rate, cg.lifting_z, ofdm_carriers_,
+        std::max(1, waveform_->getSamplesPerSymbol())));
+    if (cg.frame_samples == 0) {
+        cg.armed = false;
+    }
+    return cg;
+}
+
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         {
@@ -393,9 +540,24 @@ void StreamingDecoder::decodeCurrentFrame() {
     const size_t ofdm_control_samples = (is_ofdm && connected_)
         ? getOFDMControlFrameSamplesForCurrentMode()
         : 0;
-    const size_t full_frame_samples = (is_ofdm && connected_)
-        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
-        : 0;
+    // BUG-BURST-STALE-GEOMETRY E8a: when the group's descriptor was MISSED, size the
+    // group-start frame from the rung WE COMMANDED, not the latched one. This tuple
+    // has THREE consumers (this slice length; the readiness mirror in
+    // checkIfReadyToDecode; burst_min_block_ at the marker) — all three must resolve
+    // IDENTICALLY or the group is misaligned even with a correct stride. So re-use the
+    // readiness resolve rather than resolving again: DECODING is only ever entered from
+    // checkIfReadyToDecode (streaming_sync_acquisition.cpp), and the fresh-resolve
+    // fallback below exists purely so a future entry path cannot silently read stale
+    // state.
+    const auto cg = (cg_snapshot_sync_pos_ == sync_position_ + 1)
+        ? cg_snapshot_
+        : resolveCommandedGeometry(is_ofdm, burst_latched);
+    const size_t full_frame_samples = cg.armed
+        ? cg.frame_samples
+        : ((is_ofdm && connected_)
+               ? static_cast<size_t>(
+                     waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
+               : 0);
     const size_t control_frame_samples =
         static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
     auto requirement = decode_policy::selectDecodeSampleRequirement(
@@ -410,9 +572,21 @@ void StreamingDecoder::decodeCurrentFrame() {
         control_frame_samples);
     size_t frame_len = requirement.samples;
 
+    // 2026-07-28 DIAGNOSTIC (ULTRA_EQ_TRACE=1)
+    if (ultra::genie::eqTrace().enabled) {
+        std::fprintf(stderr,
+                     "[eqtrace] >>> decodeCurrentFrame sync_pos=%zu pending_cw=%d fixed_cw=%d "
+                     "req_mode=%d req_samples=%zu ctrl_samples=%zu burst_regime=%d latched=%d\n",
+                     sync_position_, pending_total_cw_, fixed_frame_codewords_,
+                     static_cast<int>(requirement.mode), requirement.samples,
+                     control_frame_samples, burst_regime_active ? 1 : 0,
+                     burst_latched ? 1 : 0);
+    }
+
     // Copy frame samples from buffer
     std::vector<float> frame_buffer;
     size_t frame_sync_abs = 0;
+    bool frame_truncated = false;
     {
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         frame_sync_abs = sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_);
@@ -425,11 +599,87 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         frame_len = std::min(frame_len, available);
+        frame_truncated = frame_len < requirement.samples;
 
         frame_buffer.resize(frame_len);
         for (size_t i = 0; i < frame_len; i++) {
             frame_buffer[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + i)];
         }
+    }
+
+    // ========================================================================
+    // BUG-BURST-STALE-GEOMETRY defect (A): NEVER ARM A BURST GROUP FROM A
+    // TRUNCATED FRAME. This is the half that produces the operator-visible
+    // TIMEOUT, and it is independent of the stale-constellation half (B).
+    // ========================================================================
+    // checkIfReadyToDecode released this frame once `available` cleared the
+    // requirement IT computed. `available` only grows (write_pos advances,
+    // sync_position_ is fixed), so reaching here with frame_len < requirement
+    // means the REQUIREMENT GREW between the readiness check and this decode.
+    // Three ways that happens, all live:
+    //   1. applyPendingConnectedOFDMMode/applyPendingDescriptorDataMode run at the
+    //      TOP of the processBuffer iteration that calls us — i.e. strictly after
+    //      the SYNC_FOUND iteration that gated on the old profile. A rate change
+    //      moves pilot spacing -> bits/symbol -> samples.
+    //   2. setFixedFrameCodewords is written from the GUI thread (plain int).
+    //   3. the commanded-rung tuple (B) can change between the two resolves — the
+    //      ack-emit thread writes commanded_rung_idx_.
+    // The damage is silent and structural: burst_next_pos_ and
+    // burst_data_start_abs_ are both derived from frame_len, so a short slice
+    // shifts the WHOLE group one partial frame early; refreshBurstAirEnd() then
+    // inherits it (burst_data_start_abs_ + N*burst_min_block_) and the F176
+    // half-duplex ack interlock opens INSIDE the sender's own key-down — the ack
+    // is transmitted into our peer's transmission, is lost, and the sender eats a
+    // full ARQ RTO (measured 17.5 s; 28.2 s between useful acks).
+    // FIX: do not decode a truncated burst frame at all. Return to SYNC_FOUND with
+    // sync_position_ untouched; checkIfReadyToDecode re-gates on the CURRENT
+    // requirement and releases the frame again once the audio has arrived.
+    // BOUNDED BY PROGRESS, NOT BY A TIMER (2026-07-28 review fix). Holding until the
+    // readiness timeout expires would DROP the frame to SEARCHING, and on a missed
+    // descriptor `have_burst_descriptor_` is false, so neither the group-abandonment
+    // backstop NACK nor the F165 anchored-burst backstop would fire — the group would
+    // vanish with NO tone-ack at all and the sender would eat the full ARQ RTO. That
+    // is the ❌ "refuse to arm" trap KNOWN_BUGS names explicitly, and it would be a
+    // strictly worse failure than the one being fixed. So: hold only while the missing
+    // audio is still ARRIVING. The first hold that makes no progress means the peer
+    // has stopped transmitting and the frame can never complete — fall through to the
+    // pre-fix truncated decode so the group ARMS and its ack still emits. processBuffer
+    // performs exactly one state step per audio wake-up, so a hold costs one wake-up.
+    // SCOPE: connected wideband/narrow OFDM burst-regime frames only — the two
+    // requirement modes that can arm a group (ConnectedOFDMBurst = marker-latched
+    // group start, PendingCodewords = descriptor-declared group start). Peek/control
+    // sizing is untouched. In steady state the requirement does not move between the
+    // two calls, so this guard is a strict no-op.
+    if (frame_truncated && is_ofdm && connected_ && burst_regime_active &&
+        (requirement.mode == decode_policy::DecodeSampleMode::ConnectedOFDMBurst ||
+         requirement.mode == decode_policy::DecodeSampleMode::PendingCodewords) &&
+        decode_policy::commandedGeometryEnabled()) {
+        const bool same_episode = (truncation_hold_sync_pos_ == sync_position_ + 1);
+        const bool progressing = !same_episode || frame_len > truncation_hold_frame_len_;
+        if (progressing) {
+            // Count and log EPISODES, not retries: one deferral typically re-arms on
+            // the next few audio chunks, and a per-retry WARN would spam the log.
+            if (!same_episode) {
+                truncation_hold_sync_pos_ = sync_position_ + 1;  // +1 so 0 stays "none"
+                ++truncated_burst_holds_;
+                LOG_MODEM(WARN,
+                          "[%s] Burst group-start frame TRUNCATED (%zu < %zu samples) — "
+                          "deferring arm (geometry grew between readiness and decode; "
+                          "arming here would shift the whole group early). hold #%u",
+                          log_prefix_.c_str(), frame_len, requirement.samples,
+                          truncated_burst_holds_);
+            }
+            truncation_hold_frame_len_ = frame_len;
+            state_ = DecoderState::SYNC_FOUND;
+            return;
+        }
+        LOG_MODEM(WARN,
+                  "[%s] Burst group-start frame still TRUNCATED (%zu < %zu) and the "
+                  "audio STOPPED arriving — proceeding with the short slice so the "
+                  "group still arms and still ACKs (a silent drop would cost a full RTO)",
+                  log_prefix_.c_str(), frame_len, requirement.samples);
+        truncation_hold_sync_pos_ = 0;
+        truncation_hold_frame_len_ = 0;
     }
 
     // CFO pre-correction: remove known CFO from raw samples so the entire
@@ -741,6 +991,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         waveform_->setFrequencyOffset(decode_cfo);
+        ultra::genie::eqTrace().site = "ctrl-first-peek";
         bool control_ok = processWaveformForCodewords(
             SampleSpan(frame_buffer.data(), frame_buffer.size()), 1);
         if (control_ok) {
@@ -876,6 +1127,20 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 sync_controller_.last_burst_descriptor_ = bi;
                                 sync_controller_.have_burst_descriptor_ = true;
+                                // BUG-BURST-STALE-GEOMETRY: LEARN this rung's
+                                // (cw/frame, z) from wire truth. cw is not
+                                // rate-derivable and the sender's coherence walk is
+                                // not reproducible here, so the only honest source is
+                                // a descriptor we actually decoded. Used when a LATER
+                                // descriptor for this same rung is missed.
+                                learnRungGeometry(bi.modulation, bi.code_rate,
+                                                  bi.cw_per_frame, bi.lifting_z);
+                                // ...and RECORD WHETHER THE SENDER TOOK OUR COMMAND.
+                                // This descriptor is the sender stating the rung it is
+                                // actually transmitting; if it is not the rung we
+                                // commanded, the command was declined and must not be
+                                // used to slice a later missed-descriptor group.
+                                noteDescriptorRungObserved(bi.modulation, bi.code_rate);
                                 // Backstop-NACK window (2026-07-04): HEADNULL
                                 // drops count PER descriptor-declared group.
                                 headnull_resync_drop_count_ = 0;
@@ -911,13 +1176,15 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // counters fire exactly during the fades the feature
                                 // targets (blocked the target population).
                                 {
-                                    constexpr uint64_t kTimeoutBatchGapSamples =
-                                        15ull * 48000ull;
+                                    // ONE definition, shared with the
+                                    // commanded-geometry cadence guard
+                                    // (BUG-BURST-STALE-GEOMETRY) so the two cannot
+                                    // drift: streaming_decode_policy.hpp.
                                     burst_group_full_anchor_ =
                                         last_descriptor_abs_sample_ != 0 &&
                                         frame_sync_abs > last_descriptor_abs_sample_ &&
                                         (frame_sync_abs - last_descriptor_abs_sample_) >
-                                            kTimeoutBatchGapSamples;
+                                            decode_policy::kBurstCadenceRtoGapSamples;
                                     last_descriptor_abs_sample_ = frame_sync_abs;
                                 }
                                 last_burst_src_hash_ = hdr.src_hash;
@@ -1270,6 +1537,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     auto decode_start = std::chrono::steady_clock::now();
     const int expected_codewords = expectedOFDMCodewordsForSamples(frame_buffer.size());
+    ultra::genie::eqTrace().site = "data-main";
     bool ok = processWaveformForCodewords(
         SampleSpan(frame_buffer.data(), frame_buffer.size()), expected_codewords);
 
@@ -1356,6 +1624,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                 waveform_->setAbsoluteTrainingPosition(corrected_sync_abs);
                 waveform_->setFrequencyOffset(decode_cfo);
+                ultra::genie::eqTrace().site = "marker-retry";
                 bool retry_ok = processWaveformForCodewords(
                     SampleSpan(frame_buffer.data(), frame_buffer.size()), expected_codewords);
                 if (retry_ok) {
@@ -1485,9 +1754,22 @@ void StreamingDecoder::decodeCurrentFrame() {
             // 0.60 sits well above the chirp accept floor; noise does not
             // produce 0.6+ chirp correlations inside an armed window.
             constexpr float kExpectedAnchorHoldCorr = 0.60f;
+            // BUG-BURST-STALE-GEOMETRY: a commanded-geometry arm is the SAME prior.
+            // Frame 1 is correctly SLICED but is necessarily demapped with the OLD
+            // constellation (the profile change cannot be applied inline), so mush
+            // LLRs are EXPECTED here — that frame is erased by design at the marker
+            // block. Bouncing to re-search would forfeit the whole group AND its ack,
+            // which is exactly the failure this fix exists to remove.
+            // THE 0.60 FLOOR APPLIES HERE TOO (2026-07-28 review fix). The burst latch
+            // this arm rides on is a SIGN TEST on the marker metric — a coin flip on
+            // noise — so exempting it from the correlation floor as well would let a
+            // noise lock arm a burst group and queue a decoder reconfigure. The floor
+            // is what makes the exemption a PRIOR rather than a hole; the measured
+            // failure's own DATA-sync accept was corr=0.95, far above it.
             const bool hold_expected_anchor =
-                is_ofdm && connected_ && last_sync_expected_full_anchor_ &&
-                sync_correlation_ >= kExpectedAnchorHoldCorr;
+                is_ofdm && connected_ &&
+                sync_correlation_ >= kExpectedAnchorHoldCorr &&
+                (cg.armed || last_sync_expected_full_anchor_);
             if (hold_expected_anchor) {
                 LOG_MODEM(WARN,
                           "[%s] Weak LLRs on EXPECTED full anchor (corr=%.2f, "
@@ -1532,9 +1814,91 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
-        burst_soft_buffer_.push_back(std::move(soft_bits));
-        burst_min_block_ = static_cast<size_t>(
-            waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
+        if (cg.armed) {
+            // ================================================================
+            // BUG-BURST-STALE-GEOMETRY defect (B): this group's BURST_HEADER was
+            // MISSED. Arm from the rung THIS receiver COMMANDED, as ONE tuple.
+            // ================================================================
+            // Applying it PARTIALLY (new cw with the old profile, which is what the
+            // wire path does today: setFixedFrameCodewords is immediate while mod/
+            // rate are deferred) reproduces this very bug from the other side, so
+            // every consumer below is fed from the same (mod, rate, cw, z).
+            //
+            // (1) SCALARS FIRST — no live-object swap here, so this cannot SIGSEGV.
+            const int latched_cw = fixed_frame_codewords_;
+            setFixedFrameCodewords(cg.cw);
+            waveform_->setActiveLDPCLiftingZ(static_cast<uint8_t>(cg.lifting_z));
+            // (2) Synthesize the descriptor so activeBurstLiftingZ() and finalize's
+            //     bytes_per_cw_rx agree with the stride we are about to publish.
+            //     group_size / burst_interleave / carrier_ldpc / next_light_anchor
+            //     are NOT rung-derivable — carry the latched values forward.
+            {
+                auto synth = sync_controller_.last_burst_descriptor_;
+                synth.group_size = static_cast<uint8_t>(std::max(2, burst_group_size_));
+                synth.cw_per_frame = static_cast<uint8_t>(cg.cw);
+                synth.modulation = cg.mod;
+                synth.code_rate = cg.rate;
+                synth.burst_interleave = use_burst_interleave_;
+                synth.carrier_ldpc = use_carrier_ldpc_interleaver_;
+                synth.lifting_z = static_cast<uint8_t>(cg.lifting_z);
+                sync_controller_.last_burst_descriptor_ = synth;
+                sync_controller_.have_burst_descriptor_ = true;
+            }
+            headnull_resync_drop_count_ = 0;
+            // (2b) GROUP-SEQ INFERENCE — required for correctness, not cosmetics
+            //      (2026-07-28 review fix). last_burst_group_seq_ is only written at
+            //      descriptor consume, so a missed descriptor leaves the PREVIOUS
+            //      group's seq latched. Pre-fix that was harmless because the group
+            //      always finalized 0/N and the ack carried no positive credit; this
+            //      arm makes frames 2..N decode, so the tone-ack would report a
+            //      NON-ZERO frame_mask keyed to the previous group — the sender would
+            //      credit frames it never delivered. A new group is +1. Identical
+            //      inference, and identical justification, to the late-join head-
+            //      missing path (streaming_burst_interleave.cpp): a wrong guess costs
+            //      only ack dedup/crater matching for one event, because the decoded
+            //      frames carry their own seq headers and those drive the real SACK.
+            last_burst_group_seq_ =
+                static_cast<uint8_t>((last_burst_group_seq_ + 1u) & 0x3Fu);
+            // (3) The PROFILE change stays DEFERRED (§14.36 SIGSEGV rule intact).
+            //     applyPendingDescriptorDataMode() runs at the top of the NEXT
+            //     processBuffer — the same call that first runs
+            //     accumulateBurstFrames() — so it lands strictly BEFORE frame 2 is
+            //     demodulated, and before any finalize.
+            if (cg.mod != current_modulation_ || cg.rate != code_rate_) {
+                pending_descriptor_mod_ = cg.mod;
+                pending_descriptor_rate_ = cg.rate;
+                pending_descriptor_rate_change_ = true;
+            }
+            // (4) Frame 1 was DEMODULATED with the old profile (the deferral above
+            //     cannot land before it). Its soft bits are noise AND the wrong
+            //     width for bitsPerFrame(cg.cw) — pushing them makes the burst
+            //     deinterleave THROW and the WHOLE group is dropped. Push a
+            //     zero-LLR erasure of the correct width instead: exactly the
+            //     late-join pattern. Cost = 1 frame, requested by the SACK bitmap
+            //     in the next round-trip. Benefit = frames 2..N decode, and the
+            //     group still emits its ack (the fast NACK that
+            //     BUG-ANCHOR-WAIT-NO-ACK-STALL depends on).
+            {
+                const int bytes_per_cw = (cg.lifting_z == 81) ? 243 : 81;
+                burst_soft_buffer_.emplace_back(
+                    static_cast<size_t>(
+                        fec::BurstInterleaver::bitsPerFrame(cg.cw, bytes_per_cw)),
+                    0.0f);
+            }
+            burst_min_block_ = cg.frame_samples;
+            ++commanded_geometry_arms_;
+            LOG_MODEM(WARN,
+                      "[%s] [COMMANDED-GEOMETRY] descriptor MISSED — arming group from "
+                      "the rung we commanded: %s %s cw=%d z=%d frame=%zu samples "
+                      "(latched was cw=%d); frame 1 erased by design. arm #%u",
+                      log_prefix_.c_str(), modulationToString(cg.mod),
+                      codeRateToString(cg.rate), cg.cw, cg.lifting_z, cg.frame_samples,
+                      latched_cw, commanded_geometry_arms_);
+        } else {
+            burst_soft_buffer_.push_back(std::move(soft_bits));
+            burst_min_block_ = static_cast<size_t>(
+                waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
+        }
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
         // F176/F221: data frames begin just past this header; the air-end is
         // published by refreshBurstAirEnd() once the group's ACTUAL per-frame
@@ -1585,7 +1949,29 @@ void StreamingDecoder::decodeCurrentFrame() {
                       log_prefix_.c_str(), burst_timing_offset, burst_next_pos_);
         }
 
+        // BUG-BURST-STALE-GEOMETRY: cadence reference for the commanded-geometry
+        // guard. Stamped on EVERY group start (armed or not) — a run of missed
+        // descriptors must not inflate the gap and mis-classify a steady-state group
+        // as a post-RTO resend, which is why this is not last_descriptor_abs_sample_.
+        last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
+
         state_ = DecoderState::BURST_ACCUMULATING;
+        // DELIBERATELY NO descriptor_mode_change_callback_ HERE (2026-07-28 review
+        // fix; an earlier revision of this patch fired it and it was fatal).
+        // The REAL descriptor fires that callback and then goes straight to SEARCHING
+        // — no group is armed under it. From here the chain is
+        //   onDescriptorModeChange -> applyDataMode -> notifyDataModeChanged
+        //   -> app.cpp -> ModemEngine::setDataMode -> setConnectedOFDMMode
+        //   -> pending_connected_ofdm_change_ = true
+        // and applyPendingConnectedOFDMMode() at the TOP of the very next
+        // processBuffer rebuilds waveform_, forces state_ = SEARCHING and clears
+        // pending_total_cw_. That tears down the group we just armed BEFORE
+        // accumulateBurstFrames() ever runs, so neither its group timeout nor its
+        // FAST-NACK deliver fires and the group vanishes with NO tone-ack — strictly
+        // worse than the bug (a 0/N group at least NACKs). The ARQ-window follow-
+        // through stays with the real descriptor, which the sender re-announces on
+        // the next group; one group at the old window costs at most a below-window
+        // drop that ARQ resends, which is also exactly today's behaviour.
         return;  // processBuffer() will call accumulateBurstFrames() on next iteration
     }
 
@@ -1853,6 +2239,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 LOG_MODEM(INFO, "[%s] Fixed-frame CW discovery: reprocessing %d-CW audio at %s (%zu samples)",
                           log_prefix_.c_str(), candidate_cw, codeRateToString(candidate_rate), exact_size);
 
+                ultra::genie::eqTrace().site = "cw-discovery";
                 if (!processWaveformForCodewords(
                         SampleSpan(exact_buffer.data(), exact_buffer.size()), candidate_cw)) {
                     continue;
@@ -1898,6 +2285,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
         if (one_cw_s <= frame_buffer.size()) {
             waveform_->setFrequencyOffset(decode_cfo);
+            ultra::genie::eqTrace().site = "smallframe-1cw";
             if (processWaveformForCodewords(SampleSpan(frame_buffer.data(), one_cw_s), 1)) {
                 captureConstellationSnapshot();
             }
@@ -1927,6 +2315,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                         LOG_MODEM(INFO, "[%s] Small-frame recovery: reprocessing %zu samples (%d CWs)",
                                   log_prefix_.c_str(), exact_size, hdr2.total_cw);
                         waveform_->setFrequencyOffset(decode_cfo);
+                        ultra::genie::eqTrace().site = "smallframe-exact";
                         if (processWaveformForCodewords(
                                 SampleSpan(frame_buffer.data(), exact_size), hdr2.total_cw)) {
                             captureConstellationSnapshot();
@@ -2032,6 +2421,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 waveform_->setFrequencyOffset(decode_cfo);
                 const int retry_expected_codewords =
                     expectedOFDMCodewordsForSamples(retry_buffer.size());
+                ultra::genie::eqTrace().site = "sync-recovery";
                 bool retry_ok = processWaveformForCodewords(
                     SampleSpan(retry_buffer.data(), retry_buffer.size()), retry_expected_codewords);
                 if (!retry_ok) {
@@ -2409,6 +2799,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                       log_prefix_.c_str(), burst_blocks_decoded_, next_rms, next_block_pos);
 
             waveform_->setFrequencyOffset(decode_cfo);
+            ultra::genie::eqTrace().site = "burst-continue";
             bool next_ok = processWaveformForCodewords(
                 SampleSpan(next_block.data(), next_block.size()), fixed_frame_codewords_);
 
@@ -3561,6 +3952,27 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 // Parse header to get frame type
                 if (result.frame_data.size() >= 3) {
                     result.frame_type = static_cast<v2::FrameType>(result.frame_data[2]);
+                }
+
+                // ULTRA_ITERATIVE_CHEST (default OFF): this frame is now VERIFIED —
+                // every codeword satisfied its LDPC parity check AND the frame CRC
+                // deserialised (decodeFixedFrame's own false-positive block nulls
+                // decoded[] otherwise, and reassemble() returns empty on a bad
+                // header). So we know EXACTLY what the transmitter sent, and
+                // re-running the production encoder on the reassembled bytes
+                // reproduces its air stream bit-for-bit: encodeFixedFrame pads to
+                // the same length with the same deterministic PRBS, so no pad
+                // bookkeeping is needed. Anything less than all-CWs-good is
+                // deliberately NOT fed back — a partially decoded frame determines
+                // ZERO 16QAM carriers anyway (FrameInterleaver spreads each carrier
+                // across all four codewords), and an unverified codeword is
+                // confident poison for the estimate.
+                if (data_aided_chest_enabled_ && burst_logical_index_ >= 0 &&
+                    !cw_status.usedAnyPerturbation()) {
+                    const int ldpc_z_da = activeBurstLiftingZ();
+                    result.data_aided_air_bytes = v2::encodeFixedFrame(
+                        result.frame_data, rate, decode_cw_count,
+                        apply_channel_deinterleave, bps, ldpc_z_da);
                 }
             }
 

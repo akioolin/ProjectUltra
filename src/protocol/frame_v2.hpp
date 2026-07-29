@@ -886,6 +886,17 @@ struct CodewordStatus {
     // Check if all codewords decoded successfully
     bool allSuccess() const;
 
+    // True if ANY codeword only decoded after the perturbation retry. The existing
+    // false-positive block already treats perturbation as a false-positive marker
+    // (it refuses CRC recovery when it fired); any consumer that needs "these bits
+    // are certainly what was transmitted" must refuse the frame for the same reason.
+    bool usedAnyPerturbation() const {
+        for (uint8_t p : used_perturbation) {
+            if (p != 0) return true;
+        }
+        return false;
+    }
+
     // Count failures
     int countFailures() const;
 

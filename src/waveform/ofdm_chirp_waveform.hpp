@@ -92,6 +92,26 @@ public:
     void reset() override;
 
     // ========================================================================
+    // POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, default OFF)
+    // src/ofdm/iterative_chest.hpp carries the rationale.
+    // ========================================================================
+    void setDataAidedFeedbackEnabled(bool enabled) override;
+    void setChannelHistoryFrameOrigin(long long abs_sample) override;
+    void armChannelHistoryCarry(bool armed) override;
+    void clearChannelHistory() override;
+    size_t ingestDataAidedFrame(const Bytes& encoded_air_bytes) override;
+
+    // Replay the TRANSMIT chain on already-encoded air bytes and return the
+    // resulting data-carrier constellation grid (symbol-major, data-carriers per
+    // symbol), stopping before the IFFT. This is the PRODUCTION modulate() path —
+    // same CarrierLDPC eligibility, same pilot/carrier-pattern rotation, same
+    // mapBits — so TX and re-modulation cannot drift apart. Public because
+    // tests/test_iterative_chest_remod.cpp pins it bit-exactly against a real
+    // transmit; that round-trip is the single highest-risk correctness point of
+    // the whole feature.
+    Symbol remodulateDataCarrierSymbols(const Bytes& encoded_air_bytes);
+
+    // ========================================================================
     // IWaveform - Status
     // ========================================================================
 
@@ -185,6 +205,11 @@ private:
     float last_cfo_ = 0.0f;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool carrier_ldpc_interleaver_enabled_ = false;
+    // ULTRA_ITERATIVE_CHEST (default OFF). data_aided_frame_origin_ is the absolute
+    // sample origin last announced for a frame; the ingest presents it back to the
+    // demodulator, which refuses any grid that did not come from that same frame.
+    bool data_aided_feedback_enabled_ = false;
+    long long data_aided_frame_origin_ = -1;
     // 2026-05-28 Phase 3: active LDPC lifting Z for OFDM data-frame sizing.
     // Set per-burst by the connection layer; consumed by getMinSamplesForCWCount
     // (frame_bits = num_cw * (z==81 ? 1944 : 648)). Default 27 keeps the

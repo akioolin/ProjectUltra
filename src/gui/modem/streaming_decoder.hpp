@@ -49,6 +49,9 @@
 #include "sync/cfo_tracker.hpp"       // CFOTracker — the tracked-CFO state (refactor §7 C-CFO)
 #include "frame_demodulator.hpp"      // FrameDemodulator — per-frame demod stage(s) (refactor §7 C-FD)
 #include "frame_decoder.hpp"          // FrameDecoder — soft-bits→frame FEC decode (refactor §7 C-FDec)
+#include "streaming_decode_policy.hpp"  // commandedGeometryEnabled / cadence constant
+#include "protocol/waveform_selection.hpp"  // kRungIdx* canonical rung indices
+#include <array>
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -128,6 +131,14 @@ struct DecodeResult {
     bool ping_ldpc_magic_valid = false;
     bool has_partial_codewords = false;  // MC-DPSK only: CW0 parsed, frame incomplete.
     v2::PartialFrameCodewords partial_codewords;
+
+    // ULTRA_ITERATIVE_CHEST (default OFF, src/ofdm/iterative_chest.hpp). The exact
+    // air bytes this frame was transmitted as, recovered by re-encoding a frame
+    // that passed LDPC parity on EVERY codeword AND the frame CRC. Empty unless
+    // the knob is on and the frame is fully verified. Consumed by the burst path,
+    // which re-modulates them to X and forms H = Y/X against the receive grid the
+    // demodulator still holds for THIS frame.
+    Bytes data_aided_air_bytes;
 
     // Failure-attribution diagnostics. Populated for OFDM fixed-codeword
     // decode attempts; unused by normal receive behavior.
@@ -384,6 +395,50 @@ public:
         log_prefix_ = prefix;
         sync_controller_.setLogPrefix(prefix);  // warm-sync logs now emit from the controller
     }
+
+    // BUG-BURST-STALE-GEOMETRY (2026-07-28): the canonical rung index THIS receiver
+    // put on the wire in its last tone-burst ack. Under ULTRA_RX_RATE_AUTHORITY the
+    // receiver IS the rate authority, so this ack is the sender's NEXT geometry —
+    // we know it before the sender does. On a MISSED burst descriptor the decoder
+    // slices with this rung instead of the latched one.
+    //
+    // Written on the ack-EMIT thread, which is the RX-decode thread for per-group
+    // acks (modem_rx -> protocol -> app) but the GUI thread for tick()-driven
+    // SACK/ack-repeat re-emits (SelectiveRepeatARQ::tick). Read on the decode
+    // thread. ONE relaxed atomic word so mod and rate can never be torn apart —
+    // deliberately NOT the plain-int pattern of setFixedFrameCodewords (which is an
+    // existing latent race on the very variable this bug is about; do not add a
+    // second one beside it).
+    void setCommandedRungIndex(uint8_t idx) {
+        // A NEW target clears the "sender declined it" evidence; a re-carried copy of
+        // the SAME target must NOT (the receiver re-stamps its standing command on
+        // every ACK, so clearing on every stamp would erase the one observation that
+        // proves the sender is not obeying — see resolveCommandedGeometry).
+        if (commanded_rung_idx_.exchange(idx, std::memory_order_relaxed) != idx) {
+            commanded_rung_declined_.store(false, std::memory_order_relaxed);
+        }
+    }
+    uint8_t commandedRungIndexForTesting() const {
+        return commanded_rung_idx_.load(std::memory_order_relaxed);
+    }
+    bool commandedRungDeclinedForTesting() const {
+        return commanded_rung_declined_.load(std::memory_order_relaxed);
+    }
+    // Seed the learned rung->geometry table without a wire descriptor (tests only —
+    // production populates it ONLY from decoded BURST_HEADER descriptors).
+    void seedRungGeometryForTesting(Modulation mod, CodeRate rate, int cw, int lifting_z);
+    // Replay the adoption-evidence observation a decoded BURST_HEADER would make.
+    void noteDescriptorRungForTesting(Modulation mod, CodeRate rate) {
+        noteDescriptorRungObserved(mod, rate);
+    }
+    size_t burstMinBlockSamplesForTesting() const { return burst_min_block_; }
+    uint64_t burstDataStartAbsForTesting() const { return burst_data_start_abs_; }
+    // Guard-(A) observability: how many times a burst group-start frame arrived
+    // TRUNCATED (the sizing requirement grew between the readiness check and the
+    // decode) and was deferred instead of arming the group from a short slice.
+    uint32_t truncatedBurstHoldsForTesting() const { return truncated_burst_holds_; }
+    uint32_t commandedGeometryArmsForTesting() const { return commanded_geometry_arms_; }
+    DecoderState stateForTesting() const { return state_; }
 
     // ========================================================================
     // STATUS
@@ -915,6 +970,10 @@ private:
     bool use_channel_interleave_ = true;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool use_carrier_ldpc_interleaver_ = false;
+    // ULTRA_ITERATIVE_CHEST (default OFF). Latched once per burst group from the
+    // environment — deliberately NOT a function-local `static const`, so a test can
+    // toggle the knob in-process. Read once per group, never on a hot path.
+    bool data_aided_chest_enabled_ = false;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool fixed_frame_header_discovery_ = false;
 
@@ -1048,6 +1107,86 @@ private:
     bool burst_group_full_anchor_ = false;
     uint32_t last_burst_src_hash_ = 0;
     uint64_t last_descriptor_abs_sample_ = 0;  // sample-clock gap gate (D2)
+
+    // ========================================================================
+    // BUG-BURST-STALE-GEOMETRY (2026-07-28) — commanded-geometry fallback
+    // ========================================================================
+    // See setCommandedRungIndex for the threading contract.
+    std::atomic<uint8_t> commanded_rung_idx_{protocol::kRungIdxNone};
+    // ADOPTION EVIDENCE (2026-07-28 adversarial-review fix). "We commanded X" is NOT
+    // "the sender is at X": Connection::maybeObeyAuthorityCommand has FIVE paths that
+    // decline a standing command (ULTRA_LOCK_RATE / !rateAdaptationActive; a legacy
+    // mode change already in flight; a rung the sender's ladder disabled, which is
+    // snapped to a DIFFERENT index; an UP command deferred to a clean send boundary
+    // while its TX window drains; and tryDescriptorModeSwitch falling back to the
+    // MODE_CHANGE round trip). Set TRUE when a decoded descriptor announces a rung
+    // that is NOT our standing command — direct wire evidence the sender has not
+    // taken it — and cleared when the command changes or the sender adopts it.
+    std::atomic<bool> commanded_rung_declined_{false};
+
+    // Learned rung -> frame geometry. cw/frame is NOT rate-derivable: it depends on
+    // ULTRA_QAM16_CW16 / the 8PSK ladder (connection_policy::recommendCWCount) and is
+    // then walked DOWN against the SENDER's own measured coherence time
+    // (recommendCWCountForChannel). The receiver cannot reproduce that derivation, so
+    // it LEARNS the tuple from descriptors it has already decoded — wire truth.
+    // A rung with no entry is a MISS -> fall back to today's behaviour; never
+    // substitute a neighbour rung's cw.
+    // Decode-thread only (written at descriptor consume, read at the group marker)
+    // => plain member, no atomic.
+    struct LearnedRungGeometry {
+        uint8_t cw_per_frame = 0;
+        uint8_t lifting_z = 27;
+    };
+    std::array<LearnedRungGeometry, protocol::kRungIdxCount> learned_rung_geometry_{};
+
+    // Sample-clock stamp of the last GROUP START — NOT the last DESCRIPTOR. A run of
+    // missed descriptors would inflate last_descriptor_abs_sample_ past the RTO gap
+    // and mis-classify a steady-state group as a post-RTO resend, silently disarming
+    // the fix in exactly the repeat case this bug produces.
+    uint64_t last_group_start_abs_ = 0;
+
+    // Resolved geometry for a group whose descriptor was missed.
+    struct CommandedGeometry {
+        bool armed = false;
+        Modulation mod = Modulation::QPSK;
+        CodeRate rate = CodeRate::R1_4;
+        int cw = 0;
+        int lifting_z = 27;
+        size_t frame_samples = 0;
+    };
+    // Non-const: it takes the ring lock for the cadence reference. It mutates no
+    // decoder state (the arm itself happens at the call site).
+    CommandedGeometry resolveCommandedGeometry(bool is_ofdm, bool burst_latched);
+    void learnRungGeometry(Modulation mod, CodeRate rate, int cw, int lifting_z);
+    void noteDescriptorRungObserved(Modulation mod, CodeRate rate);
+    // Absolute sample index of the current sync position (brief ring-lock read).
+    uint64_t absoluteForSyncPosition();
+
+    // ONE RESOLVE PER FRAME. checkIfReadyToDecode sizes the readiness gate and
+    // decodeCurrentFrame sizes the slice, and they run in DIFFERENT processBuffer
+    // iterations — commanded_rung_idx_ (ACK-emit thread) or the latched profile
+    // (deferred applies at the top of processBuffer) can move between them. If the
+    // two disagree the frame is truncated (requirement grew) or over-long
+    // (requirement shrank, which the truncation guard CANNOT see). So the readiness
+    // resolve is SNAPSHOT here and re-used by the decode, keyed on sync_position_+1
+    // (0 = none); a key miss falls back to a fresh resolve.
+    CommandedGeometry cg_snapshot_;
+    size_t cg_snapshot_sync_pos_ = 0;
+
+    uint32_t truncated_burst_holds_ = 0;    // guard (A) fired (episodes, not retries)
+    uint32_t commanded_geometry_arms_ = 0;  // guard (B) armed
+    // sync_position_ + 1 of the current hold episode (0 = none), so a multi-retry
+    // deferral counts and logs ONCE.
+    size_t truncation_hold_sync_pos_ = 0;
+    // frame_len at the last hold of this episode. The deferral is bounded by
+    // PROGRESS, not by a timer: hold only while the missing audio is still arriving.
+    // Once a hold makes no progress the peer has stopped transmitting and the frame
+    // will never complete — proceed with the truncated decode (exact pre-fix
+    // behaviour) so the group still ARMS and still emits its no-progress tone-ACK.
+    // Silently dropping it instead would convert a ~9 s fast-NACK cycle into a full
+    // ARQ RTO, which is the regression BUG-ANCHOR-WAIT-NO-ACK-STALL was fixed to
+    // prevent.
+    size_t truncation_hold_frame_len_ = 0;
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     // EARLY-FRAME-DECODE (2026-07-05, turnaround lever): for NON-interleaved groups

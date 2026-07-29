@@ -1,5 +1,6 @@
 // StreamingDecoder module
 
+#include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
@@ -11,6 +12,7 @@
 #include "fec/burst_interleaver.hpp"
 #include "ultra/fec.hpp"
 #include "fec/ldpc_codec.hpp"
+#include "ofdm/iterative_chest.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/phy_diagnostics.hpp"
@@ -383,6 +385,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
         block, tracked_cfo, frame_sync_abs, log_prefix_.c_str());
     waveform_->setAbsoluteTrainingPosition(frame_sync_abs);
     waveform_->setFrequencyOffset((std::abs(pre_cfo) > 0.01f) ? 0.0f : tracked_cfo);
+    ultra::genie::eqTrace().site = "late-join";
     const bool ok = processWaveformForCodewords(
         SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
 
@@ -445,6 +448,10 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
               "(member_decode=%d cw=%d declared_group=%d) — head erasure-filled at finalize",
               log_prefix_.c_str(), ok ? 1 : 0, fixed_frame_codewords_,
               std::max(2, burst_group_size_));
+    // BUG-BURST-STALE-GEOMETRY: a late-join IS a group start. Without this stamp a
+    // late-joined group leaves a stale cadence reference and the next missed
+    // descriptor would be mis-classified as a post-RTO resend.
+    last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
     state_ = DecoderState::BURST_ACCUMULATING;
     return true;
 }
@@ -692,6 +699,28 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Demodulate (CFO=0 after pre-correction, or original burst_cfo_ if no pre-correction)
     float burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
     waveform_->setFrequencyOffset(burst_decode_cfo);
+
+    // ULTRA_ITERATIVE_CHEST (default OFF) — post-FEC data-aided channel estimation.
+    // Latched per group (knob read in startBurstDataAidedChest()); armed only on the
+    // non-interleaved burst-transport path, where each PHYSICAL frame IS one logical
+    // frame. With ULTRA_BURST_INTERLEAVE=1 a codeword spans every frame of the group,
+    // so no frame's X can be reconstructed until the WHOLE group decodes — the
+    // feature is structurally unavailable and stays off.
+    // The origin is the frame's absolute sample position: it both sets the ABSOLUTE
+    // Wiener time axis (a carried observation must not appear at dt = 0) and binds
+    // the retained receive grid to this frame so a stale Y can never meet a fresh X.
+    {
+        // Knob re-read once per frame (~350-650 ms of airtime): never a hot path,
+        // and NOT a function-local `static const`, so a test can toggle it live.
+        data_aided_chest_enabled_ = ultra::ofdm::iterativeChestEnabled();
+        const bool da_on = data_aided_chest_enabled_ && !use_burst_interleave_ &&
+                           burst_transport_rx_ && protocol::isOFDMMode(mode_);
+        waveform_->setDataAidedFeedbackEnabled(da_on);
+        waveform_->setChannelHistoryFrameOrigin(static_cast<long long>(abs_burst));
+        // Nothing to carry into the first frame we demodulate for this group.
+        waveform_->armChannelHistoryCarry(da_on && !burst_soft_buffer_.empty());
+    }
+    ultra::genie::eqTrace().site = "burst-frame";
     bool ok = processWaveformForCodewords(
         SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
     if (!ok) {
@@ -760,6 +789,10 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
             waveform_->setAbsoluteTrainingPosition(corrected_abs);
             waveform_->setFrequencyOffset(burst_decode_cfo);
+            // The retry re-slices the SAME frame at a corrected position; the
+            // retained receive grid is rebuilt, so re-announce its origin.
+            waveform_->setChannelHistoryFrameOrigin(static_cast<long long>(corrected_abs));
+            ultra::genie::eqTrace().site = "burst-timing-retry";
             bool retry_ok = processWaveformForCodewords(
                 SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
             if (retry_ok) {
@@ -827,6 +860,21 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         pre.valid = true;
         burst_logical_index_ = -1;
         pending_total_cw_ = saved_pending_total_cw;
+        // ULTRA_ITERATIVE_CHEST: the verdict for THIS frame is in and the
+        // demodulator still holds THIS frame's receive grid — the only moment the
+        // two exist together. Re-modulate the verified bytes to X, form H = Y/X and
+        // push it into the channel history so the NEXT frame of the group starts
+        // from a measured channel instead of from its own LTS alone. Refused
+        // silently (returns 0) unless the frame origin matches, so a late/finalize
+        // decode can never pair a stale Y with a fresh X.
+        if (!pre.result.data_aided_air_bytes.empty()) {
+            const size_t obs =
+                waveform_->ingestDataAidedFrame(pre.result.data_aided_air_bytes);
+            LOG_MODEM(DEBUG,
+                      "[%s] ITERATIVE_CHEST: frame %zu fed back %zu data-aided "
+                      "channel observations",
+                      log_prefix_.c_str(), burst_soft_buffer_.size(), obs);
+        }
         burst_predecoded_.push_back(std::move(pre));
     } else {
         burst_predecoded_.emplace_back();  // finalize decodes it
@@ -970,6 +1018,14 @@ void StreamingDecoder::computeBurstLevelVerdict() {
 }
 
 void StreamingDecoder::finalizeBurstGroup() {
+    // ULTRA_ITERATIVE_CHEST: a data-aided observation is only valid inside one
+    // continuous acquisition. The group is over — drop the retained grid and the
+    // carried history so nothing leaks into the next group's estimate. No-op when
+    // the feature was never armed.
+    if (waveform_) {
+        waveform_->setDataAidedFeedbackEnabled(false);
+    }
+
     const int burst_group_size = std::max(2, burst_group_size_);
 
     // LATE-JOIN tail-anchor (design §3.4): the caught run has exact RELATIVE order (the

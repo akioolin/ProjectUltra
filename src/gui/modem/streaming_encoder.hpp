@@ -301,6 +301,13 @@ private:
     // pre-flip behavior; the connection layer sets 81 when the OFDM data burst
     // should use long LDPC.
     uint8_t ldpc_lifting_z_ = 27;
+    // DIAGNOSTIC ONLY (ULTRA_GENIE_DATA_AIDED, default off; see genie_tx_capture.hpp).
+    // Offset of the current encode call's output within the stream the caller is
+    // assembling, so the data-aided genie can stamp each captured TX symbol with its
+    // absolute transmit-stream sample position. 0 for a standalone frame; set only by
+    // encodeBurstLight around the in-burst descriptor. Never read unless the genie is
+    // enabled, and never affects the emitted samples.
+    long long genie_stream_base_ = 0;
     bool force_full_preamble_once_ = false;
     // §16.4: group-start-only full-chirp latch (RESEND deep-fade recovery).
     // Read solely by the burst group-start preamble decision; never consumed by

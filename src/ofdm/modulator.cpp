@@ -272,16 +272,6 @@ struct OFDMModulator::Impl {
             }
         }
 
-        // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): capture the exact transmitted
-        // freq-domain symbol so the decoder can form the true per-symbol channel
-        // H[k] = Y[k]/X[k]. ONLY for DATA symbols (genie_capture=true at the data
-        // caller) — NOT for LTS/probe symbols, which the decoder handles separately
-        // and does not equalize, so capturing them would offset the alignment. One
-        // push per data OFDM symbol, in TX order. See genie_tx_capture.hpp.
-        if (genie_capture && ultra::genie::txCapture().enabled) {
-            ultra::genie::txCapture().symbols.push_back(freq_domain);
-        }
-
         // ACE PAPR reduction (ULTRA_ACE_PAPR, default off; 2026-07-13). DATA
         // symbols only (genie_capture marks them — never LTS/probe/preamble, so
         // sync/channel-estimation waveforms stay pristine) and coherent mods
@@ -300,6 +290,27 @@ struct OFDMModulator::Impl {
             ofdm::papr_ace::applyAce(freq_domain, data_carrier_indices,
                                config.modulation, fft,
                                /*clip_ratio=*/1.6f, /*max_iters=*/8, /*mu=*/1.0f);
+        }
+
+        // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): capture the exact transmitted
+        // freq-domain symbol so the decoder can form the true per-symbol channel
+        // H[k] = Y[k]/X[k]. ONLY for DATA symbols (genie_capture=true at the data
+        // caller) — NOT for LTS/probe symbols, which the decoder handles separately
+        // and does not equalize. Each entry is stamped with the ABSOLUTE TX-stream
+        // offset of its FRAME (frame_data_base, supplied by the encoder) plus its index
+        // within that frame and the carrier geometry; the decoder addresses entries by
+        // (frame anchor, symbol index), never by a FIFO cursor. Frame granularity is
+        // load-bearing — see genie_tx_capture.hpp.
+        //
+        // 2026-07-28 ORDERING FIX: the capture now sits AFTER the ACE block above,
+        // i.e. it captures what actually goes into the IFFT. It used to sit before
+        // ACE, so with ULTRA_ACE_PAPR=1 the genie divided by the PRE-ACE symbol while
+        // the wire carried the POST-ACE one — a silently wrong "exact" H.
+        if (genie_capture && ultra::genie::txCapture().enabled) {
+            ultra::genie::txCapture().push(freq_domain,
+                                           ultra::genie::txCapture().frame_data_base,
+                                           data_carrier_indices.size(),
+                                           pilot_carrier_indices.size());
         }
 
         // IFFT to time domain
@@ -483,12 +494,6 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
                                                             active_carrier_mask,
                                                             carrier_mask_enabled,
                                                             /*genie_capture=*/true);
-        if (ultra::genie::txCapture().enabled && std::getenv("ULTRA_GENIE_DEBUG") &&
-            symbol_index < 30) {
-            std::fprintf(stderr, "[genie-tx] push symbol_index=%zu nData=%zu (total pushed=%zu)\n",
-                         symbol_index, impl_->data_carrier_indices.size(),
-                         ultra::genie::txCapture().symbols.size());
-        }
 
         // Convert to real signal
         const auto& real_symbol = impl_->complexToReal(complex_symbol);

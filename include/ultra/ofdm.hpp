@@ -135,6 +135,36 @@ public:
     // Positive = start symbols later, Negative = start symbols earlier
     void setTimingOffset(int offset);
 
+    // ========================================================================
+    // POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, default OFF)
+    // Full rationale, adaptivity derivation and safety argument:
+    // src/ofdm/iterative_chest.hpp. All inert unless explicitly enabled.
+    // ========================================================================
+
+    // Retain the per-symbol receive grid and switch the channel history to the
+    // flat (de-sloped) storage domain so observations survive a frame boundary.
+    void setDataAidedFeedbackEnabled(bool enabled);
+
+    // Absolute sample origin of the frame about to be processed. Sets the
+    // ABSOLUTE symbol index of its first data symbol, which is what lets the
+    // Wiener weight a carried observation by rho(dt) at its true age.
+    void setChannelHistoryFrameOrigin(long long abs_sample);
+
+    // Keep the channel history across the next frame boundary.
+    void armChannelHistoryCarry(bool armed);
+
+    // Drop the carried history (group boundary, re-anchor, geometry change).
+    void clearChannelHistory();
+
+    // Feed back the exact transmitted data-carrier grid of the frame whose
+    // receive grid is retained (expect_origin must match, or this is a no-op).
+    // Returns the number of accepted per-carrier observations.
+    size_t ingestDataAidedGrid(const Symbol& x_grid, long long expect_origin);
+
+    // Retained-grid geometry (tests/diagnostics).
+    size_t dataAidedRetainedSymbolCount() const;
+    size_t dataAidedRetainedCarrierCount() const;
+
     // 2026-05-28: runtime-settable LDPC codeword bit count used as the
     // "we have a codeword's worth of soft bits" gate inside processPresynced
     // and getSoftBits. Default 648 (Z=27 legacy); set to 1944 when the

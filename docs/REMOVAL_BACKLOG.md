@@ -267,6 +267,46 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   `selectCoherentOFDM`/`selectLadderRung`; the whole MC-DPSK/narrow rate machinery (RX-AUTHORITY
   is wideband-coherent-only); `RateController` itself if entry/fallback still consults it.
 
+- **R13. `Impl::interpolateChannel()` + its N×N phasor tables** (found 2026-07-28) — an earlier
+  DFT-channel-interpolation attempt that is **declared and defined but called from nowhere**.
+  **Scope:** `demodulator_impl.hpp:415` (decl), `channel_equalizer_pilot.cpp:1204` (defn),
+  `buildInterpolationPhasors()` `demodulator_impl.hpp:371` / `ofdm_demodulator_setup.cpp:70,193`,
+  the members `interp_idft_phasors` / `interp_dft_phasors` (`demodulator_impl.hpp:53-54`, two
+  N×N complex tables built unconditionally at setup for a function nobody calls) and the three
+  scratch buffers `interp_h_full_scratch` / `interp_h_cir_scratch` / `interp_h_clean_scratch`
+  (`:49-51`) plus `interp_pilot_logical_pos_scratch` (`:52`). It is also **wrong** where it is
+  not dead: it IDFTs over the LOGICAL carrier index, which warps the delay axis because the
+  carriers skip DC; it seeds the transform with linear interpolation (injecting the error the
+  transform is supposed to remove); and it hardcodes `L = 5` taps. The correct delay-domain
+  reconstruction now lives in `src/ofdm/delay_domain_interpolator.hpp` (closed form, physical
+  carrier index, no FFT — see CHANGELOG 2026-07-28).
+  **KEEP (anti-footgun):** `interp_table` / `buildInterpTable()` / the `InterpInfo` struct are
+  the LIVE linear-interpolation table used every symbol in `updateChannelEstimate` — do NOT cut
+  those with the phasors. Same for `all_carrier_fft_indices` and `is_pilot_logical`.
+
+## Conditional removal — `ULTRA_ITERATIVE_CHEST` (added 2026-07-29)
+
+Not decided-dead; logged here so the decision point is not lost.
+
+**Scope if it loses its A/B** (it is default-OFF and unproven for reliability — see
+BUG-GUI-GATE-EARLY-EXIT-FLAKE): `src/ofdm/iterative_chest.hpp`; the `da_*` /
+`wiener_symbol_base_` / `wiener_history_flat_` / `wiener_carry_armed_` members and their
+guards; `ingestDataAidedGrid`; `rereferenceCarriedHistoryPhase`;
+`OFDMChirpWaveform::remodulateDataCarrierSymbols` / `ingestDataAidedFrame`; the five
+`IWaveform` virtuals; `DecodeResult::data_aided_air_bytes`; the arm/origin/ingest block in
+`streaming_burst_interleave.cpp`.
+
+**KEEP even then (anti-footgun):**
+- `CodewordStatus::usedAnyPerturbation()` — a general "these bits are certainly what was
+  transmitted" predicate; the existing false-positive block already relies on the same fact.
+- `signedBinForLogicalCarrier()` — trivial, and it de-duplicates a bin-signing expression
+  that is otherwise open-coded in three places.
+- The `test_iterative_chest_remod.cpp` ROUND-TRIP itself. It pins
+  `encode → decode → re-encode → re-modulate == X` across the whole family, which is a
+  standing guard on the TX/RX mapping agreement (interleavers, PRBS pad, CarrierLDPC
+  eligibility, pilot rotation) — valuable regardless of whether the estimator lever ships.
+  Only the last two knob-specific cases would go.
+
 ## Deprecate (divergent, not yet removed)
 
 _(none currently — R7 done, see Completed removals)_

@@ -124,6 +124,62 @@ inline int bitsPerOFDMSymbol(int total_carriers,
     return data_carriers * static_cast<int>(getBitsPerSymbol(mod));
 }
 
+// ============================================================================
+// PURE FRAME-AIRTIME QUERY (BUG-BURST-STALE-GEOMETRY, 2026-07-28)
+// ============================================================================
+// Frame airtime in samples for an EXPLICIT geometry tuple. No live waveform
+// object, no configure() dependency — this is the SAME closed form
+// OFDMChirpWaveform::getMinSamplesForCWCount computes from its own configured
+// state (2 LTS training symbols + ceil(cw*n / bitsPerOFDMSymbol) data symbols),
+// and that method now delegates here so the two can never drift.
+//
+// WHY IT EXISTS: the burst-descriptor path CANNOT apply a mod/rate change inline
+// (it rebuilds modulator_/demodulator_/chirp_sync_ under live references →
+// SIGSEGV in HilbertTransform::process, streaming_ofdm_decode.cpp §14.36). The
+// receiver therefore has to SIZE a frame for a profile it has not configured yet.
+//
+// samples_per_symbol is supplied by the caller from IWaveform::getSamplesPerSymbol().
+// That value is INVARIANT under the profile change being predicted: configure()
+// rewrites only modulation / code_rate / use_pilots / pilot_spacing, and
+// initComponents() rebuilds the modulator from the unchanged fft_size / cp_mode /
+// symbol_guard. Do NOT re-derive it locally — the modulator's value and the
+// config-derived fallback disagree (1120 vs 1280 at the GUI default), and only the
+// modulator's is correct for slicing.
+inline int minSamplesForCWCountExplicit(int num_cw,
+                                        Modulation mod,
+                                        int lifting_z,
+                                        int total_carriers,
+                                        bool use_pilots,
+                                        int pilot_spacing,
+                                        int samples_per_symbol) {
+    if (samples_per_symbol <= 0) return 0;
+    const int training_samples = 2 * samples_per_symbol;
+    if (num_cw <= 0 || total_carriers <= 0) return training_samples;
+    // Active codeword length for the current burst: z=27 -> n=648, z=81 -> n=1944.
+    const int codeword_bits = (lifting_z == 81) ? 1944 : 648;
+    const int bits_per_symbol =
+        bitsPerOFDMSymbol(total_carriers, use_pilots, pilot_spacing, mod);
+    if (bits_per_symbol <= 0) return training_samples;
+    const int data_symbols =
+        (num_cw * codeword_bits + bits_per_symbol - 1) / bits_per_symbol;
+    return training_samples + data_symbols * samples_per_symbol;
+}
+
+// Rung-derived form: the pilot profile follows configurePilotsForCodeRate exactly
+// (ofdm_chirp_waveform.cpp is the sole writer of use_pilots/pilot_spacing, and it
+// always sets use_pilots=true + recommendedPilotSpacing(mod, rate)).
+inline int minSamplesForCWCount(int num_cw,
+                                Modulation mod,
+                                CodeRate rate,
+                                int lifting_z,
+                                int total_carriers,
+                                int samples_per_symbol) {
+    return minSamplesForCWCountExplicit(num_cw, mod, lifting_z, total_carriers,
+                                        /*use_pilots=*/true,
+                                        recommendedPilotSpacing(mod, rate),
+                                        samples_per_symbol);
+}
+
 // Experimental burst interleaver group sizing helper.
 inline int recommendedBurstGroupSize(Modulation mod, CodeRate rate, float fading_index = 0.0f) {
     if (mod == Modulation::D8PSK &&

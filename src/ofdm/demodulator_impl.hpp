@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "ofdm/frequency_selectivity.hpp"
+#include "delay_domain_interpolator.hpp"
 
 namespace ultra {
 
@@ -182,6 +183,19 @@ struct OFDMDemodulator::Impl {
     float wiener_doppler_hz_override_ = 0.5f;
     float wiener_delay_spread_s_override_ = 1.0e-3f;
 
+    // ULTRA_PILOT_DFT_INTERP (default OFF): reconstruct the data-carrier channel
+    // from a DELAY-DOMAIN (CIR) model instead of the frequency-smoothness prior.
+    // Refreshed once per OFDM symbol at the top of updateChannelEstimate() —
+    // deliberately NOT a function-local `static const`, which latches on first
+    // call and has produced un-A/B-able knobs in this codebase before.
+    // See src/ofdm/delay_domain_interpolator.hpp for the derivation.
+    bool delay_domain_interp_ = false;
+    ofdm_cir::DelayWindow delay_domain_window_{};
+    // Per-symbol scratch: de-sloped pilot observations keyed by PHYSICAL carrier
+    // index (used only when the Wiener path is inactive; the Wiener path feeds its
+    // own time-extrapolated observations through the same kernel).
+    std::vector<ofdm_wiener::Observation1D> delay_domain_pilot_obs_;
+
     // 2026-05-28: runtime LDPC codeword block size. Default 648 (Z=27 legacy).
     // Set to 1944 via OFDMDemodulator::setActiveLDPCBlockSize when a burst
     // descriptor announces Z=81 so the "we have a codeword's worth" gate inside
@@ -284,6 +298,53 @@ struct OFDMDemodulator::Impl {
     std::vector<float> wiener_time_error_var_;
     std::vector<uint8_t> wiener_time_valid_;
     int64_t wiener_time_symbol_index_ = -999999;
+
+    // ======================================================================
+    // POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, off by
+    // default). Rationale + adaptivity derivation: src/ofdm/iterative_chest.hpp.
+    // Every member below is inert while data_aided_enabled_ is false, and the
+    // three behavioural hooks (flat storage domain, absolute time base, skipped
+    // history reset) are each guarded so the knob-off path is byte-identical.
+    // ======================================================================
+    bool data_aided_enabled_ = false;
+
+    // ABSOLUTE symbol index of this frame's first data symbol. The Wiener time
+    // axis is otherwise `current_data_symbol_index_`, which RESETS TO 0 EVERY
+    // FRAME — carrying observations forward on that axis would present a
+    // 0.35 s-old sample at dt = 0, the Wiener would weight it rho = 1.0, and the
+    // estimate would get silently WORSE in exactly the confident-wrong direction
+    // 16QAM cannot absorb. Zero (and therefore a no-op) unless armed.
+    int64_t wiener_symbol_base_ = 0;
+
+    // Storage domain of wiener_pilot_history_. Observations from DIFFERENT frames
+    // carry different LTS timing offsets, so their raw H differ by a phase RAMP
+    // exp(-j*2*pi*k*delta/N). The frequency stage de-slopes with the CURRENT
+    // frame's slope, which removes that ramp only for the current frame. When
+    // carrying across frames every sample is therefore stored already de-sloped
+    // by the slope in force at capture ("flat"), and the reader skips its
+    // de-slope. One uniform convention — never a mix within one carrier.
+    bool wiener_history_flat_ = false;
+
+    // Keep wiener_pilot_history_ across the next frame boundary.
+    bool wiener_carry_armed_ = false;
+
+    // Retained receive grid for the frame currently being demodulated: Y at the
+    // data carriers of each data symbol, plus the logical carrier index each
+    // entry sits on (the scattered-pilot pattern ROTATES with symbol index, so
+    // the mapping is per-symbol and must not be recomputed later).
+    std::vector<std::vector<Complex>> da_rx_grid_;
+    std::vector<std::vector<uint16_t>> da_logical_;
+    // Identity of the retained grid: the absolute sample origin of the frame it
+    // came from. The ingest call must present the same origin, otherwise a stale
+    // Y would be divided by a fresh X — the one way this feature can fabricate a
+    // confident, completely wrong channel.
+    long long da_grid_origin_ = -1;
+    long long da_pending_origin_ = -1;
+    // Pilot-referenced noise normalisation of the retained grid (noise_variance /
+    // mean |H_pilot|^2) — the SAME quantity the pilot observations are pushed
+    // with, so data-aided and pilot observations are commensurable.
+    float da_noise_norm_ = 1.0f;
+    float da_lts_phase_slope_ = 0.0f;
 
     // Diagnostic-only failure attribution for coherent OFDM frames. These
     // fields are reset per received frame and never feed decode decisions.
@@ -407,6 +468,12 @@ struct OFDMDemodulator::Impl {
                                    int64_t symbol_index,
                                    Complex h,
                                    float noise_norm);
+    // Align carried observations to the NEW frame's phase reference (ML 1-parameter fit).
+    void rereferenceCarriedHistoryPhase();
+    // Signed FFT bin of a logical carrier (used by the flat storage domain).
+    int signedBinForLogicalCarrier(size_t logical_carrier) const;
+    // Post-FEC data-aided ingest: X grid in, observations pushed out.
+    size_t ingestDataAidedGrid(const Symbol& x_grid, long long expect_origin);
     Complex estimateWienerChannel(size_t logical_carrier,
                                   int64_t symbol_index,
                                   float noise_norm,

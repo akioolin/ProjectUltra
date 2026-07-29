@@ -408,31 +408,126 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     carrier_noise_var.resize(data_carrier_indices.size());
     carrier_erasure_flags_.assign(data_carrier_indices.size(), 0);
 
+    // 2026-07-28 DIAGNOSTIC (ULTRA_EQ_TRACE=1): equalize() call-tree tracer.
+    {
+        auto& tr = ultra::genie::eqTrace();
+        if (tr.enabled) {
+            const auto& pc = ultra::genie::passContext();
+            const std::size_t abs_sym =
+                pc.abs_train +
+                static_cast<std::size_t>(pc.training_symbols + static_cast<int>(current_data_symbol_index_)) *
+                    pc.symbol_samples;
+            std::fprintf(stderr,
+                         "[eqtrace] eq#%ld pass=%ld site=%-14s sym=%zu synced=%d mod=%d "
+                         "nData=%zu abs=%zu presynced=%d softbits=%zu\n",
+                         ++tr.calls, tr.pass, tr.site, current_data_symbol_index_,
+                         synced_symbol_count.load(), static_cast<int>(mod),
+                         data_carrier_indices.size(), abs_sym, pc.presynced ? 1 : 0,
+                         soft_bits.size());
+        }
+    }
+
     // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): true per-symbol channel genie.
     // Overwrite channel_estimate with the EXACT effective channel H[k] = Y[k]/X[k]
     // using the actual transmitted constellation captured from the modulator (see
     // genie_tx_capture.hpp). No model, no interpolation, no temporal staleness — the
     // only unconfounded genie. Splits the 16QAM wall: genie -> 16QAM decodes =>
     // estimation is the limiter; genie -> still fails => post-equalization (demap).
-    // Aligns by data-symbol order (one capture per data OFDM symbol == one equalize()).
+    //
+    // 2026-07-28 ALIGNMENT FIX. The capture is addressed by ABSOLUTE SAMPLE POSITION,
+    // never by a FIFO cursor: this decoder equalizes the same physical symbol 2-6
+    // times per frame (control-first peek at the CONTROL carrier geometry, CW0 header
+    // peek, authoritative pass, smallframe/sync-recovery/cw-discovery retries), so a
+    // consuming cursor over-ran the capture by +14 entries per frame and every genie
+    // number taken through it was meaningless. Three guards make a mispair impossible
+    // rather than merely unlikely:
+    //   1. presynced-only — the streaming SYNCED path has no absolute anchor.
+    //   2. position match within half a symbol — a re-slice retry (+/-8 samples) still
+    //      resolves to the right symbol; a symbol the encoder never sent resolves to
+    //      nothing.
+    //   3. carrier-geometry match — this is what declines the control-first peek,
+    //      which runs the DATA frame's audio through the CONTROL profile (47 data /
+    //      12 pilots vs 51/8) and would otherwise divide by the wrong carrier set.
+    // A miss leaves the production estimate untouched (degrade to baseline, never to
+    // garbage) and is COUNTED — ULTRA_GENIE_DEBUG prints hits/misses/geom_rejects per
+    // chunk, because a silent mispair is what made the old numbers unfalsifiable.
     {
         auto& cap = ultra::genie::txCapture();
-        // In-order FIFO cursor: the modulator captures DATA symbols only (LTS/probe
-        // gated out) in continuous wire order, so for a decode path that processes the
-        // frame in ONE continuous presynced pass (e.g. a 1-codeword frame, which does
-        // not trigger the per-codeword active_ldpc_block_size break + chunked re-sync)
-        // the encoder push order == the decoder equalize order and this aligns 1:1.
-        // NOTE: a 4-CW frame-interleaved frame decodes as re-synced chunks whose
-        // per-chunk carrier-pattern reset diverges from the continuous push order, so
-        // the FIFO drifts there — use --frame-cw 1 for the genie. See diagnosis doc.
-        if (cap.enabled && cap.read_index < cap.symbols.size()) {
-            const std::vector<Complex>& tx = cap.symbols[cap.read_index++];
-            if (tx.size() == channel_estimate.size()) {
+        const auto& pc = ultra::genie::passContext();
+        if (cap.enabled && pc.presynced && pc.symbol_samples > 0) {
+            // Frame anchor = this pass's absolute position for the frame's FIRST data
+            // symbol; the symbol within the frame is current_data_symbol_index_, which
+            // is frame-relative on the presynced path and identical to the encoder's
+            // per-modulate() symbol_index. Anchoring at FRAME granularity is what fixes
+            // the residual misalignment: the receiver's sync convention puts the RX
+            // position up to ~0.7 symbol away from the transmitted one (measured +796
+            // samples on ITU Good), which a nearest-SYMBOL match aliases by exactly one
+            // symbol — small residual, right geometry, wrong data.
+            const long long anchor =
+                static_cast<long long>(pc.abs_train) +
+                static_cast<long long>(pc.training_symbols) *
+                    static_cast<long long>(pc.symbol_samples);
+            const ultra::genie::TxSymbol* tx =
+                cap.lookup(anchor, static_cast<int>(current_data_symbol_index_),
+                           static_cast<long long>(pc.symbol_samples),
+                           data_carrier_indices.size(), pilot_carrier_indices.size());
+            // INDEPENDENT ALIGNMENT VALIDATOR (ULTRA_GENIE_VERIFY=1). The position key
+            // is a claim; this checks it against the CONTENT. Quadrant agreement
+            // between the PRODUCTION-equalized symbol (Y/H_prod, which decodes QPSK at
+            // 75% on this channel) and the looked-up X: ~1.0 iff the entry is the
+            // symbol actually transmitted here, ~0.25 for any wrong entry. Never
+            // used to select an entry — only to falsify the key.
+            static const bool genie_verify = [] {
+                const char* e = std::getenv("ULTRA_GENIE_VERIFY");
+                return e && e[0] == '1';
+            }();
+            if (genie_verify && tx != nullptr && tx->x.size() == channel_estimate.size()) {
+                auto score = [&](const std::vector<Complex>& xs) {
+                    int agree = 0, n = 0;
+                    for (int idx : data_carrier_indices) {
+                        if (std::norm(xs[idx]) < 1.0e-12f) continue;
+                        if (std::norm(channel_estimate[idx]) < 1.0e-20f) continue;
+                        const Complex eq = freq_domain[idx] / channel_estimate[idx];
+                        agree += (((eq.real() >= 0) == (xs[idx].real() >= 0)) &&
+                                  ((eq.imag() >= 0) == (xs[idx].imag() >= 0))) ? 1 : 0;
+                        ++n;
+                    }
+                    return n > 0 ? static_cast<double>(agree) / n : -1.0;
+                };
+                const double got = score(tx->x);
+                double best = -1.0;
+                long long best_off = 0;
+                const long long matched_off =
+                    tx->frame_base + static_cast<long long>(tx->sym_in_frame) *
+                                         static_cast<long long>(pc.symbol_samples);
+                if (got < 0.80) {
+                    for (const auto& cand : cap.symbols) {
+                        if (cand.x.size() != channel_estimate.size()) continue;
+                        const double s = score(cand.x);
+                        if (s > best) {
+                            best = s;
+                            best_off = cand.frame_base +
+                                       static_cast<long long>(cand.sym_in_frame) *
+                                           static_cast<long long>(pc.symbol_samples);
+                        }
+                    }
+                }
+                std::fprintf(stderr,
+                             "[genie-verify] dsi=%zu nData=%zu anchor=%lld matched=%lld "
+                             "agree=%.3f | best=%.3f best_off=%lld delta_sym=%.2f\n",
+                             current_data_symbol_index_, data_carrier_indices.size(),
+                             anchor, matched_off, got, best, best_off,
+                             static_cast<double>(best_off - matched_off) /
+                                 static_cast<double>(pc.symbol_samples));
+            }
+            if (tx != nullptr && tx->x.size() == channel_estimate.size()) {
                 for (int idx : data_carrier_indices) {
-                    if (std::norm(tx[idx]) > 1.0e-12f) channel_estimate[idx] = freq_domain[idx] / tx[idx];
+                    if (std::norm(tx->x[idx]) > 1.0e-12f)
+                        channel_estimate[idx] = freq_domain[idx] / tx->x[idx];
                 }
                 for (int idx : pilot_carrier_indices) {
-                    if (std::norm(tx[idx]) > 1.0e-12f) channel_estimate[idx] = freq_domain[idx] / tx[idx];
+                    if (std::norm(tx->x[idx]) > 1.0e-12f)
+                        channel_estimate[idx] = freq_domain[idx] / tx->x[idx];
                 }
             }
         }

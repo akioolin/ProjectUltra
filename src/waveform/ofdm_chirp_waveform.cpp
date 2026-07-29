@@ -1,6 +1,7 @@
 // OFDMChirpWaveform - Implementation
 
 #include "ofdm_chirp_waveform.hpp"
+#include "ofdm/genie_tx_capture.hpp"
 #include "fec/carrier_ldpc_interleaver.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"  // FFT class is in here
@@ -177,6 +178,15 @@ void OFDMChirpWaveform::initComponents() {
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
     demodulator_->setRXCarrierErasureEnabled(rx_carrier_erasure_enabled_);
+    // LATENT-BUG FIX (found while tracing BUG-BURST-STALE-GEOMETRY, 2026-07-28):
+    // configure() rebuilds the demodulator but ldpc_lifting_z_ SURVIVES on the
+    // waveform. Without re-asserting it here the fresh demodulator silently reverts
+    // its codeword gate to 648 bits while getMinSamplesForCWCount still sizes frames
+    // for n=1944 — the burst deinterleaver then gets 2x648 where it expects 2x1944
+    // and throws, dropping the group. Inert at the default z=27 (opt-in ULTRA_LDPC_Z),
+    // but the commanded-geometry path sets z at a group marker and configures one
+    // processBuffer later, which sits exactly on this.
+    demodulator_->setActiveLDPCBlockSize(ldpc_lifting_z_ == 81 ? 1944 : 648);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(getChirpConfig());
     if (shortAnchorEnabled() && mode_ == protocol::WaveformMode::OFDM_CHIRP) {
         // Phase 2a: a SECOND short-config ChirpSync (short DUAL chirp, 250+50+250+50) for the warm
@@ -447,6 +457,68 @@ Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
 
     ByteSpan span(tx_data.data(), tx_data.size());
     return modulator_->modulate(span, config_.modulation, effective_mask, mask_enabled);
+}
+
+// =============================================================================
+// POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, default OFF)
+// See src/ofdm/iterative_chest.hpp for the rationale and the adaptivity argument.
+// =============================================================================
+
+Symbol OFDMChirpWaveform::remodulateDataCarrierSymbols(const Bytes& encoded_air_bytes) {
+    if (!modulator_ || encoded_air_bytes.empty()) {
+        return Symbol{};
+    }
+    // Replay the PRODUCTION transmit path — the same modulate() the sender used, so
+    // the CarrierLDPC eligibility predicate, the carrier mask, the scattered-pilot
+    // rotation and mapBits() cannot drift from the transmitter by construction. A
+    // second, parallel implementation of the bit->carrier mapping here is exactly
+    // the BUG-8PSK-001 failure mode (a private copy that silently diverges), so
+    // there is not one. The generated audio is discarded; the grid is captured
+    // before the IFFT, hence it is independent of the modulator's NCO phase.
+    // Suppress the diagnostic TX capture — this is a RECEIVE-side replay and must not
+    // be pushed as a transmitted symbol. Guarded so that in production (genie off,
+    // always) the receive thread performs NO write to the process-global at all.
+    const bool genie_was_enabled = ultra::genie::txCapture().enabled;
+    if (genie_was_enabled) ultra::genie::txCapture().enabled = false;
+    (void)modulate(encoded_air_bytes);
+    if (genie_was_enabled) ultra::genie::txCapture().enabled = true;
+    return modulator_->getLastDataCarrierSymbolsForTesting();
+}
+
+void OFDMChirpWaveform::setDataAidedFeedbackEnabled(bool enabled) {
+    data_aided_feedback_enabled_ = enabled;
+    if (demodulator_) {
+        demodulator_->setDataAidedFeedbackEnabled(enabled);
+    }
+}
+
+void OFDMChirpWaveform::setChannelHistoryFrameOrigin(long long abs_sample) {
+    if (demodulator_) {
+        demodulator_->setChannelHistoryFrameOrigin(abs_sample);
+    }
+    data_aided_frame_origin_ = abs_sample;
+}
+
+void OFDMChirpWaveform::armChannelHistoryCarry(bool armed) {
+    if (demodulator_) {
+        demodulator_->armChannelHistoryCarry(armed);
+    }
+}
+
+void OFDMChirpWaveform::clearChannelHistory() {
+    if (demodulator_) {
+        demodulator_->clearChannelHistory();
+    }
+    data_aided_frame_origin_ = -1;
+}
+
+size_t OFDMChirpWaveform::ingestDataAidedFrame(const Bytes& encoded_air_bytes) {
+    if (!data_aided_feedback_enabled_ || !demodulator_ || encoded_air_bytes.empty()) {
+        return 0;
+    }
+    const Symbol x_grid = remodulateDataCarrierSymbols(encoded_air_bytes);
+    if (x_grid.empty()) return 0;
+    return demodulator_->ingestDataAidedGrid(x_grid, data_aided_frame_origin_);
 }
 
 void OFDMChirpWaveform::setCarrierMask(uint64_t active_mask) {
@@ -895,6 +967,17 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     LOG_MODEM(INFO, "OFDMChirpWaveform::process(): samples=%zu, cfo=%.1f, training_start=%zu, abs_start=%zu",
               samples.size(), cfo_hz_, training_start_sample_,
               has_absolute_training_start_sample_ ? absolute_training_start_sample_ : 0);
+    // DIAGNOSTIC (data-aided genie / ULTRA_EQ_TRACE): publish this pass's absolute LTS
+    // origin. It is the ONLY per-pass absolute identity the receiver has, and the genie
+    // addresses captured TX symbols by
+    //   abs_sym = abs_train + (training_symbols + data_symbol_index) * symbol_samples,
+    // which is invariant across the 2-6 re-decodes of the same frame (peek, header
+    // peek, authoritative pass, sync-recovery retries). Stale values are impossible
+    // for the genie because it also requires passContext().presynced, set immediately
+    // below in processPresynced(). Inert unless a diagnostic consumer is armed.
+    if (ultra::genie::passContextNeeded()) {
+        ultra::genie::passContext().abs_train = phase_ref_sample;
+    }
 
     // Pass CFO and initial phase to demodulator
     // This ensures CFO correction starts from the correct accumulated phase
@@ -1224,29 +1307,26 @@ int OFDMChirpWaveform::getMinSamplesForControlFrame() const {
 }
 
 int OFDMChirpWaveform::getMinSamplesForCWCount(int num_cw) const {
-    // Training symbols + data for num_cw codewords
-    int training_samples = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
-
-    // 2026-05-28 Phase 3: active codeword length is the lifted N for the
-    // current burst. ldpc_lifting_z_ is set per-burst (default 27 -> n=648,
-    // 81 -> n=1944). At z=81 the frame airtime is ~3x the legacy z=27 frame
-    // for the same num_cw — callers that care about wall-clock should pair
-    // num_cw and lifting_z carefully (typically cw=1 at z=81).
-    const int codeword_bits = (ldpc_lifting_z_ == 81) ? 1944 : 648;
-    int frame_bits = num_cw * codeword_bits;
-
-    const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+    // BUG-BURST-STALE-GEOMETRY (2026-07-28): the closed form moved to
+    // ofdm_link_adaptation::minSamplesForCWCountExplicit so the decoder can size a
+    // frame for a geometry it has NOT configured yet (a missed burst descriptor
+    // cannot apply mod/rate inline — see §14.36 SIGSEGV). Delegating here (rather
+    // than copying the arithmetic) makes the live-object path and the pure query
+    // provably ONE implementation; they cannot drift.
+    //
+    // 2026-05-28 Phase 3: active codeword length is the lifted N for the current
+    // burst. ldpc_lifting_z_ is set per-burst (default 27 -> n=648, 81 -> n=1944).
+    // At z=81 the frame airtime is ~3x the legacy z=27 frame for the same num_cw —
+    // callers that care about wall-clock should pair num_cw and lifting_z carefully
+    // (typically cw=1 at z=81).
+    return ofdm_link_adaptation::minSamplesForCWCountExplicit(
+        num_cw,
+        config_.modulation,
+        ldpc_lifting_z_,
         static_cast<int>(config_.num_carriers),
         config_.use_pilots,
         static_cast<int>(config_.pilot_spacing),
-        config_.modulation);
-    if (bits_per_symbol <= 0) {
-        return training_samples;
-    }
-    int data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
-    int data_samples = data_symbols * getSamplesPerSymbol();
-
-    return training_samples + data_samples;
+        getSamplesPerSymbol());
 }
 
 } // namespace ultra

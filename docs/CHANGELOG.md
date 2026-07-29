@@ -10,6 +10,698 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — POST-FEC DATA-AIDED CHANNEL ESTIMATION (`ULTRA_ITERATIVE_CHEST`, default OFF): the achievable form of the genie
+
+### Why
+
+The 2026-07-28 data-aided genie (`H[k] = Y[k]/X_TRUE[k]`) settled the question: **the wall is
+channel estimation.** `measure_ack_fer`, ITU Good, 4 seeds x n=100 — every rung at every SNR
+decodes at 98-100% given the exact channel (QPSK R3/4 @20 93.5→99.8, @14 69.8→98.8; 8PSK R2/3
+@20 82.3→99.8; 16QAM R2/3 @20 **51.0→99.5**; 16QAM R3/4 @20 **27.8→98.8**). The genie cheats by
+knowing X. **But a frame that passes LDPC parity on every codeword AND the frame CRC tells the
+receiver EXACTLY what was transmitted** — re-encode it, re-modulate it, and `H = Y/X` becomes an
+achievable, model-free, noise-limited channel observation.
+
+**This is NOT the existing pre-FEC decision-directed tracker** (`dd_qam16_*`,
+`ULTRA_COHERENT_DD_OFF`), which hard-decides X from `Y/Ĥ` so its errors are CORRELATED with the
+estimate it feeds — a positive-feedback loop, measured FLAT on this exact problem (31/150 vs 31,
+2026-05-29) and harmful on 8PSK (BUG-8PSK-001). Post-FEC X is verified, so `H_dd = H + N/X` is
+statistically independent of `Ĥ`. Different estimator, not a better decision device. That path
+is untouched.
+
+### What was built
+
+Carry-forward, not an intra-frame second pass — and that is a STRUCTURAL result, not a shortcut.
+`FrameInterleaver`'s permutation is `interleaved_idx = bit*CW + (cw+bit) % CW`
+(`frame_interleaver.cpp:46`), so any CW consecutive air bits carry one bit from EACH codeword. A
+16QAM carrier consumes 4 consecutive air bits at cw_count=4, i.e. it draws on ALL FOUR codewords.
+Fraction of carriers whose X is fully determined by a PARTIAL decode:
+
+| cw_count | QPSK | 8PSK | **16QAM** |
+|---|---|---|---|
+| 4, 3 of 4 pass | 0.50 | 0.375 | **0.000** |
+| 4, 2 of 4 pass | 0.00–0.25 | 0.00–0.125 | **0.000** |
+
+So re-decoding a frame with its own decoded bits is a NO-OP at the target rung, and a fully
+decoded frame needs no help. The value is entirely in TRANSFERRING one frame's exact channel to
+the next frame of the burst group. That also makes it cheap: no second equalize pass, no second
+LDPC pass.
+
+Pipeline (all inert unless the knob is on):
+1. `streaming_ofdm_decode.cpp` — on a frame where `cw_status.allSuccess()`, `reassemble()` is
+   non-empty (valid header + CRC) and no codeword used the perturbation retry, re-encode with the
+   PRODUCTION `v2::encodeFixedFrame` on the reassembled bytes. Exact by construction: the
+   encoder regenerates the same deterministic PRBS pad, so no pad bookkeeping is needed.
+2. `OFDMChirpWaveform::remodulateDataCarrierSymbols` — replays the PRODUCTION `modulate()`
+   (same CarrierLDPC eligibility, same pilot/carrier rotation, same `mapBits`) and captures the
+   data-carrier grid before the IFFT. **No second copy of the bit→carrier mapping exists** —
+   a private reimplementation is precisely the BUG-8PSK-001 failure mode.
+3. `ofdm_stream_processor.cpp` — retains Y at each data symbol's data carriers (~6-12 KB/frame,
+   nothing when off), bound to the frame's ABSOLUTE sample origin.
+4. `channel_equalizer_pilot.cpp::ingestDataAidedGrid` — `H_dd = Y/X` per carrier per symbol,
+   pushed into the EXISTING separable Wiener via `addWienerPilotObservation`. No parallel
+   estimator, no blend constant: the covariance solve already knows how to weight a stale exact
+   observation against a fresh noisy one.
+
+### Three things that had to be right, and one that was measured
+
+**(a) Observation noise weight — DERIVED, not branched.** `H_dd = H + N/X` ⇒ noise scales by
+`1/|X|²`. Every constellation in `mapBits()` is unit-AVERAGE-power, so
+`noise_norm_dd = wiener_noise_norm / |X[k]|²` is exactly 1× for QPSK/8PSK (unit modulus), +7.0 dB
+on the 16QAM inner points (|X|²=0.2), −2.6 dB on its corners, and correct for 32/64/256-QAM
+without being told they exist. No `kQam16*`, no `if (mod == X)`.
+
+**(b) Absolute time axis.** The Wiener was keyed on `current_data_symbol_index_`, which RESETS TO
+0 EVERY FRAME. Carrying an observation on that axis presents a 0.35 s-old sample at Δt = 0, the
+Wiener weights it ρ = 1.0, and the estimate gets silently WORSE. `wiener_symbol_base_` (absolute
+frame origin ÷ symbol_samples) fixes it; it is 0, hence a no-op, when the knob is off.
+
+**(c) FLAT storage domain.** Frames carry different LTS timing offsets, so their raw H differ by
+a phase RAMP. Stored de-sloped at capture, read without de-sloping, re-sloped at the target.
+
+**(d) COMMON-PHASE RE-REFERENCING — measured, and it was the difference between −50% and +14%.**
+Each frame is acquired independently (mixer reset, CFO phase reference re-derived, timing
+re-solved), so `H_k(f) = H_true(f)·e^{jφ_k}` with **φ arbitrary per frame**. De-sloping removes
+only the part linear in carrier index. First GUI-gate run with the carry on and no re-referencing:
+**~865 bps and no delivery, vs 1840 bps baseline** — the carried sample was confidently wrong,
+exactly what 16QAM's absolute-amplitude ring bit cannot absorb. Instrumenting the residual
+measured the inter-frame common phase at **−75° to +23°, varying frame to frame** — hypothesis
+confirmed rather than assumed. The correction is the ML estimate of that single unknown,
+`φ = arg( Σ_k H_new(k)·conj(H_carried(k)) )` over every overlapping carrier: one complex
+accumulator, one atan2, no threshold, no tuned constant, no per-modulation branch.
+
+### Test verification
+
+- `tests/test_iterative_chest_remod.cpp` (CTest `IterativeChestRemod`) — **the load-bearing pin.**
+  `encode → transmit → decode → re-encode → re-modulate == the original X`, EXACT complex
+  equality, over {QPSK, 8PSK, 16QAM} x {R1/2, R2/3, R3/4} x {1,2,4,8 CW} x {Z=27, Z=81} x
+  {channel interleave} x {CarrierLDPC} x {full, short payload}. A mis-mapping here yields a
+  confident, geometry-valid, WRONG channel that parity gating CANNOT catch — the same class of
+  bug that made every pre-2026-07-28 genie number meaningless. Includes a negative control
+  (one corrupted info byte must change X), a knob non-latching test, and an inertness test.
+- `ctest --test-dir build --output-on-failure -j4` — full suite green.
+- CPU (per frame, re-encode + re-modulate + `H=Y/X`), **measured on both hosts**:
+
+| rung | Mac M4 Pro | **Pi5 (Cortex-A76)** | frame airtime | Pi5 % of airtime |
+|---|---|---|---|---|
+| QPSK R3/4 4CW (26 sym) | 1.19 ms | **3.21 ms** | 653 ms | **0.49%** |
+| 8PSK R2/3 4CW (17 sym) | 1.93 ms | **5.04 ms** | 443 ms | **1.14%** |
+| 16QAM R2/3 4CW (13 sym) | 1.87 ms | **4.91 ms** | 350 ms | **1.40%** |
+| 16QAM R3/4 4CW (13 sym) | 1.04 ms | **2.79 ms** | 350 ms | **0.80%** |
+
+  A Pi5 holds real-time comfortably. The LDPC re-encode dominates (2.4–4.5 ms on the Pi5);
+  `LDPCDecoder::lastCodewordBits()` would remove it, but only by bypassing `encodeFixedFrame`
+  and re-implementing the interleavers — the divergence risk is not worth 1% of airtime.
+
+### Faithful-gate A/B — HONEST VERDICT: INCONCLUSIVE, and why
+
+`tools/gui_qso_scenario.sh --channel good --snr-db 20 --file-kb 21`, interleaved ON/OFF per seed:
+
+| seed | knob ON | knob OFF | delta |
+|---|---|---|---|
+| 42 | PASS **2100** | PASS 1840 | **+14.1%** |
+| 7 | **FAIL** (died ~70 s) | PASS 2110 | — |
+| 11 | PASS **1890** | **FAIL** (died ~14.6 s) | — |
+| 23 | PASS 1540 | PASS **1630** | −5.5% |
+
+Delivered pairs only: mean ON 1820 vs OFF 1735 = **+4.9%**, which is INSIDE this gate's known
+fade noise (±25%). **Do not quote this as a win.** Two of four pairs are unusable because the
+harness kills both stations on BOTH arms — filed as BUG-GUI-GATE-EARLY-EXIT-FLAKE. The
+`measure_ack_fer --config burst_chunk` path cannot substitute: it recovers 6/24 frames and never
+arms burst accumulation (independently confirmed here; already documented in the 2026-07-28 plan).
+
+**What IS established:** the mechanism works and is wired correctly end-to-end (2592 accepted
+observations per frame on the production 8PSK R2/3 z=81 cw4 geometry = 51 carriers x 51 symbols
+minus 9 zero-pad carriers, exactly as predicted), the re-modulation is bit-exact over 576
+configurations, the CPU is a non-issue on a Pi5, and the common-phase term is REAL and was
+decisive. **What is NOT established:** any FER or goodput claim. That needs a working reliability
+gate first.
+
+### Files
+
+`src/ofdm/iterative_chest.hpp` (new, knob + full rationale) ·
+`src/ofdm/ofdm_stream_processor.cpp` (Y retention, absolute time base, carry gate, origin
+consume) · `src/ofdm/channel_equalizer_pilot.cpp` (`ingestDataAidedGrid`,
+`rereferenceCarriedHistoryPhase`, flat storage domain, `signedBinForLogicalCarrier`) ·
+`src/ofdm/channel_equalizer_lts.cpp` (absolute LTS seed index) · `src/ofdm/demodulator_impl.hpp`
+· `include/ultra/ofdm.hpp` · `src/waveform/waveform_interface.hpp` (5 default-no-op virtuals) ·
+`src/waveform/ofdm_chirp_waveform.{hpp,cpp}` · `src/protocol/frame_v2.hpp`
+(`usedAnyPerturbation()`) · `src/gui/modem/streaming_decoder.hpp`
+(`DecodeResult::data_aided_air_bytes`, `data_aided_chest_enabled_`) ·
+`src/gui/modem/streaming_ofdm_decode.cpp` · `src/gui/modem/streaming_burst_interleave.cpp` ·
+`tests/test_iterative_chest_remod.cpp` (new) · `tests/CMakeLists.txt`
+
+---
+
+## 2026-07-28 — Data-aided genie (`H=Y/X`) alignment FIXED: frame-anchored addressing replaces the FIFO cursor (DIAGNOSTIC-ONLY, `ULTRA_GENIE_DATA_AIDED`, default OFF)
+
+### What was broken
+
+The true per-symbol data-aided channel genie (the one unconfounded probe for the 16QAM
+estimation-vs-demap split) was built but silently mispaired, so every number ever taken
+through it was meaningless. Two independent causes, both now measured rather than guessed:
+
+1. **A consuming FIFO cursor cannot work on this decoder.** Traced with `ULTRA_EQ_TRACE=1`:
+   the decoder equalizes each frame **2–6 times**. A clean 4-CW QPSK frame runs a
+   control-first peek (7 symbols, at the CONTROL carrier geometry — 47 data / 12 pilots, not
+   the data profile's 51/8), a CW0 header peek (7), and the authoritative pass (26) =
+   **40 `equalize()` calls for 26 pushed symbols, +14 spurious consumptions per frame**;
+   `smallframe-1cw` / `sync-recovery` (±8 samples) / `cw-discovery` / `marker-retry` add whole
+   further passes. The read set is also channel-dependent (frames the RX never syncs to are
+   never read, and post-burst false locks are read but never pushed) — so no counting scheme
+   can align it. Measured over an 8-frame chunk: 318 calls vs 208 pushes.
+2. **The residual, after switching to absolute-sample addressing.** The RX→TX stream origin —
+   the receiver's sync convention (FFT window deliberately placed inside the CP) plus channel
+   group delay — is **+796 samples on ITU Good** (−148 on AWGN, +920 on 16QAM/Good). Half a
+   symbol is 576. A nearest-SYMBOL match therefore aliased by **exactly one symbol**: zero
+   residual, correct carrier geometry, and completely wrong data. Content agreement 0.25 =
+   chance. This is what left the genie at QPSK@60 = 56 while baseline was ~92 in the original
+   diagnosis, and at 0/24 vs 120/160 in the first absolute-addressing attempt.
+
+Also fixed while there: the capture sat **above** the ACE block in `createOFDMSymbol`, so with
+`ULTRA_ACE_PAPR=1` the genie divided by the PRE-ACE symbol while the wire carried the POST-ACE
+one — a silently wrong "exact" H. Inert at the default (ACE off), latent otherwise.
+
+### What changed
+
+* `src/ofdm/genie_tx_capture.hpp` — rewritten. `TxSymbol{x, frame_base, sym_in_frame, n_data,
+  n_pilot}`; `TxCapture::lookup(anchor_rx, sym_index, symbol_samples, n_data, n_pilot)` is a
+  **non-consuming, idempotent** lookup keyed by **(frame anchor, symbol index within frame)**.
+  Adds `PassContext{abs_train, symbol_samples, training_symbols, presynced}` and
+  `passContextNeeded()`.
+* `src/ofdm/modulator.cpp` — capture moved BELOW ACE; pushes `frame_data_base` + geometry.
+* `src/gui/modem/streaming_encoder.{hpp,cpp}` — supplies `frame_data_base` (frame start +
+  preamble) in `encodeFrame`, `encodeFrameLight`, and the `encodeBurstLight` group loop;
+  `genie_stream_base_` carries the in-burst descriptor's offset.
+* `src/ofdm/channel_equalizer_equalize.cpp` — frame-anchored lookup + `ULTRA_GENIE_VERIFY`.
+* `src/ofdm/ofdm_stream_processor.cpp`, `src/waveform/ofdm_chirp_waveform.cpp` — populate
+  `PassContext` (only when a diagnostic consumer is armed).
+* `tools/measure_ack_fer.cpp` — `measureBurst` pump floors (below).
+
+### Why it is correct (not just tuned)
+
+Frame granularity is the load-bearing choice: burst frames are ≥9 symbols apart while the
+sync convention is a **sub-symbol** quantity, so a frame anchor cannot alias while a symbol
+anchor provably does. Four guards make a mispair impossible rather than unlikely —
+presynced-only (the streaming SYNCED path has no absolute anchor and its
+`current_data_symbol_index_` is a different quantity); ≥4 agreeing origin votes; nearest frame
+must be ≥4× closer than the runner-up; carrier-geometry match (this is what declines the
+control-first peek). **A miss leaves the production estimate untouched** — degrade to
+baseline, never to garbage — and misses/geometry-rejects are counted and printed
+(`ULTRA_GENIE_DEBUG`), because the old failure mode was silence.
+
+### Harness fidelity (same change, `measureBurst` only)
+
+Two floors on how long the harness pumps: (1) `kFullSearchSamples` — the full-anchor chirp
+search refuses to run without 2.5 s of unsearched audio, so short bursts (`--frame-cw 1`)
+reported `chunk_sync_fail` on every chunk (5/5 → 0/5); (2) trailing allowance 8 → 16 pump
+chunks — the burst decoder emits frames well after the last transmitted sample, and 8 chunks
+truncated the backlog. Measured QPSK R3/4 Good@60 seed 7 n=10: 8 → 60/80, 16 → 70/80,
+32/64/128/256 → 70/80 (saturated). A measurement floor, not a knob.
+
+### Test verification
+
+```
+# hard gate — paired, --frame-cw 4 --burst-interleave 0, Good@60, n=20 (frames_recovered/160)
+#   seed  7: OFF 139  GENIE 139     seed 23: OFF 139  GENIE 140
+#   seed 11: OFF 138  GENIE 140     seed 42: OFF 140  GENIE 140
+# independent CONTENT validator (never selects an entry, only falsifies the key)
+ULTRA_GENIE_DATA_AIDED=1 ULTRA_GENIE_VERIFY=1 ./build/measure_ack_fer --snr 60 \
+  --config burst_chunk --channel good --mod qpsk --rate r3_4 --seed 7 --n 2 \
+  --frame-cw 4 --burst-interleave 0
+#   -> agree=1.000 on 377/396 lookups, remainder >=0.92 (channel noise, not misalignment)
+#   -> 16QAM identical: agree=1.000 on 114/120
+# production untouched: knob UNSET, this tree vs clean HEAD, 9 cells -> byte-identical CSV
+ctest --test-dir build --output-on-failure -j4   # 91/91 pass (1 disabled: TNCSession)
+```
+
+**What the now-valid genie says** (Good, seed 7, n=20, frames_recovered/160): QPSK R3/4
+@60 139→139, @20 135→138, @14 106→**133**, @10 58→**118** (the genie is demonstrably live).
+Every 16QAM cell pins at **exactly 60/160 = 3 frames per chunk, independent of SNR
+(20/24/60)** — and the genie accounting shows only **3 of 8 frames are ever equalized at
+all** (hits 60 = 3 × [7 header-peek + 13 authoritative]). So with exact per-symbol
+per-carrier H, 16QAM decodes **every frame the receiver attempts**; the other 5/8 are lost
+in burst framing/sync before any demodulation. The demap is not the wall — but the size of
+the 16QAM prize cannot be read off this harness until that framing limit is fixed.
+
+---
+
+## 2026-07-28 — Delay-domain (CIR) pilot reconstruction landed as `ULTRA_PILOT_DFT_INTERP` (DEFAULT-OFF) — and it EXONERATES pilot interpolation as the 16QAM/Good limiter
+
+**Investigated hypothesis (from a design brief):** the data-carrier channel estimate is
+reconstructed from the pilot grid by LINEAR INTERPOLATION; on ITU Good (two paths 0.5 ms
+apart → |H| ripples with period 1/τ = 2000 Hz) linear is the wrong reconstruction filter, so
+|Ĥ| carries a gain error; 16QAM's ring bit is an ABSOLUTE amplitude comparison
+(`soft_demap.hpp:95`, |I| vs `QAM16_THRESHOLD` = 2/√10) so a gain error flips it, while 8PSK's
+unit-radius distance LLRs are scale-invariant and immune. Predicted fix: delay-domain (CIR)
+reconstruction.
+
+### What the code actually does (premise correction #1)
+
+**In the production configuration the data carriers do NOT get linear interpolation.**
+`channel_equalizer_pilot.cpp` computes the linear interpolation and then, when
+`ofdm_pilots::scatteredPilotsActive(config)` (true for every coherent OFDM data frame —
+`scattered_pilots` defaults true, `use_pilots` is set true in `modem_mode.cpp:149/266` and
+`ofdm_chirp_waveform.cpp:312`), **overwrites it with `estimateWienerChannel()`** and passes the
+linear value only as the `fallback` argument. Verified at runtime: sweeping
+`ULTRA_WIENER_DELAY_SPREAD_S` 0.0005→0.009 moves the FER (10→13 fails in 24), so the Wiener
+path is live.
+
+That Wiener path is already a delay-domain-prior MMSE estimator in disguise: its frequency
+correlation `sinc(π·Δf·τ)` is the Fourier transform of a flat delay window of width τ. The
+brief's proposal and the shipped code are the same estimator family; the differences are the
+window SHAPE (discrete integer-sample vs continuous rect) and the position VARIABLE.
+
+### What was built anyway (it is the better-specified estimator)
+
+`src/ofdm/delay_domain_interpolator.hpp` (new): MMSE reconstruction onto a symmetric
+integer-sample delay window, in closed form.
+
+- **Why no FFT** (deviating from the brief's "use PocketFFT"): an FFT is the right tool only
+  for a uniform pilot grid covering a full period. Ours is neither — carriers skip DC so the
+  LOGICAL index is not proportional to frequency (the pre-existing, never-called
+  `Impl::interpolateChannel()` makes exactly that mistake), and `Np·spacing = 64 ≠ 1024`, so an
+  Np-point IDFT yields the CIR *aliased and Dirichlet-smeared*, making "truncate to the CP" a
+  no-op. Doing it in closed form gives the exact same operator with none of those errors:
+  `R(Δk) = sin(π·Δk·W/Nfft) / (W·sin(π·Δk/Nfft))`, the Dirichlet kernel of the window, with
+  `G[p][q] = R(k_p−k_q)`, `λ = σ²/P_h`, `Ĥ(k) = d_k^T (G+λI)^{-1} h_p`. Constant-free.
+- **Aliasing:** two delays differing by `fft_size/pilot_spacing` are IDENTICAL at every pilot,
+  so the window is capped at `fft/d` (= 128 samples = 2.67 ms at sp8, 85 = 1.78 ms at sp12) and
+  reports `alias_clamped`. Also capped by the CYCLIC PREFIX — a tap past the CP is ISI, not a
+  channel the OFDM model can represent. Default span = the same delay assumption the Wiener
+  prior uses (channel-class override if present, else `ULTRA_WIENER_DELAY_SPREAD_S`), so the
+  knob swaps the FILTER, not the channel MODEL. Poor HF (2 ms) is not silently corrupted: it
+  runs at R1/4 → spacing 5 → unambiguous 204 samples = 4.3 ms.
+- **Band edges:** this is a MODEL EVALUATION, not an interpolation between bracketing pilots, so
+  carriers outside the pilot span are extrapolated under the same prior — no DFT wrap, no
+  edge-hold. The cost is paid honestly in the returned `error_var`, which the existing consumers
+  (DD Kalman pilot variance, `per_carrier_h_error_var_` / eps_H) already read.
+- **Double-precision solve** local to this path: the delay-window Gram matrix is far more
+  ill-conditioned than the sinc one (det(G) ~ 1e-22 at sp8/59 carriers). The shipped
+  float32 `ofdm_wiener::solveRealSystem` costs ~4e-3 relative accuracy at small λ. Keeping the
+  new solve local leaves the default Wiener path bit-for-bit unchanged.
+
+### Premise correction #2: "exact for a 2-tap channel" is only true when W ≤ Np
+
+With W taps and Np pilots the fit is underdetermined for W > Np and returns the minimum-norm /
+MMSE solution — it reproduces H at the pilots but not exactly between them. 8 pilots spanning
+56 carriers resolve delays no finer than 1024/56 = 18.3 samples (0.38 ms), and the ITU Good taps
+are 24 samples apart. `tests/test_ofdm_delay_domain_interpolator.cpp` pins BOTH regimes.
+
+### Measurement — the knob is NEUTRAL, so the reconstruction filter is NOT the limiter
+
+`measure_ack_fer --config data4_full --rate r2_3`, 6 seeds {11,23,37,53,71,89} × 24 frames
+(n=144/cell). Baseline reproduces the brief's numbers exactly.
+
+| cell | OFF | ON |
+|---|---|---|
+| 16QAM Good @20/24/28/32/40 | 51.4 / 30.6 / 21.5 / 16.7 / 15.3 % | 52.1 / 30.6 / 21.5 / 15.3 / 15.3 % |
+| 16QAM Moderate @24 / @32 | 61.8 / 56.2 % | 62.5 / 55.6 % |
+| 8PSK Good @20 / @24 | 16.0 / 5.6 % | 16.7 / 5.6 % |
+| QPSK Good @12 | 35.4 % | 35.4 % |
+| 16QAM AWGN @12 / @20 | 100 / 4.2 % | 100 / 4.2 % |
+| 16QAM Good @32/40, spacing 10 | 2.8 / 2.8 % | 2.8 / 2.8 % |
+| 16QAM Good @32/40, spacing 12 | 75.0 / 77.8 % | 72.9 / 77.1 % |
+
+Every delta is ≤1 frame in 144. Two independent controls confirm the filter is not the lever:
+sweeping `ULTRA_PILOT_DFT_SPAN_MS` from 0.05 ms (a degenerate 1-tap = maximally smoothed
+estimate) to 2.0 ms (a 95-tap = essentially unsmoothed estimate) moved 16QAM Good@32 by **0
+frames in 72**; and the pre-existing genie oracles make things WORSE, not better
+(`ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS` 30.6→69.4% @24 — it models taps at {0, 24} in the RAW
+domain and so cannot represent the bulk OFDM timing offset; `ULTRA_GENIE_LTS_FREEZE`
+30.6→48.6%).
+
+### What the evidence points at instead (FILED, not fixed here)
+
+**(1) The pilot-spacing response is non-monotone and cliff-shaped, not smooth.** 16QAM R2/3,
+ITU Good @40 dB, 6 seeds × 24, sweeping `ULTRA_R23_PILOT_SPACING`:
+
+| spacing | 5 | 6 | 7 | **8 (production)** | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|
+| pilots | 12 | 10 | 9 | **8** | 7 | 6 | 6 | 5 |
+| data carriers | 47 | 49 | 50 | **51** | 52 | 53 | 53 | 54 |
+| FER | 12.5% | 6.2% | 26.4% | **15.3%** | 2.8% | 2.8% | **2.1%** | 77.8% |
+
+FEWER pilots measure BETTER (sp9/10/11 → 2-3% with 52-53 data carriers vs sp8's 15.3% with 51),
+then fall off a cliff at 12. An interpolation-quality effect would be monotone in pilot density;
+this is not. Confirmed at 24 dB too (16QAM 41.0/30.6/17.4/9.7/66.0% at sp 7/8/9/10/12) and it is
+**fading- and amplitude-specific**: 8PSK barely moves over the same sweep (4.9/5.6/6.9/3.5/12.5%)
+and AWGN is flat at the harness floor (4.2% at sp8 and sp12 alike, so it is not a TX/RX pattern
+mismatch). If `sp10`/`sp11` survives the GUI gate this is simultaneously a ~5× FER win and +2
+data carriers over the production `sp8` grid — a bigger lever than anything in the brief.
+
+**(2) The MMSE equalizer tap is BIASED and the 16QAM demapper does not correct for it.**
+`channel_equalizer_equalize.cpp` computes `equalized = conj(h)·rx/(|h|²+σ²)`, which shrinks the
+constellation by `g = |h|²/(|h|²+σ²) < 1`, **per carrier**. `demapQAM16` then compares the
+shrunk |I| against the fixed absolute `QAM16_THRESHOLD`; nothing rescales by `g`. An outer-ring
+point on a carrier with per-carrier SNR below 3 dB (g < 0.667) is pulled across the threshold and
+reads INNER — a systematic, confident-wrong ring bit that QPSK/8PSK are structurally blind to,
+and that does NOT improve with average SNR because a deep null scales with the signal. A
+prototype unbias (ZF tap `conj(h)·rx/|h|²` with post-eq noise var `σ²/|h|²`) measured a
+consistent but small gain — exactly 1 frame in 144 better at every SNR (74→73, 44→43, 24→23,
+22→21). Real and correctly-signed, not the dominant term. Prototype reverted; not shipped.
+
+**(3) `Impl::interpolateChannel()` is DEAD CODE** — declared `demodulator_impl.hpp:415`, defined
+`channel_equalizer_pilot.cpp:1204`, called from nowhere. It is an earlier DFT-interpolation
+attempt that IDFTs over the LOGICAL carrier index (warping the delay axis across the DC gap),
+seeds the transform with linear interpolation, and hardcodes `L = 5` taps with a comment
+assuming 46.875 Hz spacing. Along with its `interp_idft_phasors`/`interp_dft_phasors` N×N tables
+and three scratch buffers built unconditionally in `buildInterpolationPhasors()`
+(`ofdm_demodulator_setup.cpp:70/193`), it is a removal candidate → `REMOVAL_BACKLOG.md`.
+
+### Files
+
+- `src/ofdm/delay_domain_interpolator.hpp` (new)
+- `src/ofdm/channel_equalizer_pilot.cpp` — per-symbol knob read + window derivation; the
+  non-Wiener branch; the Wiener frequency-axis swap in `estimateWienerChannel`;
+  `have_model_error_var` now gates the `per_carrier_h_error_var_` / DD `pilot_interp_sigma`
+  writes (previously keyed on `use_wiener_interpolation` alone)
+- `src/ofdm/demodulator_impl.hpp` — `delay_domain_interp_`, `delay_domain_window_`,
+  `delay_domain_pilot_obs_`
+- `tests/test_ofdm_delay_domain_interpolator.cpp` (new), `tests/CMakeLists.txt`
+
+### Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4      # 90/90 pass (TNCSession disabled)
+./build/tests/test_ofdm_delay_domain_interpolator   # 7/7
+```
+
+Unit-test numbers (fail-before / pass-after pin, worst case over all 8 scattered-pilot phases):
+
+- Exactness (W = 7 ≤ Np = 8, taps at 0 and 3 samples, fft 128 → the production 2000 Hz ripple):
+  delay-domain rel-RMS **6.3e-4**, worst gain **0.01 dB**; linear rel-RMS **0.178**, worst gain
+  **4.66 dB** — linear crosses 16QAM's +3.52 dB outer-ring flip point, delay-domain does not.
+- Production geometry (fft 1024, sp8, ITU Good taps 0/24 samples, W = 47 ≫ Np = 8): delay-domain
+  rel-RMS **0.031** / gain **1.14 dB**; linear **0.178** / **4.66 dB**. Gain is measured over
+  carriers above the production `kRelFadeOnset = 0.25` trust boundary — in a deep null |H|→0
+  makes any absolute error an unbounded dB error and the LLR path already down-weights it.
+- Kernel closed form vs a direct window sum: max error **3.6e-7**.
+
+**Default OFF. Nothing in the shipped decode path changes.**
+
+---
+
+## 2026-07-28 — BUG-BURST-STALE-GEOMETRY fixed: TWO independent defects on the burst group-start path (`ULTRA_COMMANDED_GEOMETRY`, DEFAULT-ON)
+
+**Symptom (operator-caught):** "full receiver timeout, not acking anything, 2-3 in a row."
+Rig MPG@20 two-station DEBUG capture, clocks pinned sender+4.75 s = receiver by three
+independent ACK arrivals. A burst group decoded `FAILED (0/12 CWs)` ×5 at LTS in-band SNR
+**14.1 dB** (not a fade), the group finished **1.9 s before the sender stopped transmitting**,
+the no-progress ack was keyed INSIDE the sender's key-down [130.1, 138.9], the sender's own
+audio-activity log has a **27 s hole**, and the sender ate the full **17.5 s ARQ RTO**.
+**28.2 s between useful acks; 17.6 s of airtime delivered zero bytes.**
+
+### The framing that mattered: this is TWO defects, not one
+
+The bug doc and the implementation plan both treated it as one (stale geometry). It is two,
+and only one of them is fixed by the commanded-geometry work:
+
+**(A) ALIGNMENT / TRUNCATION → the TIMEOUT.** `checkIfReadyToDecode`
+(`streaming_sync_acquisition.cpp`) releases the group-start frame once `available` clears the
+requirement **IT** computed. `available` only grows (write_pos advances, sync_position_ is
+fixed), so if `decodeCurrentFrame` then reaches `frame_len = std::min(frame_len, available)`
+with `frame_len < requirement`, the REQUIREMENT GREW between the two calls — and the frame is
+silently **truncated**. Three live ways that happens:
+`applyPendingConnectedOFDMMode`/`applyPendingDescriptorDataMode` run at the TOP of the
+processBuffer iteration that calls `decodeCurrentFrame`, i.e. strictly after the SYNC_FOUND
+iteration that gated on the old profile (a rate change moves pilot spacing → bits/symbol →
+samples); `setFixedFrameCodewords` is a plain int written from the GUI thread; and — new with
+(B) — the commanded-rung tuple can change between the two resolves because the ack-emit thread
+writes it. `burst_next_pos_` AND `burst_data_start_abs_` are both derived from `frame_len`, so
+a short slice shifts the WHOLE group early; `refreshBurstAirEnd()` inherits it
+(`burst_data_start_abs_ + N*burst_min_block_`) and the F176 half-duplex ack interlock opens
+into the sender's own key-down. On the capture the head window was processed TWICE 9 ms apart
+(t=137.634 / 137.643, identical `training_start=21313`), the group counted 5 frames while
+consuming ~4 frame-times of air, and finished 1.24 s early.
+**NOTE: `burst_min_block_` itself was CORRECT (59360 both sides — cw is airtime-normalizing by
+design, `connection_policy.hpp`). (A) is NOT a geometry error and is NOT fixed by (B).**
+
+**(B) STALE GEOMETRY → the DESTROYED GROUP.** A missed BURST_HEADER descriptor after a rung
+switch leaves the receiver slicing with the PREVIOUS rung: wrong **constellation** on every
+frame (0/N CWs), not wrong slicing.
+
+### What changed
+
+**(A) — never arm a burst group from a truncated frame** (`streaming_ofdm_decode.cpp`,
+`decodeCurrentFrame`). The `std::min` now records `frame_truncated`; when it is true on a
+connected OFDM burst-regime frame whose requirement mode can ARM a group
+(`ConnectedOFDMBurst` = marker-latched group start, `PendingCodewords` = descriptor-declared
+group start), the decoder does **not decode it at all** — it returns to `SYNC_FOUND` with
+`sync_position_` untouched and `checkIfReadyToDecode` re-gates on the CURRENT requirement.
+The existing per-frame timeout (`max(FRAME_TIMEOUT_MS, required_ms + 2000)`) bounds the wait,
+so it cannot livelock. In steady state the requirement does not move between the two calls, so
+the guard is a strict no-op. Counter: `truncatedBurstHoldsForTesting()`.
+*Proof that no path can still derive burst geometry from a short slice:* the only two arm
+sites are the marker block (now unreachable with a truncated frame) and
+`lateJoinBurstAccumulation`, which already `return false`s when `available < data_block` and
+therefore can never be short.
+
+**(B) — slice a missed descriptor with the COMMANDED rung.** The receiver IS the rate
+authority (`ULTRA_RX_RATE_AUTHORITY`, default ON), so its own last tone-burst ack already told
+the sender its next rung. Pieces:
+- **Pure geometry query** — `ofdm_link_adaptation::minSamplesForCWCountExplicit(cw, mod, z,
+  carriers, use_pilots, pilot_spacing, samples_per_symbol)` + the rung-derived
+  `minSamplesForCWCount(...)`. `OFDMChirpWaveform::getMinSamplesForCWCount` now DELEGATES to it,
+  so the live-object path and the pure query are provably one implementation. This dissolves the
+  bug doc's "OPEN BLOCKER": the closed form's only live-object read is
+  `getSamplesPerSymbol()`, which is INVARIANT under the profile change being predicted
+  (`configure()` rewrites only modulation/code_rate/use_pilots/pilot_spacing; `initComponents()`
+  rebuilds the modulator from the unchanged fft_size/cp_mode/symbol_guard). No `configure()`, no
+  live-reference swap, no SIGSEGV path.
+- **Commanded-rung snoop** — `ModemEngine::transmitToneBurstAck` (the single point every
+  `ToneBurstAckPayload` passes through from BOTH frontends) hands
+  `rate_hint | (rung_cmd << 3)` to the decoder as a relaxed atomic. Four mandatory rejects:
+  authority OFF (the bits then mean a quantized quality + a RELATIVE demote), `kRungCmdReserved`
+  (the WAITING-REBASE voice, which would decode as index 24), `kRungIdxNone`, out-of-range.
+  **No protocol-layer change** — `connection.cpp` already stamped these five bits.
+- **Learned rung→geometry table** — cw/frame is NOT rate-derivable (`ULTRA_QAM16_CW16`,
+  the 8PSK ladder) and the sender's own coherence walk (`recommendCWCountForChannel`) is not
+  reproducible at the receiver, so `learned_rung_geometry_` is populated ONLY from decoded
+  BURST_HEADER descriptors — wire truth. A rung with no entry is a MISS → today's behaviour;
+  never substitute a neighbour's cw.
+- **Cadence guard** — the single ambiguity is whether the sender HEARD the command. A lost ack
+  costs the sender its full ARQ RTO, so the resend cannot arrive inside the steady-state
+  cadence: `gap > 15 s` ⇒ post-RTO ⇒ keep the latched geometry. Measured on this capture:
+  steady-state 7.00-13.33 s (n=24) vs post-RTO 19.43/20.01 s (n=2) — **disjoint**. The 15 s
+  constant was ALREADY in-tree (gate D2) and is now ONE definition
+  (`streaming_decode_policy::kBurstCadenceRtoGapSamples`) with two consumers. The reference is
+  `last_group_start_abs_`, **not** `last_descriptor_abs_sample_` as the bug doc proposed: the
+  latter advances only on DECODED descriptors, so two consecutive misses would inflate the gap
+  past 15 s and silently disarm the fix in exactly the repeat case.
+- **One tuple, three consumers** — the readiness mirror, the slice length, and
+  `burst_min_block_` all resolve the same `(mod, rate, cw, z)`. Fixing only `burst_min_block_`
+  (the line the bug doc cites) misaligns the whole group.
+- **Frame 1 is a deliberate zero-LLR erasure.** The profile change stays DEFERRED (§14.36
+  SIGSEGV rule intact — `applyPendingDescriptorDataMode` lands at the top of the next
+  processBuffer, i.e. before frame 2 and before any finalize), so frame 1 is correctly SLICED
+  but necessarily demapped with the OLD constellation. Its soft bits are noise AND the wrong
+  width for `bitsPerFrame(cw)`, which would make the burst deinterleave THROW and drop the whole
+  group. Cost: 1 frame, requested by the SACK bitmap in the next round trip, instead of a 17.5 s
+  RTO for all N. The synthesized `last_burst_descriptor_` (+ `have_burst_descriptor_ = true`)
+  carries the same `lifting_z` the stride used so `activeBurstLiftingZ()` and finalize's
+  `bytes_per_cw_rx` agree. The F147 expected-anchor LLR immunity is extended to a commanded arm
+  for the same reason (mush LLRs are EXPECTED there; bouncing to re-search forfeits the group
+  AND its ack) — **keeping the 0.60 correlation floor**, see review fix 3 below.
+- **Group-seq inference** — `last_burst_group_seq_` is only written at descriptor consume, so a
+  missed descriptor leaves the PREVIOUS group's seq latched. Pre-fix that was harmless (the
+  group always finalized 0/N, so the ack carried no positive credit); a commanded arm makes
+  frames 2..N decode, so the tone-ack would report a NON-ZERO `frame_mask` keyed to the previous
+  group and the sender would credit frames it never delivered. The arm now infers `+1`, the
+  identical inference (and identical justification) the late-join head-missing path already
+  makes for the structurally identical situation.
+- **NO RX protocol follow-through.** An earlier revision fired `descriptor_mode_change_callback_`
+  from the arm so the ARQ window would follow the geometry. That was **fatal** — see review
+  fix 1.
+
+**LATENT BUG fixed in passing** (`ofdm_chirp_waveform.cpp::initComponents`): `configure()`
+rebuilds the demodulator but `ldpc_lifting_z_` survives on the waveform, and the fresh
+demodulator's codeword gate silently reverted to 648 bits while `getMinSamplesForCWCount` still
+sized frames for n=1944 → the burst deinterleaver gets 2×648 where it expects 2×1944 and
+throws. Inert at the default z=27 (opt-in `ULTRA_LDPC_Z`), but the commanded-geometry path sets
+z at a group marker and configures one processBuffer later, sitting exactly on it.
+`setActiveLDPCBlockSize` is now re-asserted in `initComponents`.
+
+### Adversarial review round 2 — six changes, one of them load-bearing
+
+Three independent review passes (correctness / concurrency-lifetime / regression-scope) were
+run against the first revision. Six findings were real and are fixed here; the rest are
+recorded as rejected-with-reason in `docs/KNOWN_BUGS.md`.
+
+**1 (was HIGH, and the worst of the set) — "we commanded X" is NOT "the sender is at X".**
+The first revision armed on the standing command with only an *inertness* test against the
+receiver's own latched rung. That is not evidence about the SENDER, and
+`Connection::maybeObeyAuthorityCommand` declines a standing command on **five** distinct paths:
+`!rateAdaptationActive()` (`ULTRA_LOCK_RATE`); `mode_change_pending_`; a rung the sender's
+ladder disabled, which is **snapped to a different index**; an **UP command deferred to a clean
+send boundary** while its TX window drains — which explicitly does *not* arm dedup, "the
+re-carried command must retry", so it can stand un-adopted for many groups while the receiver
+re-stamps it on every ack; and `tryDescriptorModeSwitch` falling back to the legacy MODE_CHANGE
+round trip. Reproduced in-tree: a group where the wire equals the latched rung and a
+non-adopted command stands went **5/5 → 0/5** with a 2.80 s mis-timed finalize. That is the
+feature *destroying a healthy group* — the exact case `KNOWN_BUGS` documents as harmless today
+(xfer_3 burst#26 missed its descriptor and still decoded 5/5). Two gates added, both derived
+from the sender's own code rather than tuned:
+- **DEMOTE-ONLY.** The sender defers only when `isFasterMode(cmd, current)`; a demote obeys
+  immediately ("a failing window never drains — waiting would deadlock"). Same predicate, same
+  0.05 epsilon, evaluated receiver-side. Physics corroborates the asymmetry: a demote is issued
+  INTO a degrading channel, which is where anchors actually get missed, while a climb commits at
+  a clean freshly-turned-around boundary where the anchor is most likely to be heard. The
+  measured rig failure (8PSK R2/3 → QPSK R3/4, idx 5 → 4) is a demote, so coverage of the target
+  population is preserved.
+- **DECLINED.** Every decoded descriptor announces the rung the sender is ACTUALLY transmitting.
+  One that disagrees with the standing command is direct wire evidence of non-adoption →
+  `commanded_rung_declined_`, cleared only when the command CHANGES or the sender adopts it
+  (a re-carried copy of the same target must not clear it, or the one observation that proves
+  non-adoption would be erased on the next ack).
+Residual, stated plainly: the first missed descriptor after a freshly-changed demote command
+that the sender happens to decline is still exposed for exactly one group, because no
+descriptor has been decoded yet to prove the decline. That degrades to today's failure mode,
+not worse.
+
+**2 (was HIGH) — the RX-protocol follow-through tore down the group it had just armed.**
+`descriptor_mode_change_callback_` → `Connection::onDescriptorModeChange` → `applyDataMode` →
+`notifyDataModeChanged` → `app.cpp` → `ModemEngine::setDataMode` → `setConnectedOFDMMode` →
+`pending_connected_ofdm_change_ = true`, and `applyPendingConnectedOFDMMode()` at the TOP of the
+very next `processBuffer` rebuilds `waveform_`, forces `state_ = SEARCHING` and clears
+`pending_total_cw_`. The real descriptor path is safe because it fires the callback and goes
+straight to SEARCHING with no group armed; from the marker block it destroys the armed group
+**before `accumulateBurstFrames()` ever runs**, so neither its group timeout nor its FAST-NACK
+deliver fires — the group vanishes with **no tone-ack at all**, which is strictly worse than the
+bug (a 0/N group at least NACKs). Removed. The sender re-announces the geometry on the next
+group; one group at the old ARQ window costs at most a below-window drop that ARQ resends —
+which is also exactly today's behaviour.
+
+**3 (was MEDIUM) — the F147 LLR immunity must keep its correlation floor.** The first revision
+exempted a commanded arm from the 0.60 floor entirely. The burst latch that arm rides on is a
+SIGN TEST on the marker metric (`marker_metric.real() < 0.0f`) — a coin flip on noise — so the
+exemption would let a weak lock arm a burst group and queue a decoder reconfigure. The floor is
+what makes the exemption a PRIOR rather than a hole; the measured failure's own DATA-sync accept
+was corr=0.95, far above it.
+
+**4 (was MEDIUM) — the cadence guard failed OPEN across a reset.** `StreamingDecoder::reset()`
+zeroes `total_fed_` (the absolute sample clock) but did not clear `last_group_start_abs_`, so a
+stale-high stamp made `now_abs > last_group_start_abs_` false for minutes of audio and the
+RTO-gap discriminator — the only check separating "the sender heard my command" from "it never
+did" — silently allowed everything. Cleared in `reset()` alongside the truncation-hold episode
+key (a ring position, which `sync_position_ = 0` would otherwise collide with).
+
+**5 (was MEDIUM) — guard (A) could swallow the group with NO ack.** Holding until the readiness
+timeout drops the frame to SEARCHING; on a missed descriptor `have_burst_descriptor_` is false,
+so neither the group-abandonment backstop NACK nor the F165 anchored-burst backstop fires. That
+is the ❌ "refuse to arm" trap this bug entry names explicitly. The hold is now bounded by
+**progress, not by a timer**: hold only while the missing audio is still arriving; the first
+hold that makes no progress means the peer stopped transmitting, so fall through to the pre-fix
+truncated decode and let the group arm and ACK. This also bounds the `PendingCodewords` scope
+concern (that mode is selected for any variable-CW frame, not only group starts).
+
+**6 (was LOW, but it is the dangerous direction) — one resolve per frame.** The readiness gate
+and the slice ran `resolveCommandedGeometry` independently, in different `processBuffer`
+iterations, with the ack-emit thread able to move the input in between. A GROWING requirement is
+caught by the truncation guard; a SHRINKING one is not — it yields a short, unflagged slice with
+identical downstream damage. The readiness resolve is now snapshotted and re-used by the decode
+(keyed on `sync_position_`; `DECODING` is only ever entered from `checkIfReadyToDecode`, and the
+fresh-resolve fallback exists only so a future entry path cannot read stale state).
+
+### Defaults
+
+`ULTRA_COMMANDED_GEOMETRY` gates **both** halves and is **DEFAULT-ON**; `=0` restores the exact
+pre-fix behaviour for both. Deliberately **not** a function-local `static const` — a
+function-local static latches the env on first call, so one process could only observe one
+value and the fail-before/pass-after test pair would be impossible to write. It runs at most a
+few times per burst group, never on a per-sample hot path.
+
+### Test verification
+
+`tests/test_burst_stale_geometry.cpp` (new; `add_test(BurstStaleGeometry)`) runs the knob=0
+(pre-fix) and knob=1 (fixed) arms **in one process** — the fail-before evidence is re-proved on
+every CI run rather than asserted in a comment. Real StreamingEncoder → samples → real
+StreamingDecoder, no channel impairment (these are geometry defects; a clean channel makes the
+split structural, not statistical).
+
+| arm | frame_mask | frames recovered | samples fed at group callback | mechanism counter |
+|---|---|---|---|---|
+| (A) knob=0 — pre-fix | `0x00` | **0 / 3** | 410400 (early) | `trunc_holds=0` |
+| (A) knob=1 — fixed | `0x07` | **3 / 3** | 465600 | `trunc_holds=1` |
+| (B) knob=0 — pre-fix | `0x00` | **0 / 5** | 412800 (stale wide stride) | `cmd_arms=0` |
+| (B) knob=1 — fixed | `0x1E` | **4 / 5** | 278400 (the group's true airtime) | `cmd_arms=1` |
+| (C) declined command | `0x1F` | **5 / 5** | 412800 | `cmd_arms=0` (inert) |
+| (D) deferred climb | `0x1F` | **5 / 5** | 412800 | `cmd_arms=0` (inert) |
+
+(A) and (B) pin the two defects; (C) and (D) pin the two ADOPTION GATES from review fix 1.
+(B) models the measured rig failure — a DEMOTE the sender took immediately (QPSK R3/4 cw8
+latched → QPSK R1/4 cw4 on the wire; the rig's own 8PSK-R2/3-cw12 → QPSK-R3/4-cw8 pair is
+airtime-IDENTICAL by design and would hide the stride half). Its frame 1 is the deliberate
+erasure, so the gate asserts `mask & 0x1E == 0x1E`, not `all_ok`. (C) and (D) set the wire EQUAL
+to the latched rung, so a correct decoder recovers 5/5, and assert the resolver stays out of the
+way; with the two gates disabled both arms measure **0/5** — i.e. they are live regression pins
+for "the feature destroys a healthy group", not decoration. Every arm asserts its mechanism
+counter, so no pass can come from luck.
+(A) uses cw16-on-the-wire vs cw4-latched because the full-anchor search only declares sync once
+~2.5 s of audio sits past the group start, so `available` at the readiness check is already
+~1.3 s — only a frame LONGER than that slack can be truncated, which is also why this defect
+bites hardest on the widest rungs.
+
+Gates (re-run after the review fixes): `cmake --build build -j4` clean; `ctest --test-dir build
+--output-on-failure -j4` → **89/89 passed** (was 88/88; +1 = the new test), 1 disabled
+(TNCSession, pre-existing).
+Faithful gate: `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21`
+→ `RESULT=PASS`, `FILE_CRC_OK_COUNT=2`, `GOODPUT_BPS=1570`; and
+`--channel moderate --snr-db 18 --seed 7` → `RESULT=PASS`, `FILE_CRC_OK_COUNT=2`,
+`GOODPUT_BPS=930`. Neither guard FIRED on either sim run — 0 hits for `COMMANDED-GEOMETRY` and
+0 for `frame TRUNCATED` across both stations' logs (a clean OTASim path never misses a
+descriptor). The fix is inert on the healthy path, which is what a correctness guard should be
+and why these runs are a no-regression check, **not** an effect measurement; the goodput figures
+are single-seed and sit inside this gate's documented ±25% fade noise, so they are not a claim.
+
+**UltraTncSimAudio is intermittently failing on this machine today and it is NOT this change.**
+Characterized three independent ways: with the fix STASHED and the tree rebuilt clean it failed
+2/2; with `ULTRA_COMMANDED_GEOMETRY=0` (exact pre-fix behaviour for both halves) it still failed
+1/3; and decisively, `grep -c` for either new guard's log line
+(`COMMANDED-GEOMETRY` / `Burst group-start frame TRUNCATED`) across the whole
+`Testing/Temporary/LastTest.log` of a failing run is **0** — neither guard executes anywhere in
+the suite. It is a real-time wall-clock audio session that fails with a 0/12-CW decode under
+host load; it passed 3/3 standalone and on two consecutive full `-j4` runs after the review
+fixes landed.
+
+### Still open / not claimed
+
+- **No rig or multi-seed throughput claim.** The unit test proves the MECHANISM. Per the
+  project's interleaved-A/B rule the goodput claim needs `tools/gui_qso_scenario.sh` at MPG@20
+  with the knob interleaved ON/OFF in the same epoch. Shipped default-ON anyway because both
+  halves are CORRECTNESS fixes (a truncated slice and a wrong constellation are wrong at any
+  SNR), not throughput tuning.
+- **Not covered:** the sender heard the command but its coherence walk shrank cw below the
+  learned baseline. The table then holds the wrong cw for that rung and the group is destroyed
+  exactly as today; it self-corrects within one group (every arriving descriptor overwrites the
+  entry). The `[COMMANDED-GEOMETRY]` INFO line logs rung/cw/z/frame_samples so the rig can
+  measure how often the arm was right.
+- **Three stale-TRUE leaks on `have_burst_descriptor_`** (the `accumulateBurstFrames`
+  hard-failure abort and the two deinterleave-throw early returns bypass the normal clear;
+  the group-timeout clear sits inside a `burst_transport_rx_ && burst_group_callback_` gate)
+  will SUPPRESS the new guard. Fail-safe (suppression = today's behaviour) and orthogonal, but
+  they are why a rig run may show fewer arms than missed descriptors. NOT fixed here.
+- **One-group adoption blind spot** (review fix 1's residual). A freshly-changed DEMOTE command
+  that the sender then declines is still armable for exactly one group, because no descriptor
+  has been decoded since the command to prove the decline. It degrades to today's failure mode
+  (group destroyed, ack still emitted), not worse. Closing it fully would need the sender to
+  echo its obeyed rung in the ack — a wire change, deliberately not taken here.
+- **The commanded rung is published at ack ENCODE time**, not at RF emission
+  (`ModemEngine::transmitToneBurstAck` only renders samples; `app.cpp` may park them in a
+  single-slot deferral for up to 12 s, and a second ack overwrites the first). Reviewed and
+  judged NOT worth the plumbing: an ack that is dropped entirely leaves the sender to RTO, which
+  the cadence guard already catches; an ack that is overwritten by a newer one carrying the same
+  or a newer command is heard, and we store latest-wins; and any residual mismatch is caught by
+  the DECLINED gate on the next decoded descriptor.
+- **cw drift inside a rung.** `recommendCWCountForChannel` walks cw DOWN against the sender's own
+  measured coherence, so the same rung can legitimately transmit cw 16/8/4 at different times
+  while the learned table holds one snapshot. A wrong cw degrades to today's failure mode (wrong
+  stride, group destroyed) and self-corrects on the next decoded descriptor. Deriving cw instead
+  of learning it would require the receiver to reproduce the sender's fading-index input, which
+  it does not have.
+
+---
+
 ## 2026-07-26 — ULTRA_LINEAR_SNR_RING measures a WASH on the rig: stays default-off (the code fix is still correct)
 
 Rig A/B, 4 interleaved pairs, MPG@20, knob on the MAC receiver (verified present in the live

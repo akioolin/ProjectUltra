@@ -188,6 +188,39 @@ public:
     // by callers that know the current frame has safe multi-CW LDPC geometry.
     virtual void setRXCarrierErasureEnabled(bool enabled) { (void)enabled; }
 
+    // ========================================================================
+    // POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, default OFF)
+    // See src/ofdm/iterative_chest.hpp for the full rationale. All default no-ops:
+    // only OFDM_CHIRP implements them, and only when the knob is on.
+    // ========================================================================
+
+    // Arm/disarm the feature for the frames that follow. Disarming also drops any
+    // retained receive grid, so a stale Y can never meet a fresh X.
+    virtual void setDataAidedFeedbackEnabled(bool enabled) { (void)enabled; }
+
+    // Absolute sample origin of the frame about to be processed. Converted to an
+    // ABSOLUTE symbol index for the channel-history time axis, so an observation
+    // carried from the previous frame is weighted by rho(dt) at its true age
+    // instead of appearing at dt = 0.
+    virtual void setChannelHistoryFrameOrigin(long long abs_sample) { (void)abs_sample; }
+
+    // Keep the channel history across the next frame boundary (true) or let each
+    // frame start from its own LTS as production does (false).
+    virtual void armChannelHistoryCarry(bool armed) { (void)armed; }
+
+    // Hard reset of the carried history — burst-group boundary, re-anchor, geometry
+    // change. A carried observation is only valid inside one continuous acquisition.
+    virtual void clearChannelHistory() {}
+
+    // Feed back the EXACT air bytes of a frame that passed LDPC parity on every
+    // codeword AND the frame CRC. Re-modulates them to recover X, forms
+    // H_dd = Y/X on the retained receive grid, and pushes the result into the
+    // channel history. Returns the number of observations accepted (0 = inert).
+    virtual size_t ingestDataAidedFrame(const Bytes& encoded_air_bytes) {
+        (void)encoded_air_bytes;
+        return 0;
+    }
+
     // Reset internal state (call between frames)
     virtual void reset() = 0;
 

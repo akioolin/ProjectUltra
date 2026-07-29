@@ -16,6 +16,7 @@
 #include "ultra/timing_profiler.hpp"
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "genie_tx_capture.hpp"
 
 namespace ultra {
 
@@ -498,6 +499,25 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
         // Process all complete symbols
         size_t symbols_processed = 0;
+        // DIAGNOSTIC (genie / ULTRA_EQ_TRACE): the streaming SYNCED path carries NO
+        // absolute training anchor and its current_data_symbol_index_ is a running
+        // synced_symbol_count, not a frame-relative index — so mark the pass
+        // NOT-presynced and let the genie decline it rather than mispair.
+        if (ultra::genie::passContextNeeded()) {
+            auto& pc = ultra::genie::passContext();
+            pc.symbol_samples = impl_->symbol_samples;
+            pc.training_symbols = 0;
+            pc.presynced = false;
+            auto& tr = ultra::genie::eqTrace();
+            if (tr.enabled && impl_->rx_buffer.size() >= impl_->symbol_samples) {
+                std::fprintf(stderr,
+                             "[eqtrace] --- PASS %ld site=%-14s STREAM-SYNCED buffered=%zu "
+                             "data_syms<=%zu ldpc_block=%zu\n",
+                             ++tr.pass, tr.site, impl_->rx_buffer.size(),
+                             impl_->rx_buffer.size() / impl_->symbol_samples,
+                             impl_->active_ldpc_block_size);
+            }
+        }
         while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
             impl_->current_data_symbol_index_ =
                 static_cast<size_t>(impl_->synced_symbol_count.load());
@@ -830,6 +850,59 @@ void OFDMDemodulator::setTimingOffset(int offset) {
     impl_->manual_timing_offset = offset;
 }
 
+// =============================================================================
+// POST-FEC DATA-AIDED CHANNEL ESTIMATION (ULTRA_ITERATIVE_CHEST, default OFF)
+// Rationale, adaptivity derivation and safety argument: src/ofdm/iterative_chest.hpp
+// =============================================================================
+
+void OFDMDemodulator::setDataAidedFeedbackEnabled(bool enabled) {
+    if (impl_->data_aided_enabled_ == enabled) return;
+    impl_->data_aided_enabled_ = enabled;
+    // The storage domain must be uniform across the whole history (never a mix of
+    // sloped and flat samples at one carrier), so it is switched with the feature
+    // and the existing history is dropped at the switch.
+    impl_->wiener_history_flat_ = enabled;
+    impl_->resetWienerPilotHistory();
+    impl_->da_rx_grid_.clear();
+    impl_->da_logical_.clear();
+    impl_->da_grid_origin_ = -1;
+    impl_->da_pending_origin_ = -1;
+    if (!enabled) {
+        impl_->wiener_carry_armed_ = false;
+        impl_->wiener_symbol_base_ = 0;
+    }
+}
+
+void OFDMDemodulator::setChannelHistoryFrameOrigin(long long abs_sample) {
+    impl_->da_pending_origin_ = abs_sample;
+}
+
+void OFDMDemodulator::armChannelHistoryCarry(bool armed) {
+    impl_->wiener_carry_armed_ = armed && impl_->data_aided_enabled_;
+}
+
+void OFDMDemodulator::clearChannelHistory() {
+    impl_->resetWienerPilotHistory();
+    impl_->da_rx_grid_.clear();
+    impl_->da_logical_.clear();
+    impl_->da_grid_origin_ = -1;
+    impl_->da_pending_origin_ = -1;
+    impl_->wiener_symbol_base_ = 0;
+}
+
+size_t OFDMDemodulator::ingestDataAidedGrid(const Symbol& x_grid,
+                                            long long expect_origin) {
+    return impl_->ingestDataAidedGrid(x_grid, expect_origin);
+}
+
+size_t OFDMDemodulator::dataAidedRetainedSymbolCount() const {
+    return impl_->da_rx_grid_.size();
+}
+
+size_t OFDMDemodulator::dataAidedRetainedCarrierCount() const {
+    return impl_->da_rx_grid_.empty() ? 0 : impl_->da_rx_grid_[0].size();
+}
+
 bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols) {
     // Process samples after external sync (chirp preamble)
     //
@@ -889,13 +962,43 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->dd_qam16_measurement_var_.clear();
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
-    impl_->resetWienerPilotHistory();
+    // ULTRA_ITERATIVE_CHEST: with the carry armed the previous frame's VERIFIED
+    // data-aided observations must survive this frame boundary — that transfer is
+    // the entire lever (a frame's own decoded bits cannot refine its own channel:
+    // FrameInterleaver spreads every 16QAM carrier across all four codewords).
+    // Unarmed (the default) this resets exactly as before.
+    //
+    // A pass with NO FRESH absolute origin (the origin is announced per burst data
+    // frame and consumed below) has no trustworthy place on the absolute time axis
+    // — a control peek or an out-of-band probe would otherwise inherit the previous
+    // frame's timestamp and its observations would land at the wrong age. Such a
+    // pass is treated as unarmed: full reset, base 0, i.e. exactly the production
+    // behaviour. Safe because the decoder re-arms before EVERY burst data frame.
+    const bool da_pass = impl_->data_aided_enabled_ &&
+                         impl_->da_pending_origin_ >= 0 &&
+                         impl_->symbol_samples > 0;
+    if (!da_pass) {
+        impl_->wiener_carry_armed_ = false;
+    }
+    if (!impl_->wiener_carry_armed_) {
+        impl_->resetWienerPilotHistory();
+    }
+    impl_->da_rx_grid_.clear();
+    impl_->da_logical_.clear();
+    impl_->da_grid_origin_ = -1;
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->constellation_air_bit_index_ = 0;
     impl_->constellation_valid_air_bits_ = static_cast<size_t>(-1);
     impl_->constellation_capacity_air_bits_ = 0;
+
+    // The absolute symbol origin of THIS frame, latched before any LTS/pilot
+    // observation is pushed so every sample in the history shares one time axis.
+    impl_->wiener_symbol_base_ =
+        da_pass ? (impl_->da_pending_origin_ /
+                   static_cast<long long>(impl_->symbol_samples))
+                : 0;
 
     // Clear constellation symbols so we only show the current frame's data
     {
@@ -965,6 +1068,27 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     LOG_SYNC(INFO, "processPresynced: skipped %d training symbols, %zu samples remaining",
              training_symbols, remaining);
 
+    // DIAGNOSTIC (genie / ULTRA_EQ_TRACE): publish the absolute sample identity of the
+    // symbols this pass is about to equalize. abs_train was set by the waveform; the
+    // stride and the training skip are only known here. Written only when a diagnostic
+    // consumer is armed — inert in production.
+    if (ultra::genie::passContextNeeded()) {
+        auto& pc = ultra::genie::passContext();
+        pc.symbol_samples = impl_->symbol_samples;
+        pc.training_symbols = training_symbols;
+        pc.presynced = true;
+        auto& tr = ultra::genie::eqTrace();
+        if (tr.enabled) {
+            std::fprintf(stderr,
+                         "[eqtrace] --- PASS %ld site=%-14s presynced in=%zu training=%d "
+                         "data_syms=%zu sym_samples=%zu abs_train=%zu ldpc_block=%zu mod=%d\n",
+                         ++tr.pass, tr.site, samples.size(), training_symbols,
+                         remaining / impl_->symbol_samples, impl_->symbol_samples,
+                         pc.abs_train, impl_->active_ldpc_block_size,
+                         static_cast<int>(impl_->config.modulation));
+        }
+    }
+
     // === PHASE 2: Process data symbols ===
     LOG_DEMOD(DEBUG, "DATA phase: first_sample=%.6f, remaining=%zu", *ptr, remaining);
     size_t data_offset = 0;
@@ -990,6 +1114,35 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         const auto& bb = impl_->toBaseband(sym_samples);
         const auto& fd = impl_->extractSymbol(bb, 0);
 
+        // ULTRA_ITERATIVE_CHEST: retain the raw receive grid Y at this symbol's data
+        // carriers. `freq_domain_scratch` is a single reused buffer overwritten every
+        // symbol, so without this the frame's Y is gone by the time LDPC returns a
+        // verdict. Cost is ~51 complex + 51 uint16 per symbol (~6-12 KB/frame) and
+        // NOTHING is retained while the knob is off. The logical index is stored per
+        // symbol because activateCarrierPattern() ROTATES the scattered pilots, so
+        // data carrier c is a different logical carrier from one symbol to the next.
+        if (impl_->data_aided_enabled_) {
+            impl_->da_rx_grid_.emplace_back();
+            impl_->da_logical_.emplace_back();
+            auto& y_row = impl_->da_rx_grid_.back();
+            auto& l_row = impl_->da_logical_.back();
+            const size_t nd = impl_->data_carrier_indices.size();
+            y_row.reserve(nd);
+            l_row.reserve(nd);
+            for (size_t c = 0; c < nd; ++c) {
+                const int fft_idx = impl_->data_carrier_indices[c];
+                if (fft_idx < 0 || static_cast<size_t>(fft_idx) >= fd.size() ||
+                    c >= impl_->data_logical_carrier_indices.size()) {
+                    y_row.clear();
+                    l_row.clear();
+                    break;
+                }
+                y_row.push_back(fd[fft_idx]);
+                l_row.push_back(static_cast<uint16_t>(
+                    impl_->data_logical_carrier_indices[c]));
+            }
+        }
+
         // Per-symbol pilot tracking: update channel estimate from pilot observations.
         // For differential modes: update only |H| (magnitude) to track fading depth,
         // while keeping phase frozen from LTS. This gives MMSE accurate amplitude
@@ -1006,6 +1159,16 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         ++impl_->synced_symbol_count;
         impl_->updateQuality();
     }
+
+    // Bind the retained receive grid to the frame it came from. ingestDataAidedGrid
+    // refuses any origin but this one, which is what makes "stale Y meets fresh X"
+    // structurally impossible rather than merely unlikely.
+    impl_->da_grid_origin_ =
+        (da_pass && !impl_->da_rx_grid_.empty()) ? impl_->da_pending_origin_ : -1;
+    // CONSUME the origin. The next pass must be told its own absolute position or
+    // it is not eligible for the carry (see da_pass above) — this is what stops a
+    // stale timestamp from silently mislabelling an out-of-band pass.
+    impl_->da_pending_origin_ = -1;
 
     if (data_offset < remaining) {
         impl_->rx_buffer.assign(ptr + data_offset, ptr + remaining);
@@ -1084,6 +1247,12 @@ void OFDMDemodulator::reset() {
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
     impl_->resetWienerPilotHistory();
+    // A full reset is a re-acquisition: a carried data-aided observation is only
+    // valid inside one continuous acquisition, so drop it unconditionally here.
+    impl_->da_rx_grid_.clear();
+    impl_->da_logical_.clear();
+    impl_->da_grid_origin_ = -1;
+    impl_->wiener_symbol_base_ = 0;
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);

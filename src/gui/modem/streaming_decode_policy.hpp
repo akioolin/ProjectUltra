@@ -5,10 +5,64 @@
 #include "ultra/types.hpp"
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 
 namespace ultra {
 namespace gui {
 namespace streaming_decode_policy {
+
+// ============================================================================
+// BUG-BURST-STALE-GEOMETRY (2026-07-28) — ULTRA_COMMANDED_GEOMETRY, DEFAULT-ON
+// ============================================================================
+// Covers BOTH halves of the fix (they are independent defects on one path):
+//   (A) never arm a burst group from a TRUNCATED group-start frame
+//       (streaming_ofdm_decode.cpp, the `frame_truncated` guard in
+//       decodeCurrentFrame), and
+//   (B) on a MISSED burst descriptor, slice with the rung THIS receiver
+//       COMMANDED instead of the latched one (resolveCommandedGeometry).
+// `=0` restores the pre-fix behaviour for both, exactly.
+//
+// DELIBERATELY NOT a function-local `static const` lambda (the house pattern for
+// most knobs): a function-local static latches the env on FIRST call, so one
+// process can only ever observe one value — and tests/test_burst_stale_geometry.cpp
+// runs the pre-fix (=0) and fixed (=1) arms IN ONE PROCESS, which is what keeps the
+// fail-before evidence live on every CI run instead of rotting in a comment. This
+// runs at most a few times per burst group, never on a per-sample hot path.
+// DEFAULT-OFF as of 2026-07-29 — flipped on RIG EVIDENCE, opt in with =1.
+//
+// WHY IT IS OFF. Measured on the IONOS rig at MPG@20, 8 interleaved transfers (4 pairs,
+// Mac = receiver = where this decoder knob lives): the guard armed **once** — and in that same
+// batch there were **7 groups that arrived with no BURST_HEADER descriptor at all**, i.e. 7
+// opportunities. cmd_arms read 0 in 7 of the 8 runs. The arm-mean goodput difference (ON 1.83
+// vs OFF 1.50 kbps) is therefore a NULL CONTROL, not an effect: a knob that provably did
+// nothing cannot have caused a 23% swing, and reading it as one would be the exact scoring
+// error this project has been bitten by before.
+//
+// The suppression was PREDICTED before it was measured: three `have_burst_descriptor_`
+// stale-TRUE leaks (MODEM_INFRASTRUCTURE_MAP §7b — the accumulateBurstFrames hard-failure
+// abort, the two deinterleave-throw early returns, and the group-timeout clear gated on
+// burst_transport_rx_ && burst_group_callback_) leave the latch TRUE, so the resolver's
+// `have_burst_descriptor_` early-out declines to arm. Shipping this DEFAULT-ON would ship
+// code that does not engage.
+//
+// RE-ENABLE ONLY AFTER: (1) those three leaks are fixed so the guard can actually arm, and
+// (2) a fresh interleaved rig A/B shows cmd_arms > 0 in the ON arm. Until then the honest
+// state is "implemented, reviewed, not yet exercised".
+inline bool commandedGeometryEnabled() {
+    const char* e = std::getenv("ULTRA_COMMANDED_GEOMETRY");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';  // DEFAULT-OFF (rig: does not engage)
+}
+
+// Sample-clock gap that separates a STEADY-STATE burst group from a post-ACK-RTO
+// resend. Already in-tree and justified in-comment at the descriptor-consume site
+// (gate D2): steady-state groups arrive every burst+turnaround (<= ~11.5 s worst
+// case) while a timeout resend can only follow the sender's ACK RTO (>= ~19 s of
+// silence). Measured on the 2026-07-28 rig capture: steady-state 7.00-13.33 s
+// (n=24) vs post-RTO 19.43/20.01 s (n=2) — disjoint, 15 s sits between.
+// ONE definition, two consumers (D2 provisional-HARQ keys + the commanded-geometry
+// cadence guard) so they cannot drift apart.
+inline constexpr uint64_t kBurstCadenceRtoGapSamples = 15ull * 48000ull;
 
 inline size_t estimateRobustOFDMControlSamples(size_t default_control_samples,
                                                Modulation data_mod,

@@ -1328,6 +1328,21 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     resetFrameArrivalTrackingLocked();
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
+    // BUG-BURST-STALE-GEOMETRY (2026-07-28 review fix): this reset REWINDS the
+    // absolute sample clock (total_fed_ = 0 above). Leaving a stale-high group-start
+    // stamp behind would make `now_abs > last_group_start_abs_` false for the next
+    // several minutes of audio, which silently disables the arrival-cadence
+    // discriminator — the ONLY check that separates "the sender heard my command"
+    // from "it never did and is resending the old geometry". Clearing it here makes
+    // the resolver take its explicit "no reference -> allow" branch deliberately
+    // rather than by unsigned-comparison accident. The per-frame truncation-hold
+    // episode key is a ring position and must go with it (sync_position_ = 0 above
+    // would otherwise collide with a stale key of 1).
+    last_group_start_abs_ = 0;
+    truncation_hold_sync_pos_ = 0;
+    truncation_hold_frame_len_ = 0;
+    cg_snapshot_ = CommandedGeometry{};
+    cg_snapshot_sync_pos_ = 0;
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
     burst_predecoded_.clear();

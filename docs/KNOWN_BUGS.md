@@ -8,6 +8,266 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-GUI-GATE-EARLY-EXIT-FLAKE (open, 2026-07-29) — P2, MEASUREMENT BLOCKER
+
+**Symptom.** `tools/gui_qso_scenario.sh --channel good --snr-db 20 --file-kb 21` intermittently
+ends with `RESULT=FAIL REASON=process_exit_before_pass`. Both `ultra_gui` processes stop within
+~0.5 s of each other, their log files truncated MID-LINE (unflushed), and **no macOS crash report
+is written**. Two observed timings: during handshake (~14.6 s, `ELAPSED_SEC=21`) and mid-transfer
+(~70 s). stderr is discarded by the harness (`>/dev/null 2>&1` at
+`tools/gui_qso_scenario.sh:497/507`), so the termination cause is currently invisible.
+
+**NOT caused by `ULTRA_ITERATIVE_CHEST`.** Measured on the SAME tree, interleaved, ITU Good @20,
+21 KB:
+
+| seed | knob ON | knob OFF (baseline) |
+|---|---|---|
+| 42 | PASS 2100 bps | PASS 1840 bps |
+| 7 | **FAIL** (died ~70 s) | PASS 2110 bps |
+| 11 | PASS 1890 bps | **FAIL** (died ~14.6 s) |
+| 23 | PASS 1540 bps | PASS 1630 bps |
+
+The baseline fails with the identical signature, so this is a property of the working tree /
+harness, not of the feature.
+
+**Impact.** It makes the faithful gate unusable as a *reliability* instrument until fixed: a
+one-seed FAIL cannot be attributed. Any A/B run on this gate right now must report per-seed
+results and must NOT quote a pass rate.
+
+**First step when picking this up:** re-run with stderr captured (a copy of the harness with the
+two `>/dev/null 2>&1` redirections pointed at files) and read the termination message. Do not
+theorise first — the harness is hiding the answer, not lacking one.
+
+
+### BUG-BURST-STALE-GEOMETRY: a missed switch-descriptor makes the receiver slice the whole group with the PREVIOUS rung's geometry — group destroyed (0 CWs on every frame) AND the ack keyed into the sender's own transmission (~28 s dead air)
+
+- **STATUS: ✅ FIXED 2026-07-28 (`ULTRA_COMMANDED_GEOMETRY`, DEFAULT-ON, opt out `=0`).**
+  See CHANGELOG 2026-07-28. Two things this entry got WRONG, both corrected below in place:
+  1. **It is TWO independent defects, not one.** (A) an ALIGNMENT/TRUNCATION defect produces
+     the TIMEOUT and is NOT fixed by the commanded-geometry work; (B) the stale geometry
+     destroys the group. Both are fixed; §"Mechanism" below only described (B).
+  2. **Line refs had drifted** (corrected in the text): the arm site is
+     `streaming_ofdm_decode.cpp:1536` not 1533 (1533 is `descriptor_group_size_locked_`), the
+     descriptor set-site is **878** not 762, and the mid-burst gate is **1204** not 1013.
+  Remaining work is rig validation only (interleaved A/B at MPG@20); the mechanism is pinned
+  by `tests/test_burst_stale_geometry.cpp`, which runs the pre-fix and fixed arms in one
+  process.
+- **DEFECT (A) — ALIGNMENT/TRUNCATION, the one that causes the TIMEOUT (added 2026-07-28).**
+  `checkIfReadyToDecode` (`streaming_sync_acquisition.cpp`) releases the group-start frame once
+  `available` clears the requirement IT computed. `available` only grows, so reaching
+  `frame_len = std::min(frame_len, available)` in `decodeCurrentFrame` with a short `frame_len`
+  means the REQUIREMENT GREW between the two calls — silent truncation. Live causes: the
+  deferred `applyPendingConnectedOFDMMode`/`applyPendingDescriptorDataMode` run at the TOP of
+  the processBuffer iteration that decodes, i.e. after the SYNC_FOUND iteration that gated on
+  the old profile; and `setFixedFrameCodewords` is a plain int written from the GUI thread.
+  `burst_next_pos_` AND `burst_data_start_abs_` both derive from `frame_len`, so the whole
+  group lands early and `refreshBurstAirEnd()` inherits it. On the capture the head window was
+  processed TWICE 9 ms apart (t=137.634/137.643, identical `training_start=21313`), the group
+  counted 5 frames while consuming ~4 frame-times of air and finished 1.24 s early.
+  **`burst_min_block_` itself was CORRECT (59360 both sides — cw is airtime-normalizing by
+  design, `connection_policy.hpp`), so (A) is NOT a geometry error.**
+  FIX: never arm a burst group from a truncated frame — defer to SYNC_FOUND and retry.
+- **Root-caused 2026-07-28 from a two-station DEBUG capture** (operator-caught
+  "full receiver timeout, not acking anything, 2-3 in a row"). Rig MPG@20,
+  `/tmp/dbg/{mac,pi5}.log`. Clocks aligned sender+4.75 s = receiver, pinned by
+  three independent ACK arrivals at the sender (4.78/4.78/4.71) — **not inferred
+  from timing**.
+- **Mechanism.** A group's frame geometry arrives in its BURST_HEADER
+  descriptor, carried by a control frame behind the full dual-chirp anchor
+  (the sender arms one for every DESC-SWITCH, F163). If the receiver misses
+  that anchor and takes the connected DATA-sync fallback
+  (`sync_controller.cpp:830`), it never decodes the descriptor, and
+  `streaming_ofdm_decode.cpp:1536` (was cited as 1533; 1533 is
+  `descriptor_group_size_locked_ = false`) arms accumulation from the **latched**
+  count:
+  `burst_min_block_ = getMinSamplesForCWCount(fixed_frame_codewords_)`.
+  Nothing checks that a descriptor for THIS group was ever received.
+- **Measured instance.** Receiver (rate authority) commanded 8PSK R2/3 →
+  QPSK R3/4 at t=134.25; sender obeyed at 129.87 (`Fixed frame CW count set
+  to 8`) and keyed 5 frames / 422080 samples = 8.79 s. Receiver missed the
+  anchor (`Down chirp NOT found`, up-chirp WAS at corr=0.671), took the data
+  fallback at corr=0.95, sliced 8-CW frames as **12-CW** → `FAILED (0/12 CWs)`
+  ×5 with LTS in-band SNR **14.1 dB** (not a fade). Short slices exhausted the
+  group **1.9 s before the sender stopped transmitting**; the no-progress ack
+  was keyed at sender-clock 137.02 inside key-down [130.1, 138.9].
+  **The sender's own audio-activity log has a 27 s hole (129.5→156.5)** —
+  direct proof the ack never arrived. Sender ate the full **17.5 s RTO**
+  (`zero-progress ARQ round 1 (rto)`), resent, and the SAME frames decoded
+  **5/5 q=0.96** once the descriptor was finally read. **28.2 s between useful
+  acks; 17.6 s of airtime delivered zero bytes.**
+- **Why all three half-duplex guards failed at once** (this is the important
+  part — no single check is missing):
+  1. **F176 geometry air-gate** — `refreshBurstAirEnd()` computes
+     `burst_data_start_abs_ + N*burst_min_block_` from the SAME stale
+     `fixed_frame_codewords_`, so it published a short air-end; and it is
+     **zeroed at finalize** (`streaming_burst_interleave.cpp:1236`), so a
+     *premature* finalize disarms the very gate meant to catch it.
+  2. **CCA `channelBusyForTx()`** — read `idle=1` at t=141.57 mid-burst: the
+     channel was in a genuine ~7 dB fade trough (rms 0.077 vs thresh 0.152).
+     Energy carrier-sense cannot be the interlock here (already documented at
+     app.cpp:745).
+  3. **`rxSignalActive(1600)`** — anchored on SYNC events, and a burst group is
+     sliced from one sync, so it was 4.3 s stale by ack time.
+  The deferred-ack path fired **once in the whole 287 s run**, and not here.
+- **Frequency / cost.** Missed-descriptor groups vs zero-decode groups across
+  4 captured runs: debug 2/2, xfer_1 0/0, xfer_2 0/0, xfer_3 3/2. Both debug
+  failures land immediately after a `DESC-SWITCH`. ~35 s of a 287 s transfer
+  ≈ **12%**. NOT strictly 1:1 — xfer_3 burst#26 missed its descriptor and still
+  decoded 5/5, which fits: a missed descriptor is harmless when the geometry
+  did not actually change.
+- **FIX DIRECTION — and two traps that make the obvious patches WRONG:**
+  - ❌ *"Refuse to arm without a descriptor."* Strictly removes the corrupted
+    slice, but **does not fix the stall** (sender still RTOs), and it **kills a
+    load-bearing behaviour**: a failed 0/N group deliberately still emits a
+    no-progress tone-ack = the fast NACK that
+    `BUG-ANCHOR-WAIT-NO-ACK-STALL` was fixed to provide. Burst#21 in the same
+    run was also geometry-broken but its ack landed AFTER key-down (receiver was
+    running behind) → sender resent immediately, ~9 s not ~28 s. Refusing to arm
+    would convert those cheap cases into full RTOs.
+  - ❌ *"Publish a maximally-conservative air-end when geometry is unknown."*
+    The deferred-ack deadline **DROPS** the ack if air still appears to be
+    arriving (F127, app.cpp:2966) — an over-large air-end manufactures dropped
+    acks, i.e. worse.
+  - ❌ *"Single-chirp anchor fallback"* (the up-chirp WAS detected at corr=0.671
+    when the down-chirp match failed) — **WITHDRAWN 2026-07-28, operator-caught:
+    this breaks low-SNR sync.** The dual chirp does two irreplaceable jobs.
+    (a) *CFO/timing decoupling*: slope = 2400 Hz / 500 ms = 4800 Hz/s →
+    **10 samples per Hz** (matches the log's `cfo_to_samples=10.0`). The SUM of
+    up/down positions gives timing with CFO cancelled; the DIFFERENCE gives CFO.
+    One chirp collapses both into one unknown — ±3 samples at connected warm CFO
+    (±0.3 Hz), but ±500 samples at acquisition (±50 Hz). (b) *False-alarm
+    rejection — the decisive one.* Measured on this run: accepted dual-verified
+    syncs n=108 **mean corr 0.894, min 0.587**; up-found/down-MISSING n=27
+    **mean corr 0.848, max 0.965**. The distributions overlap almost entirely —
+    an up-chirp at 0.965 had NO valid down-chirp. **Correlation magnitude is not
+    a discriminator; the gap test is the whole discriminator.** Any single-chirp
+    threshold rejecting the 0.965 false peaks also throws away real 0.587
+    anchors. The burst#10 up-chirp at 0.671 sits BELOW the failed-test mean and
+    was most likely a fade false peak, not the real anchor.
+  - ❌ *"Announce the next group's geometry one group early"* (extend the
+    `BURST_FLAG_NEXT_LIGHT_ANCHOR` next-group pattern). Two blockers:
+    `ControlFrame::PAYLOAD_SIZE = 6` is fully consumed by the descriptor
+    (`payload[0..5]`), and more fundamentally **the sender cannot know the next
+    rung** — the switch is TRIGGERED by the receiver's ACK rate_hint
+    (`detected group_seq=36` → `Code rate changed` → `RX-AUTHORITY obey`, all
+    within 10 ms). There is no lookahead to carry.
+  - ✅ **USE THE COMMANDED GEOMETRY (recommended; operator-simplified).** The
+    receiver IS the rate authority — it issued `rate_hint=4` at t=134.25 and so
+    knew the sender's next geometry BEFORE the sender did. On a missed
+    descriptor it should slice with **its own commanded rung**, not the latched
+    one. The single ambiguity is whether the sender HEARD the command (the
+    command rides in the tone-burst ack; if that ack was lost the sender never
+    switched and is resending the OLD geometry — applying the commanded rung
+    there would mirror the bug). That is directly observable from arrival
+    cadence, and **the discriminator + threshold already exist in the code**
+    (`kTimeoutBatchGapSamples = 15 s`, streaming_ofdm_decode.cpp, justified
+    in-comment as steady-state ≤ ~11.5 s vs ack-RTO ≥ ~19 s):
+      * missed descriptor + steady-state gap → **use the commanded rung**
+      * missed descriptor + post-RTO gap → sender never heard it → keep latched
+    **Measured separation on this run: steady-state groups 7.00-13.33 s (n=24)
+    vs post-RTO resends 19.43/20.01 s (n=2) — disjoint, 15 s sits between.**
+    Both failing groups (#10 at 8.53 s, #21 at 10.75 s) were STEADY-STATE, i.e.
+    the sender had switched and the commanded geometry was correct — **both
+    would have been fixed.** No wire change, no second decode, no new constant,
+    and it touches neither the chirp anchor nor the ack gate.
+    (Superseded a two-hypothesis decode-both-and-pick-by-LDPC-parity design —
+    unnecessary hedging against an ambiguity that is already observable.)
+- **✅ IMPLEMENTED 2026-07-28** (`ULTRA_COMMANDED_GEOMETRY`, DEFAULT-ON) — the ✅
+  route above, PLUS the separate defect (A) guard. The three ❌ routes each have a
+  demonstrated regression or a broken premise and stay rejected. Sites:
+  `ofdm_link_adaptation.hpp` (pure geometry query), `ofdm_chirp_waveform.cpp`
+  (delegates to it + a latent `initComponents` z-reassert fix),
+  `streaming_decode_policy.hpp` (knob + the ONE 15 s cadence constant),
+  `streaming_decoder.hpp` (`commanded_rung_idx_`, `learned_rung_geometry_`,
+  `last_group_start_abs_`), `streaming_ofdm_decode.cpp` (resolver + truncation guard
+  + marker arm + descriptor learn), `streaming_sync_acquisition.cpp` (readiness
+  mirror), `streaming_burst_interleave.cpp` (late-join cadence stamp),
+  `modem_engine.cpp` (ack snoop). Gate: `tests/test_burst_stale_geometry.cpp`.
+  **Rig validation still owed** (interleaved MPG@20 A/B).
+- **⚠ THE PREMISE NEEDED TWO MORE GATES — "we commanded X" is NOT "the sender is at
+  X" (adversarial review, 2026-07-28).** The ✅ route above states the single
+  ambiguity is whether the sender HEARD the command. That is wrong: it may hear it and
+  still not obey. `Connection::maybeObeyAuthorityCommand` declines a standing command
+  on FIVE paths — `!rateAdaptationActive()` (`ULTRA_LOCK_RATE`); `mode_change_pending_`;
+  a locally-disabled rung SNAPPED to a different index; an **UP command deferred to a
+  clean send boundary** while its TX window drains, which explicitly does *not* arm
+  dedup ("the re-carried command must retry") so it can stand un-adopted for many
+  groups while the receiver re-stamps it on every ack; and `tryDescriptorModeSwitch`
+  falling back to the legacy MODE_CHANGE round trip. Arming an un-adopted command
+  measured **5/5 → 0/5** on an otherwise healthy group in-tree, i.e. the fix
+  destroying exactly the case this entry documents as harmless (xfer_3 burst#26).
+  Two gates, both derived from the sender's own obey logic, not tuned:
+  **DEMOTE-ONLY** (the sender defers only `isFasterMode`; a demote obeys immediately,
+  and the measured failure 8PSK R2/3 → QPSK R3/4 is a demote) and **DECLINED** (a
+  decoded descriptor announcing a rung ≠ the standing command is direct wire evidence
+  of non-adoption). Pinned by trials (C) and (D) of the gate test.
+- **Review findings REJECTED, with reasons** (do not re-file):
+  * *"`burst_min_block_` from the learned cw can be wrong because the sender's
+    coherence walk moves cw within a rung."* Real mechanism, but a wrong cw degrades
+    to exactly today's failure (wrong stride, group destroyed) and self-corrects at the
+    next decoded descriptor; the reviewer's demonstration of it was actually the
+    un-adopted-rung case, now gated. Deriving cw instead of learning it needs the
+    sender's fading-index input, which the receiver does not have.
+  * *"Publish the commanded rung at RF emission, not at ack encode."* Real (the ack can
+    be parked ≤12 s in a single lossy slot). Not worth the plumbing: a dropped ack ⇒
+    sender RTO ⇒ the cadence guard fires; an overwritten ack ⇒ the newer one carries the
+    same-or-newer command and we store latest-wins; any residue is caught by DECLINED.
+  * *"Narrow guard (A) away from `PendingCodewords`."* Rejected — that IS the
+    descriptor-declared group start, i.e. where the guard is most needed. The stall
+    concern is answered instead by bounding the hold on PROGRESS.
+  * *"The `initComponents` z re-assert is not inert at z=81."* Kept. It is a strict
+    no-op at the default z=27, and at z=81 the OLD behaviour was incoherent by
+    construction (the waveform said 81 while its own demodulator said 648).
+- **IMPLEMENTATION NOTES (2026-07-28 — path mapped; the "blocker" DISSOLVED, see
+  the ⚠ item).** Do not re-derive these:
+  - *Getting the commanded rung to the decoder needs NO protocol-layer change.*
+    The tone-burst ack carries it and is built by the StreamingEncoder
+    (`ToneBurstAck encoded: ... rate_hint=4`); encoder and decoder are both owned
+    by ModemEngine. Full index = `rate_hint | (rung_cmd << 3)`
+    (connection.cpp:445-446), → `coherentRungFromIndex()` → mod/rate.
+  - *Do NOT try to derive cw/frame from the rung.* It is not rate-derived
+    (8PSK R2/3→12, QPSK R3/4→8, QPSK R2/3→8) and the real derivation is
+    `applyDataMode`'s `new_cw` parameter deep in the connection layer. Instead
+    **learn the table from descriptors already received** — the decoder sees
+    `cw/frame`+`lifting_z` per rung on the wire. Verified sufficient for both
+    failures: QPSK R3/4→8 CW was learned at t=53.7 (failure at 137.6) and
+    QPSK R2/3→8 CW at t=73.8 (failure at 260.2). No entry → fall back to today.
+  - *Existing RX-side adoption hook*: `Connection::onDescriptorModeChange(mod,
+    rate, cw_per_frame)` (connection.cpp:6011) already runs the RX subset of a
+    mode change (window/timers/chunk capacity) — a synthesized geometry should
+    call it too, or the receiver keeps the old ARQ window.
+  - ⚠ **"OPEN BLOCKER" — DISSOLVED 2026-07-28, it was not real.**
+    `getMinSamplesForCWCount` is closed-form in scalars and its ONLY live-object
+    read (`getSamplesPerSymbol()`) is INVARIANT across the profile change being
+    predicted: `configure()` rewrites only modulation / code_rate / use_pilots /
+    pilot_spacing, and `initComponents()` rebuilds the modulator from the
+    unchanged fft_size / cp_mode / symbol_guard. So an explicit-params query
+    (`ofdm_link_adaptation::minSamplesForCWCountExplicit`) needs no live object,
+    no deferred `configure()`, and cannot reach `HilbertTransform::process`.
+    **The REAL blocker was different and bigger:** the stale call has THREE
+    consumers per group (the readiness mirror in `checkIfReadyToDecode`, the
+    slice length `full_frame_samples`/`frame_len` in `decodeCurrentFrame`, and
+    `burst_min_block_` at the marker) and the first two run BEFORE the marker
+    block — so fixing only `burst_min_block_` (the line this entry cites)
+    misaligns the whole group. All three now resolve one tuple. Also: frame 1 is
+    necessarily demodulated with the OLD profile, so its soft bits must be pushed
+    as a zero-LLR ERASURE of the correct width or the burst deinterleave throws
+    and the whole group is dropped. Original text kept below for the record:
+  - ⚠ (original) **reconfigure ordering.** The descriptor path cannot apply a
+    mod/rate change inline: it sets `pending_descriptor_mod_/rate_` and DEFERS
+    `configure()` to the top of the next `processBuffer` because doing it inline
+    swapped `modulator_/demodulator_/chirp_sync_` under live references →
+    **SIGSEGV in HilbertTransform::process** (ultra_gui-2026-05-28-000112.ips,
+    streaming_ofdm_decode.cpp:~838). That deferral is safe for a real descriptor
+    (it is its own frame, so the switch lands before the marker frame), but the
+    synthesized case IS the marker frame: `burst_min_block_ =
+    getMinSamplesForCWCount(fixed_frame_codewords_)` (line 1533) needs the NEW
+    profile at arm time, and `getMinSamplesForCWCount(int)` reads the configured
+    profile internally — there is no explicit-params overload. Resolve by adding
+    a pure geometry query (cw + mod + rate + z → samples) that does not touch the
+    live waveform objects, THEN arm. Partially applying the geometry here — new
+    cw with the old profile — would reproduce this very bug from the other side.
+
 ### BUG-PHYSICAL-SNR-RIG-REF: the new physical in-band SNR readout is wrong on the IONOS bench (read 4.4 dB below effective 6.7 — physically impossible) and stale after handshake
 - Status: **OPEN (filed 2026-07-07; display-only — nothing consumes it).** The two-SNR model
   (CHANGELOG 2026-07-07) computes physical = (P_train − N)/N with N = the burst-time

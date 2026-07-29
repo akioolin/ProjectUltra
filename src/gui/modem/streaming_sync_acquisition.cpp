@@ -946,9 +946,28 @@ void StreamingDecoder::checkIfReadyToDecode() {
     const size_t ofdm_control_samples = (is_ofdm_here && connected_)
         ? getOFDMControlFrameSamplesForCurrentMode()
         : 0;
-    const size_t full_frame_samples = (is_ofdm_here && connected_)
-        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
-        : 0;
+    // BUG-BURST-STALE-GEOMETRY E8b — THIS MIRROR IS NOT OPTIONAL. It is the readiness
+    // gate for decodeCurrentFrame's slice. If it releases the frame after only the
+    // LATCHED (shorter) sample count while the decode then asks for the COMMANDED
+    // length, `frame_len = std::min(frame_len, available)` silently truncates the
+    // group-start frame — and burst_next_pos_ / burst_data_start_abs_ are both
+    // derived from that length, so the whole group lands early and the half-duplex
+    // ack interlock opens into the sender's key-down. Both sites resolve the SAME
+    // tuple; decodeCurrentFrame additionally refuses to arm on any residual
+    // truncation (the two resolves are separated in time by one processBuffer).
+    // SNAPSHOTTED (2026-07-28 review fix): the decode RE-USES this exact result
+    // instead of resolving again, so the two cannot disagree even if the standing
+    // command or the latched profile moves in between. A shrinking requirement is the
+    // dangerous direction — it produces a SHORT slice with no truncation to detect.
+    const auto cg_ready = resolveCommandedGeometry(is_ofdm_here, burst_latched);
+    cg_snapshot_ = cg_ready;
+    cg_snapshot_sync_pos_ = sync_position_ + 1;  // +1 so 0 stays "none"
+    const size_t full_frame_samples = cg_ready.armed
+        ? cg_ready.frame_samples
+        : ((is_ofdm_here && connected_)
+               ? static_cast<size_t>(
+                     waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
+               : 0);
     const size_t control_frame_samples =
         static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
     auto requirement = decode_policy::selectDecodeSampleRequirement(

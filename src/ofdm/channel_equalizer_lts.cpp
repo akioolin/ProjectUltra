@@ -1024,7 +1024,10 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     }
 
     // Mark that we have a valid channel estimate (for smoothing factor selection)
-    seedWienerPilotHistoryFromCurrentChannel(-1);
+    // Time axis is ABSOLUTE when the data-aided carry is armed (see
+    // demodulator_impl.hpp: wiener_symbol_base_); -1 places the LTS one symbol
+    // before this frame's first data symbol either way.
+    seedWienerPilotHistoryFromCurrentChannel(wiener_symbol_base_ - 1);
     snr_symbol_count = num_symbols;
 }
 

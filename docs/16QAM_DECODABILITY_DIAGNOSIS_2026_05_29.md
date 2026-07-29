@@ -307,6 +307,69 @@ read ~92 before trusting any 16QAM genie result.
 This does NOT change the verdict below — it would only confirm/refine
 estimation-vs-demap. The convergent evidence already points at estimation accuracy.
 
+## Data-aided genie — ALIGNMENT SOLVED (2026-07-28), and the split it produces
+
+**Corrections to the WIP section above (both mechanisms it names are wrong):**
+
+1. *"A 4-CW frame decodes as re-synced chunks whose per-chunk carrier-pattern reset
+   diverges from the push order, so read_index drifts +1 per codeword; use
+   `--frame-cw 1`."* — **False.** OFDM_CHIRP only ever uses `processPresynced`, which
+   has no `active_ldpc_block_size` break; a 4-CW frame is ONE continuous 26-symbol
+   pass, and within a pass `current_data_symbol_index_` equals the encoder's
+   `symbol_index` 1:1. `--frame-cw 1` was never the right config and is a bad gate
+   (12.5% baseline vs 87.5% at `--frame-cw 4 --burst-interleave 0`).
+2. The real cursor over-run: **the decoder equalizes each frame 2–6 times.** A clean
+   4-CW frame = control-first peek (7 symbols, at the CONTROL geometry 47 data/12
+   pilots) + CW0 header peek (7) + authoritative pass (26) = **40 equalize() calls for
+   26 pushed symbols, +14 spurious consumptions per frame**; failure paths add whole
+   passes (`smallframe-1cw`, `sync-recovery` ±8, `cw-discovery`, `marker-retry`).
+   The read set is also channel-dependent (frames the RX never syncs to are never
+   read). **No consuming cursor can work** — the fix is addressing, not counting.
+
+**The residual bug, precisely.** After switching to absolute-sample addressing the
+genie still destroyed QPSK on Good (0/24 vs 120/160 baseline) while being a perfect
+no-op on AWGN. Cause: the RX→TX stream origin — the receiver's sync convention (FFT
+window placed inside the CP) plus channel group delay — is **+796 samples on ITU Good**
+and −148 on AWGN. Half a symbol is 576. So a nearest-SYMBOL match aliased by exactly
+one symbol: small residual (0), correct carrier geometry, and completely wrong data.
+Measured content agreement 0.25 = chance. **Fix: anchor the join at FRAME granularity**
+(frames are ≥9 symbols apart, so a sub-symbol sync convention cannot alias), then index
+the symbol within the frame. Guards: presynced-only, ≥4 agreeing origin votes,
+unambiguous nearest frame, carrier-geometry match (this is what declines the control
+peek), and a miss leaves the production estimate untouched, counted, and printed.
+
+**Validation.** An independent CONTENT check (`ULTRA_GENIE_VERIFY=1`, quadrant
+agreement between the production-equalized symbol and the looked-up X) reads **1.000**
+on QPSK and on 16QAM. Hard gate, `--frame-cw 4 --burst-interleave 0`, Good@60,
+frames_recovered/160: genie OFF 139/138/139/140 vs genie ON 139/140/140/140 on seeds
+7/11/23/42 — the genie no longer costs anything. With the knob unset the harness is
+bit-identical to clean HEAD across 9 cells; `ctest` 91/91.
+
+**What the (now valid) genie says.** Good channel, seed 7, n=20:
+
+| Cell | genie OFF | genie ON |
+|---|---|---|
+| QPSK R3/4 @60 | 139/160 | 139/160 |
+| QPSK R3/4 @20 | 135/160 | 138/160 |
+| QPSK R3/4 @14 | 106/160 | **133/160** |
+| QPSK R3/4 @10 | 58/160 | **118/160** |
+| 16QAM R1/2 @60 | 60/160 | 60/160 |
+| 16QAM R1/2 @20 | 56/160 | 60/160 |
+| 16QAM R2/3 @20 | 34/160 | **60/160** |
+| 16QAM R2/3 @24 | 43/160 | **60/160** |
+
+The genie is demonstrably live (QPSK@10 nearly doubles). **Every 16QAM cell pins at
+exactly 60/160 = 3 frames per chunk, independent of SNR (20/24/60).** The genie
+accounting explains it: 8 frames pushed, and only **3 are ever equalized at all**
+(hits 60 = 3 × [7-symbol header peek + 13-symbol authoritative pass]). So with an
+exact per-symbol per-carrier H, 16QAM decodes **every frame the receiver attempts** —
+and the other 5/8 are lost in burst framing/sync before any demodulation happens.
+
+**Consequence for the estimation-vs-demap split:** the demap is NOT the wall (exact H
+→ 3/3), which supports the doc's convergent verdict; but the *magnitude* of the
+16QAM opportunity cannot be read off this harness until the 5/8-never-attempted burst
+framing limit for the 16QAM geometry is fixed. That is the next blocker, not the demap.
+
 ## Earlier "next diagnostic" notes (superseded by the above)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel
