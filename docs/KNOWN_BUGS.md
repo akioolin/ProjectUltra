@@ -8,6 +8,63 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (open, 2026-07-29) — P2, ATTRIBUTION UNRESOLVED
+
+**Symptom.** `ultra_gui` segfaults in the RX decode thread during DISCONNECT teardown.
+Crash report `~/Library/Logs/DiagnosticReports/ultra_gui-2026-07-28-220448.ips`:
+
+```
+EXC_BAD_ACCESS / SIGSEGV   KERN_INVALID_ADDRESS at 0x0
+  ultra::HilbertTransform::process              <- null dereference
+  ultra::OFDMChirpWaveform::detectDataSync
+  ultra::sync::SyncController::detectFullAnchorFallback
+  ultra::gui::StreamingDecoder::searchForSync
+  ultra::gui::StreamingDecoder::processBuffer
+  ultra::gui::ModemEngine::rxDecodeLoop         <- RX decode thread
+```
+
+**Mechanism.** Same class as the documented §14.36 race (`streaming_ofdm_decode.cpp`:
+*"swapped modulator_/demodulator_/chirp_sync_ while other paths still held references —
+SIGSEGV in HilbertTransform::process"*) but a **different trigger**: the disconnect-time mode
+switch, not a descriptor switch. The rig log ends:
+
+```
+[365.935] Disconnect timeout, forcing disconnect
+[365.935] Disconnected from PI5
+[365.956] [StreamingEncoder] Mode changed to MC-DPSK     <- waveform swapped
+   ... crash 23 s later, decode thread still inside searchForSync()
+```
+
+**Scope, stated accurately — do not overstate this:**
+- The transfer had **COMPLETED** (1.42 kbps, 26 groups, file received). **No data was lost.**
+- It occurred in the `ULTRA_COMMANDED_GEOMETRY=0` arm, so that feature is not implicated.
+- 1 occurrence in 8 rig transfers.
+- **BUT** in the real GUI a disconnect does not quit the app, so this would crash a live
+  station on disconnect. User-facing, which is why it is filed rather than ignored.
+
+**ATTRIBUTION: UNRESOLVED. Do not blame a specific change on this evidence.**
+
+| arm | runs | crashes |
+|---|---|---|
+| clean HEAD `808942a`, RIG (both ends clean) | 8 | **0** |
+| clean HEAD `808942a`, SIM (`gui_qso` good@20) | 8 | **0** |
+| dirty tree, RIG | 8 | **1** |
+
+0/8 vs 1/8 is **one event — below the resolving power of this sample.** The decision rule was
+written down before the data was collected, specifically so it could not be rationalised after
+the fact. At a ~12% rate, separating the arms needs roughly **24 runs each** (~2 h rig time per
+arm). Worth spending only if it recurs.
+
+Note the only prior crash report the code cites (`ultra_gui-2026-05-28-000112.ips`) has been
+rotated away, so "only one report on this machine" does NOT prove the signature is new.
+
+**Next diagnostic step (cheap, do this before more rig time):** the disconnect path calls
+`setDataMode`/mode-switch from the protocol thread while `rxDecodeLoop` is inside
+`searchForSync()`. Audit whether that switch honours the same deferral discipline the descriptor
+path uses (`pending_descriptor_*` applied at the top of the next `processBuffer`) — §14.36 exists
+precisely because doing it inline swaps the waveform under live references. If the disconnect
+path swaps inline, that is the bug and it needs no statistics.
+
 ### BUG-GUI-GATE-EARLY-EXIT-FLAKE (open, 2026-07-29) — P2, MEASUREMENT BLOCKER
 
 **Symptom.** `tools/gui_qso_scenario.sh --channel good --snr-db 20 --file-kb 21` intermittently
