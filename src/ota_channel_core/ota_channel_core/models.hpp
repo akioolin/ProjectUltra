@@ -149,6 +149,24 @@ public:
     void process(std::span<const float> input, std::vector<float>& output);
     std::vector<float> process(std::span<const float> input);
 
+    // 2026-07-29 Phase 0 (EFFECTIVE_SINR handoff §9): expose simulator truth
+    // H[k,t]. The tap structure in processWithComplexFading is exactly
+    //     out(n) = x_a(n)*g1*a1(n) + x_a(n-D)*g2*a2(n)
+    // so the instantaneous frequency response at the CURRENT tap state is
+    //     H(f) = g1*a1 + g2*a2*exp(-j*2*pi*f*D/fs).
+    // This is ground truth for estimator NMSE, which is the measurement the
+    // whole "is channel estimation the limiter" question turns on. Both prior
+    // oracles were invalid (see src/ofdm/genie_true_h.hpp); this replaces them
+    // with the channel model's own state rather than a second decode pass.
+    //
+    // NOTE ON DOMAIN: the returned H does NOT include the analytic (Hilbert)
+    // filter's response or its group delay, nor the receiver's FFT-window
+    // timing convention. Comparisons against a receiver estimate must fit out a
+    // global complex scale and a linear phase ramp first -- those are exactly
+    // the conventions the equalizer is invariant to.
+    std::complex<float> trueFrequencyResponse(float freq_hz) const;
+    size_t multipathDelaySamples() const { return delay_samples_; }
+
     float actualCFO() const { return actual_cfo_hz_; }
     float fadingMagnitude() const;
     std::complex<float> fadingTap1ForDiagnostics() const { return fading1_; }

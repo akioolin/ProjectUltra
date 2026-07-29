@@ -765,6 +765,24 @@ std::vector<float> WattersonChannel::process(std::span<const float> input) {
     return output;
 }
 
+std::complex<float> WattersonChannel::trueFrequencyResponse(float freq_hz) const {
+    // Mirrors processWithComplexFading exactly:
+    //   out(n) = x_a(n)*g1*a1(n) + x_a(n-D)*g2*a2(n)
+    // A pure delay of D samples is exp(-j*2*pi*f*D/fs) in frequency.
+    const Complex tap1 = config_.fading_enabled ? fading1_ : Complex(1.0f, 0.0f);
+    if (!config_.multipath_enabled || delay_samples_ == 0) {
+        // The no-multipath branch applies fading1_ alone (and, with fading off,
+        // passes the sample through untouched).
+        return config_.fading_enabled ? tap1 : Complex(1.0f, 0.0f);
+    }
+    const Complex tap2 = config_.fading_enabled ? fading2_ : Complex(1.0f, 0.0f);
+    const float phase = -2.0f * static_cast<float>(M_PI) * freq_hz *
+                        static_cast<float>(delay_samples_) /
+                        static_cast<float>(config_.sample_rate);
+    const Complex delay_term(std::cos(phase), std::sin(phase));
+    return config_.path1_gain * tap1 + config_.path2_gain * tap2 * delay_term;
+}
+
 float WattersonChannel::fadingMagnitude() const {
     return std::abs(fading1_);
 }

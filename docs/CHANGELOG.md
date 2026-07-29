@@ -10,6 +10,70 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Phase 0: simulator truth H[k,t] exposed and VALIDATED, domain contract pinned
+
+### 1. What was broken
+
+Two channel-estimation oracles were believed and cited in docs, comments and the infra map, and
+both were invalid (see the entry below). The common cause is that **neither was ever checked
+against ground truth** — there was no ground truth to check against. The EFFECTIVE_SINR handoff
+§9 Phase 0 lists "expose simulator truth `H[k,t]`" as a deliverable precisely because every later
+phase depends on it; Phase 3's acceptance criterion is literally "if perfect/genie H does not
+materially reduce the target FER, stop treating channel-mean estimation as the main speed limiter."
+That criterion was being evaluated with no truth source.
+
+### 2. What was changed
+
+- `src/ota_channel_core/ota_channel_core/models.hpp`, `models.cpp` — new
+  `WattersonChannel::trueFrequencyResponse(float freq_hz)` and `multipathDelaySamples()`.
+- `tests/test_channel_truth_h.cpp` (new), `tests/CMakeLists.txt` — CTest `ChannelTruthH`.
+
+### 3. How it works
+
+The response is derived from the model's own tap structure in `processWithComplexFading`:
+```
+out(n) = x_a(n)*g1*a1(n) + x_a(n-D)*g2*a2(n)
+=> H(f) = g1*a1 + g2*a2*exp(-j*2*pi*f*D/fs)
+```
+Crucially the test does **not** restate that formula — it measures the channel empirically (drive a
+pure tone, correlate the output against the same tone) and compares. A formula typed twice proves
+nothing; that is how the previous oracles passed inspection.
+
+**THE DOMAIN CONTRACT (the real deliverable), now measured rather than assumed:**
+
+| quantity | measured |
+|---|---|
+| analytic front-end delay | **-64.00 samples exactly** (an ADVANCE — NOT the 1793-tap FIR's ~896-sample group delay; the front end is delay-compensated) |
+| global complex scale | 1.0000 at +0.00 deg |
+| deviation from a pure linear ramp | 0.01 deg worst, 700-2300 Hz |
+| residual NMSE after removing scale + ramp | **-81.3 dB** |
+
+Any truth-vs-estimate comparison must remove **a global complex scale and a linear phase ramp, and
+nothing more** — those two are exactly what an OFDM receiver absorbs (phase reference, FFT-window
+timing). Removing more hides real estimator error; removing less reports a wrong answer. The first
+draft of this test did the latter — it fitted the ramp through the origin, folding the constant
+phase into the slope — and reported NMSE 1.91 on a channel it now matches to -81 dB. That is the
+same class of mistake that broke the cross-pass genie, and it is now caught by a test.
+
+Assertions are pinned to the measured values (delay within 1 sample of -64, NMSE below -40 dB,
+ramp deviation below 2 deg) so a future change to the analytic front end trips the gate instead of
+silently reinterpreting every comparison built on top of it. The test also guards its own validity:
+it fails if the two-path response is not frequency-selective (so it cannot pass on a trivially flat
+channel) and checks that disabling multipath really does give a flat response.
+
+### 4. Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4 -R ChannelTruthH   # ALL PASS
+cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4
+```
+
+No production behavior change — this adds a const accessor and a test. Phase 0 remains incomplete:
+carrier ordering (incl. the DC gap) and symbol timestamps / estimator reset rules are still TODO,
+and those are what allow truth-H to be evaluated at a specific OFDM symbol's FFT window.
+
+---
+
 ## 2026-07-29 — BOTH channel-estimation oracles are invalid (follow-up to the same-day RETRACTION)
 
 ### 1. What was broken

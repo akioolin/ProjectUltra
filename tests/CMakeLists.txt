@@ -383,6 +383,14 @@ add_executable(test_cyclic_prefix_geometry test_cyclic_prefix_geometry.cpp)
 target_link_libraries(test_cyclic_prefix_geometry PRIVATE ultra_core)
 add_test(NAME CyclicPrefixGeometry COMMAND test_cyclic_prefix_geometry)
 
+# Phase 0 (EFFECTIVE_SINR handoff): validates simulator truth H[k,t] against the
+# channel model's actual sample-domain filter, and PINS the domain contract (fit
+# out one global delay before comparing). Exists because two channel-estimation
+# oracles were believed without ever being checked against ground truth.
+add_executable(test_channel_truth_h test_channel_truth_h.cpp)
+target_link_libraries(test_channel_truth_h PRIVATE ota_channel_core)
+add_test(NAME ChannelTruthH COMMAND test_channel_truth_h)
+
 add_executable(test_rate_controller test_rate_controller.cpp)
 target_link_libraries(test_rate_controller PRIVATE ultra_core)
 add_test(NAME RateController COMMAND test_rate_controller)
