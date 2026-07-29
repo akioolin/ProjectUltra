@@ -1,0 +1,35 @@
+# OFDM per-rung PER calibration -- EESM beta + logistic PER curve.
+#
+# FITTED 2026-07-29 from tools/measure_ack_fer --gamma-csv:
+#   9 rungs x {AWGN, ITU Good} x SNR 6..28 dB step 2 x seeds {7,11} x n=40
+#   = 16901 frames. Fit on seed 7, VALIDATED on held-out seed 11.
+#
+# Fitted on BOTH channels COMBINED deliberately. The thesis is that one calibration
+# per MCS predicts from the measured per-carrier grid alone, making the channel-class
+# label unnecessary. Held-out cross-channel split (|pred-act| on AWGN minus on Good):
+#   8PSK R2/3 0.001, 16QAM R1/2 0.013, QPSK R1/4 0.017, 16QAM R3/4 0.028,
+#   QPSK R1/2 0.028, QPSK R2/3 0.029, QAM8 R3/4 0.051, 16QAM R2/3 0.054,
+#   QPSK R3/4 0.059.
+#
+# CAVEAT, read before acting on this table: the held-out reliability-diagram MAE
+# meets the plan's <=5pp acceptance for only 2 of 9 rungs (QPSK R1/4 0.026, QPSK
+# R2/3 0.035). The rest run 5.9-13.5pp, worst 16QAM R2/3 at 0.135. Cross-channel
+# AGREEMENT is good; absolute per-decile calibration is not yet good enough to
+# command a rate. Use for SHADOW scoring (Phase 6) only.
+#
+# gamma convention: RAW getCarrierGammaSnapshot() = |H|^2/noise_variance, NOT the
+# renormalized group mean from finalizeGroupCarrierGammas(). A constant scale bias
+# cancels because the fit and the prediction share it; a different gamma definition
+# does NOT, hence the version guard.
+version,1
+provenance,measure_ack_fer sweep 2026-07-29; fit seed 7; holdout seed 11; 16901 frames
+# mod,rate,beta,midpoint_db,slope,valid,n_frames,holdout_mae
+qpsk,r1_4,2.00,3.824,2.500,1,1877,0.0262
+qpsk,r1_2,3.50,5.867,2.500,1,1878,0.0660
+qpsk,r2_3,3.50,7.456,4.000,1,1878,0.0349
+qpsk,r3_4,2.00,6.927,2.500,1,1878,0.0624
+qam8,r2_3,6.00,11.122,2.500,1,1878,0.0741
+qam8,r3_4,3.50,11.642,1.200,1,1878,0.0589
+qam16,r1_2,10.00,11.586,2.500,1,1878,0.1017
+qam16,r2_3,6.00,12.999,2.500,1,1878,0.1348
+qam16,r3_4,3.50,14.041,1.800,1,1878,0.0657

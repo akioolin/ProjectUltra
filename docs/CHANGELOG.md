@@ -10,6 +10,97 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Phase 5 + 6: calibrated PER predictor works, and it catches the ladder's worst rung
+
+### 1. What was built
+
+EFFECTIVE_SINR §9 Phase 5 (resource-element link abstraction) and Phase 6 (shadow selector),
+implementing the plan's §6.2 "calibrated EESM" first step. The MIESM/MMIB end state (§6.1) is
+deliberately not attempted.
+
+- `src/protocol/link_abstraction.hpp` — log-domain EESM, two-parameter logistic PER curve in dB,
+  versioned per-profile calibration, reliability-constrained selector. CTest `LinkAbstraction`
+  (24 assertions).
+- `calibration/ofdm_per_v1.csv` — the fitted table, as DATA with provenance and a version guard.
+- `tools/measure_ack_fer` — `--gamma-csv` (per-frame grid + outcome), `--calib`, `--shadow-max-per`.
+
+### 2. Calibration
+
+Sweep: 9 rungs x {AWGN, ITU Good} x SNR 6-28 step 2 x seeds {7,11} x n=40 = **16901 frames**.
+Fitted on seed 7, validated on held-out seed 11. Fitted on BOTH channels COMBINED — that is the
+whole thesis, and fitting per channel would prove nothing.
+
+**THE KEY RESULT — one calibration per MCS predicts across both channel types.** Held-out
+cross-channel split (|pred-act| on AWGN vs on Good):
+
+| rung | split | | rung | split |
+|---|---|---|---|---|
+| 8PSK R2/3 | **0.001** | | QPSK R2/3 | 0.029 |
+| 16QAM R1/2 | **0.013** | | 8PSK R3/4 | 0.051 |
+| QPSK R1/4 | **0.017** | | 16QAM R2/3 | 0.054 |
+| 16QAM R3/4 | **0.028** | | QPSK R3/4 | 0.059 |
+| QPSK R1/2 | 0.028 | | | |
+
+**So the channel-class label is unnecessary for rate selection** — which matters because the
+Good/AWGN discriminator is a known-open bug (BUG-FADING-INDEX-BLIND) and the entire anchor table
+is keyed on it. Fitted midpoints also order monotonically with spectral efficiency (QPSK R1/4
+3.82 dB -> 16QAM R3/4 14.04 dB), the physics sanity check.
+
+### 3. Phase 6 shadow evaluation — seed 23, never used in fitting
+
+| rung | SNR | predicted PER | actual PER | error |
+|---|---|---|---|---|
+| QPSK R3/4 | 14 | 0.268 | 0.260 | +0.008 |
+| QPSK R3/4 | 20 | 0.027 | 0.020 | +0.007 |
+| 8PSK R2/3 | 14 | 0.603 | 0.560 | +0.043 |
+| 8PSK R2/3 | 20 | 0.134 | 0.160 | -0.026 |
+| 16QAM R2/3 | 14 | 0.864 | 0.840 | +0.024 |
+| 16QAM R2/3 | 20 | 0.523 | 0.520 | +0.003 |
+
+Aggregate calibration error 0.3-4.3 points. Catastrophic overcommits: **1 of 144** frames
+predicted at <=10% PER actually failed (0.7%; plan's bound is <5%).
+
+**THE HEADLINE.** 16QAM R2/3 on ITU Good at 20 dB is the exact rung the shipped anchor table
+selects and which measures 51.4% FER — documented in waveform_selection.hpp as "the dominant
+source of rate churn". The predictor says **52.3%** against an actual 52.0%, and the
+reliability-constrained selector would demote in 34 of 50 frames. It catches the ladder's worst
+decision from the measured per-carrier grid alone.
+
+### 4. Honest limits — do NOT actuate on this yet
+
+- **Per-decile calibration is not good enough.** The held-out reliability-diagram MAE meets the
+  plan's <=5pp bar for only 2 of 9 rungs (QPSK R1/4 0.026, QPSK R2/3 0.035); the rest run
+  5.9-13.5pp, worst 16QAM R2/3 at 0.135. AGGREGATE PER is well calibrated; per-probability-bin
+  is not. Phase 7 actuation needs the latter.
+- Two channels only (AWGN, Good). The plan's Phase 5 training matrix also wants Moderate, Poor,
+  static two-ray notches, colored noise, interference, impulsive noise, CFO/SRO, clipping/ALC.
+- The objective is first-order only: `efficiency * (1 - PER)`. It deliberately excludes the
+  half-duplex costs §8 requires (turnaround, ACK, retransmission, switch, recovery), because
+  folding in an unvalidated cost model would bury it inside an authoritative-looking number.
+- Harness geometry is LONG CP; production is MEDIUM. Measured immaterial on these channels, but
+  the calibration inherits it.
+
+### 5. Fourth provenance bug, found and now guarded
+
+gamma = |H|^2/noise_variance was assembled from two values captured at different points: the hook
+sat at `channel_equalizer_lts.cpp:706` while `noise_variance` is assigned at :799/:840, so it
+recorded the PREVIOUS frame's value (or the 0.1f reset). gamma was effectively INDEPENDENT of SNR
+— mean spanned only 4634..9129 across a 6..28 dB sweep — and poisoned a first calibration into a
+degenerate corner (EESM collapsing to min(gamma), beta pinned at the grid edge for 6 of 9 rungs,
+cross-channel splits of 0.13-0.20). Capture now runs after every assignment.
+
+Post-fix gamma tracks SNR ~1:1: 8 -> 9.76, 14 -> 15.09, 20 -> 20.95, 26 -> 26.94 dB. Guarded by a
+physical assertion in `ChestNmseProvenance` (mean gamma must move >4 dB per 6 dB step) — the check
+that would have caught it in seconds rather than after a full sweep and a bad fit.
+
+### 6. Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4 -E UltraTncSimAudio   # 97/97
+```
+
+---
+
 ## 2026-07-29 — ANSWER: channel-MEAN estimation is NOT the throughput limiter (Phase 3 stopping rule fires)
 
 ### 1. The question, and why this settles it without an oracle
