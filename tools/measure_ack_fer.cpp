@@ -493,63 +493,34 @@ void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts
 
 // === Estimator NMSE against simulator truth -- NOT YET TRUSTWORTHY ==========
 //
-// STATUS 2026-07-29: THE TOOL IS WRONG. Do not quote its NMSE. Proved by its own
-// identity-channel control, which is the first thing any future work here must run:
+// STATUS 2026-07-29 (updated): the tool's PROFILE provenance bug is FIXED; its
+// TEMPORAL provenance is still unsolved, so it is usable ONLY with frozen taps.
 //
-//   ULTRA_CHANNEL_DELAY_MS=0 ULTRA_CHANNEL_DOPPLER_HZ=0 measure_ack_fer \
-//       --snr 20 --config data4_full --channel good --mod qam16 --rate r2_3 \
-//       --seed 7 --n 20 --chest-nmse 1
+// FIXED -- profile provenance. The receiver runs a control-first hypothesis (QPSK
+// R1/4, pilot spacing 5) before the data profile (spacing 8), so a "first capture
+// per frame" rule stored H_channel * X_spacing8 / X_spacing5: |H| clean, adjacent
+// phases jumping 50-140 deg. The capture site now accepts only a pass whose geometry
+// matches genie_true_h::expect(). Identity control went 4.401 (+6.44 dB) ->
+// 0.0202 (-16.95 dB), with rejected_profile_captures == frames.
 //
-// With both overrides the Watterson taps collapse to 1 and multipath is disabled, so
-// the channel is LITERALLY IDENTITY -- truth H is the constant 1 at every carrier,
-// confirmed by the dump (|truth| = 1 exactly). Decode is 20/20 PERFECT. A receiver
-// cannot decode 16QAM R2/3 flawlessly on an identity channel with a bad channel
-// estimate, so the estimate is good by construction. This comparison nevertheless
-// reports NMSE 4.40 (+6.4 dB). Therefore the fault is in THIS CODE, not the
-// estimator and not the channel.
+// NOT FIXED -- temporal provenance. Truth taps are read from the channel AFTER
+// runFrame(), i.e. the END-OF-BURST state, while the estimate is captured at the LTS
+// near the START of the burst. transmitFromA() advances the Watterson taps across the
+// whole burst before any decode happens. On a fading channel the comparison therefore
+// spans that interval and measures channel EVOLUTION plus estimator error. Measured
+// on ITU Good @20, n=30: 0.0685 with Doppler live vs 0.0268 frozen for QPSK R3/4, and
+// the ranking tracks FRAME LENGTH (QPSK 89856 samples worst, QAM16 R3/4 74880 best),
+// which is the signature of a time gap rather than of estimator quality.
 //
-// What the dump shows on that identity channel: |est| is flat to about +/-15%
-// (consistent with estimation noise), but arg(est/truth) scatters by tens of degrees
-// in a pattern no single delay reproduces. Since a delay is the only mechanism that
-// produces smooth phase progression across carriers, the residual is NOT a window
-// offset -- and note the delay search already scans a full alias period, so it would
-// have found one. Plumbing the receiver's absolute FFT-window index out (the
-// remaining Phase 0 item) would therefore NOT fix this.
+// Enforced: --chest-nmse now REFUSES to run on GOOD/MODERATE/POOR unless
+// ULTRA_CHANNEL_DOPPLER_HZ=0. To lift that restriction, record Watterson tap truth
+// indexed by ABSOLUTE SAMPLE and query it at the exact LTS FFT window -- the same
+// machinery then serves every post-Wiener data symbol.
 //
-// Live candidates, none yet eliminated: the frequency smoothing applied to
-// channel_estimate immediately before the capture site (channel_equalizer_lts.cpp,
-// "LTS H freq-smooth"); whether the stored H is in the flat/de-sloped domain rather
-// than the raw Y/X domain; and whether pilot-bearing carriers are stored under a
-// different convention from data carriers.
-//
-// The identity-channel control is the cheap gate: get it to report NMSE ~ 1/SNR
-// (about 0.01 at 20 dB) BEFORE trusting any reading on a real channel.
-//
-// WHAT IT DOES ESTABLISH (both real, both reproducible with --chest-nmse 1 and
-// ULTRA_CHEST_NMSE_DUMP=1, on a static two-path channel via ULTRA_CHANNEL_DOPPLER_HZ=0):
-//   * MAGNITUDE tracks truth to about +/-12% across the whole 140-2906 Hz band.
-//   * The estimate CANNOT follow truth into a deep null -- at f=984 Hz truth is
-//     0.0347 while the scaled estimate sits near 0.20. That is correct behaviour
-//     for a noise-limited estimator, not a defect.
-//
-// THE OBSTRUCTION (proved, not suspected). The receiver's FFT-window offset is
-// UNOBSERVABLE MODULO fft_size from the carrier grid. A delay of exactly N samples
-// is a circular shift, so exp(-j*2*pi*k*N/N) = 1 for every integer bin k. Measured
-// with ULTRA_CHEST_DELAY_SCAN=1: the residual is exactly periodic in 1024 samples --
-// identical to six significant figures at d = -1920, -896, 128, 1152, 2176 (all
-// 7.49705) and at d = -2048, -1024, 0, 1024, 2048 (all 24.1742). The documented RX
-// sync offset is up to ~0.7 symbol (~796 samples, equalize.cpp:462-465), i.e. inside
-// one alias period and NOT recoverable by search.
-//
-// Even at the best in-period delay the residual stays near 3.0 (the value for
-// roughly uncorrelated phase), so a SECOND misalignment remains unisolated --
-// candidates: the frequency-smoothing applied to channel_estimate just before the
-// capture site, and whether the stored H is in the flat/de-sloped domain.
-//
-// TO FINISH: export the receiver's actual absolute FFT-window sample index (and the
-// smoothing state) alongside the captured estimate instead of inferring the ramp.
-// The symbol-timing formula is already written down in
-// src/ofdm/symbol_timing_contract.hpp; what is missing is plumbing the live value out.
+// STILL ONLY AN INITIALIZATION METRIC. Even time-aligned, this is the LTS estimate.
+// Production refines per-symbol via pilots + Wiener immediately before equalize()
+// (ofdm_stream_processor.cpp:1146). The Phase 3 question needs H_used at the equalizer
+// input, and FER -- not NMSE -- as the stopping criterion.
 //
 // === Phase 0 payoff: estimator NMSE against simulator truth =================
 //
@@ -733,6 +704,28 @@ Counts measure(const Args& args) {
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     Counts counts;
     ChestNmseAccum chest_acc;
+    if (args.chest_nmse) {
+        // FAIL FAST on a moving channel. Truth taps are read AFTER runFrame() and so
+        // report the END-OF-BURST state, while the estimate is captured at the LTS near
+        // the START. On a fading channel that difference is TEMPORAL PROVENANCE ERROR,
+        // not estimator error -- it silently inflated a published table on 2026-07-29
+        // (see the CHANGELOG retraction) despite this file already documenting the
+        // precondition. A comment was not enough; this is now enforced.
+        const bool fading_channel =
+            args.channel == ultra::ota_channel_core::ChannelType::GOOD ||
+            args.channel == ultra::ota_channel_core::ChannelType::MODERATE ||
+            args.channel == ultra::ota_channel_core::ChannelType::POOR;
+        const char* dop = std::getenv("ULTRA_CHANNEL_DOPPLER_HZ");
+        const bool doppler_frozen = dop != nullptr && std::atof(dop) == 0.0;
+        if (fading_channel && !doppler_frozen) {
+            throw std::runtime_error(
+                "--chest-nmse on a fading channel requires ULTRA_CHANNEL_DOPPLER_HZ=0. "
+                "Truth taps are sampled after the burst; with Doppler active the "
+                "comparison spans LTS-time to end-of-burst and measures channel "
+                "EVOLUTION, not estimator error. Time-stamped truth is not implemented "
+                "yet -- see docs/CHANGELOG.md 2026-07-29 retraction.");
+        }
+    }
 
     for (int i = 0; i < args.n; ++i) {
         if (ultra::genie::txCapture().enabled) {

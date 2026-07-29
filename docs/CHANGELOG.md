@@ -10,6 +10,94 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — RETRACTION: the ITU Good NMSE table measured channel evolution, not estimator error
+
+### 1. Retracted
+
+> **Retracted:** the ITU Good nonzero-Doppler LTS NMSE table (previous entry, §4) compared the
+> LTS-time estimate against END-OF-BURST Watterson taps. It therefore contains temporal channel
+> evolution and cannot be interpreted as estimator NMSE or converted into effective SINR. The
+> capture-profile provenance fix and the identity controls remain valid.
+
+**Mechanism.** `transmitFromA()` pushes the whole burst through the channel before any decoding
+(`channel.cpp:105`), and Watterson advances its fading taps on every transmitted sample
+(`models.cpp:735`). The receiver captures its LTS estimate near the START of that burst. The
+comparator then calls `trueFrequencyResponse()` AFTER `runFrame()`, which returns the CURRENT —
+end-of-burst — tap state. So the table compared `H_est(t_LTS)` against `H_true(t_end)`.
+
+**This file already documented the precondition** ("Requires ULTRA_CHANNEL_DOPPLER_HZ=0 ...
+otherwise the tap state read after the frame is not the state the LTS saw") and the table was
+produced without it. A comment was not sufficient protection; it is now enforced in code.
+
+**Corroborating signature:** the reported NMSE ranks by FRAME LENGTH, not by rung difficulty —
+QPSK R3/4 is the longest frame (89,856 samples) and read WORST, QAM16 R3/4 the shortest (74,880)
+and read BEST. That is a time-gap signature.
+
+| rung | published (Doppler live) | Doppler frozen |
+|---|---|---|
+| QPSK R3/4 | 0.0685 | **0.0268** |
+| 8PSK R2/3 | 0.0471 | **0.0316** |
+| 16QAM R2/3 | 0.0450 | **0.0249** |
+| 16QAM R3/4 | 0.0423 | **0.0224** |
+
+The frozen column is valid for ONE static two-path realization and is NOT a general fading
+result. Any conclusion drawn from the 0.045-based effective-SINR arithmetic is void.
+
+### 2. Interpretation errors also retracted
+
+- **"Flat NMSE across rungs shows estimator error does not explain the rung spread"** — wrong. A
+  COMMON SINR loss can leave QPSK alive while killing 16QAM precisely because their thresholds
+  differ. Flatness proves nothing either way.
+- **"each constellation's own SINR requirement"** — imprecise. The collapse is set by the whole
+  MCS (constellation, code rate, pilot geometry, interleaving, demapper). 16QAM R2/3 at 14/30 vs
+  16QAM R3/4 at 4/30 is the same constellation and demonstrates it directly.
+- `SINR_eff = SNR/(1+SNR*eps)` is a heuristic requiring same-stage per-carrier error,
+  approximately independent estimation noise and a diagonal channel. And `1/eps` is an asymptotic
+  ceiling only if `eps` stays constant as SNR rises — LTS estimation noise should FALL with SNR,
+  so quoting a fixed ceiling was doubly unsound.
+
+### 3. What was changed
+
+- `tools/measure_ack_fer.cpp` — `--chest-nmse` now **FAILS FAST** on GOOD/MODERATE/POOR unless
+  `ULTRA_CHANNEL_DOPPLER_HZ=0`, with the reason in the error text. The stale "THE TOOL IS WRONG"
+  header is rewritten to state precisely what is fixed (profile provenance) and what is not
+  (temporal provenance), and that this remains an INITIALIZATION metric regardless.
+- `tests/test_chest_nmse_provenance.sh`, `tests/CMakeLists.txt` — new CTest
+  **`ChestNmseProvenance`**. The prior commit shipped the provenance fix with NO test.
+
+**The test was verified to bite.** Re-introducing the bug (disabling the expect gate) makes it
+fail on two independent assertions — `nmse=4.50312` and `rejected=0` — and it returns green when
+restored. A regression test that cannot fail is the same class of error as the bugs it guards.
+
+### 4. Separate finding: the FER harness does NOT run production geometry
+
+`measure_ack_fer` sets `CyclicPrefixMode::LONG` (128 samples at fft 1024) while production
+`presets::balanced()` uses `MEDIUM` (96). The harness therefore runs a **33% longer guard
+interval** than the shipped modem — more multipath-tolerant, lower throughput. Paired A/B
+comparisons within the harness remain valid (both arms share the geometry), but **absolute FER
+and floor numbers from this tool do not transfer to production**, including the same-seed
+baseline recorded for Phase 0. Not changed here: switching it silently would invalidate
+comparisons against every prior measurement made with this tool.
+
+### 5. Still open
+
+- Time-stamped truth: record Watterson taps indexed by ABSOLUTE SAMPLE and query at the exact LTS
+  FFT window. The same machinery then serves every post-Wiener data symbol.
+- The Phase 3 measurement remains `H_used` after `updateChannelEstimate()` and immediately before
+  `equalize()` (`ofdm_stream_processor.cpp:1146`), with a paired same-seed three-arm shadow decode
+  (production estimate / exact mean channel with production uncertainty / full perfect CSI) and
+  **FER** as the stopping criterion, not NMSE.
+- `genie_true_h`'s inject-side compatibility check still compares only FFT-vector length; the
+  injection oracle stays default-off and unvalidated for window/timing/reference alignment.
+
+### 6. Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4 -E UltraTncSimAudio   # 96/96 pass
+```
+
+---
+
 ## 2026-07-29 — Capture-provenance bug found by external review; estimator error MEASURED
 
 ### 1. What was broken

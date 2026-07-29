@@ -406,6 +406,17 @@ add_executable(test_ofdm_carrier_ordering test_ofdm_carrier_ordering.cpp)
 target_link_libraries(test_ofdm_carrier_ordering PRIVATE ultra_core)
 add_test(NAME OFDMCarrierOrdering COMMAND test_ofdm_carrier_ordering)
 
+# Protects the capture-provenance fix (dbaf028), which shipped without a test. Asserts
+# the identity control passes, that the control-first pass is rejected once per frame
+# (so it cannot pass for the wrong reason), and that the temporal guard refuses a
+# fading channel with live taps.
+if(TARGET measure_ack_fer)
+    add_test(NAME ChestNmseProvenance
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test_chest_nmse_provenance.sh
+                     $<TARGET_FILE:measure_ack_fer>)
+    set_tests_properties(ChestNmseProvenance PROPERTIES TIMEOUT 900)
+endif()
+
 add_executable(test_channel_noise_contract test_channel_noise_contract.cpp)
 target_link_libraries(test_channel_noise_contract PRIVATE ota_channel_core)
 add_test(NAME ChannelNoiseContract COMMAND test_channel_noise_contract)
