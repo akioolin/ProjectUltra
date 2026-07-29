@@ -17,6 +17,8 @@
 //     the carrier set itself invariant.
 
 #include "ofdm/pilot_pattern.hpp"
+#include "ultra/dsp.hpp"
+#include "ultra/ofdm.hpp"
 #include "ultra/types.hpp"
 
 #include <algorithm>
@@ -239,6 +241,76 @@ int main() {
               "narrowband obeys the same DC-skip and count contract");
         check(nb_high - nb_low > 0.0f && nb_low > 1000.0f && nb_high < 1800.0f,
               "narrowband band sits inside the 1250-1750 Hz chirp region");
+    }
+
+    // --- VALIDATE the carrier->Hz map against a REAL TRANSMITTED SIGNAL.
+    //
+    // Everything above is self-consistent: it checks buildCarrierPattern's structure
+    // and then checks MY frequency formula against MY expected numbers. A sign flip
+    // or an offset in the mapping would pass all of it. Since truth-vs-estimate work
+    // evaluates the true channel AT these frequencies, a wrong map would silently
+    // corrupt every such comparison -- so the map has to be checked against emitted
+    // audio, not arithmetic.
+    //
+    // The DC skip is the sharpest available probe: bin k=0 is never occupied, so the
+    // transmitted spectrum must show a NOTCH at exactly center_freq, with energy
+    // present on both sides and absent outside the predicted band edges.
+    {
+        ultra::ModemConfig tx = ultra::presets::balanced();
+        ultra::OFDMModulator mod(tx);
+        std::vector<uint8_t> payload(512, 0xA5);
+        const auto samples = mod.modulate(payload, tx.modulation);
+        std::printf("   TX probe: %zu samples\n", samples.size());
+
+        const size_t n = 16384;
+        if (samples.size() >= n) {
+            ultra::FFT fft(n);
+            std::vector<ultra::Complex> in(n), out(n);
+            for (size_t i = 0; i < n; ++i) {
+                // Hann window to keep leakage from filling the notch.
+                const double w = 0.5 - 0.5 * std::cos(2.0 * M_PI * static_cast<double>(i) /
+                                                      static_cast<double>(n - 1));
+                in[i] = ultra::Complex(static_cast<float>(samples[i] * w), 0.0f);
+            }
+            fft.forward(in, out);
+
+            auto bandPower = [&](double f_lo, double f_hi) {
+                const double bin_hz = static_cast<double>(tx.sample_rate) /
+                                      static_cast<double>(n);
+                double acc = 0.0;
+                int cnt = 0;
+                for (size_t k = 0; k < n / 2; ++k) {
+                    const double f = static_cast<double>(k) * bin_hz;
+                    if (f >= f_lo && f <= f_hi) {
+                        acc += static_cast<double>(std::norm(out[k]));
+                        ++cnt;
+                    }
+                }
+                return cnt ? acc / cnt : 0.0;
+            };
+
+            // In-band reference: the two lobes either side of centre.
+            const double lower = bandPower(400.0, 1300.0);
+            const double upper = bandPower(1700.0, 2600.0);
+            const double notch = bandPower(1477.0, 1523.0);   // +/- half a carrier
+            const double outside = bandPower(3300.0, 4200.0);
+            const double inband = 0.5 * (lower + upper);
+
+            const double notch_db = 10.0 * std::log10(notch / inband);
+            const double out_db = 10.0 * std::log10(outside / inband);
+            const double lobe_db = 10.0 * std::log10(lower / upper);
+            std::printf("   notch@1500Hz = %+.1f dB   outside-band = %+.1f dB   lobe balance = %+.2f dB\n",
+                        notch_db, out_db, lobe_db);
+
+            check(notch_db < -6.0,
+                  "TX spectrum has a NOTCH at center_freq => DC skip maps to 1500 Hz");
+            check(out_db < -20.0,
+                  "TX energy is confined to the predicted band (nothing above 3.3 kHz)");
+            check(std::abs(lobe_db) < 3.0,
+                  "energy present on BOTH sides of centre (map is not mirrored/offset)");
+        } else {
+            check(false, "TX probe produced too few samples to analyse");
+        }
     }
 
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
