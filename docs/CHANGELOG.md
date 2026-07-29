@@ -10,6 +10,62 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — FULL-FAMILY GENIE SWEEP: the estimator penalty scales with SPECTRAL EFFICIENCY, and the ceiling is flat
+
+**What this settles.** Why the ladder tops out where it does, and that channel estimation is
+not a "16QAM problem" but a DENSITY problem visible at every rung.
+
+`build/measure_ack_fer --config data4_full --channel good --snr 20`, 4 seeds {7,11,23,42}
+x n=100 (n=400/cell, sigma ~2 points). Genie OFF vs ON (`ULTRA_GENIE_DATA_AIDED`, exact
+per-symbol per-carrier H from the real transmitted symbols):
+
+| mod | rate | bits/carrier | OFF | ON | gain |
+|---|---|---|---|---|---|
+| QPSK | R1/4 | 0.50 | 99.5 | 99.8 | +0.3 |
+| QPSK | R1/2 | 1.00 | 99.5 | 99.8 | +0.3 |
+| QPSK | R2/3 | 1.33 | 97.2 | 99.8 | +2.6 |
+| QPSK | R3/4 | 1.50 | 93.5 | 99.8 | +6.3 |
+| 16QAM | R1/2 | 2.00 | 87.2 | 99.8 | +12.6 |
+| 8PSK | R2/3 | 2.00 | 82.2 | 99.8 | +17.6 |
+| 8PSK | R3/4 | 2.25 | 55.0 | 99.8 | +44.8 |
+| 16QAM | R2/3 | 2.67 | 51.0 | 99.5 | +48.5 |
+| 16QAM | R3/4 | 3.00 | 27.8 | 98.8 | **+71.0** |
+
+**The genie ceiling is FLAT at ~99.8 across the entire family.** With exact H every rung
+decodes, so the channel, the demapper and the LDPC are all adequate — the estimate is the
+binding constraint, and its cost rises monotonically with spectral efficiency.
+
+**Corollary — the 16QAM R1/2 "strictly dominated" claim is FALSE.** At equal eta=2.0,
+16QAM R1/2 measures **87.2%** vs 8PSK R2/3 **82.2%** (~2.5 sigma). "Prefer the lower order at
+equal eta" was a constellation-geometry estimate that ignored the code rate; R1/2 buys more FEC
+margin than the denser constellation costs. Same error class as the old 8PSK Good 19.0 anchor.
+The rung STAYS DISABLED — its other reason (the predictive climb parking on it, idx 3 -> 7)
+is untouched and still real.
+
+### Differential subcarrier modulations — and a COVERAGE LIMIT to be honest about
+
+Same harness, ITU Good @20, 4 seeds x n=100:
+
+| mod | rate | OFF | ON | gain |
+|---|---|---|---|---|
+| DQPSK | R1/2 | 98.0 | 99.2 | +1.2 |
+| DQPSK | R2/3 | 91.8 | 99.2 | +7.4 |
+| D8PSK | R1/2 | 98.0 | 99.2 | +1.2 |
+| D8PSK | R2/3 | 92.2 | 99.2 | +7.0 |
+
+Differential benefits MORE than coherent at the same efficiency (DQPSK R2/3 +7.4 vs coherent
+QPSK R2/3 +2.6, both 1.33 b/c) — consistent with differential detection's ~3 dB penalty putting
+it nearer its threshold.
+
+> ⚠️ **These are DQPSK/D8PSK as OFDM SUBCARRIER modulations, NOT the MC-DPSK waveform.**
+> `tools/measure_ack_fer.cpp` is OFDM-only (`makeOFDMConfig`; no `WaveformMode::MC_DPSK`
+> anywhere), so these cells still run the coherent equalizer and still use a channel estimate.
+> **The MC-DPSK waveform and OFDM_NARROW remain UNMEASURED** and are not reachable through this
+> harness — they would need the GUI gate with a forced mode. Do not read this table as
+> whole-waveform coverage; it is whole-MODULATION coverage within wideband OFDM.
+
+---
+
 ## 2026-07-29 — POST-FEC DATA-AIDED CHANNEL ESTIMATION (`ULTRA_ITERATIVE_CHEST`, default OFF): the achievable form of the genie
 
 ### Why
