@@ -81,6 +81,47 @@ else
     ok "fading channel without ULTRA_CHANNEL_DOPPLER_HZ=0 is refused"
 fi
 
+# ---- 5: the per-carrier gamma grid must TRACK SNR.
+#
+# gamma = |H|^2 / noise_variance is the input to the Phase 5 link abstraction. It is
+# assembled from two receiver-internal values captured at different points in the LTS
+# routine, and getting that provenance wrong is silent: an earlier version captured
+# noise_variance BEFORE it was assigned for the frame, so gamma reported the previous
+# frame's (or the 0.1f reset) value and was essentially INDEPENDENT of SNR -- mean
+# gamma spanned only 4634..9129 across a 6..28 dB sweep. Nothing detected that until a
+# calibration fit came out degenerate.
+#
+# A physical check catches it instantly: on AWGN, mean gamma must rise roughly 1 dB per
+# dB of SNR. This is the cheapest possible guard on the whole gamma path.
+GDIR="$(mktemp -d)"
+slope_ok=1
+prev_db=""
+for snr in 8 14 20 26; do
+    rm -f "$GDIR/g.csv"
+    "$EXE" --snr "$snr" --config data4_full --channel awgn --mod qpsk --rate r1_4 \
+        --seed 7 --n 6 --gamma-csv "$GDIR/g.csv" >/dev/null 2>&1 || true
+    db=$(awk -F, 'NF>9 {s=0;n=0; for(i=8;i<=NF;i++){s+=$i;n++} if(n>0){print 10*log(s/n)/log(10); exit}}' \
+         "$GDIR/g.csv" 2>/dev/null)
+    if [ -z "$db" ]; then
+        bad "no gamma grid emitted at snr=$snr"
+        slope_ok=0
+        break
+    fi
+    printf '   snr=%2s dB  mean gamma = %7.2f dB\n' "$snr" "$db"
+    if [ -n "$prev_db" ]; then
+        # 6 dB of SNR must move gamma by at least 4 dB. A stale noise variance
+        # produces ~0 dB of movement, so this bound is far from the true ~6 and
+        # still catches the bug decisively.
+        if ! awk "BEGIN{exit !(($db - $prev_db) > 4.0)}"; then
+            bad "gamma moved only $(awk "BEGIN{printf \"%.2f\", $db-$prev_db}") dB for a 6 dB SNR step"
+            slope_ok=0
+        fi
+    fi
+    prev_db="$db"
+done
+rm -rf "$GDIR"
+[ "$slope_ok" = "1" ] && ok "per-carrier gamma tracks SNR on AWGN (>4 dB per 6 dB step)"
+
 if [ "$FAIL" = "0" ]; then
     echo "ALL PASS"
 else

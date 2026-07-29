@@ -62,6 +62,15 @@ inline std::vector<std::complex<float>>& buffer() {
     return b;
 }
 
+// Noise variance in force at the moment `buffer()` was captured. Needed to form
+// the per-carrier gamma = |H|^2 / nv that Phase 5's link abstraction consumes.
+// Carried with the estimate deliberately: reading it separately after the frame
+// would reintroduce the provenance class of bug this file exists to document.
+inline float& capturedNoiseVar() {
+    static float nv = 0.0f;
+    return nv;
+}
+
 // Instrumentation. An oracle that silently fails to engage reports "no effect",
 // which is indistinguishable from "perfect CSI does not help" -- the exact trap
 // that produced two invalid oracles before this one. Always check these counters

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -79,6 +80,9 @@ struct Args {
     // via setOFDMConfig at modem_engine.cpp:250) -- pass --cp medium to measure the
     // shipped geometry. See docs/CHANGELOG.md 2026-07-29.
     std::string cp_name = "long";
+    // Phase 5: dump the per-frame per-carrier gamma grid paired with the decode
+    // outcome. This is the training data for the EESM/PER link abstraction.
+    std::string gamma_csv;
     // 2026-07-29 Phase 0 payoff: measure the LTS channel estimate against
     // SIMULATOR TRUTH and report NMSE. Requires ULTRA_CHANNEL_DOPPLER_HZ=0 so the
     // taps are frozen and truth H is time-invariant -- otherwise the tap state
@@ -226,6 +230,8 @@ Args parseArgs(int argc, char** argv) {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
         } else if (key == "--genie-true-h") {
             args.genie_true_h = std::stoi(requireValue("--genie-true-h")) != 0;
+        } else if (key == "--gamma-csv") {
+            args.gamma_csv = requireValue("--gamma-csv");
         } else if (key == "--cp") {
             args.cp_name = requireValue("--cp");
             if (args.cp_name != "medium" && args.cp_name != "long" &&
@@ -719,6 +725,10 @@ Counts measure(const Args& args) {
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     Counts counts;
     ChestNmseAccum chest_acc;
+    std::ofstream gamma_out;
+    if (!args.gamma_csv.empty()) {
+        gamma_out.open(args.gamma_csv, std::ios::app);
+    }
     if (args.chest_nmse) {
         // FAIL FAST on a moving channel. Truth taps are read AFTER runFrame() and so
         // report the END-OF-BURST state, while the estimate is captured at the LTS near
@@ -779,6 +789,50 @@ Counts measure(const Args& args) {
                                     /*expect_full_anchor=*/expect_anchor,
                                     /*fixed_budget=*/true);
             gtrue::mode() = gtrue::Mode::Off;
+            classify(outcome, trial.frame_bytes, counts);
+            continue;
+        }
+
+        if (!args.gamma_csv.empty()) {
+            namespace gtrue = ultra::ofdm::genie_true_h;
+            gtrue::buffer().clear();
+            {   // same provenance gate as --chest-nmse: only the pass whose geometry
+                // matches the transmitted profile, never the control-first peek.
+                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                auto& x = gtrue::expect();
+                x.active = true;
+                x.pilot_spacing = static_cast<uint32_t>(want.pilot_spacing);
+                x.modulation = static_cast<int>(want.modulation);
+                x.num_carriers = static_cast<uint32_t>(want.num_carriers);
+                x.fft_size = static_cast<uint32_t>(want.fft_size);
+            }
+            gtrue::mode() = gtrue::Mode::Capture;
+            auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
+                                    /*reset_decoder=*/true,
+                                    /*expect_full_anchor=*/expect_anchor);
+            gtrue::mode() = gtrue::Mode::Off;
+
+            const bool ok = isExpectedSuccess(outcome, trial.frame_bytes);
+            const auto& est = gtrue::buffer();
+            const float nv = std::max(gtrue::capturedNoiseVar(), 1e-12f);
+            if (!est.empty() && gamma_out.is_open()) {
+                const auto cfg = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                std::vector<int> all, data, pilot;
+                std::vector<size_t> dlog, plog;
+                std::vector<bool> isp;
+                std::vector<ultra::Complex> pseq;
+                ultra::ofdm_pilots::buildCarrierPattern(cfg, 0, all, data, pilot,
+                                                        dlog, plog, isp, pseq);
+                gamma_out << args.snr_db << ',' << args.channel_name << ','
+                          << args.mod_name << ',' << args.rate_name << ','
+                          << args.seed << ',' << i << ',' << (ok ? 1 : 0);
+                for (int idx : data) {
+                    if (static_cast<size_t>(idx) < est.size()) {
+                        gamma_out << ',' << (std::norm(est[idx]) / nv);
+                    }
+                }
+                gamma_out << '\n';
+            }
             classify(outcome, trial.frame_bytes, counts);
             continue;
         }

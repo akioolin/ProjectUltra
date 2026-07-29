@@ -704,6 +704,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         } else if (ultra::ofdm::genie_true_h::buffer().empty()) {
             ultra::ofdm::genie_true_h::buffer() = channel_estimate;
             ++ultra::ofdm::genie_true_h::stats().captures;
+            // NB: noise_variance is NOT captured here -- it is assigned FURTHER DOWN
+            // this function (both the 2-LTS and 1-LTS branches). Capturing it at this
+            // point recorded the PREVIOUS frame's value (or the 0.1f reset default),
+            // which made gamma = |H|^2/nv independent of SNR: measured per-frame mean
+            // gamma spanned only 4634..9129 across a 6..28 dB sweep, where it should
+            // move ~160x. Fourth instance of the same provenance class of bug in this
+            // diagnostic. It is now captured at the END of the function instead.
         }
     }
 
@@ -1094,6 +1101,14 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // before this frame's first data symbol either way.
     seedWienerPilotHistoryFromCurrentChannel(wiener_symbol_base_ - 1);
     snr_symbol_count = num_symbols;
+
+    // Phase 5 diag: pair the captured LTS H with the noise variance that was
+    // actually derived for THIS frame. Must run after every noise_variance
+    // assignment above; see the note at the capture site.
+    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Capture &&
+        !ultra::ofdm::genie_true_h::buffer().empty()) {
+        ultra::ofdm::genie_true_h::capturedNoiseVar() = noise_variance;
+    }
 }
 
 
