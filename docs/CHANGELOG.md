@@ -10,6 +10,105 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Capture-provenance bug found by external review; estimator error MEASURED
+
+### 1. What was broken
+
+The estimate-vs-truth comparison failed its own identity control: on a channel collapsed to
+IDENTITY (`ULTRA_CHANNEL_DELAY_MS=0 ULTRA_CHANNEL_DOPPLER_HZ=0`, truth H = 1 at every carrier)
+with decode 20/20 PERFECT, it reported NMSE 4.401 (+6.44 dB). A receiver cannot decode 16QAM
+R2/3 flawlessly with a bad estimate, so the tool was wrong.
+
+**ROOT CAUSE (external review, verified here): capture provenance.** The receiver runs a
+CONTROL-FIRST hypothesis before the data profile — `streaming_ofdm_decode.cpp:968`, *"control
+always rides coherent QPSK R1/4"* — at pilot spacing 5, while the transmitted data profile is
+QAM16 R2/3 at spacing 8. The diagnostic's "first capture per frame" rule
+(`channel_equalizer_lts.cpp`) therefore stored the SPECULATIVE pass, capturing
+
+    H_captured = H_channel * X_spacing8 / X_spacing5
+
+a deterministic quotient of two nearly-unit-modulus training sequences. |H| looks clean while
+adjacent-carrier phases jump 50-140 deg — exactly the "impossible" signature observed, which I
+had wrongly reasoned could not be phase noise (correctly: magnitude scatter cannot reveal a
+deterministic rotation from dividing by the wrong constant-modulus reference).
+
+Self-inflicted: the first-capture rule was introduced earlier the same day to fix a last-capture
+bug, and landed on a different wrong pass. The correct rule is neither.
+
+### 2. What was changed
+
+- `src/ofdm/genie_true_h.hpp` — new `Expect` (pilot spacing, modulation, carrier count, FFT
+  size) plus a `rejected_profile` counter, with the provenance rationale.
+- `src/ofdm/channel_equalizer_lts.cpp` — capture only when the decoding geometry matches the
+  expected transmitted profile; count rejections.
+- `tools/measure_ack_fer.cpp` — harness declares the transmitted profile before each frame and
+  reports `rejected_profile_captures`.
+
+### 3. Verification
+
+| case | before | after |
+|---|---|---|
+| identity control, QAM16 R2/3 | 4.401 (+6.44 dB) | **0.0202 (-16.95 dB)** |
+| identity control, QPSK R1/4 (transmitted == speculative geometry) | 0.0166 | 0.0166 |
+
+A 23.4 dB correction. `rejected_profile_captures=20` for n=20 confirms exactly one control-first
+pass rejected per frame. The QPSK R1/4 row is the independent check: when the transmitted profile
+already equals the speculative one there is no mismatch, and that case read correctly (0.0166,
+fitted delay -0.007 samples) even BEFORE the fix — predicted by the reviewer to 3 significant
+figures.
+
+### 4. FIRST REAL MEASUREMENT — LTS estimator error vs simulator truth
+
+ITU Good, real fading, 20 dB, seed 7, n=30:
+
+| rung | LTS NMSE | dB | decode |
+|---|---|---|---|
+| QPSK R3/4 | 0.0685 | -11.64 | 28/30 |
+| 8PSK R2/3 | 0.0471 | -13.27 | 24/30 |
+| 16QAM R2/3 | 0.0450 | -13.46 | 14/30 |
+| 16QAM R3/4 | 0.0423 | -13.73 | 4/30 |
+
+With `SINR_eff ~= SNR / (1 + SNR*eps)`: at 20 dB the thermal floor is 1/SNR = 0.010 while
+eps ~= 0.045, i.e. **4.5x larger**. Unmitigated that caps effective SINR near 12.6 dB on a 20 dB
+channel (a 7.4 dB loss).
+
+**DO NOT yet read this as "estimation is the wall."** This is the LTS INITIALIZATION only;
+production refines per-symbol via pilots + Wiener immediately before `equalize()`
+(`ofdm_stream_processor.cpp:1146`), which is exactly the machinery designed to remove this error.
+Note also that NMSE is nearly FLAT across rungs (-11.6 to -13.7) while decode collapses 28/30 ->
+4/30, so estimator error does not explain the rung spread — that is each constellation's own SINR
+requirement.
+
+**Next measurement (the one that answers Phase 3):** capture `H_used` AFTER
+`updateChannelEstimate()` and immediately BEFORE `equalize()`, per data symbol, and compare that
+against truth. Then a paired same-seed shadow decode with three arms (production estimate; exact
+mean channel with production uncertainty; full perfect CSI) with FER — not NMSE — as the stopping
+criterion.
+
+### 5. Two corrections to previously recorded facts
+
+- The harness uses **LONG** CP (128 samples, 1152 samples/symbol), not MEDIUM/96
+  (`tools/measure_ack_fer.cpp:249`). Prior notes said MEDIUM.
+- The -81.3 dB truth validation exercises only **700-2300 Hz**, deliberately avoiding the
+  analytic-filter edges (`tests/test_channel_truth_h.cpp`). It does NOT validate the full
+  occupied 140.6-2906.25 Hz band.
+
+Also flagged and NOT yet addressed: `genie_true_h`'s inject-side compatibility check still
+compares only FFT-vector length, so the injection oracle remains unvalidated for
+window/timing/reference alignment. It stays default-off.
+
+### 6. Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4 -E UltraTncSimAudio   # 95/95 pass
+```
+
+`UltraTncSimAudio` excluded: intermittent on this machine (measured 1 pass / 5 runs on the
+current tree, 1 pass / 1 run at HEAD with changes stashed); a 265 s real-time audio session
+against a 300 s timeout. Re-run on a quiet machine.
+
+---
+
 ## 2026-07-29 — Phase 0 COMPLETE: carrier ordering, noise contract, symbol timing
 
 Completes the EFFECTIVE_SINR handoff §9 Phase 0 deliverable list. No production behavior

@@ -687,10 +687,24 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // ends up holding an H from the trailing dead air -- which, injected into
     // every data symbol, destroys decoding even when the two passes are fed a
     // bit-identical signal. The harness clears the buffer at each frame boundary.
-    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Capture &&
-        ultra::ofdm::genie_true_h::buffer().empty()) {
-        ultra::ofdm::genie_true_h::buffer() = channel_estimate;
-        ++ultra::ofdm::genie_true_h::stats().captures;
+    if (ultra::ofdm::genie_true_h::mode() == ultra::ofdm::genie_true_h::Mode::Capture) {
+        // Only the pass whose geometry matches the transmitted profile. See the
+        // CAPTURE PROVENANCE note in genie_true_h.hpp: the control-first hypothesis
+        // decodes at QPSK R1/4 / spacing 5 before the data profile, and capturing
+        // THAT stores H_channel * X_data / X_control, not the channel.
+        const auto& x = ultra::ofdm::genie_true_h::expect();
+        const bool geometry_matches =
+            !x.active ||
+            (static_cast<uint32_t>(config.pilot_spacing) == x.pilot_spacing &&
+             static_cast<int>(config.modulation) == x.modulation &&
+             static_cast<uint32_t>(config.num_carriers) == x.num_carriers &&
+             static_cast<uint32_t>(config.fft_size) == x.fft_size);
+        if (!geometry_matches) {
+            ++ultra::ofdm::genie_true_h::stats().rejected_profile;
+        } else if (ultra::ofdm::genie_true_h::buffer().empty()) {
+            ultra::ofdm::genie_true_h::buffer() = channel_estimate;
+            ++ultra::ofdm::genie_true_h::stats().captures;
+        }
     }
 
     // Compute average channel response for logging

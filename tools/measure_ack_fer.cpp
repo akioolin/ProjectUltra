@@ -617,7 +617,16 @@ void accumulateChestNmse(const ultra::ota_channel_core::SimulatedChannel& channe
         std::cerr << "# chest dump: est.size=" << est.size()
                   << " cfg.fft=" << cfg.fft_size << " Nc=" << cfg.num_carriers
                   << " carriers_used=" << freqs.size() << "\n";
-        for (size_t i = 0; i < freqs.size(); i += 6) {
+        // Unoccupied bins first: if these hold data too, the array is not what we
+        // think it is. DC(0) is the skipped centre; 100/500/900 are outside the
+        // occupied sets (1..30, 995..1023).
+        for (int probe : {0, 100, 500, 900}) {
+            std::cerr << "#   UNOCCUPIED bin " << probe << " |est|="
+                      << std::abs(est[probe]) << "\n";
+        }
+        // ADJACENT carriers -- sampling every 6th aliases a phase ramp into
+        // apparent scatter, which is how this looked like non-ramp noise.
+        for (size_t i = 0; i < freqs.size() && i < 12; ++i) {
             std::cerr << "#   f=" << freqs[i]
                       << "  |est|=" << std::abs(e[i])
                       << "  |truth|=" << std::abs(t[i])
@@ -769,6 +778,16 @@ Counts measure(const Args& args) {
         if (args.chest_nmse) {
             namespace gtrue = ultra::ofdm::genie_true_h;
             gtrue::buffer().clear();
+            {   // Accept only the pass matching the TRANSMITTED profile. Without this
+                // the control-first QPSK R1/4 peek is captured instead of the data pass.
+                const auto want = makeOFDMConfig(args.mod, args.rate);
+                auto& x = gtrue::expect();
+                x.active = true;
+                x.pilot_spacing = static_cast<uint32_t>(want.pilot_spacing);
+                x.modulation = static_cast<int>(want.modulation);
+                x.num_carriers = static_cast<uint32_t>(want.num_carriers);
+                x.fft_size = static_cast<uint32_t>(want.fft_size);
+            }
             gtrue::mode() = gtrue::Mode::Capture;   // capture only; never inject
             auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
                                     /*reset_decoder=*/true,
@@ -790,7 +809,9 @@ Counts measure(const Args& args) {
     if (args.chest_nmse) {
         const double mean = chest_acc.frames
             ? chest_acc.sum_nmse / static_cast<double>(chest_acc.frames) : -1.0;
-        std::cerr << "# chest_nmse frames=" << chest_acc.frames
+        std::cerr << "# chest_nmse rejected_profile_captures="
+                  << ultra::ofdm::genie_true_h::stats().rejected_profile
+                  << " frames=" << chest_acc.frames
                   << " mean_nmse=" << mean
                   << " mean_nmse_db=" << (mean > 0 ? 10.0 * std::log10(mean) : 0.0)
                   << " mean_fitted_delay_samples="

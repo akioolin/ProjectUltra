@@ -70,6 +70,7 @@ struct Stats {
     long captures = 0;    // clean passes that produced a true H
     long injections = 0;  // data symbols that actually received it
     long misses = 0;      // inject requested but no usable H was stored
+    long rejected_profile = 0;  // capture skipped: geometry != transmitted profile
     double nmse_sum = 0.0;   // sum of ||injected - replaced||^2 / ||replaced||^2
     long nmse_count = 0;
 };
@@ -77,6 +78,36 @@ struct Stats {
 inline Stats& stats() {
     static Stats s;
     return s;
+}
+
+// CAPTURE PROVENANCE (2026-07-29, external review). A raw "first capture per frame"
+// rule is WRONG and produced a +6.44 dB identity-control NMSE that looked like a
+// catastrophic estimator. The receiver runs a CONTROL-FIRST hypothesis before the
+// data profile (streaming_ofdm_decode.cpp:968: "control always rides coherent QPSK
+// R1/4"), so the first LTS estimate of a frame belongs to a speculative decode at a
+// DIFFERENT pilot spacing (5) than the transmitted data profile (8). What gets
+// captured is then
+//     H_captured = H_channel * X_spacing8 / X_spacing5
+// -- a deterministic quotient of two nearly-unit-modulus training sequences. |H|
+// looks clean while adjacent-carrier phases jump 50-140 deg, which is exactly the
+// "impossible" signature observed. Confirmed empirically: transmitting the control
+// profile itself (qpsk r1_4, so transmitted == speculative geometry) drops the
+// identity-control NMSE from 4.401 to 0.0166 (-17.79 dB) and the fitted delay from
+// 122 samples to -0.007.
+//
+// So: never "first capture wins", and never "last capture wins" either. Accept only
+// the pass whose geometry matches the transmitted profile.
+struct Expect {
+    bool active = false;
+    uint32_t pilot_spacing = 0;
+    int modulation = -1;
+    uint32_t num_carriers = 0;
+    uint32_t fft_size = 0;
+};
+
+inline Expect& expect() {
+    static Expect e;
+    return e;
 }
 
 // True when the stored H is usable for a frame of `carriers` FFT bins.
