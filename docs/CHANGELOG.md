@@ -10,6 +10,87 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — ANSWER: channel-MEAN estimation is NOT the throughput limiter (Phase 3 stopping rule fires)
+
+### 1. The question, and why this settles it without an oracle
+
+EFFECTIVE_SINR §9 Phase 3: *"If perfect/genie H or the new channel mean does not materially
+reduce the target FER, stop treating channel-mean estimation as the main speed limiter."*
+
+Three attempts to build a perfect-CSI oracle failed this session (circular data-aided genie;
+LTS-freeze as a noisy snapshot; cross-pass injection defeated by FFT-window provenance). **The
+stopping rule never required an oracle.** It requires a channel mean that is MEASURABLY better,
+and `ULTRA_LTS_DFT_DENOISE` — already implemented, default-off — is exactly that.
+
+### 2. Both halves measured
+
+**Half 1 — the estimate really does improve.** Truth-referenced `--chest-nmse` on frozen taps
+(the regime where that diagnostic is valid):
+
+| rung | NMSE off | NMSE on | improvement |
+|---|---|---|---|
+| QPSK R3/4 | 0.02675 | 0.00660 | **4.05x** |
+| 16QAM R2/3 | 0.02492 | 0.00628 | **3.97x** |
+
+This independently corroborates the offline H-MSE harness's "3-6x" claim, which until now was
+only a code comment.
+
+**Half 2 — that 4x buys nothing.** ITU Good, 4 seeds x n=60 = 240 frames per cell:
+
+| SNR | rung | denoise OFF | denoise ON | delta |
+|---|---|---|---|---|
+| 20 | QPSK R3/4 | 220/240 | 221/240 | +1 |
+| 20 | 8PSK R2/3 | 195/240 | 194/240 | -1 |
+| 20 | 16QAM R2/3 | 111/240 | 111/240 | 0 |
+| 20 | 16QAM R3/4 | 56/240 | 59/240 | +3 |
+| 14 | QPSK R3/4 | 155/240 | 155/240 | 0 |
+| 14 | QPSK R1/2 | 218/240 | 218/240 | 0 |
+| 11 | QPSK R3/4 | 94/240 | 94/240 | 0 |
+| 11 | QPSK R1/2 | 195/240 | 197/240 | +2 |
+
+1σ at n=240 is ~7.7 frames. Every delta is inside noise, at three SNRs spanning 11-20 dB and
+five MCS combinations. The lower SNRs are the fair test — estimation noise is relatively larger
+there — and the effect is exactly zero.
+
+### 3. Conclusion, with its scope stated
+
+**Channel-MEAN estimation is not the throughput limiter. Do NOT build the Phase 2-4
+posterior/Kalman estimator on the channel-mean rationale.**
+
+NOT refuted, and deliberately left open:
+- **§2.4 estimator UNCERTAINTY semantics.** `error_var` is a normalized fraction multiplied by
+  local `|H_hat|^2`, which drives modeled uncertainty toward ZERO in a notch — exactly where the
+  estimate is least trustworthy. Measured support this session: on a static two-path channel the
+  estimate cannot follow truth into a null (truth 0.0347 at 984 Hz vs a scaled estimate near
+  0.20), while absolute estimate error stays roughly constant across the band. So the model
+  claims the notch is ~21x MORE certain than mid-band at the one place it is least reliable.
+  That is a RELIABILITY-WEIGHTING lever, not a channel-mean lever, and this result says nothing
+  against it.
+- **Phases 5-8 (the selector).** Independent of all of the above.
+
+### 4. Also settled: the harness/production CP mismatch is immaterial
+
+`measure_ack_fer` runs LONG CP (128), production `presets::balanced()` runs MEDIUM (96). New
+`--cp` flag makes it selectable; default stays LONG so comparisons against every prior
+measurement remain valid. Measured, same seed, n=60:
+
+- ITU Good @20: deltas +2/0/-1/+2 frames across four rungs — pure noise. Expected: Good's delay
+  spread is 0.5 ms = 24 samples, buried by both guard intervals, so only 2.9% airtime differs.
+- ITU Moderate @20 and Poor @24: mixed and at noise. The only near-significant cell (Moderate
+  QPSK R3/4) over 4 seeds: LONG 174/240 vs MEDIUM 163/240 = +11 at 1σ≈7.7 (~1.4σ), consistent in
+  sign but driven by one seed.
+
+**Nothing needs re-baselining.** Absolute floor numbers from this tool still carry the caveat
+that they are LONG-CP, but the difference is not measurable on the channels we test.
+
+### 5. Test verification
+
+```
+ctest --test-dir build --output-on-failure -j4 -E UltraTncSimAudio   # 96/96
+```
+
+---
+
 ## 2026-07-29 — RETRACTION: the ITU Good NMSE table measured channel evolution, not estimator error
 
 ### 1. Retracted

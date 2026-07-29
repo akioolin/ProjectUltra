@@ -73,6 +73,12 @@ struct Args {
     // identically => injection must be a no-op and reproduce baseline exactly.
     // Any deviation there is a defect in the oracle, not a channel finding.
     float genie_clean_snr_db = 60.0f;
+    // Cyclic prefix. DEFAULT LONG deliberately: every measurement ever made with this
+    // tool used LONG, so defaulting to production MEDIUM would silently invalidate
+    // comparison against all of them. PRODUCTION IS MEDIUM (presets::balanced(), pushed
+    // via setOFDMConfig at modem_engine.cpp:250) -- pass --cp medium to measure the
+    // shipped geometry. See docs/CHANGELOG.md 2026-07-29.
+    std::string cp_name = "long";
     // 2026-07-29 Phase 0 payoff: measure the LTS channel estimate against
     // SIMULATOR TRUTH and report NMSE. Requires ULTRA_CHANNEL_DOPPLER_HZ=0 so the
     // taps are frozen and truth H is time-invariant -- otherwise the tap state
@@ -220,6 +226,12 @@ Args parseArgs(int argc, char** argv) {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
         } else if (key == "--genie-true-h") {
             args.genie_true_h = std::stoi(requireValue("--genie-true-h")) != 0;
+        } else if (key == "--cp") {
+            args.cp_name = requireValue("--cp");
+            if (args.cp_name != "medium" && args.cp_name != "long" &&
+                args.cp_name != "short") {
+                throw std::runtime_error("unknown --cp: " + args.cp_name);
+            }
         } else if (key == "--chest-nmse") {
             args.chest_nmse = std::stoi(requireValue("--chest-nmse")) != 0;
         } else if (key == "--genie-clean-snr") {
@@ -241,13 +253,16 @@ Args parseArgs(int argc, char** argv) {
     return args;
 }
 
-ultra::ModemConfig makeOFDMConfig(ultra::Modulation mod, ultra::CodeRate rate) {
+ultra::ModemConfig makeOFDMConfig(ultra::Modulation mod, ultra::CodeRate rate,
+                                  const std::string& cp_name = "long") {
     ultra::ModemConfig cfg;
     cfg.fft_size = 1024;
     cfg.num_carriers = 59;
     cfg.sample_rate = kSampleRate;
     cfg.center_freq = 1500.0f;
-    cfg.cp_mode = ultra::CyclicPrefixMode::LONG;
+    cfg.cp_mode = cp_name == "medium" ? ultra::CyclicPrefixMode::MEDIUM
+                : cp_name == "short"  ? ultra::CyclicPrefixMode::SHORT
+                                      : ultra::CyclicPrefixMode::LONG;
     cfg.modulation = mod;
     cfg.code_rate = rate;
     cfg.use_pilots = true;
@@ -263,7 +278,7 @@ bool usesFullPreamble(MeasureConfig config) {
 }
 
 void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
-    const auto ofdm = makeOFDMConfig(args.mod, args.rate);
+    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name);
     encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
     encoder.setOFDMConfig(ofdm);
     encoder.setDataMode(args.mod, args.rate);
@@ -276,7 +291,7 @@ void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
 }
 
 void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
-    const auto ofdm = makeOFDMConfig(args.mod, args.rate);
+    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name);
     // Only 1-CW control frames decode on the cold setMode() path. 4-CW DATA
     // frames are a connected-mode construct, so Data4Full uses the connected
     // decoder too — its full chirp preamble is admitted via
@@ -773,7 +788,7 @@ Counts measure(const Args& args) {
             gtrue::buffer().clear();
             {   // Accept only the pass matching the TRANSMITTED profile. Without this
                 // the control-first QPSK R1/4 peek is captured instead of the data pass.
-                const auto want = makeOFDMConfig(args.mod, args.rate);
+                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name);
                 auto& x = gtrue::expect();
                 x.active = true;
                 x.pilot_spacing = static_cast<uint32_t>(want.pilot_spacing);
@@ -786,7 +801,7 @@ Counts measure(const Args& args) {
                                     /*reset_decoder=*/true,
                                     /*expect_full_anchor=*/expect_anchor);
             gtrue::mode() = gtrue::Mode::Off;
-            accumulateChestNmse(channel, makeOFDMConfig(args.mod, args.rate), chest_acc);
+            accumulateChestNmse(channel, makeOFDMConfig(args.mod, args.rate, args.cp_name), chest_acc);
             classify(outcome, trial.frame_bytes, counts);
             continue;
         }
