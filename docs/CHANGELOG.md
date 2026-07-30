@@ -10,6 +10,116 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — ROOT CAUSE: the Moderate "irreducible FER floor" is the LTS CFO seed gate
+
+### 1. Three of my own conclusions are RETRACTED first
+
+- **"The Moderate FER floor is an irreducible physical/outage limit."** WRONG. It is a
+  deterministic receiver impairment. Decisive control: QPSK R1/2 on Moderate passes **32/40 at
+  28 dB, 32/40 at 60 dB, and 32/40 at 100 dB** — bit-identical. An information-theoretic outage
+  goes to ZERO as SNR grows; this does not move at all.
+- **"The frame spans ~2 coherence times on Moderate."** WRONG twice over. (a) I measured the frame
+  from the start of the burst, which includes the ~1.2 s dual chirp; CSI ageing starts at the LTS
+  (`ofdm_chirp_waveform.cpp`: `[CHIRP][TRAINING_SYMBOLS]` then data). (b) I used 12.67 ms per
+  symbol, which is `(512+96)/48000` — the 512-FFT geometry from the stale spec table **I
+  personally corrected earlier the same day**, then used the wrong number anyway. Actual is
+  `(1024+128)/48000 = 24.0 ms`. Corrected CSI age through the payload is 0.31-0.62 s, i.e.
+  0.37-0.74 x Tc, so the claimed crossing of 1.0 never happened.
+- **"The LTS residual-CFO gate is correctly suppressing false positives, because the true TX
+  offset is exactly zero."** WRONG, and this was the actual bug. The TX offset is zero, but the
+  composite two-path channel's phase genuinely rotates, that rotation persists into the payload,
+  and the gate blocks correcting it.
+
+### 2. Root cause
+
+`channel_equalizer_lts.cpp` applies the LTS residual CFO only when
+`coherent_residual && (trusted_cfo_seed || flat_lts_channel)`. On any fading channel BOTH seed
+conditions are unreachable:
+- `trusted_cfo_seed` requires `|chirp CFO| >= 0.75 Hz` — false at TX CFO 0;
+- `flat_lts_channel` requires across-carrier CV `< 0.20` — false on any Rayleigh channel, where
+  the CV converges to ~0.52 regardless of severity (BUG-FADING-INDEX-BLIND).
+
+So the correction NEVER fires on fading. Measured residuals on FAILING Moderate frames are
+-2.4 to -2.6 Hz against ~0 on passing frames. At 24.0 ms per symbol, 2.5 Hz is 21.6 deg/symbol
+and ~560 deg accumulated over a 26-symbol payload.
+
+The gate's stated justification is also wrong on the physics, as noted here previously:
+`h1*conj(h0)` per carrier is `|H|^2`, real and positive, so frequency selectivity cancels EXACTLY
+and `lts_channel_cv` gates on the wrong axis. `cfo_coherence` is the correct and sufficient test.
+
+### 3. Measured effect (new knob `ULTRA_LTS_CFO_SEED_OFF`, DEFAULT-OFF)
+
+QPSK R1/2, Moderate, seeds 7+11, n=40 each:
+
+| dial | gate ON (production) | gate bypassed |
+|---|---|---|
+| 20 dB | 65/80 | **78/80** |
+| 28 dB | 65/80 | **80/80** |
+| 60 dB | 65/80 | **80/80** |
+
+**The 18.75% "floor" goes to zero.** Full 12-cell sweep at 20 dB, seeds 7+11:
+
+| channel | QPSK R1/2 | QPSK R3/4 | 8PSK R2/3 | 16QAM R2/3 | total |
+|---|---|---|---|---|---|
+| AWGN | +0 | +0 | +0 | +0 | **+0 (byte-identical)** |
+| Good | +0 | -2 | -2 | -3 | **-7 / 320** |
+| Moderate | **+13** | **+11** | +5 | +2 | **+31 / 320** |
+
+AWGN is untouched because a flat channel satisfies `flat_lts_channel`, so the gate never differed
+there. Moderate's +13/+11 are ~3-5 sigma at n=80. Good's per-cell losses are each under 1 sigma
+but consistently negative.
+
+### 4. What did NOT separate the two cases
+
+Two refinement attempts, both null — recorded so they are not retried:
+- **Coherence threshold** (`ULTRA_LTS_CFO_COH`) at 0.70 / 0.85 / 0.93: IDENTICAL results. Every
+  applied correction is already highly coherent, so the Good cost is not low-coherence garbage.
+- **Minimum residual magnitude** (`ULTRA_LTS_CFO_MIN`) at 0.3 / 1.0 / 1.8 Hz: IDENTICAL results.
+  The harmful Good corrections are also large.
+
+So the Good cost is a genuine, coherent, large rotation whose correction still hurts — consistent
+with the LTS pair measuring an INSTANTANEOUS phase slope that is then extrapolated across the
+whole payload. Under Gaussian Doppler the composite phase is a random walk, not a constant offset,
+so extrapolation over-reaches; on Moderate the drift is large enough that correcting still wins by
+a wide margin, on Good the true offset is ~0 and the correction is mostly injected error. A
+principled fix would weight the correction by its persistence (e.g. a per-symbol tracked phase
+rate rather than a frame-constant CFO), not gate it on channel flatness.
+
+### 5. A second, independent defect found on the way
+
+gamma = |H|^2/noise_variance SATURATES on fading, because `noise_variance` is derived from
+`E|h1-h0|^2/4` over the LTS pair and that difference contains CHANNEL INNOVATION, not only thermal
+noise. Measured mean gamma vs dial:
+
+| dial | AWGN | Good | Moderate |
+|---|---|---|---|
+| 28 | 28.6 | 24.5 | 25.1 |
+| 40 | 40.6 | 32.9 | 31.2 |
+| 60 | **60.6** | **38.8** | **35.8** |
+
+AWGN tracks 1:1 to 60 dB; Good ceilings near 39 dB and Moderate near 36 dB. At dial 60 the
+receiver believes Moderate is 35.8 dB, a 24 dB shortfall. This feeds the MMSE denominator, the LLR
+sigma^2 and the erasure gate, and it is a separate bug from the CFO gate. Not fixed here.
+
+### 6. Status and what this changes
+
+All three knobs are DEFAULT-OFF; production behaviour is unchanged. **This is a fade/throughput
+claim, so per CLAUDE.md it must go through `tools/gui_qso_scenario.sh` before any default flip** —
+`measure_ack_fer` evidence is necessary but not sufficient.
+
+The Phase 3 conclusion is NARROWED accordingly: LTS channel-MEAN denoising did not help on the
+tested ITU Good cells. It did NOT validate dynamic post-Wiener estimation, and given §5 it
+certainly did not clear the fading noise-variance path.
+
+The investigation is renamed from "is estimation the wall" to **"which receiver component creates
+the SNR-independent Doppler x delay-spread floor?"** — two answers so far (this CFO gate; the
+innovation-contaminated noise variance), with the Wiener prior mismatch (Gaussian-Doppler
+simulator vs Jakes J0 prior, uniform-PDP frequency prior vs 2 discrete paths) still unexamined.
+
+`ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — Moderate IN training fixes the safety failure; my time-selectivity model is refuted
 
 ### 1. Including Moderate in the calibration fixes the dangerous failure

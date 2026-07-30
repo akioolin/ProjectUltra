@@ -438,14 +438,57 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             // matter at low SNR. Allowing zero-seed correction on flat channels
             // restores the refinement where it is safe.
             constexpr float kMinTrustedCFOSeedHz = 0.75f;
-            constexpr float kMinResidualCFOCoherence = 0.70f;
+            // ULTRA_LTS_CFO_COH (2026-07-29 diag): override the coherence threshold.
+            // cfo_coherence = |sum of unit phase-step vectors| / count is the PHYSICALLY
+            // correct validity test for this estimator -- it measures directly whether the
+            // per-carrier phase steps agree, which is what a genuine common rotation
+            // implies and what noise or per-carrier time-variation destroys. The seed/CV
+            // conditions ANDed with it are not: frequency selectivity cancels exactly in
+            // h1*conj(h0) (= |H|^2, real and positive), so lts_channel_cv gates on the
+            // wrong axis entirely.
+            float kMinResidualCFOCoherence = 0.70f;
+            if (const char* e = std::getenv("ULTRA_LTS_CFO_COH")) {
+                const float v = static_cast<float>(std::atof(e));
+                if (v > 0.0f && v <= 1.0f) {
+                    kMinResidualCFOCoherence = v;
+                }
+            }
             constexpr float kFlatChannelCvMax = 0.20f;
             float old_cfo = freq_offset_hz;
             const bool trusted_cfo_seed = std::abs(old_cfo) >= kMinTrustedCFOSeedHz;
             const bool coherent_residual = cfo_coherence >= kMinResidualCFOCoherence;
             const bool flat_lts_channel = lts_channel_cv < kFlatChannelCvMax;
-            const bool seed_ok = trusted_cfo_seed || flat_lts_channel;
-            if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f &&
+            // ULTRA_LTS_CFO_SEED_OFF (2026-07-29 diag): bypass the seed gate, keeping
+            // the COHERENCE gate. Hypothesis under test: on a fading channel the LTS
+            // reports a real composite-phase rotation (measured -2.4..-2.6 Hz on FAILED
+            // Moderate frames vs ~0 on passes) which this gate blocks, because
+            // trusted_cfo_seed is false at TX CFO 0 and flat_lts_channel is false on any
+            // Rayleigh channel (across-carrier CV ~0.52 vs a 0.20 threshold). At 24 ms
+            // per symbol, 2.5 Hz is 21.6 deg/symbol and ~560 deg over a 26-symbol payload.
+            const bool seed_gate_disabled = [] {
+                const char* e = std::getenv("ULTRA_LTS_CFO_SEED_OFF");
+                return e != nullptr && e[0] != '\0' && e[0] != '0';
+            }();
+            const bool seed_ok =
+                seed_gate_disabled || trusted_cfo_seed || flat_lts_channel;
+            // ULTRA_LTS_CFO_MIN (2026-07-29 diag): minimum residual worth applying.
+            // The LTS pair measures an INSTANTANEOUS phase slope; applying it as a CFO
+            // extrapolates that slope across the whole payload. Under Gaussian Doppler the
+            // composite phase is a random walk, not a constant offset, so extrapolation is
+            // only worthwhile when the measured rotation is large relative to the
+            // estimator's own uncertainty -- otherwise the correction injects more error
+            // than it removes. Measured: on Moderate residuals reach 2.4-2.6 Hz on frames
+            // that fail, and correcting them removes an 18.75% FER floor entirely; on Good
+            // the true offset is ~0 and correcting costs 2-3 frames per 80.
+            float min_residual_hz = 0.3f;
+            if (const char* e = std::getenv("ULTRA_LTS_CFO_MIN")) {
+                const float v = static_cast<float>(std::atof(e));
+                if (v >= 0.0f && v < 5.0f) {
+                    min_residual_hz = v;
+                }
+            }
+            if (std::abs(residual_cfo) > min_residual_hz &&
+                std::abs(residual_cfo) < 5.0f &&
                 coherent_residual && seed_ok) {
                 freq_offset_hz += residual_cfo;
                 freq_offset_filtered = freq_offset_hz;
