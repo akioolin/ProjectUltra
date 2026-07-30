@@ -10,6 +10,419 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-30 — FIXED: sync cursor can run past live audio (BUG-SYNC-CURSOR-AHEAD)
+
+Operator challenge that started it: "we cant have handshake flake, find out what really
+happened". It was not a flake. A 420 s handshake deadlock on the Pi 5 rig traced to three
+compounding defects in the RX sync path. Full write-up in docs/KNOWN_BUGS.md; summary:
+
+**The log lied.** "LOAD-SHED 2187129 samples (45.6 s) - search fell behind live" was emitted
+by a decoder that had received 2.6 s of audio in its entire life. The search had not fallen
+behind; the correlation cursor was 1.835 s AHEAD of the write head, and the unsearched
+calculation is a raw modular ring distance whose wrap-branch aliases "cursor ahead" into
+"nearly a full 50 s buffer". The figure is capacity - lead, not a measurement.
+
+**Changed (all default-ON, correctness not tuning):**
+1. `src/sync/sync_controller.cpp` — enforce `unsearched <= total_fed_`. Chosen over fixing
+   individual writers because it is true under every wrap state and independent of which
+   writer misbehaved, so it catches the family rather than one instance.
+2. `src/gui/modem/streaming_sync_acquisition.cpp` — clamp `sync_position_` at its SOURCE.
+   15+ downstream cursor writers are `sync_position_ + <len>`, so one clamp closes them all.
+   Mirrors `setSearchFloorLocked`, which has always been clamped — the two are written from
+   the same expression two lines apart and only one was guarded.
+3. `src/gui/modem/streaming_frame_policy.hpp` — a training window reading digital silence is
+   UNWRITTEN MEMORY, not a PING. Previously `training_rms <= 0.001` forced `ratio = 0.0`,
+   which is the strongest possible ping evidence; it is now the strongest possible reject.
+   Suppresses `ping_by_silence`, `ping_by_chirp_lock` and `is_ping` — the silence path alone
+   is insufficient because zero `data_rms` trivially clears `kPingChirpLockMaxDataRMS`.
+
+**Verification.** `test_streaming_frame_policy` 47/47, replaying the rig's exact inputs and
+requiring no ping verdict by either route while a genuine low-level PING still detects. Full
+suite 99/99. Faithful gate PASSES at BOTH good@20 (2350 bps, CRC ok) and good@10 (610 bps,
+CRC ok); genuine PINGs there read train_RMS 0.29-0.44 against the 0.001 reject floor, and
+neither new guard fired spuriously in either run.
+
+**One test expectation was CORRECTED, not accommodated:** it asserted that
+`evaluatePingRMS(nullptr, 0)` — an empty buffer — classifies as a PING. That is the same
+defect in miniature. Safe: the wrapper has no production callers (grep-verified); the sole
+production entry is `streaming_ofdm_decode.cpp:843`.
+
+**Provenance.** 65-agent adversarial audit (15 confirmed / 44 refuted). Load-bearing
+file:line claims were re-verified by hand before any edit.
+
+---
+
+## 2026-07-30 — Goodput-maximizing rate controller (ULTRA_GOODPUT_RATE, default OFF)
+
+### 1. Why — the ladder costs 10.6% against simply pinning the best rung
+
+Interleaved same-epoch A/B, IONOS MPG@20, 50 KB, both arms CRC-clean:
+
+| pair | forced 8PSK R2/3 | auto ladder | delta | ladder mode changes |
+|---|---|---|---|---|
+| 1 | 2.06 kbps | 1.86 kbps | +10.8% | 5 |
+| 2 | 1.59 kbps | 1.44 kbps | +10.4% | 8 |
+
+The epoch roughened ~23% between pairs (both arms fell together) and the RELATIVE gain
+held — that is what makes it trustworthy. The pinned arm made ONE mode change and never
+demoted, not even on the rough epoch, so every demote the ladder made was unnecessary.
+More churn on the rougher epoch gave the worse result.
+
+Sender-clock accounting the same day showed this is the whole prize: airtime is 81-84% of
+wall clock and delivers 1851/1756 bps against QPSK R3/4's measured 2066 ceiling, i.e.
+airtime runs at 90-99% of the rung's own ceiling. Retransmission is NOT the loss. The
+ladder churned six mode changes while docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md
+measures 8PSK R2/3 at 2450 bps on this exact channel and SNR. `1860 raw x 0.84 = 1562`
+reproduces the measured 1.55 kbps from rung choice alone.
+
+### 2. What was wrong with the existing controller
+
+`updateRxAuthorityCommand` decides from `selectCoherentOFDM(snr_avg, fading)` and layers
+~10 correctives on top (censored ring feed, sticky class, asymmetric class persistence,
+decode-evidence veto, two-crater rule, goodput regrade, dense fast demote, EMA hold,
+ratcheting penalties, climb dwell). Each exists to suppress a wrong answer from the
+primary variable. Two independent defects:
+
+**Wrong timescale.** At MPG the Doppler is 0.1 Hz so Tc ~ 4 s; the controller acts on one
+or two groups (~10-20 s), INSIDE the Rayleigh process it reacts to. A rate loop cannot
+track fast fading, only chase it. Adaptation on HF must track the slow component
+(propagation, QSB over minutes), so the window must sit above Tc and below that.
+
+**Wrong decision variable.** A crater is read as "the rung is too high". On a Rayleigh
+channel that is a category error (CLAUDE.md: fading loss is irreducible). Every rung
+craters. The right rung maximizes delivered goodput, which the anchor doc measures
+directly — 8PSK R2/3 wins on Good@20 INCLUDING its crater rate.
+
+### 3. What it does
+
+Decides on measured delivered goodput over a coherence-derived window and reads NO SNR —
+deliberate, since the anchor/scale chain (the +8.70 dB offset, guard-bin noise over-read,
+the 51.4%-FER Good anchor) has been this project's largest source of wrong rate decisions.
+A controller that never consumes an SNR cannot be wrong about one.
+
+- **Window**: `Tc = 0.423/f_d` (numerator SHARED with `connection_policy.hpp`, not
+  re-declared), 8 independent fades, clamped 2..8 groups. 4 groups at MPG with ~10 s
+  groups = ~40 s ~ 9 Tc.
+- **Hold** is a theorem: `f_below <= 1` so `eta_below` bounds the lower rung's goodput;
+  `f·eta_cur >= eta_below` therefore PROVES no lower rung can win. The converse is not
+  sound, so falling below only makes a demote permitted.
+- **Demote** requires `f < break_even/(1+switch_margin)` on a full window.
+- **Climb** is an explicit bet (f_above is unobservable until tried), judged after 2 groups
+  against the MEASURED goodput of the rung it came from, with exponential per-rung backoff.
+- **Catastrophic path**: 2 consecutive 0/N groups bypass the window.
+
+### 4. Three defects found on the first rig attempt
+
+All three share one shape — a quantity derived from a worst case, or written in one place
+and read from another.
+
+1. **Switch-cost sign inverted.** Demoting pays iff `eta_below > f·eta_cur·(1+m)`, i.e.
+   `f < break_even/(1+m)`. The code MULTIPLIED, making demotion easier rather than
+   stickier. Rig log: `f_window=0.800 break_even=0.750 reason=goodput-demote` — a demote
+   from a rung winning by 5 points. Walked R3/4 -> R2/3 -> R1/2, 1.38 kbps.
+2. **Backoff indexed on the wrong rung.** `noteProbeFailed` recorded the failure against
+   the climb TARGET; `decide()` read `backoff_[cur]`, the rung climbed FROM. The two never
+   met, so a failed probe placed no obstacle in front of a retry: the SAME `idx 4 -> 5`
+   climb three times, 9 mode changes, 1.25 kbps. A penalty written to one index and read
+   from another is not a weak penalty, it is no penalty.
+3. **Window resized mid-fill.** `configure()` ran every group with a freshly measured
+   cadence; when the size shrank, `next_ % window_` aliased occupied slots (logged
+   `n=2/3`). The size is now latched for the life of a window.
+
+A fourth issue was corrected in design rather than code: the climb bar originally demanded
+>= 0.95 on EVERY group, which is near-unreachable under irreducible fading, so the
+controller could only descend. It is now derived from the same airtime algebra.
+
+### 5. A ladder finding the tests caught
+
+`eta(16QAM R1/2) = 4 x 0.5 = 2.000` and `eta(8PSK R2/3) = 3 x 0.667 = 2.001` — the same
+2.0 bits/carrier (the 0.001 is `getCodeRateValue`'s 3-dp rounding of 2/3,
+include/ultra/types.hpp:147). 8PSK R2/3 is the enabled rung directly below. So 16QAM R1/2
+buys ZERO throughput while demanding a denser constellation: more SNR for the same bits,
+worse PAPR, more exposure to the cheap-card compression that craters 16QAM above drive
+~0.70. Its break-even is >= 1, meaning no delivered fraction justifies it. Pinned by
+`test_dominated_rung_is_always_left`.
+
+### 5b. RIG A/B RESULT — WASH, keep default-OFF
+
+Three interleaved pairs, IONOS MPG@20, 50 KB, after all fixes (sign, backoff index, window
+resize) plus the two design corrections (statistical window floor, ladder ceiling):
+
+| pair | goodput ctl | ladder | delta |
+|---|---|---|---|
+| 1 | 1.83 | 1.75 | +4.6% |
+| 2 | 1.58 | 2.07 | -23.7% |
+| 3 | 1.93 | 1.35 | +43.0% |
+| mean | 1.78 | 1.72 | +8.0% paired |
+
+**NOT a result.** n=3, sign 2+/1-, spread -24% to +43%. The +8% mean is not claimable and
+is not claimed. The knob stays default-OFF.
+
+One secondary observation, also n=3 and therefore weak: the controller's spread is
+1.58-1.93 (sd ~0.18) against the ladder's 1.35-2.07 (sd ~0.36), i.e. it roughly HALVES
+run-to-run variance. Settling behaviour is operator-relevant but it is not throughput, and
+three pairs cannot establish it.
+
+**Where it still loses.** Pair 2's controller run descended to QPSK R1/2 and never reached
+8PSK R2/3. Suspected remaining bias: the demote rule credits the rung below with f=1
+(inherited from `goodputBreakEvenDeliveredFraction`, whose own comment calls that
+"deliberately conservative: it makes demoting EASIER, never harder"). That IS conservative
+for the crater-REGRADE use it was written for, where making demotion easier preserves
+legacy behaviour. As a PRIMARY selection rule the same choice is a systematic downward
+bias — it over-values every lower rung. A less optimistic f_below is the next thing to try
+if this is picked up again.
+
+**What the exercise did establish**, independently of the controller: forced 8PSK R2/3
+beats the auto ladder by 10.6% on both pairs of an epoch-controlled A/B, and the ladder's
+demotes at MPG@20 are unnecessary. That gap is real and remains unclaimed by any shipped
+change.
+
+
+### 5b. RIG VERIFICATION — sync fixes hold; my rescue fix REGRESSED and is gated off
+
+8-attempt handshake matrix on the IONOS rig (the failure was a handshake deadlock, so the
+test is connects, not throughput).
+
+**The three sync-path fixes are verified:**
+
+| metric | before | after |
+|---|---|---|
+| phantom PING (`ratio=0.000`) | the deadlock trigger | **0 of 5 attempts** |
+| phantom load-shed | "45.6 s" after 2.6 s of audio | **gone** — remaining sheds are 0.2 s against 60 s fed |
+| cursor-ahead guard firings | n/a | 0 (correct: the source clamp prevents the state, so the
+backstop never has to act) |
+
+**A FOURTH defect was fixed and then REVERTED — it measured worse than the bug.**
+
+The CONNECT_ACK rescue is destroyed by `Accepted OFDM DATA sync (corr=...)` on the burst
+path. That is a real defect: a sync correlation is NOT proof the peer decoded our ACK
+(measured at corr=0.59 AND corr=0.80 with the initiator still retrying nine times into a
+responder that had cleared `connect_ack_frame_`). I changed destroy -> defer.
+
+Two failures, in order:
+1. **Unbounded defer = starvation.** Re-armed on EVERY accepted sync (corr 0.87/0.94/0.94/
+   0.91 in a row), each pushing the timer out 21552 ms, so the rescue never fired. Destroy
+   became starve; identical deadlock. Bounded it to 2 defers.
+2. **Bounded defer = collisions.** Releasing the rescue fires up to 6 CONNECT_ACK re-sends of
+   8.3 s each — ~50 s of the responder keyed up while the initiator transmits its own CONNECT
+   retries. **3/3 handshake attempts deadlocked**, against roughly 1-in-20 before. Gating it
+   off restored the link immediately (3/5 connected: 1.64, 2.27, 2.02 kbps).
+
+The original code's comment named this exact hazard — "so it cannot fire an 8.3 s MC-DPSK /
+OFDM CONNECT_ACK blast INTO the initiator's in-flight group burst... both stations keyed at
+once". I read it as a timing concern and made it worse.
+
+Now behind `ULTRA_CONNECT_ACK_RESCUE_DEFER` (**default OFF = legacy disarm**). Kept rather
+than deleted because the underlying defect is real and STILL OPEN: a lost CONNECT_ACK has no
+recovery once a sync disarms it, and the deadlock still occurs ~2 in 5. The correct fix is a
+CHEAP rescue — a short control-frame re-ACK, not an 8.3 s MC-DPSK blast — plus a carrier-sense
+hold that actually covers the peer's TX. Do NOT default this on without that.
+
+**Attribution discipline:** before blaming my own changes I verified the guards fired ZERO
+times on both ends across all 3 failing attempts, and that the CFO rejections I first suspected
+(9/14/24 per run) also appear at 23-25 per run in EARLIER SUCCESSFUL transfers — i.e. normal
+background, not the cause. That check stopped a fourth wrong attribution.
+
+### 6. Verification
+
+`test_goodput_rate_controller.cpp` 71/71 — the hold guarantee is tested as a theorem
+across every rung, the switch-cost sign has its own regression test naming the rig log
+line, the backoff test targets the returned rung (it would fail against the old code), and
+a scenario test replays a measured Good@20 delivered-fraction record and requires no
+demote. Full suite 99/99 (`UltraTncSimAudio` fails only while a rig A/B saturates the CPU;
+passes 56.6 s standalone). Post-fix rig A/B PENDING — the only pre-fix paired result was
+2.01 vs 1.53 (+31%, 3 mode changes vs 6), measured with defects 2 and 3 still live.
+
+---
+
+## 2026-07-30 — RETRACTED IN PART: the RTO clamp is NOT the stall mechanism (ULTRA_ADAPTIVE_RTO)
+
+### 0. RETRACTION — read this before the analysis below
+
+The entry below was written from the RECEIVER's log and is WRONG in its central claim.
+Null-controlled rig measurement (`ADAPTIVE-RTO ENGAGED` logging on both ends, sender
+engagement confirmed at 53 firings) shows:
+
+    ENGAGED rto=17420ms (legacy would be 17420ms, configured=17420ms) srtt=10962 rttvar=5481
+    ENGAGED rto=20533ms (legacy would be 23144ms, configured=23144ms) srtt=12568 rttvar=1991
+    ENGAGED rto=17352ms (legacy would be 17420ms, configured=17420ms) srtt=10748 rttvar=1651
+
+Two corrections:
+
+1. **The SENDER's configured timeout is 17.4-23.1 s, not 44.7 s.** The 44.7 s figure was
+   read from the Mac's log, and the Mac is the file RECEIVER, not the sender. The value
+   scales with rung and window; on the path that actually retransmits it is roughly half
+   what was claimed.
+
+2. **The adaptive floor changes the RTO by 0-20%, not 7.5x.** The measured srtt is
+   ~11-14 s, so `srtt + 4*rttvar` lands at 17-23 s — essentially on top of the configured
+   value. The clamp is barely binding at real RTTs. The dramatic 6000-vs-44700 figure in
+   the unit test comes from a SYNTHETIC 2000 ms sample and does not occur on this link.
+
+Consequently the "~19% of wall clock" attribution to the RTO clamp is withdrawn. First
+paired rig result was ADAPTIVE 1.12 vs BASELINE 1.50 (-25%); a second, null-controlled
+pair is in progress. The knob stays DEFAULT-OFF and is currently measuring wash-to-harmful.
+
+**The stall measurement itself also needs qualifying.** It counted gaps between
+"Burst group complete" events. During a NACK-driven retransmission round the sender IS
+transmitting but no group completes, so those gaps are not all dead air. Sender-log
+inspection of one 24.6 s "stall" shows ~8 s of genuine idle (CCA idle=1 ofdm_gated=1)
+followed by a normal detect-and-retransmit cycle. Genuine idle time exists; its size is
+not yet established and the ~19% figure should not be quoted.
+
+What remains valid below: the RFC6298 estimator IS clamped by the configured value, the
+configured value IS sized on a full window rather than frames in flight, and both are
+worth fixing on their merits. They are simply not worth the throughput that was claimed.
+
+### ORIGINAL ENTRY (claims above superseded)
+
+## 2026-07-30 — RIG: the RFC6298 RTO estimator is discarded by its own clamp (ULTRA_ADAPTIVE_RTO)
+
+### 1. Symptom (operator-spotted)
+
+The operator, watching a live transfer: "would have been a lot faster if it didn't hit a
+bunch of timeout and retx at the end". Correct, and it is the largest single loss measured
+so far. Counting gaps between burst-group completions that exceed the run's own nominal
+9-10 s cadence by >60%:
+
+| run | kbps | stalls | dead air | % of wall | at t= |
+|---|---|---|---|---|---|
+| ab_mac_1 | 2.06 | 5 | 63 s | **32%** | 91, 109, 150, 208, 248 |
+| ab_mac_2 | 1.86 | 3 | 36 s | 16% | 196, 219, 240 |
+| ab_mac_3 | 1.59 | 4 | 36 s | 14% | 125, 143, 241, 289 |
+| ab_mac_4 | 1.44 | 1 | 12 s | 4% | 117 |
+| gp_mac_1 | 2.01 | 1 | 54 s | 27% | one 63 s stall at 188 |
+
+Mean ~19% of wall clock, clustered at the END of transfers. In gp_mac_1 the last ~1.4 KB
+of a 50 KB file took 57 s: last bulk group at 188.4 s, NACK seq=72 at 194.6 s, then
+nothing until 251.9 s.
+
+### 2. Root cause
+
+`selective_repeat_arq_policy.hpp::updateRTO` implements a correct RFC6298 estimator
+(srtt, rttvar, Karn-safe sampling) and then throws it away:
+
+    update.floor_ms   = max(clamp(srtt*1.5, 600, 2500), configured_ack_timeout_ms);
+    update.ceiling_ms = max(12000, configured_ack_timeout_ms);
+    update.rto_ms     = clamp(srtt + 4*rttvar, floor_ms, ceiling_ms);
+
+With the wideband OFDM configured timeout at 44.7 s, floor == ceiling == 44700 and the
+clamp collapses to a point. Every round trip computes an RTO and discards it.
+
+The 44.7 s itself is the second half of the defect. It is
+`wideOFDMBurstAirtimeMs(mod, rate, arq_.getWindowSize())` — the airtime of a FULL
+16-frame window (burst=21552ms) plus SACK hold, ACK-repeat tail and jitter margin. That
+is the right bound when 16 frames are in flight. It is set once per mode configuration
+and never shrinks, so at the tail — ONE frame outstanding, ~1.27 s of airtime, true round
+trip ~10 s — the sender still waits 44.7 s.
+
+Two failures compounding: a worst-case value used where the actual in-flight count
+belongs, and that worst case then used as BOTH bounds of the adaptive estimator.
+
+Note the existing unit tests PIN this behaviour ("high configured timeout should dominate
+RTO"). Per CLAUDE.md a test expectation is a claim to verify, not evidence of intent.
+
+### 3. Change (ULTRA_ADAPTIVE_RTO, default OFF)
+
+`updateRTO` gains `bool adaptive_floor = false`. When set, the configured value is kept
+as the CEILING and as the initial value (SelectiveRepeatARQ already seeds
+`adaptive_ack_timeout_ms_` from it before any sample exists), but no longer as the floor —
+the srtt-derived floor governs below it.
+
+Flooring at the worst case is unnecessary rather than merely conservative: srtt is
+measured from real round trips and therefore already contains whatever burst airtime the
+link actually uses. A link that genuinely takes 21 s per round trip gets an RTO above 21 s
+by construction. This is asserted directly in the test.
+
+Default OFF and knob-gated because a too-short RTO causes spurious retransmission, which
+on a half-duplex link costs a whole turnaround.
+
+### 4. Verification
+
+`tests/test_selective_repeat_policy.cpp` — 88/88. New cases assert BOTH paths on identical
+input: adaptive 6000 ms vs legacy 44700 ms (the same measurement, 7.5x the timeout), the
+default argument reproduces legacy exactly, and a genuinely slow link still gets a long
+RTO. Full suite 99/99 (`UltraTncSimAudio` fails only when the rig A/B is saturating the
+CPU; passes 56.6 s standalone). Rig A/B pending.
+
+---
+
+## 2026-07-30 — RIG: sender-clock time accounting retracts BOTH of yesterday's turnaround numbers
+
+### 1. What was wrong
+
+Two figures were derived on 2026-07-29 from `tools/transfer_time_budget.py`, which reads the
+RECEIVER's log, and both were wrong:
+
+- **"turnaround = 31.9% of wall clock (26 x 3.15 s)"** — over-charged.
+- **"ACK end -> next burst = 2.53 s, SENDER-SIDE"** — mislabelled, and it motivated a plan to
+  pre-encode the next burst during the ACK wait.
+
+Root cause of the first: the tool MODELS burst airtime as `frames x frame_s`, with `frame_s`
+taken from the modem-reported `data_ms`. It never measures airtime. When that model
+under-estimates, the leftover does not vanish — it lands in the adjacent gap category, which is
+turnaround. Root cause of the second: the receiver's "ACK end" is when it finished handing ACK
+samples to its OWN output queue, which is neither when they reached the air nor when the sender
+heard them. Attributing the whole interval to the sender was unsupported by the clock that
+measured it.
+
+Both are the same failure this session hit five other times: a quantity captured where its
+units, clock origin, or code path differ from the assumption. The budget tool's own docstring
+warns that sender-side time "is invisible here and lands inside the gap categories" — the
+warning was correct and I read past it.
+
+### 2. What was measured
+
+Env-gated `ULTRA_TXLAT_DIAG` timestamps (`std::chrono::steady_clock`, WARN level) at two
+boundaries on the SENDER, so one clock spans the whole cycle:
+
+- `Connection::onToneBurstAck` entry — the ACK has been demodulated (`ack_heard`)
+- `ModemEngine::postProcessTx` entry — samples exist, pre-shaping (`audio_ready`, logs `n`)
+
+Burst airtime is then MEASURED as `n/48000` instead of modelled. Two 50 KB transfers, IONOS
+MPG@20, both CRC-clean (1.55 and 1.43 kbps):
+
+| segment | run 1 (n=25) | run 2 (n=28) |
+|---|---|---|
+| burst airtime | 8.550 s | 7.593 s |
+| **W: burst end -> ack_heard** | **1.789 s** | **1.909 s** |
+| **E: ack_heard -> next audio_ready** | **0.089 s** | **0.062 s** |
+| full cycle | 10.419 s | 9.584 s |
+| overhead share of cycle | **18.0%** | **20.6%** |
+| measured airtime / wall | 221.3/264.5 = **84%** | 233.3/287.4 = **81%** |
+
+W is tight (1.74-1.91 across all cycles bar two startup outliers), so this is structural, not
+fade-driven.
+
+### 3. Consequences
+
+**The pre-encode lever is dead.** E = 62-89 ms. Encoding the next burst during the ACK wait can
+recover at most 0.85% of wall clock. Not built.
+
+**Turnaround is 16-19%, not 31.9%**, and 96% of it is W — the sender idle, waiting to hear the
+ACK. That is half-duplex by construction (CLAUDE.md: "the ACK gap is the other station's turn,
+not reclaimable sender airtime"), so it is not pipelineable. Named components of the 1.85 s:
+sender lead-in+tail 200 ms (`postProcessTx`, 150+50 default), receiver decode->keyup 20 ms,
+receiver ACK lead-in+tail 200 ms, ACK tone 408 ms (`samples=19584` — the SNR-adaptive staircase
+IS firing; it is not stuck at 675 ms) = 828 ms. The residual ~1.0 s is audio-pipeline latency on
+both ends plus ACK-detect scan cadence, and is not yet instrumented.
+
+**The shortfall is rung selection, not wasted airtime.** Airtime delivers 1851 and 1756 bps.
+QPSK R3/4's measured ceiling on ITU Good @20 is 2066 (docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md)
+and the ladder sat mostly on R2/3-R3/4, so airtime runs at ~90-99% of the rung's own ceiling —
+retransmission is NOT the loss. The ladder churned six mode changes (QPSK R1/2, R2/3 x3, R3/4 x2,
+8PSK R2/3 x1) while the same table measures 8PSK R2/3 at **2450 bps** on this exact channel and
+SNR. `1860 raw x 0.84 airtime = 1562` reproduces the measured 1.55 kbps from rung choice alone.
+
+### 4. Status
+
+Instrumentation is diagnostic-only and applied to the Pi5's tree ONLY (not committed; that tree
+is left dirty deliberately and must be reverted). Zero cost when `ULTRA_TXLAT_DIAG` is unset.
+`tools/transfer_time_budget.py` must not be trusted for airtime until it consumes measured
+sample counts; its turnaround row is an upper bound, not a measurement.
+
+---
+
 ## 2026-07-30 — RIG (IONOS MPG@20): the anchor table's Good column inverts rung ordering
 
 ### 1. The measurement

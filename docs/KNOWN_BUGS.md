@@ -683,6 +683,84 @@ theorise first — the harness is hiding the answer, not lacking one.
   PHYSICAL ordering that cannot alias, dominating any modulo counter (~10 lines, zero wire cost).
 - Not urgent while the salvage is OFF (a stale ACK then costs at most a duplicate resend).
 
+### BUG-SYNC-CURSOR-AHEAD: the sync cursor can run PAST live audio; the distance calc aliases that into a phantom ~50 s backlog, and the decoder fabricates a PING from zero-filled memory — FIXED 2026-07-30
+
+**Symptom.** On the Pi 5 rig a handshake deadlocked for 420 s. The receiver's log claimed
+the sync search had fallen far behind the antenna:
+
+    [27.285] searchForSync: LOAD-SHED 2187129 samples (45.6 s) - search fell behind live
+
+...when only 2.6 s of audio had EVER been fed to that decoder.
+
+**The search had NOT fallen behind. It was 1.8 s AHEAD.** The 45.6 s figure is
+`capacity - lead`, not a measurement. Forced reconstruction, no fitted parameters:
+shed 2,187,129 + backlog_cap 124,800 = 2,311,929 = 2,400,000 - 88,071, i.e. a correlation
+cursor 88,071 samples (1.835 s) past the write head.
+
+**Three defects, each independently sufficient to keep the bug alive.**
+
+1. **Unvalidated modular distance.** `sync_controller.cpp` computed
+   `unsearched = write_pos_ >= correlation_pos_ ? diff : capacity - correlation_pos_ + write_pos_`.
+   The else-branch is correct ONLY if the ring wrapped. When the cursor is instead merely
+   AHEAD of live it returns a near-full buffer. The same open-coded distance appears in the
+   readiness gate (`streaming_sync_acquisition.cpp`), which is how the decoder was allowed to
+   slice memory it had never written.
+
+2. **Two cursors from one expression, one clamped.** `streaming_ofdm_decode.cpp:915-916`:
+   `correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame)` (wrap only) sits one
+   line above `setSearchFloorLocked(frame_sync_abs + min_frame)`, which has ALWAYS clamped to
+   `total_fed_` (`sync_ring_buffer.cpp:68-73`). Only one of the pair was guarded.
+   `sync_position_` itself can legitimately point past the searched window: it is a
+   TRAINING-START offset (`mc_dpsk_waveform.cpp:136-141` adds chirp + gap to a peak bounded
+   only by `window_len - chirp_len`, `chirp_sync.hpp:642-643`), giving a maximum of 124,800
+   for a 120,000-sample window. The SEARCH_BACKTRACK cushion normally absorbs it; on a COLD
+   ring (every pre-TX `reset()` rewinds and zero-fills, `streaming_decoder.cpp:1343-1393`) the
+   first search runs with `search_start = 0` and no cushion at all.
+
+3. **Digital silence read as PING evidence.** `evaluatePingFrame` forced `ratio = 0.0` when
+   `training_rms <= kMinTrainingRMSForPingRatio` (0.001), and `ping_by_silence = ratio <
+   0.5` — so the ONE observation that proves the buffer is invalid was the STRONGEST possible
+   evidence of a valid PING. A live RX path cannot produce ~0.0 (measured floor 0.009-0.011;
+   the gate's genuine PING reads train_RMS=0.3346). The rig logged
+   `PING detected ... ratio=0.000 chirp_corr=0.837` — a real chirp lock with a fabricated
+   payload verdict — which then set a search floor walling off the genuine CONNECT_ACK for
+   2.5 s.
+
+**Causal chain to the deadlock.** cold ring -> no backtrack cushion -> detector offset past
+live -> readiness gate defeated by the same modular bug -> decode reads zeroes -> phantom
+PING -> unclamped cursor parks in the future -> alias detonates the shed -> search blind 2.5 s
+-> CONNECT_ACK missed -> responder's rescue retry disarmed by an unrelated false
+`Accepted OFDM DATA sync (corr=0.59)` -> permanent half-open, 420 s.
+
+**Fixes (all default-ON; correctness, not tuning).**
+- `sync_controller.cpp` — invariant `unsearched <= total_fed_`. You cannot have more
+  unsearched data than you have ever received; the invariant holds under every wrap state and
+  needs no knowledge of which writer misbehaved, so it catches the whole family. Violation
+  logs ERROR and re-anchors the cursor to the write head.
+- `streaming_sync_acquisition.cpp` — clamp `sync_position_` at its SOURCE. 15+ downstream
+  `correlation_pos_` writers are all of the form `sync_position_ + <len>`, so a source that
+  can never exceed live audio cannot produce a cursor in the future. One edit, not 26.
+- `streaming_frame_policy.hpp` — `buffer_invalid` when `training_rms <= 0.001`; suppresses
+  `ping_by_silence`, `ping_by_chirp_lock` AND `is_ping`. Suppressing the silence path alone is
+  insufficient: the chirp-lock route reaches the same verdict because zero `data_rms`
+  trivially clears `kPingChirpLockMaxDataRMS` (0.16). Keyed on TRAINING rms specifically so
+  the low-SNR PING path (#70), which accepts weak payloads via `data_rms`/PATH2, is unaffected.
+
+**Verification.** `test_streaming_frame_policy` 47/47 — replays the rig's exact inputs
+(zero-filled slice, chirp_corr 0.837, no LDPC attempt) and requires no ping verdict by EITHER
+route, plus a genuine low-level PING that must still detect, plus the threshold boundary.
+One pre-existing assertion was CORRECTED: it required `evaluatePingRMS(nullptr, 0)` to
+classify as a PING — the same defect in miniature. Safe to change: that wrapper has no
+production callers (verified by grep); the only production entry is
+`streaming_ofdm_decode.cpp:843`. Full suite 99/99. Faithful gate
+`gui_qso_scenario.sh --channel good --snr-db 20` PASS, 2350 bps, CRC ok, and neither new
+guard fired spuriously.
+
+**Audit provenance.** 65-agent adversarial audit, 15 findings confirmed / 44 refuted; the
+load-bearing file:line claims were re-verified by hand before acting.
+
+---
+
 ### BUG-DECODE-BACKLOG-COLLISIONS: under deep-fade search thrash the decoder falls 10-20 s behind LIVE audio — every receiver response (ACK, backstop, adopt) leaves stale, colliding with the sender's already-airing recovery bursts
 - Status: **OPEN — pinned 2026-07-07 (F176 rig, MPG@20).** Hard evidence: a burst
   AIRED at t≈218, its anchor was ACCEPTED by the decoder at t≈239 (**~20 s of
