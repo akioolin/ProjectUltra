@@ -448,12 +448,44 @@ SearchWindowResult SyncController::acquireSearchWindow(
             return result;
         }
 
-        // Calculate unsearched data available
+        // Calculate unsearched data available.
+        //
+        // BUG-SYNC-CURSOR-AHEAD (2026-07-30): the else-branch below is a raw modular ring
+        // distance and it is correct ONLY if the ring has wrapped. If correlation_pos_ is
+        // instead simply AHEAD of write_pos_ — which happens whenever a cursor is parked at
+        // sync_position_ + frame_len past live audio (streaming_ofdm_decode.cpp writes 15+
+        // such cursors, none clamped, unlike their already-clamped sibling
+        // setSearchFloorLocked) — this returns capacity - lead, i.e. a phantom near-full
+        // buffer. On the Pi 5 that printed as "LOAD-SHED 2187129 samples (45.6 s) — search
+        // fell behind live" when only 2.6 s of audio had EVER been fed. The search had not
+        // fallen behind at all; it was 1.8 s ahead. Reconstruction:
+        //     shed 2187129 + backlog_cap 124800 = 2311929 = 2400000 - 88071
+        // i.e. a cursor 88071 samples (1.835 s) in the future.
+        //
+        // GUARD: unsearched can never exceed the number of samples ever fed. That invariant
+        // holds under every wrap state and needs no knowledge of which writer misbehaved, so
+        // it catches the whole family rather than one instance. Violation means the cursor is
+        // ahead of live; the only sound recovery is to treat the search as caught up (there
+        // is by definition nothing beyond live to search) and re-anchor the cursor to the
+        // write head so the next pass starts from real audio.
         size_t unsearched;
         if (ring_.write_pos_ >= ring_.correlation_pos_) {
             unsearched = ring_.write_pos_ - ring_.correlation_pos_;
         } else {
             unsearched = ring_.buffer_capacity_samples_ - ring_.correlation_pos_ + ring_.write_pos_;
+        }
+        if (unsearched > ring_.total_fed_) {
+            static int cursor_ahead_count = 0;
+            if (++cursor_ahead_count % 20 == 1) {
+                LOG_MODEM(ERROR,
+                          "[%s] searchForSync: CURSOR AHEAD OF LIVE — unsearched=%zu > "
+                          "total_fed=%zu (corr_pos=%zu write_pos=%zu). Impossible state; "
+                          "re-anchoring to the write head (x%d)",
+                          log_prefix_.c_str(), unsearched, ring_.total_fed_,
+                          ring_.correlation_pos_, ring_.write_pos_, cursor_ahead_count);
+            }
+            ring_.correlation_pos_ = ring_.write_pos_;
+            unsearched = 0;
         }
 
         // LOAD-SHED (BUG-DECODE-BACKLOG-COLLISIONS, F176/F186): under deep-fade

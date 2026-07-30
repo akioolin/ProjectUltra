@@ -63,6 +63,10 @@ struct PingFrameDecision {
     float idle_noise_rms = 0.0f;   // 0 = caller had no valid idle-noise estimate
     float data_inband_rms = 0.0f;  // gap RMS through the in-band FIR (0 = not measured)
     bool gap_is_noise = false;     // noise-relative payload-absence verdict
+    // BUG-SYNC-CURSOR-AHEAD: the training window read digital silence, which a live RX
+    // path cannot produce (measured floor 0.009-0.011). Means the slice covered unwritten
+    // ring memory — the decode is invalid, not a PING.
+    bool buffer_invalid = false;
 };
 
 using PingRMSDecision = PingFrameDecision;
@@ -87,6 +91,26 @@ inline PingFrameDecision evaluatePingFrame(
     const size_t check_len = std::min(count - check_start, rms_check_samples);
     decision.data_rms = rms(samples ? samples + check_start : nullptr, check_len);
 
+    // BUG-SYNC-CURSOR-AHEAD (2026-07-30): DIGITAL SILENCE IS UNWRITTEN MEMORY, NOT A PING.
+    //
+    // A training window whose RMS is at or below kMinTrainingRMSForPingRatio (0.001) cannot
+    // come from a live receiver. The measured noise floor on real hardware is 0.009-0.011
+    // (Pi 5 rig, CCA and RMS-skip lines), an order of magnitude above it; even a disconnected
+    // input carries dither. The only way to read ~0.0 is to slice ring memory that was never
+    // written — reset() zero-fills the whole 50 s buffer (streaming_decoder.cpp:1393).
+    //
+    // Before this change that condition forced ratio = 0.0, which is the STRONGEST POSSIBLE
+    // PING EVIDENCE (ping_by_silence = ratio < threshold). So the one observation that proves
+    // the buffer is invalid was being read as proof of a valid PING. On the rig a real chirp
+    // locked at corr=0.837, the decoder sliced past the write head into zeroes, and the log
+    // printed "PING detected ... ratio=0.000" — a fabricated frame that then set a search
+    // floor walling off the genuine CONNECT_ACK for 2.5 s.
+    //
+    // It must be the strongest possible REJECT instead. Keyed on training_rms specifically:
+    // the low-SNR PING path (#70) deliberately accepts weak/flooded payloads via data_rms and
+    // PATH2, and near-zero DATA rms is physically ordinary (a genuine silent gap). Near-zero
+    // TRAINING rms is not — the training symbols are what the transmitter just sent.
+    decision.buffer_invalid = (decision.training_rms <= kMinTrainingRMSForPingRatio);
     decision.ratio = (decision.training_rms > kMinTrainingRMSForPingRatio)
         ? decision.data_rms / decision.training_rms
         : 0.0f;
@@ -96,7 +120,11 @@ inline PingFrameDecision evaluatePingFrame(
     decision.ldpc_decode_succeeded = ldpc_decode_succeeded;
     decision.ldpc_magic_valid = ldpc_magic_valid;
 
-    decision.ping_by_silence = decision.ratio < kPingMaxDataToTrainingRMSRatio;
+    // An invalid buffer can never be evidence FOR a ping. Suppress both ping paths and
+    // the final verdict; the caller then treats this as "no frame here" and keeps searching
+    // real audio instead of fabricating one and walling off the region behind a search floor.
+    decision.ping_by_silence =
+        !decision.buffer_invalid && decision.ratio < kPingMaxDataToTrainingRMSRatio;
     const bool chirp_signature_real =
         chirp_corr >= kPingCorrFloor &&
         std::abs(gap_error_samples) <= kPingMaxGapError;
@@ -131,6 +159,22 @@ inline PingFrameDecision evaluatePingFrame(
     decision.ping_by_chirp_lock =
         chirp_signature_real && no_valid_frame &&
         (!ldpc_decode_attempted || payload_energy_absent);
+    // BUG-SYNC-CURSOR-AHEAD: suppressing ping_by_silence alone is NOT enough. The chirp-lock
+    // path reaches the same verdict by a different route: on the rig the chirp signature was
+    // genuinely real (corr=0.837 >= kPingCorrFloor), no LDPC frame validated, and
+    // payload_energy_absent is satisfied by data_rms <= kPingChirpLockMaxDataRMS (0.16) —
+    // which zero-filled memory trivially meets. So an unwritten slice would still have been
+    // classified as a PING through ping_by_chirp_lock.
+    //
+    // An invalid slice must yield NO verdict in either direction. The chirp detection itself
+    // remains real information (it is what put us here), but nothing can be concluded about a
+    // payload that was never read; the caller must keep searching real audio rather than
+    // fabricate a frame and wall the region off behind a search floor.
+    if (decision.buffer_invalid) {
+        decision.ping_by_chirp_lock = false;
+        decision.is_ping = false;
+        return decision;
+    }
     decision.is_ping = decision.ping_by_silence || decision.ping_by_chirp_lock;
     return decision;
 }

@@ -46,8 +46,18 @@ void test_rms_and_ping_detection() {
     CHECK(!data_decision.is_ping, "data energy after training should not be ping");
     CHECK_CLOSE(data_decision.ratio, 1.0f, 0.0001f, "data RMS ratio");
 
+    // CHANGED 2026-07-30 (BUG-SYNC-CURSOR-AHEAD). This previously asserted that an EMPTY
+    // buffer (nullptr, 0 samples) classifies as a PING — the same defect that deadlocked the
+    // rig, in miniature: "no data at all" was the strongest possible ping evidence, because
+    // rms()==0 forced ratio=0 which trivially clears kPingMaxDataToTrainingRMSRatio.
+    //
+    // Safe to change: evaluatePingRMS has NO production callers (verified by grep across
+    // src/) — it is a test-only convenience wrapper. The single production entry point is
+    // evaluatePingFrame at streaming_ofdm_decode.cpp:843.
     auto silent = evaluatePingRMS(nullptr, 0);
-    CHECK(silent.is_ping, "silence should classify as ping-compatible chirp-only frame");
+    CHECK(silent.buffer_invalid, "an empty buffer is invalid input, not a signal");
+    CHECK(!silent.is_ping,
+          "an empty buffer must NOT classify as a ping — nothing was measured");
 }
 
 void test_ping_chirp_lock_fallback() {
@@ -168,6 +178,67 @@ void test_consumed_samples_policy() {
 
 }  // namespace
 
+
+// ── BUG-SYNC-CURSOR-AHEAD: an unwritten slice must never classify as a PING ────
+// Reproduces the exact rig failure of 2026-07-30 (Pi 5, IONOS). The sync cursor ran past
+// the write head, the decoder sliced ring memory that reset() had zero-filled, and the
+// classifier read the resulting digital silence as the STRONGEST POSSIBLE ping evidence:
+//
+//   [PI5] PING detected: path1=1 path2=0 ratio=0.000 chirp_corr=0.837 ldpc_ok=skipped
+//
+// That fabricated frame then set a search floor that walled off the genuine CONNECT_ACK
+// for 2.5 s, and the connection deadlocked for 420 s.
+//
+// A live receiver cannot produce ~0.0 RMS: the measured floor on that radio was
+// 0.009-0.011, an order of magnitude above kMinTrainingRMSForPingRatio (0.001), and even a
+// disconnected input carries dither. Digital silence in the TRAINING window can only mean
+// unwritten memory.
+void test_unwritten_slice_is_not_a_ping() {
+    const size_t n = kPingTrainingSkipSamples + kPingRMSCheckSamples;
+    std::vector<float> zeros(n, 0.0f);
+
+    // The rig's exact conditions: real chirp lock, no LDPC attempt, zero-filled slice.
+    auto d = evaluatePingFrame(zeros.data(), zeros.size(),
+                               kPingTrainingSkipSamples, kPingRMSCheckSamples,
+                               /*chirp_corr=*/0.837f, /*gap_error_samples=*/-27.0f,
+                               /*ldpc_decode_succeeded=*/false, /*ldpc_magic_valid=*/false,
+                               /*ldpc_decode_attempted=*/false);
+    CHECK(d.buffer_invalid, "a zero-filled training window must be flagged invalid");
+    CHECK(!d.ping_by_silence, "an invalid buffer must not satisfy ping-by-silence");
+    CHECK(!d.ping_by_chirp_lock,
+          "an invalid buffer must not satisfy ping-by-chirp-lock either — the chirp was "
+          "real (0.837) and zero data_rms trivially clears kPingChirpLockMaxDataRMS, so "
+          "suppressing only the silence path would leave this route open");
+    CHECK(!d.is_ping, "an unwritten slice must yield NO ping verdict");
+
+    // A GENUINE ping at the measured live noise floor must still be detected. This is the
+    // regression guard for the low-SNR PING path (#70): the reject keys on TRAINING rms
+    // (physically impossible near zero), never on data_rms (a real silent gap reads ~0).
+    std::vector<float> real(n, 0.0f);
+    for (size_t i = 0; i < kPingTrainingSkipSamples; ++i) {
+        real[i] = (i % 2 == 0) ? 0.05f : -0.05f;   // training present, well above the floor
+    }
+    for (size_t i = kPingTrainingSkipSamples; i < n; ++i) {
+        real[i] = (i % 2 == 0) ? 0.010f : -0.010f; // payload area = ambient noise floor
+    }
+    auto g = evaluatePingFrame(real.data(), real.size(),
+                               kPingTrainingSkipSamples, kPingRMSCheckSamples,
+                               /*chirp_corr=*/0.837f, /*gap_error_samples=*/-27.0f,
+                               false, false, false);
+    CHECK(!g.buffer_invalid, "a real training window is not flagged invalid");
+    CHECK(g.is_ping, "a genuine low-level PING must still be detected");
+
+    // Boundary: exactly at the threshold counts as invalid (<=), just above does not.
+    std::vector<float> at(n, kMinTrainingRMSForPingRatio);
+    auto a = evaluatePingFrame(at.data(), at.size(), kPingTrainingSkipSamples,
+                               kPingRMSCheckSamples, 0.837f, -27.0f, false, false, false);
+    CHECK(a.buffer_invalid, "training rms exactly at the floor is invalid");
+    std::vector<float> above(n, kMinTrainingRMSForPingRatio * 4.0f);
+    auto b = evaluatePingFrame(above.data(), above.size(), kPingTrainingSkipSamples,
+                               kPingRMSCheckSamples, 0.837f, -27.0f, false, false, false);
+    CHECK(!b.buffer_invalid, "training rms above the floor is valid");
+}
+
 int main() {
     test_rms_and_ping_detection();
     test_ping_chirp_lock_fallback();
@@ -176,6 +247,7 @@ int main() {
     test_sync_recovery_gate();
     test_non_data_frame_detection();
     test_consumed_samples_policy();
+    test_unwritten_slice_is_not_a_ping();
 
     if (tests_failed != 0) {
         std::cout << "StreamingFramePolicy: " << (tests_run - tests_failed)

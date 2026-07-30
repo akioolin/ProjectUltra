@@ -776,7 +776,48 @@ void StreamingDecoder::searchForSync() {
 
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
-        sync_position_ = sync_controller_.ring_.wrapRingIndexLocked(search_start + sync_result.start_sample);
+        // BUG-SYNC-CURSOR-AHEAD (2026-07-30): CLAMP THE DETECTOR TO LIVE AUDIO.
+        //
+        // sync_result.start_sample is a TRAINING-START offset, i.e. the detected preamble
+        // position PLUS the rest of the preamble structure. For MC-DPSK that is
+        // down_chirp_start + chirp_samples + gap_samples (mc_dpsk_waveform.cpp:136-141), and
+        // the down-chirp peak is only bounded by window_len - chirp_len
+        // (chirp_sync.hpp:642-643). On a 120000-sample window that yields a maximum
+        // start_sample of 124800 — GREATER THAN THE WINDOW ITSELF. So a detection near the
+        // end of the window legitimately points PAST the last audio the receiver has.
+        //
+        // Normally the SEARCH_BACKTRACK cushion absorbs the overshoot, but on a COLD ring
+        // (every pre-TX reset() rewinds and zero-fills, streaming_decoder.cpp:1343-1393) the
+        // first search runs with search_start = 0 and no cushion at all. The result on the
+        // Pi 5: sync_position_ landed 1920 samples past write_pos_, the readiness gate below
+        // (which uses the same unvalidated modular distance) saw a near-full buffer and let
+        // the decoder slice ZERO-FILLED memory, and every cursor derived from
+        // sync_position_ + frame_len inherited the overshoot.
+        //
+        // Clamping here fixes the whole family at the source: 15+ downstream writers of
+        // correlation_pos_ are all of the form sync_position_ + <len>, so a sync_position_
+        // that can never exceed live audio cannot produce a cursor in the future. This
+        // mirrors setSearchFloorLocked (sync_ring_buffer.cpp:68-73), which has always been
+        // clamped — the two are written from the same expression two lines apart in
+        // streaming_ofdm_decode.cpp:915-916 and only one of them was guarded.
+        {
+            const size_t detected_abs = search_start + sync_result.start_sample;
+            if (detected_abs > sync_controller_.ring_.total_fed_) {
+                static int clamp_count = 0;
+                if (++clamp_count % 20 == 1) {
+                    LOG_MODEM(WARN,
+                              "[%s] searchForSync: detector start_sample points PAST live "
+                              "audio (abs=%zu > total_fed=%zu, overshoot=%zu); clamping to "
+                              "the write head (x%d)",
+                              log_prefix_.c_str(), detected_abs,
+                              sync_controller_.ring_.total_fed_,
+                              detected_abs - sync_controller_.ring_.total_fed_, clamp_count);
+                }
+                sync_position_ = sync_controller_.ring_.write_pos_;
+            } else {
+                sync_position_ = sync_controller_.ring_.wrapRingIndexLocked(detected_abs);
+            }
+        }
 
         const bool timing_cfo_genie =
             qam16GenieTimingCfoEnabled() &&
