@@ -1,6 +1,7 @@
 // ModemEngine - Main implementation
 // Constructor, destructor, configuration, and TX functions
 
+#include <chrono>
 #include "modem_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "ultra/logging.hpp"
@@ -494,6 +495,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
         "phy", "frame.tx", fields);
 
+    if (std::getenv("ULTRA_TXLAT_DIAG")) {
+        // Logs the SAMPLE COUNT so burst airtime is measured (n/48000) rather than modelled
+        // from data_ms — the modelling error is what inflated the old turnaround figure.
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        LOG_MODEM(WARN, "TXLAT audio_ready us=%lld n=%zu",
+                  static_cast<long long>(now_us), samples.size());
+    }
     auto processed = postProcessTx(samples);
     if (is_ofdm && streaming_decoder_) {
         const size_t turn_samples =
@@ -650,6 +659,14 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
               protocol::waveformModeToString(waveform_mode_),
               modulationToString(data_modulation_));
 
+    if (std::getenv("ULTRA_TXLAT_DIAG")) {
+        // Logs the SAMPLE COUNT so burst airtime is measured (n/48000) rather than modelled
+        // from data_ms — the modelling error is what inflated the old turnaround figure.
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        LOG_MODEM(WARN, "TXLAT audio_ready us=%lld n=%zu",
+                  static_cast<long long>(now_us), samples.size());
+    }
     auto processed = postProcessTx(samples);
     if (protocol::isOFDMMode(waveform_mode_) && streaming_decoder_) {
         const size_t turn_samples =

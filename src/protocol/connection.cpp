@@ -1,6 +1,7 @@
 // Connection state machine - core logic
 // Frame handlers are in connection_handlers.cpp
 
+#include <chrono>
 #include "connection.hpp"
 #include "connection_policy.hpp"
 #include "waveform_selection.hpp"
@@ -1900,6 +1901,18 @@ void Connection::sendNextFileChunk() {
 // caller must extend the wire format; not gated for v1.
 bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
+    // TXLAT (ULTRA_TXLAT_DIAG): timestamp the two boundaries that bracket a half-duplex
+    // turnaround on the SENDER's own clock, so the interval can be decomposed without
+    // mixing clocks across stations. This measurement retired two wrong figures on
+    // 2026-07-30 (see CHANGELOG): encode+ARQ is 62-89 ms, not 2.5 s, and measured airtime
+    // is 81-84% of wall clock rather than the 68% a modelled-airtime budget implied.
+    // WARN level so it survives the default log level; env-gated so it costs nothing off.
+    if (std::getenv("ULTRA_TXLAT_DIAG")) {
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        LOG_MODEM(WARN, "TXLAT ack_heard us=%lld", static_cast<long long>(now_us));
+    }
+
     if (state_ != ConnectionState::CONNECTED) return false;
 
     // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3, gated on
