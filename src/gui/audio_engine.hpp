@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <SDL.h>
 #include <vector>
 #include <queue>
@@ -169,12 +170,35 @@ private:
     // Period size requested from SDL2 (samples per callback). SDL2 uses a
     // 2-period buffer internally, so total ALSA buffer = 2 × buffer_size_.
     // 8192 → 170 ms period → 340 ms total: comfortable cushion even on
-    // USB-1.1 audio dongles and Linux scheduler jitter. Latency cost is
-    // negligible for an HF modem — a single OFDM data frame is 660 ms+ of
-    // audio anyway. Smaller buffers (1024-4096) work on macOS/CoreAudio
-    // but were causing XRUNs on the Pi 5 + C-Media USB-1.1 dongle test rig
-    // (avail_max running at 96% of buffer capacity → drops on any jitter).
-    int buffer_size_ = 8192;
+    // USB-1.1 audio dongles and Linux scheduler jitter. Smaller buffers
+    // (1024-4096) work on macOS/CoreAudio but were causing XRUNs on the Pi 5 +
+    // C-Media USB-1.1 dongle test rig (avail_max running at 96% of buffer
+    // capacity → drops on any jitter).
+    //
+    // "LATENCY COST IS NEGLIGIBLE" — MEASURED FALSE 2026-07-30. That claim compared
+    // the buffer against one frame's duration, which is the wrong comparison. On a
+    // HALF-DUPLEX link this buffer is crossed FOUR times per turnaround (sender TX
+    // out → receiver RX in → receiver ACK out → sender RX in), and turnaround is
+    // 16-19% of wall clock. Rig decomposition on the sender's own clock put the gap
+    // from burst-end to ACK-heard at 1.79-1.91 s, of which only ~760 ms is named
+    // (lead-in/tail 200 + decode 2 + ACK lead-in 150 + ACK tone 408). The unnamed
+    // ~1.1 s matches 4 × 170 ms plus SDL double-buffering. The receiver itself is
+    // NOT slow: "Burst group complete" → "TX ToneBurstAck" measures 2 ms.
+    //
+    // It also explains why the gap LOOKS variable on the waterfall — sometimes the
+    // ACK butts against the OFDM, sometimes ~2 s follows it: the delay depends on
+    // where each event lands within the callback period.
+    //
+    // ULTRA_AUDIO_BUFFER overrides it (samples, clamped 64..16384). Default UNCHANGED
+    // at 8192 — the Pi 5 XRUN finding above is real hardware evidence and this stays
+    // opt-in until a rig A/B says otherwise. macOS/CoreAudio is the safe end to test.
+    int buffer_size_ = [] {
+        if (const char* e = std::getenv("ULTRA_AUDIO_BUFFER"); e && *e) {
+            const int n = std::atoi(e);
+            if (n >= 64 && n <= 16384) return n;
+        }
+        return 8192;
+    }();
 
     // Buffer limits (prevent unbounded growth if main loop stalls)
     static constexpr size_t MAX_RX_BUFFER_SAMPLES = 96000;  // 2 seconds at 48kHz
