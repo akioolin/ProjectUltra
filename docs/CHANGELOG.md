@@ -10,6 +10,95 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-30 — RIG (IONOS MPG@20): the anchor table's Good column inverts rung ordering
+
+### 1. The measurement
+
+Real hardware, IONOS at MPG@20, 50 KB bench file (md5 bc8c74571d2277ce7f194620ded9319b
+verified on EVERY run), Mac = receiver/rate-authority, Pi5 = sender. Arms interleaved per pair so
+each shares a fade epoch. Fix = `ULTRA_RUNG_CLASS_ANCHOR=1`.
+
+| pair | base | fix | delta | crater suspects b/f | frames aired b/f |
+|---|---|---|---|---|---|
+| standalone | 1.51 | 1.86 | +23% | 5/2 | 135/121 |
+| 1 | 1.30 | 1.64 | +26% | 5/3 | 144/132 |
+| 2 | 1.50 | 1.80 | +20% | 6/4 | 142/123 |
+| 3 | 1.55 | 1.49 | **-4%** | **1/10** | 130/145 |
+
+All eight runs CRC-clean. Mean base 1.47, mean fix 1.70 (+16%), but NOT unanimous, and pair 3
+inverted with a 10x crater increase.
+
+### 2. Pair 3 explains itself, and it condemns the change
+
+Rung mix by total codewords (rung proxy):
+
+| | 8-CW frames | 12-CW frames |
+|---|---|---|
+| p3 base | 115 | 15 |
+| p3 fix | 97 | **48** |
+
+The "conservative" knob made the ladder use the DENSER rung 3x MORE. Cause: the Good-vs-AWGN
+anchor gaps are NOT uniform. QPSK R3/4 goes 15.0 -> 20.0 dB (**+5**), 8PSK R2/3 goes 16.0 -> 17.0
+(**+1**). `connection.cpp`'s predictive climb scans highest-rung-first and takes the first that
+passes, so under the class-aware anchor 8PSK R2/3 (needs 17) became EASIER to satisfy than QPSK
+R3/4 (needs 20). **The change inverts the ladder ordering.** `ULTRA_RUNG_CLASS_ANCHOR` stays
+DEFAULT-OFF and should not be pursued in this form.
+
+### 3. The defect underneath, which is the real finding
+
+The anchor table's GOOD column claims 8PSK R2/3 holds at **17.0 dB** while QPSK R3/4 needs
+**20.0** — a denser constellation at higher spectral efficiency (2.0 vs 1.5 bits/carrier)
+requiring LESS SNR. Measured truth from this session's FER sweep (9 rungs, seeds 7+11, n=80/point,
+SNR at which each rung first reaches <=10% FER on ITU Good): QPSK R3/4 **20 dB**, 8PSK R2/3
+**22 dB**. So 8PSK R2/3's Good anchor is **5 dB below its own FER floor**.
+
+That is not an accident, and the in-tree comment says so: *"GOOD 19.0 -> 17.0 (2026-07-26,
+MEASURED): the anchor belongs at the THROUGHPUT CROSSOVER, not the FER<=10% floor"* — deliberately
+placed where a denser rung carrying more retransmissions still wins on delivered bps.
+
+**The bug is that ONE CONSTANT SERVES TWO INCOMPATIBLE PURPOSES.** As a LADDER-SELECTION
+threshold, a throughput-crossover anchor is defensible. As the CAPACITY CALIBRATION inside
+`rungPredictedSustainable()` (`alpha = -A/ln(1-c)`, A = 10^(anchor/10)) it must be the FER floor,
+because the predictor asks "will this rung decode", not "will it win on goodput". Feeding a
+crossover constant into a decodability predictor makes it optimistic by exactly the gap — 5 dB for
+8PSK R2/3.
+
+**The fix is to separate the two constants**, not to change which column is read. That is a
+table/API change and is NOT attempted here.
+
+### 4. Independent rig confirmation of over-commit, in one consistent scale
+
+From the baseline rig log, clean vs cratered frames grouped by total codewords — same quantity,
+same units, same log, so no cross-scale inference:
+
+| total_cw | clean n | clean median | clean min | crater n | crater median | crater max |
+|---|---|---|---|---|---|---|
+| 8 | 118 | 18.0 | 9.2 | 6 | 11.5 | 12.6 |
+| **12** | **2** | **17.0** | **16.7** | **5** | **13.8** | **14.0** |
+
+The 12-CW rung (8PSK R2/3) separates PERFECTLY: every crater <=14.0 dB, every success >=16.7 dB.
+The ladder attempted it 7 times and cratered 5 — a **71% failure rate** — committing at ~14 dB to a
+rung that demonstrably needs >=16.7. That is over-commit measured without any scale conversion.
+
+### 5. Two of my own claims retracted
+
+- **"6-9 dB of over-commit" (earlier today) was based on a bad comparison.** I compared
+  `ofdm_internal_snr_db` (13.8) against a DIAL-referenced requirement (20 dB). Checked properly:
+  sim at dial 20 reads internal 18.2-18.4; rig at MPG@20 reads internal median **17.33**
+  (range 6.45-23.23). The rig tracks the sim within ~1 dB — there is no hardware deficit, and the
+  5 flagged frames sat in the LOW TAIL (12.5-14.0), i.e. fade troughs, not the operating point.
+  The operator challenged this directly ("we cant run 4psk 3/4 on snr 20 good fading?!") and was
+  right: QPSK R3/4 does work at Good @20.
+- **The stale-config detector's threshold is wrong.** Its "healthy acquisition" gate is an
+  ABSOLUTE `ofdm_internal_snr_db >= 12`, and on real fading 12 dB IS a trough — so it counts
+  ordinary fade craters as suspects. Rig data shows 8/11 craters sit ABOVE the lowest clean frame,
+  so no absolute gate can separate them. It must be relative to what the rung in force requires.
+  The detector stays diagnostic-only; its counts are NOT a defect rate.
+
+`ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — Stale-config crater DETECTOR (diagnostic); the airtime analysis already existed
 
 ### 1. The correction that matters most: this analysis was already in the repo
