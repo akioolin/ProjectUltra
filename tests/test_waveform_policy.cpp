@@ -456,6 +456,39 @@ void test_waveform_factory() {
 
 }  // namespace
 
+
+// FER-FLOOR TABLE ORDERING INVARIANT (2026-07-30).
+//
+// Within a fading class, a rung with HIGHER spectral efficiency must require MORE SNR.
+// The predictive climb (connection.cpp) scans highest-rung-first and takes the FIRST that
+// passes, so an inversion makes a DENSER rung preferentially selected over a sparser one.
+//
+// Not hypothetical. ULTRA_RUNG_CLASS_ANCHOR read the GOOD column of the ladder-SELECTION
+// table, whose Good-vs-AWGN gaps are non-uniform (QPSK R3/4 +5 dB, 8PSK R2/3 only +1 dB).
+// That inverted the ordering and, on the IONOS rig at MPG@20, tripled 12-CW usage
+// (15 -> 48 frames) and took craters from 1 to 10 within a single interleaved pair.
+// kMeasuredFerFloor avoids that failure mode because every entry is the same KIND of
+// quantity (the measured <=10% FER point) -- but only while it stays ordered, hence this.
+void test_fer_floor_monotonic() {
+    using namespace ultra::protocol;
+    for (int cls = 0; cls < 3; ++cls) {
+        const float fidx = (cls == 0) ? 0.05f : (cls == 1) ? 0.50f : 0.95f;
+        float prev_eta = -1.0f;
+        float prev_snr = -1.0e9f;
+        for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+            const CoherentPick p = coherentRungFromIndex(r);
+            const float snr = rungFerFloorDb(p.mod, p.rate, fidx);
+            if (snr >= kRungDisabledDb) continue;    // unmeasured cell: no constraint
+            const float eta = rungSpectralEfficiency(r);
+            if (prev_eta >= 0.0f && eta > prev_eta) {
+                CHECK(snr >= prev_snr,
+                      "FER-floor table is monotone in spectral efficiency per class");
+            }
+            if (eta > prev_eta) { prev_eta = eta; prev_snr = snr; }
+        }
+    }
+}
+
 int main() {
     // ULTRA_ENTRY_CAP_R34 is read ONCE (static lambda): pin it OFF before the first
     // policy call so the knob-off checks are hermetic regardless of the parent env.
@@ -471,6 +504,7 @@ int main() {
     test_data_mode_policy();
     test_ofdm_chirp_qam16_configuration();
     test_waveform_factory();
+    test_fer_floor_monotonic();
 
     if (tests_failed != 0) {
         std::cout << "Waveform policy: " << (tests_run - tests_failed)
@@ -481,3 +515,4 @@ int main() {
     std::cout << "Waveform policy: " << tests_run << "/" << tests_run << " passed\n";
     return 0;
 }
+    

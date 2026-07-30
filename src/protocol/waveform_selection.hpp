@@ -503,6 +503,66 @@ inline float rungClassAnchorDb(Modulation mod, CodeRate rate, float fading_index
 // margin_db shifts every carrier down (climb hysteresis + crater penalty ride
 // here). Modulation-adaptive by construction: no per-mod branches; geometry
 // enters only through the rung's own measured anchor.
+// ============================================================================
+// MEASURED FER-FLOOR ANCHORS — a SECOND anchor table, deliberately separate.
+// ============================================================================
+//
+// WHY A SECOND TABLE EXISTS. `min_snr_db` in kCoherentLadder is a LADDER-SELECTION
+// threshold, and by explicit design it is NOT the decodability floor. The in-tree note
+// on 8PSK R2/3 says so: "GOOD 19.0 -> 17.0 (2026-07-26, MEASURED): the anchor belongs at
+// the THROUGHPUT CROSSOVER, not the FER<=10% floor" — placed where a denser rung
+// carrying more retransmissions still wins on delivered bps.
+//
+// That is defensible for CHOOSING a rung. It is wrong as the capacity calibration inside
+// rungPredictedSustainable(), whose alpha = -A/ln(1-c) answers "will this rung DECODE",
+// not "will it win on goodput". Feeding a crossover constant to a decodability predictor
+// makes it optimistic by exactly the gap. ONE CONSTANT WAS SERVING TWO INCOMPATIBLE
+// PURPOSES; this separates them.
+//
+// EVIDENCE (2026-07-29/30). The Good column claims 8PSK R2/3 holds at 17.0 dB while QPSK
+// R3/4 needs 20.0 — a denser constellation at HIGHER spectral efficiency (2.0 vs 1.5
+// bits/carrier) requiring LESS SNR, which is not physical. Confirmed on the IONOS rig at
+// MPG@20 with clean/crater frames grouped by codeword count (one log, one scale, no
+// conversion): the 12-CW rung separates perfectly — every crater <=14.0 dB, every success
+// >=16.7 dB — and the ladder attempted it 7 times, cratering 5 (71%), committing at ~14 dB.
+//
+// VALUES: the SNR at which each rung first reaches <=10% FER, measured with
+// tools/measure_ack_fer over 9 rungs x {AWGN, Good, Moderate} x SNR 6-28 dB step 2 x
+// seeds {7,11} x n=40 (n=80 per point). Provenance is the frame path at LONG CP.
+//
+// kRungDisabledDb means "no swept SNR in 6-28 dB reached 10% FER", which is the honest
+// entry for every Moderate cell — Moderate has an SNR-INDEPENDENT FER FLOOR (QPSK R1/2
+// bottoms at ~14% near 12 dB and plateaus ~19% out to 28 dB). A disabled entry makes the
+// predictor REFUSE the rung, which is the correct conservative answer: on that class no
+// rung is predicted to hold a 10% target at any SNR we can measure.
+inline constexpr CoherentRung kMeasuredFerFloor[] = {
+    // mod              rate             AWGN   GOOD             MODERATE
+    {Modulation::QPSK,  CodeRate::R1_4, { 6.0f, 12.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R1_2, { 6.0f, 14.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R2_3, { 8.0f, 16.0f,           kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R3_4, { 8.0f, 20.0f,           kRungDisabledDb}},
+    {Modulation::QAM8,  CodeRate::R2_3, {14.0f, 22.0f,           kRungDisabledDb}},
+    {Modulation::QAM8,  CodeRate::R3_4, {14.0f, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R1_2, {14.0f, 20.0f,           kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R2_3, {16.0f, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R3_4, {16.0f, kRungDisabledDb, kRungDisabledDb}},
+};
+
+// Measured decodability floor for one rung on the CURRENT fading class. Unlike
+// rungClassAnchorDb() there is NO fallback to another column: an unmeasured or
+// never-reached cell returns kRungDisabledDb so the predictor refuses the rung rather
+// than borrowing a more permissive class's number. Borrowing is precisely how the
+// class-blind minimum became AWGN-calibrated on every channel.
+inline float rungFerFloorDb(Modulation mod, CodeRate rate, float fading_index) {
+    const int cls = static_cast<int>(classifyFading(fading_index));
+    for (const auto& r : kMeasuredFerFloor) {
+        if (r.mod == mod && r.rate == rate) {
+            return r.min_snr_db[cls];
+        }
+    }
+    return kRungDisabledDb;
+}
+
 // ULTRA_RUNG_CLASS_ANCHOR (2026-07-29, default-OFF): calibrate the predictor on the
 // anchor for the CURRENT fading class instead of the class-blind minimum.
 //
@@ -537,9 +597,25 @@ inline bool rungPredictedSustainable(const float* gamma_lin, size_t n,
         const char* e = std::getenv("ULTRA_RUNG_CLASS_ANCHOR");
         return e != nullptr && e[0] != '\0' && e[0] != '0';
     }();
-    const float anchor_db = (use_class_anchor && fading_index >= 0.0f)
-        ? rungClassAnchorDb(mod, rate, fading_index)
-        : calibrationAnchorDbFor(mod, rate);
+    // ULTRA_FER_FLOOR_ANCHOR (2026-07-30, default-OFF): calibrate on the MEASURED
+    // decodability floor rather than the ladder-selection anchor. See kMeasuredFerFloor
+    // above for why these must be different constants.
+    //
+    // NOTE this is NOT the same as ULTRA_RUNG_CLASS_ANCHOR, which merely read a different
+    // COLUMN of the same (crossover-based) table and was measured HARMFUL on the rig: the
+    // Good-vs-AWGN gaps are non-uniform (QPSK R3/4 +5 dB, 8PSK R2/3 +1 dB), so it inverted
+    // the ladder ordering and tripled 12-CW usage. Using a self-consistent FER-floor table
+    // avoids that failure mode because every entry is the same KIND of quantity.
+    const bool use_fer_floor = [] {
+        const char* e = std::getenv("ULTRA_FER_FLOOR_ANCHOR");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    const float anchor_db =
+        (use_fer_floor && fading_index >= 0.0f)
+            ? rungFerFloorDb(mod, rate, fading_index)
+            : (use_class_anchor && fading_index >= 0.0f)
+                ? rungClassAnchorDb(mod, rate, fading_index)
+                : calibrationAnchorDbFor(mod, rate);
     if (anchor_db >= kRungDisabledDb) return false;
     const float c = getCodeRateValue(rate);
     if (c <= 0.0f || c >= 1.0f) return false;

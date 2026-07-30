@@ -6,6 +6,7 @@
 #include "connection_policy.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
+#include "goodput_rate_controller.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
@@ -1154,8 +1155,21 @@ private:
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
+    // BUG-CONNECT-ACK-RESCUE-DISARM: bound how many times an accepted OFDM sync may postpone
+    // the CONNECT_ACK rescue. Unbounded deferral starves the recovery exactly as the old
+    // unconditional disarm destroyed it. Two burst airtimes is ample for a genuine burst to
+    // decode a frame and clear the rescue through the normal path.
+    static constexpr int kMaxConnectAckRescueDefers = 2;
+    int connect_ack_defer_count_ = 0;
     void updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater = false,
                                   float delivered_fraction = -1.0f);
+
+    // GOODPUT-MAXIMIZING RATE CONTROL (ULTRA_GOODPUT_RATE, default OFF). Replaces the
+    // SNR-anchor pick + corrective stack in updateRxAuthorityCommand when enabled; inert
+    // and untouched when off. See goodput_rate_controller.hpp for why it reads no SNR.
+    GoodputRateController goodput_ctl_;
+    std::chrono::steady_clock::time_point goodput_last_verdict_{};
+    bool goodput_last_verdict_valid_ = false;
 
 public:
     // F165 ANCHORED-BURST ACK BACKSTOP: the decoder accepted an expected full

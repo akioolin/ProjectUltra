@@ -766,6 +766,7 @@ void Connection::acceptCall() {
     // half-open (rig F225: Mac ACK faded at the Pi5, 0 retries, 240 s timeout).
     // Interval/budget are already airtime-/config-derived, mode-agnostic.
     connect_ack_retx_remaining_ = connectAckRetxBudget();
+    connect_ack_defer_count_ = 0;  // fresh rescue -> fresh defer budget
     const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
@@ -2561,6 +2562,75 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     const CoherentPick mapped = selectCoherentOFDM(snr_avg, eff_fading);
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
+
+    // ── GOODPUT-MAXIMIZING PATH (ULTRA_GOODPUT_RATE, default OFF) ────────────────
+    // REPLACES everything below, deliberately. The SNR-anchor pick plus its ~10
+    // correctives measured 10.6% WORSE than pinning 8PSK R2/3 on the rig (2026-07-30,
+    // both pairs of an interleaved MPG@20 A/B; the pinned arm never demoted even on the
+    // rough epoch). Layering a goodput rule ON TOP of that stack would keep the churn it
+    // exists to remove, so this returns early rather than composing.
+    //
+    // It reads NO SNR. That is the point: the anchor/scale chain has been the largest
+    // single source of wrong rate decisions here, and a controller that never consumes
+    // an SNR cannot be wrong about one. See goodput_rate_controller.hpp for the
+    // derivation and the hold guarantee.
+    if (goodputRateControllerEnabled()) {
+        // Window sized from the channel, not chosen: Tc = 0.423/f_d with f_d derived
+        // from the SAME fading index the rest of the controller uses, and the group
+        // cadence MEASURED from the interval between verdicts (this function runs once
+        // per burst group). First verdict has no interval yet and falls back to 10 s.
+        const auto now_tp = std::chrono::steady_clock::now();
+        float group_s = 10.0f;
+        if (goodput_last_verdict_valid_) {
+            const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now_tp - goodput_last_verdict_)
+                                   .count();
+            if (dt_ms > 1000 && dt_ms < 60000) group_s = static_cast<float>(dt_ms) / 1000.0f;
+        }
+        goodput_last_verdict_ = now_tp;
+        goodput_last_verdict_valid_ = true;
+        const float doppler = connection_policy::designDopplerForFadingIndex(eff_fading);
+        goodput_ctl_.configure(windowGroupsForCoherence(doppler, group_s), group_s);
+        // The ladder's own pick is a CEILING, not a command: it bounds which rungs are
+        // plausible at this SNR/class, while the measured goodput chooses within that.
+        // Without it the climb is an unbounded staircase that walks up until a rung
+        // breaks (rig: 2->3->4->5->8 into a 51.4%-FER rung in four windows).
+        goodput_ctl_.setCeiling(coherentRungIndexFor(mapped.mod, mapped.rate));
+
+        // delivered_fraction < 0 means the frame count was not measurable for this
+        // group; fall back to the binary outcome rather than inventing a number.
+        const float f = (delivered_fraction >= 0.0f)
+                            ? delivered_fraction
+                            : (all_ok ? 1.0f : 0.0f);
+        goodput_ctl_.observe(cur, f);
+        const auto decision = goodput_ctl_.decide(cur);
+        uint8_t gp_cmd = decision.rung;
+        if (gp_cmd != kRungIdxNone && gp_cmd != cur) {
+            // Same enabled-ladder discipline as the legacy path (F145): a command
+            // naming a disabled rung is unobeyable and pins a cratering rung forever.
+            const uint8_t snapped = snapRungIndexDownToEnabled(gp_cmd);
+            gp_cmd = (snapped != kRungIdxNone) ? snapped : cur;
+        }
+        rx_authority_cmd_ = gp_cmd;
+        if (gp_cmd != cur) {
+            const CoherentPick commanded = coherentRungFromIndex(gp_cmd);
+            LOG_MODEM(INFO,
+                      "Connection: GOODPUT-RATE verdict %s %s (idx %u -> %u) reason=%s "
+                      "f_window=%.3f break_even=%.3f window=%dg/%.1fs doppler=%.2f q=%.2f",
+                      modulationToString(commanded.mod), codeRateToString(commanded.rate),
+                      cur, gp_cmd, decision.reason, goodput_ctl_.windowedDeliveredFraction(),
+                      goodputBreakEvenDeliveredFraction(cur), goodput_ctl_.windowGroups(),
+                      group_s, doppler, quality);
+        } else {
+            LOG_MODEM(INFO,
+                      "Connection: GOODPUT-RATE hold idx %u reason=%s f_window=%.3f "
+                      "break_even=%.3f n=%d/%d q=%.2f",
+                      cur, decision.reason, goodput_ctl_.windowedDeliveredFraction(),
+                      goodputBreakEvenDeliveredFraction(cur), goodput_ctl_.observations(),
+                      goodput_ctl_.windowGroups(), quality);
+        }
+        return;
+    }
     // TWO-CRATER rule + CRATER-MARGIN memory (F122: 10 moves/283 s — a single
     // crater at a ~10 s decision quantum vs Tc 2-4 s is an irreducible deep null
     // the ARQ absorbs, NOT rate evidence; chasing singles paid the full-anchor +
@@ -4347,11 +4417,101 @@ void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
     // group-0 ACK latency. Gated on use_burst_transport_ so the normal OFDM
     // handshake (which keeps the rescue armed until a decoded frame) is unchanged.
     if (use_burst_transport_) {
+        // ULTRA_CONNECT_ACK_RESCUE_DEFER (default OFF) — RIG-REGRESSED, see below.
+        //
+        // The reasoning for deferring instead of disarming is still sound (a sync
+        // correlation is NOT proof the peer decoded our ACK; corr=0.59 and corr=0.80 both
+        // disarmed the rescue on the rig while the initiator had NOT received it, then
+        // retried nine times into a station that would never answer). But the FIX measured
+        // WORSE than the bug: 3/3 handshake attempts deadlocked with it on, against roughly
+        // 1-in-20 before.
+        //
+        // Mechanism, and the original comment below called it: releasing the rescue fires up
+        // to 6 CONNECT_ACK re-sends of 8.3 s each — ~50 s of the responder keyed up — while
+        // the initiator is transmitting its own CONNECT retries. Both stations keyed at once
+        // on a half-duplex medium is the exact collision the disarm existed to prevent. I
+        // read that comment as a timing concern and made it worse.
+        //
+        // Kept behind a knob rather than deleted because the underlying defect is REAL and
+        // still unfixed: a lost CONNECT_ACK has no recovery once the sync disarms it. The
+        // correct fix is a CHEAP rescue (a short control-frame re-ACK, not an 8.3 s MC-DPSK
+        // blast) plus a carrier-sense hold that actually covers the peer's TX — not simply
+        // re-enabling the expensive one. Do not default this on without that.
+        static const bool kRescueDefer = [] {
+            const char* e = std::getenv("ULTRA_CONNECT_ACK_RESCUE_DEFER");
+            return e != nullptr && e[0] == '1' && e[1] == '\0';
+        }();
+        if (!kRescueDefer) {
+            LOG_MODEM(INFO,
+                      "Connection: Accepted OFDM DATA sync (corr=%.2f); disarming CONNECT_ACK "
+                      "rescue (burst transport)",
+                      sync_correlation);
+            connect_ack_frame_.clear();
+            connect_ack_retx_remaining_ = 0;
+            return;
+        }
+        // BUG-CONNECT-ACK-RESCUE-DISARM (2026-07-30): DEFER, DO NOT DESTROY.
+        //
+        // The original reasoning was that an accepted OFDM data sync "proves" the initiator
+        // received our CONNECT_ACK, since it only transmits data after the handshake
+        // completes. The premise is sound but the inference is not: a SYNC CORRELATION IS
+        // NOT PROOF OF A PEER STATE TRANSITION. A correlation is a match against a template;
+        // it fires on the initiator's own MC-DPSK CONNECT retransmissions and on noise.
+        //
+        // Measured twice on the Pi 5 rig (2026-07-30): corr=0.59 and corr=0.80 both disarmed
+        // the rescue while the initiator had NOT received the ACK — it went on to log
+        // "Connect timeout, retrying via MC-DPSK (2/10)" nine more times into a responder
+        // that had already cleared connect_ack_frame_ and would never answer. In the first
+        // case every decode following the "accepted sync" read 1.1-2.7 dB EVM with the delay
+        // spread rejected, i.e. the sync was demonstrably not a real data burst. Result:
+        // permanent half-open, 420 s per attempt.
+        //
+        // The collision hazard the disarm was introduced for is REAL and is preserved: an
+        // 8.3 s CONNECT_ACK blast into the initiator's in-flight group burst corrupts the
+        // GROUP_ACK round trip. But that hazard is about TIMING, not about whether recovery
+        // should still exist. Deferring the next rescue attempt past the in-flight burst
+        // satisfies it exactly, while keeping the only mechanism that can repair a genuinely
+        // lost ACK. A wrong "proof" costs the entire connection; a deferred retry costs one
+        // burst of latency.
+        //
+        // If the sync WAS real, a frame decodes shortly and the normal path clears the
+        // rescue (connection.cpp ~4181) before the deferred timer ever expires — so the
+        // healthy case is unchanged.
+        // BOUNDED defer. First cut re-armed the timer on EVERY accepted sync and syncs
+        // arrive faster than the deferral, so the rescue was perpetually postponed and never
+        // fired — "destroy" became "starve", which deadlocks identically. Rig evidence:
+        // corr=0.87, 0.94, 0.94, 0.91 in a row, each pushing the timer out 21552 ms, zero
+        // re-sends. A recovery path that can be indefinitely postponed by the very condition
+        // it exists to recover from is not a recovery path.
+        //
+        // Bound it: a GENUINE burst decodes a frame within a burst or two, and the normal
+        // path (connection.cpp ~4181) clears the rescue on that decoded frame. If two burst
+        // airtimes pass with accepted syncs but NO decoded frame, the syncs are not leading
+        // to a handshake and the rescue must be allowed to fire.
+        if (connect_ack_defer_count_ >= kMaxConnectAckRescueDefers) {
+            LOG_MODEM(WARN,
+                      "Connection: Accepted OFDM DATA sync (corr=%.2f) but %d defers have "
+                      "already passed with NO decoded frame — releasing the CONNECT_ACK "
+                      "rescue (%d retries left). Repeated syncs without a decode mean the "
+                      "peer is not hearing our ACK.",
+                      sync_correlation, connect_ack_defer_count_,
+                      connect_ack_retx_remaining_);
+            return;
+        }
+        ++connect_ack_defer_count_;
+        // One in-flight burst of airtime at the current rung — exactly the window the
+        // collision hazard spans. Derived from the live data mode, not a constant.
+        const uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
+            data_modulation_, data_code_rate_, arq_.getWindowSize(), data_frame_cw_count_);
+        const uint32_t defer_ms =
+            std::max<uint32_t>(connectAckRetransmitMs(), burst_ms);
+        connect_ack_retransmit_ms_ = defer_ms;
         LOG_MODEM(INFO,
-                  "Connection: Accepted OFDM DATA sync (corr=%.2f); disarming CONNECT_ACK rescue (burst transport)",
-                  sync_correlation);
-        connect_ack_frame_.clear();
-        connect_ack_retx_remaining_ = 0;
+                  "Connection: Accepted OFDM DATA sync (corr=%.2f); DEFERRING CONNECT_ACK "
+                  "rescue by %u ms (defer %d/%d, %d retries left). A sync correlation is not "
+                  "proof the peer decoded our ACK.",
+                  sync_correlation, defer_ms, connect_ack_defer_count_,
+                  kMaxConnectAckRescueDefers, connect_ack_retx_remaining_);
         return;
     }
 
@@ -5350,6 +5510,47 @@ void Connection::configureArqForCurrentDataMode() {
                     std::min<uint64_t>(repeat_covered_timeout_ms, 0xFFFFFFFFull)));
         }
         arq_.setAckTimeout(ack_timeout_ms);
+
+        // ULTRA_INFLIGHT_RTO: the SAME timeout evaluated at every frame count 1..window,
+        // so the ARQ can size a retransmit on what is ACTUALLY outstanding instead of on
+        // the window maximum. Built from the identical policy calls used for the scalar
+        // above, including the adaptive_short_reanchor repeat-covered floor, so entry
+        // [window] reproduces ack_timeout_ms exactly — logged as an identity check.
+        {
+            const size_t win = std::min<size_t>(
+                arq_.getWindowSize(), selective_repeat_arq_policy::kMaxWindow);
+            uint32_t table[selective_repeat_arq_policy::kMaxWindow + 1] = {};
+            for (size_t n = 1; n <= win; ++n) {
+                const uint32_t sack_hold_n = connection_policy::wideOFDMSackDelayMs(
+                    data_modulation_, data_code_rate_, n, data_frame_cw_count_,
+                    continuation_reanchor_ms);
+                uint32_t t = connection_policy::computeWideOFDMAckTimeoutMs(
+                    data_modulation_, data_code_rate_, n,
+                    adaptive_short_reanchor ? sack_hold_n : sack_delay_ms,
+                    kWideOFDMAckRepeatCount, data_frame_cw_count_,
+                    continuation_reanchor_ms);
+                if (adaptive_short_reanchor) {
+                    const uint32_t burst_n = connection_policy::wideOFDMBurstAirtimeMs(
+                        data_modulation_, data_code_rate_, n, data_frame_cw_count_,
+                        continuation_reanchor_ms);
+                    const uint64_t covered_n =
+                        static_cast<uint64_t>(burst_n) +
+                        static_cast<uint64_t>(sack_hold_n) +
+                        static_cast<uint64_t>(ack_repeat_tail_ms) +
+                        static_cast<uint64_t>(decode_jitter_margin_ms);
+                    t = std::max<uint32_t>(
+                        t, static_cast<uint32_t>(
+                               std::min<uint64_t>(covered_n, 0xFFFFFFFFull)));
+                }
+                table[n] = t;
+            }
+            arq_.setAckTimeoutTable(table, win + 1);
+            LOG_MODEM(INFO,
+                      "Connection: INFLIGHT-RTO table n=1..%zu -> %ums..%ums "
+                      "(scalar=%ums; identity at n=window %s)",
+                      win, table[1], table[win], ack_timeout_ms,
+                      (table[win] == ack_timeout_ms) ? "OK" : "MISMATCH");
+        }
 
         LOG_MODEM(INFO,
                   "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums/control=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums, sack_slides=%d, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, ack_repeat_delay=%ums, ack_repeat_guard=%ums, cw=%d, continuation_reanchor=%ums (OFDM %s %s)",
