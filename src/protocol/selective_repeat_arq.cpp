@@ -370,7 +370,7 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
         v2::splitIntoCodewords(tx_window_[slot].frame_data, code_rate_);
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
-    tx_window_[slot].timeout_ms = currentAckTimeoutMs();
+    tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -392,6 +392,7 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
     stats_.frames_sent++;
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
+    rearmOutstandingTimeouts();
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent %s seq=%d slot=%zu, window=[%d,%d)",
               v2::frameTypeToString(frame_type), seq, slot, tx_base_seq_, tx_next_seq_);
@@ -450,7 +451,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].info_codewords.clear();
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
-    tx_window_[slot].timeout_ms = currentAckTimeoutMs();
+    tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -469,6 +470,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     stats_.frames_sent++;
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
+    rearmOutstandingTimeouts();
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed %s seq=%d slot=%zu cw=%d, window=[%d,%d)",
               v2::frameTypeToString(frame_type), seq, slot, fixed_frame_codewords_,
@@ -520,7 +522,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     tx_window_[slot].info_codewords =
         v2::splitIntoCodewords(tx_window_[slot].frame_data, code_rate_);
     tx_window_[slot].seq = seq;
-    tx_window_[slot].timeout_ms = currentAckTimeoutMs();
+    tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -539,6 +541,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     stats_.frames_sent++;
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
+    rearmOutstandingTimeouts();
 
     LOG_MODEM(INFO, "SR-ARQ: Sent variable DATA seq=%d slot=%zu total_cw=%d",
               seq, slot, static_cast<int>(frame.total_cw));
@@ -2260,6 +2263,37 @@ uint32_t SelectiveRepeatARQ::currentAckTimeoutMs() const {
     return config_.ack_timeout_ms;
 }
 
+// ULTRA_INFLIGHT_RTO: the timeout for the burst CURRENTLY outstanding. See
+// selective_repeat_arq_policy.hpp::inflightRtoEnabled for why a scalar is wrong at the
+// tail of a transfer. Falls through to the scalar when the knob is off, when no table has
+// been supplied (MC-DPSK / narrow / control paths), or for counts outside the table.
+uint32_t SelectiveRepeatARQ::ackTimeoutForFrames(size_t frames) const {
+    if (!arq_policy::inflightRtoEnabled() || ack_timeout_table_n_ == 0) {
+        return currentAckTimeoutMs();
+    }
+    const size_t idx = std::clamp<size_t>(frames, 1, ack_timeout_table_n_ - 1);
+    const uint32_t t = ack_timeout_table_[idx];
+    if (t == 0) return currentAckTimeoutMs();
+    // Never exceed the scalar: the table is a REDUCTION for small bursts, never a licence
+    // to wait longer than the configured bound.
+    return std::min(t, currentAckTimeoutMs());
+}
+
+// Re-arm every outstanding slot to the timeout for the burst as it now stands. Called as
+// frames are queued: slot 1 of a 5-frame burst is seeded when in_flight==1, but it is
+// waiting for the SAME group ACK as slot 5, so it must be re-armed upward as the burst
+// grows. Without this, early frames in a full burst would time out mid-burst — the
+// spurious-retransmission failure this knob must not introduce.
+void SelectiveRepeatARQ::rearmOutstandingTimeouts() {
+    if (!arq_policy::inflightRtoEnabled() || ack_timeout_table_n_ == 0) return;
+    const uint32_t t = ackTimeoutForFrames(tx_in_flight_);
+    for (auto& s : tx_window_) {
+        if (s.active && !s.acked && s.timeout_ms > 0 && s.timeout_ms < t) {
+            s.timeout_ms = t;
+        }
+    }
+}
+
 void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
     if (!slot.rtt_sample_eligible) {
         return;
@@ -2277,7 +2311,8 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 
     // RFC6298-style estimator (Karn-safe: retransmitted slots are marked ineligible).
     const auto rto = arq_policy::updateRTO(
-        have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms);
+        have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms,
+        arq_policy::adaptiveRtoEnabled());
     srtt_ms_ = rto.srtt_ms;
     rttvar_ms_ = rto.rttvar_ms;
     adaptive_ack_timeout_ms_ = rto.rto_ms;
@@ -2285,6 +2320,22 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
               sample_ms, srtt_ms_, rttvar_ms_, adaptive_ack_timeout_ms_);
+    // NULL CONTROL (2026-07-30). A knob that provably did not engage proves nothing, and
+    // this one is easy to leave inert: the burst/file path must actually reach
+    // maybeSampleRTT for the adaptive floor to matter at all. Log at INFO, once per
+    // change, so a rig run can be checked for engagement instead of assumed. Prints the
+    // legacy value alongside so the delta is visible without a second run.
+    if (arq_policy::adaptiveRtoEnabled() && adaptive_ack_timeout_ms_ != last_logged_rto_ms_) {
+        last_logged_rto_ms_ = adaptive_ack_timeout_ms_;
+        const auto legacy = arq_policy::updateRTO(
+            have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms,
+            /*adaptive_floor=*/false);
+        LOG_MODEM(INFO,
+                  "SR-ARQ: ADAPTIVE-RTO ENGAGED rto=%ums (legacy would be %ums, "
+                  "configured=%ums) srtt=%.0f rttvar=%.0f sample=%ums",
+                  adaptive_ack_timeout_ms_, legacy.rto_ms, config_.ack_timeout_ms,
+                  srtt_ms_, rttvar_ms_, sample_ms);
+    }
 }
 
 void SelectiveRepeatARQ::sendFrameNack(uint16_t seq) {

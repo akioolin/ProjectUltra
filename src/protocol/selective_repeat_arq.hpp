@@ -225,6 +225,14 @@ public:
     uint32_t getAckBatchSize() const { return config_.ack_batch_size; }
 
     // Set ACK timeout (adaptive based on waveform frame duration)
+    // In-flight-aware timeout table (ULTRA_INFLIGHT_RTO). Index = frames outstanding,
+    // 1..kMaxWindow; entry [window] must equal the legacy scalar. Supplied by the
+    // Connection from the same policy function, so the ARQ holds no timing knowledge.
+    void setAckTimeoutTable(const uint32_t* table, size_t count) {
+        ack_timeout_table_n_ = std::min(count, sizeof(ack_timeout_table_) / sizeof(uint32_t));
+        for (size_t i = 0; i < ack_timeout_table_n_; ++i) ack_timeout_table_[i] = table[i];
+    }
+
     void setAckTimeout(uint32_t timeout_ms) {
         config_.ack_timeout_ms = timeout_ms;
         if (!have_rtt_estimator_) {
@@ -530,6 +538,9 @@ private:
     float srtt_ms_ = 0.0f;
     float rttvar_ms_ = 0.0f;
     uint32_t adaptive_ack_timeout_ms_ = 0;
+    uint32_t ack_timeout_table_[selective_repeat_arq_policy::kMaxWindow + 1] = {};
+    size_t ack_timeout_table_n_ = 0;
+    uint32_t last_logged_rto_ms_ = 0;  // null-control dedup (see maybeSampleRTT)
 
     // Statistics
     ARQStats stats_;
@@ -588,6 +599,8 @@ private:
     bool tryCompletePartialRXSlot(size_t slot_index);
     void maybeSampleRTT(TXSlot& slot);
     uint32_t currentAckTimeoutMs() const;
+    uint32_t ackTimeoutForFrames(size_t frames) const;
+    void rearmOutstandingTimeouts();
     uint32_t ackRepeatDelayForCopy(int copy_index) const;
     int ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index) const;
 

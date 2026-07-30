@@ -1324,6 +1324,60 @@ void test_linear_ring_couples_offset_compensation() {
     unsetenv("ULTRA_LINEAR_SNR_RING");
 }
 
+
+// ── ULTRA_INFLIGHT_RTO: the timeout must be a FUNCTION of frames outstanding ──
+// Operator observation 2026-07-30: "would have been a lot faster if it didn't hit a bunch
+// of timeout and retx at the end". The ARQ timeout is computed once per mode change with
+// arq_.getWindowSize(), so at the tail of a transfer — ONE frame outstanding, ~1.27 s of
+// airtime — the sender still waits the full-window value. One rig transfer spent 57 s
+// delivering the last ~1.4 KB of a 50 KB file with CCA reading idle=1 through the gap.
+//
+// This pins the properties the in-flight table depends on. It is a DIFFERENT defect from
+// the RTO clamp (ULTRA_ADAPTIVE_RTO): that one only stopped the configured value flooring
+// the RFC6298 estimate, and it does not help here because srtt is averaged over all round
+// trips — mostly full bursts — so the estimator never learns the tail is cheap.
+void test_inflight_ack_timeout_scales_with_frames() {
+    const auto mod = Modulation::QAM8;
+    const auto rate = CodeRate::R2_3;
+    const uint32_t reanchor = connection_policy::wideOFDMShortReanchorChirpDurationMs();
+    const int cw = 12;
+
+    auto timeout_for = [&](size_t n) {
+        const uint32_t sack_hold = connection_policy::wideOFDMSackDelayMs(
+            mod, rate, n, cw, reanchor);
+        return connection_policy::computeWideOFDMAckTimeoutMs(
+            mod, rate, n, sack_hold, 1, cw, reanchor);
+    };
+
+    // MONOTONE: more frames in flight can never mean a shorter wait. This is what makes
+    // a table indexed by outstanding count safe to consult at any point in a burst.
+    uint32_t prev = 0;
+    for (size_t n = 1; n <= selective_repeat_arq_policy::kMaxWindow; ++n) {
+        const uint32_t t = timeout_for(n);
+        CHECK(t >= prev, "ack timeout must be monotone in frames outstanding (n=" << n << ")");
+        prev = t;
+    }
+
+    // The tail must be MATERIALLY cheaper than a full window, or the change buys nothing.
+    const uint32_t t1 = timeout_for(1);
+    const uint32_t t8 = timeout_for(8);
+    const uint32_t t16 = timeout_for(selective_repeat_arq_policy::kMaxWindow);
+    CHECK(t1 * 2 < t8, "a 1-frame tail must cost less than half an 8-frame window's wait");
+    CHECK(t1 * 4 < t16, "and far less than a full 16-frame window's");
+
+    // IDENTITY: evaluated at the window size, the table entry the ARQ would use must equal
+    // what the legacy scalar path computes — the knob is a reduction for SMALL bursts, not
+    // a re-tuning of the configured bound.
+    for (size_t win : {size_t{4}, size_t{8}, size_t{16}}) {
+        const uint32_t sack_hold = connection_policy::wideOFDMSackDelayMs(
+            mod, rate, win, cw, reanchor);
+        const uint32_t scalar = connection_policy::computeWideOFDMAckTimeoutMs(
+            mod, rate, win, sack_hold, 1, cw, reanchor);
+        CHECK(timeout_for(win) == scalar,
+              "table[window] must reproduce the legacy scalar exactly (win=" << win << ")");
+    }
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
@@ -1372,6 +1426,7 @@ int main() {
     test_connect_pick_defer_semantics();
     test_anchor_offset_override();
     test_linear_ring_couples_offset_compensation();
+    test_inflight_ack_timeout_scales_with_frames();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)
