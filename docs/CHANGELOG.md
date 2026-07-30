@@ -10,6 +10,75 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — GUI GATE on the CFO fix: reliability up, goodput flat. NOT shippable yet.
+
+### 1. The gate result
+
+`tools/gui_qso_scenario.sh`, ITU Moderate @20 dB, 8 KB file, 6 seeds, base/fix INTERLEAVED per
+seed so each pair shares a fade epoch. Fix = `ULTRA_LTS_CFO_SEED_OFF=1`.
+
+| seed | base | fix |
+|---|---|---|
+| 42 | FAIL | FAIL |
+| 23 | 1620 | 1160 |
+| 11 | 1110 | 1480 |
+| 7 | 1390 | 1110 |
+| 19 | **FAIL** | **1330** |
+| 31 | 410 | 490 |
+
+- Completion: base **4/6**, fix **5/6** — the fix rescued seed 19 from total failure.
+- Delivered-only (4 seeds passing in both arms): base 1132 bps, fix 1060 bps = **-6%**, noise.
+- All-runs mean: base 755, fix 928 = +23%, but carried ENTIRELY by the single rescue.
+- Baseline spread 410-1620 bps = 4x on the same channel and settings.
+
+**Verdict: NOT shippable on this evidence.** One rescue in six is a single event, and goodput on
+completed transfers does not move. `ULTRA_LTS_CFO_SEED_OFF` stays DEFAULT-OFF.
+
+### 2. The null control was nearly mis-read — and the log message is misleading
+
+First count of "LTS residual CFO" lines gave 178 in BASE vs 38 in FIX, i.e. backwards, which would
+have made the whole A/B meaningless. 176 of those 178 read **"below correction threshold"** — they
+are DETECTIONS THAT WERE REJECTED, not applications. Counting `corrected to`:
+
+| run | applied | rejected |
+|---|---|---|
+| 42_base | 2 | 176 |
+| 42_fix | **22** | 16 |
+| 23_base | 5 | 16 |
+| 23_fix | **15** | 18 |
+
+So the fix DOES engage in production (11x more applications on seed 42, 3x on seed 23), and the
+gate really does suppress genuine 2.6-2.7 Hz corrections in the GUI path exactly as in
+`measure_ack_fer`.
+
+**Defect worth fixing independently:** `channel_equalizer_lts.cpp:555` logs
+`"LTS residual CFO: %.2f Hz (below correction threshold)"` from an `else if (|residual| > 0.1f)`
+catch-all. A 2.71 Hz residual against a 0.3 Hz threshold is reported as "below threshold" when it
+actually failed the seed/CV gate. That message actively misleads about why the correction was
+skipped, and it is why this took so long to see.
+
+### 3. The finding that matters more than the fix
+
+Frame reliability on Moderate improved massively in the harness (65/80 -> 80/80, 3-5 sigma, floor
+removed) and **goodput on completed transfers did not move**. Two independent measurements now say
+the same thing: on this channel the bottleneck is NOT frame error rate.
+
+That is consistent with the whole session. It points at the SELECTOR and the protocol overhead —
+rung choice, crater/demote/re-climb churn, turnaround — not the PHY. The 4x baseline spread on an
+identical channel is the same symptom.
+
+### 4. Harness note
+
+`gui_qso_scenario.sh` hardcodes `--log-level debug --log-category all` (lines 497/507). BRAVO emits
+~11700 DEMOD debug lines per run, which throttles the real-time sim well below wall-clock pace and
+makes each run several minutes. Identical in both arms so A/B validity is unaffected, but it caps
+how many seeds are practical per session. Not changed here — it is the trusted gate and altering
+it would break comparability with every prior measurement.
+
+`ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — ROOT CAUSE: the Moderate "irreducible FER floor" is the LTS CFO seed gate
 
 ### 1. Three of my own conclusions are RETRACTED first
