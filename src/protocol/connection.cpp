@@ -2697,8 +2697,13 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                     bool all_pass = true;
                     for (size_t f = 0; f < fresh; ++f) {
                         const auto& g = rx_auth_gamma_ring_[fresh_idx[f]];
+                        // Pass the measured fading index so ULTRA_RUNG_CLASS_ANCHOR can
+                        // calibrate on the CURRENT class instead of the class-blind
+                        // (AWGN) minimum, which is 4-6 dB optimistic on fading. Knob-off
+                        // ignores it and behaves byte-identically.
                         if (!rungPredictedSustainable(g.data(), g.size(), p.mod,
-                                                      p.rate, margin)) {
+                                                      p.rate, margin,
+                                                      fading_index_)) {
                             all_pass = false;
                             break;
                         }

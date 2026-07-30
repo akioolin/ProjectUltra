@@ -10,6 +10,90 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-07-29 — Stale-config crater DETECTOR (diagnostic); the airtime analysis already existed
+
+### 1. The correction that matters most: this analysis was already in the repo
+
+I proposed measuring "where the airtime goes" and the operator pointed out it had been done.
+`docs/F163_TIME_BUDGET_2026_07_06.md` is a complete accounting of a 51,200 B transfer, and it
+does NOT point at the estimator:
+
+| category | s | % |
+|---|---|---|
+| Useful fresh-data airtime | 132.3 | **30.4%** |
+| ACK turnaround gaps | 91.4 | 21.0% |
+| Retransmit airtime | 60.6 | 13.9% |
+| Overhead (descriptors, anchors) | 54.8 | 12.6% |
+| RTO / dead-air stalls | 51.5 | 11.8% |
+| Mode-change re-encode duplicates | 38.3 | 8.8% |
+| Receiver decode lag | 0 | disproven |
+
+Its own conclusions: *"the ladder's up-switches bought zero throughput upside here, only stall
+downside"*; the transfer ran **1.9x slower than its own demonstrated clean cadence** (efficiency
+0.52); and the delivered rate was **rung-FLAT** — base advanced 5-per-group identically at QPSK
+R1/2 and 16QAM R2/3. The four biggest sinks are all rate-switch machinery, three flagged NEW:
+16QAM adoption black hole (~58 s), down-switch voiding 7 already-SACKed frames (~50 s), and two
+missed-light-descriptor episodes (~41 s and ~30 s).
+
+**Two days of estimator work were spent against evidence already in the repository saying the
+bottleneck is the switch/ARQ layer.** Recorded so it is not repeated.
+
+### 2. What was built
+
+A DIAGNOSTIC-ONLY detector for the missed-descriptor mechanism, in the burst group-completion
+path (`streaming_burst_interleave.cpp`). It emits `stale_config_suspect=1` on the existing
+`event=burst_logical` diagnostic line.
+
+**The discriminator.** A stale-config decode and a deep fade both produce all-codewords-failed,
+so a failure count cannot separate them. What separates them is that a config mismatch keeps
+HEALTHY ACQUISITION while every codeword dies, whereas a genuine fade drags SNR and correlation
+down with it. Condition: `cw_ok == 0 && cw_fail > 0` AND `ofdm_internal_snr_db >= 12` AND
+`sync_correlation >= 0.70`.
+
+### 3. My first version was DEAD BY CONSTRUCTION — sixth provenance error of the day
+
+I gated on `sync_quality_db >= 15` and `llr_mean_abs < 0.15`, taking both numbers straight from
+the F163 report. On this code path:
+- `sync_quality_db` is **0 on every frame** (not populated here), so the gate could never be true;
+- `llr_mean_abs` runs **11-17**, not 0.06-0.08 — off by two orders of magnitude.
+
+Those report values came from the RIG's own log format, a different provenance. Same failure family
+as the five earlier ones this session: numbers imported across a boundary without checking the
+units or whether the field is even populated. Measured the real fields first, then rewrote.
+
+**No LLR threshold is used, deliberately.** Cratered frames did show depressed `llr_mean_abs`
+(11.46, 11.95 vs 13.7-17.2 for partially-successful frames) but that is two samples from one run —
+far too thin for a classifier boundary. The condition is the physically motivated part; the metric
+is already on the line so a threshold can be fitted once occurrences accumulate.
+
+### 4. Validation
+
+| channel | frames | failed | total craters | suspects |
+|---|---|---|---|---|
+| AWGN @20 | 16 | 0 | 0 | 0 |
+| Good @20 | 21 | 4 | 0 | 0 |
+| Moderate @20 (seed 23) | 24 | 2 | 0 | 0 |
+| Moderate @20 (seed 31) | 20 | 3 | 1 | **1** |
+
+**0 false positives across 61 frames containing 6 partial failures**, and it fires on the one
+total-crater-with-healthy-acquisition. That is the intended behaviour. Small n; the point is the
+discrimination, not a rate.
+
+`burst_chunk` in `measure_ack_fer` could NOT be used to validate this: it returns
+`frames_recovered=0` even at AWGN @25 with several parameter combinations, and `--group` variants
+throw. Flagged as a separate harness problem, not investigated.
+
+### 5. Status
+
+Diagnostic only — no behaviour change, no repair logic. It exists to answer "does this happen on
+hardware, and how often" before anything in the ARQ/descriptor path is touched. The next step is a
+rig run at IONOS MPG@20 counting `stale_config_suspect` occurrences; if it does not fire there,
+the repair is not worth the risk.
+
+`ctest 97/97` (UltraTncSimAudio excluded — intermittent).
+
+---
+
 ## 2026-07-29 — GUI GATE on the CFO fix: reliability up, goodput flat. NOT shippable yet.
 
 ### 1. The gate result

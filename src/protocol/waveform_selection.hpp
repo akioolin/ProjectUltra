@@ -503,11 +503,43 @@ inline float rungClassAnchorDb(Modulation mod, CodeRate rate, float fading_index
 // margin_db shifts every carrier down (climb hysteresis + crater penalty ride
 // here). Modulation-adaptive by construction: no per-mod branches; geometry
 // enters only through the rung's own measured anchor.
+// ULTRA_RUNG_CLASS_ANCHOR (2026-07-29, default-OFF): calibrate the predictor on the
+// anchor for the CURRENT fading class instead of the class-blind minimum.
+//
+// THE DEFECT. calibrationAnchorDbFor() deliberately returns the MINIMUM across the
+// three class columns (see its body), which is the AWGN column in practice, and this
+// predictor uses it as alpha's calibration. So the live per-group rung predictor is
+// calibrated to AWGN NO MATTER WHAT CHANNEL IS IN USE. Measured optimism on ITU Good
+// against FER-vs-SNR curves (measure_ack_fer, 9 rungs, seeds 7+11, n=80/point; the
+// SNR at which each rung first reaches <=10% FER):
+//
+//   rung        calibrated at   measured needs   optimism
+//   QPSK R1/2      10.0 dB         14.0 dB        -4 dB
+//   QPSK R2/3      12.0 dB         16.0 dB        -4 dB
+//   QPSK R3/4      15.0 dB         20.0 dB        -5 dB
+//   8PSK R2/3      16.0 dB         22.0 dB        -6 dB
+//
+// Every rung is 4-6 dB optimistic on fading BY CONSTRUCTION. That is the
+// over-commit -> crater -> demote -> re-climb cycle, and it is consistent with the
+// measured 4x goodput spread on one channel (410-1620 bps, ITU Moderate @20, 9 GUI
+// runs at identical settings).
+//
+// rungClassAnchorDb() already provides the class-correct anchor and already falls back
+// to the physics floor when the class column is disabled. Passing a NEGATIVE
+// fading_index preserves the legacy class-blind behaviour exactly, so the knob-off path
+// is byte-identical.
 inline bool rungPredictedSustainable(const float* gamma_lin, size_t n,
                                      Modulation mod, CodeRate rate,
-                                     float margin_db) {
+                                     float margin_db,
+                                     float fading_index = -1.0f) {
     if (gamma_lin == nullptr || n == 0) return false;
-    const float anchor_db = calibrationAnchorDbFor(mod, rate);
+    const bool use_class_anchor = [] {
+        const char* e = std::getenv("ULTRA_RUNG_CLASS_ANCHOR");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    const float anchor_db = (use_class_anchor && fading_index >= 0.0f)
+        ? rungClassAnchorDb(mod, rate, fading_index)
+        : calibrationAnchorDbFor(mod, rate);
     if (anchor_db >= kRungDisabledDb) return false;
     const float c = getCodeRateValue(rate);
     if (c <= 0.0f || c >= 1.0f) return false;

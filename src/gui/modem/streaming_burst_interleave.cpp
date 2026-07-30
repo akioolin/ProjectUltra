@@ -508,6 +508,10 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
             bb.push_back(m.ofdm_broadband_snr_db);
         }
     }
+    std::vector<float> mean_raw_for_diag;
+    if (std::getenv("ULTRA_GAMMA_DOMAIN_LOG") != nullptr) {
+        mean_raw_for_diag = mean;   // snapshot BEFORE renormalization
+    }
     if (!bb.empty() && sum_all > 0.0) {
         std::nth_element(bb.begin(), bb.begin() + bb.size() / 2, bb.end());
         // kOfdmLegacyAnchorScaleOffsetDb: the EESM anchor table was measured on
@@ -519,6 +523,29 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
         if (mean_lin > 1e-12) {
             const float scale = static_cast<float>(target / mean_lin);
             for (auto& v : mean) v *= scale;
+        }
+    }
+    // 2026-07-29 diag: the PER calibration in calibration/ofdm_per_v1.csv was fitted
+    // against RAW getCarrierGammaSnapshot() gamma, but this vector is renormalized to
+    // the in-band scale (and carries ofdmAnchorScaleOffsetDb). Applying the raw-fitted
+    // table here without accounting for that would be a domain mismatch -- the fifth of
+    // this class found today. Log both means so the shift is MEASURED, not assumed.
+    if (std::getenv("ULTRA_GAMMA_DOMAIN_LOG") != nullptr) {
+        double raw_sum = 0.0;
+        for (size_t i = 0; i < mean_raw_for_diag.size(); ++i) {
+            raw_sum += mean_raw_for_diag[i];
+        }
+        double norm_sum = 0.0;
+        for (float v : mean) {
+            norm_sum += v;
+        }
+        const size_t n = mean.size();
+        if (n > 0 && !mean_raw_for_diag.empty()) {
+            const double raw_db =
+                10.0 * std::log10(std::max(raw_sum / mean_raw_for_diag.size(), 1e-12));
+            const double norm_db = 10.0 * std::log10(std::max(norm_sum / n, 1e-12));
+            LOG_MODEM(WARN, "GAMMA-DOMAIN raw_mean=%.2f dB norm_mean=%.2f dB shift=%+.2f dB",
+                      raw_db, norm_db, norm_db - raw_db);
         }
     }
     last_group_carrier_gammas_ = std::move(mean);
@@ -1284,6 +1311,49 @@ void StreamingDecoder::finalizeBurstGroup() {
                 << " ofdm_internal_snr_db=" << result.ofdm_internal_snr_db
                 << " fading=" << result.lts_fading_index
                 << " sync_corr=" << result.sync_correlation;
+
+            // STALE-CONFIG CRATER SUSPECT (2026-07-29, diagnostic only, no behaviour change).
+            //
+            // docs/F163_TIME_BUDGET_2026_07_06.md §3 sinks 1/3/4: a mode change announced on
+            // a 0.21 s LIGHT descriptor can be missed, after which the receiver decodes the
+            // whole group at its STALE config. Adoption then waits for a full-anchor RTO
+            // resend -- 24.5-25.8 s measured versus 3-7 s when the descriptor decodes. Three
+            // occurrences in one 51,200 B transfer cost ~129 s of a 435 s window, all flagged
+            // NEW (unfixed) there.
+            //
+            // THE DISCRIMINATOR. A stale-config decode and a deep fade BOTH produce
+            // all-codewords-failed, so a failure count cannot separate them. What separates
+            // them is that a config mismatch keeps HEALTHY ACQUISITION while every codeword
+            // dies, whereas a genuine fade takes the SNR and the correlation down with it.
+            //
+            // FIELDS: use only ones this path actually populates. A first version of this
+            // check gated on `sync_quality_db >= 15` and `llr_mean_abs < 0.15`, taking both
+            // numbers from the F163 report -- and was DEAD BY CONSTRUCTION, because on this
+            // path sync_quality_db is 0 on every frame and llr_mean_abs runs 11-17, not
+            // 0.06-0.08. Those report values came from the rig's own log format, a different
+            // provenance. Measured here instead (Moderate @20, 22 frames): cratered frames
+            // carry ofdm_internal_snr_db ~18 dB and sync_corr ~0.86 while failing all 12 CWs.
+            //
+            // NO LLR THRESHOLD ON PURPOSE. Cratered frames did show depressed llr_mean_abs
+            // (11.46, 11.95) against 13.7-17.2 for partially-successful ones, but that is two
+            // crater samples from one run -- far too thin to set a classifier boundary on.
+            // The condition below is the physically motivated part (total crater despite good
+            // acquisition); llr_mean_abs is already on this line, so a threshold can be
+            // derived once enough occurrences are collected. Detect the CANDIDATE, report the
+            // metric, do not pretend to classify yet.
+            constexpr float kStaleCfgMinInternalSnrDb = 12.0f;
+            constexpr float kStaleCfgMinSyncCorr = 0.70f;
+            const bool all_cw_failed =
+                result.codewords_ok == 0 && result.codewords_failed > 0;
+            const bool acquisition_healthy =
+                std::isfinite(result.ofdm_internal_snr_db) &&
+                result.ofdm_internal_snr_db >= kStaleCfgMinInternalSnrDb &&
+                result.sync_correlation >= kStaleCfgMinSyncCorr;
+            if (all_cw_failed && acquisition_healthy) {
+                oss << " stale_config_suspect=1"
+                    << " configured_cw=" << fixed_frame_codewords_
+                    << " group_size=" << burst_group_size_;
+            }
             ultra::phyDiagLine(oss.str());
         }
     }
