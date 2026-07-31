@@ -1,4 +1,5 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <chrono>
 #include <cmath>
 #include "audio_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
@@ -207,6 +208,21 @@ void AudioEngine::closeInput() {
 
 void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
     std::lock_guard<AudioEngineMutex> lock(tx_mutex_);
+    // TXLAT (ULTRA_TXLAT_DIAG): queue depth AT THE MOMENT OF SUBMISSION.
+    //
+    // Tests the operator's hypothesis for the variable ACK timing seen on the waterfall:
+    // if residual audio is sitting in tx_queue_ when the ACK is submitted, the ACK plays
+    // BEHIND it and its time-to-air varies with whatever was left over. depth_ms > 0 means
+    // a flush-before-send would help; depth_ms == 0 everywhere means the variability is
+    // callback phase (0..buffer_size_/48 ms) plus fixed device latency instead, and a flush
+    // is a no-op. Distinguishing those two is the whole question — do not guess it.
+    if (std::getenv("ULTRA_TXLAT_DIAG")) {
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        LOG_MODEM(WARN, "TXLAT queue_submit us=%lld n=%zu depth_before=%zu depth_ms=%.1f",
+                  static_cast<long long>(now_us), samples.size(), tx_queue_.size(),
+                  tx_queue_.size() * 1000.0 / 48000.0);
+    }
     for (float s : samples) {
         tx_queue_.push(s);
     }
@@ -380,6 +396,17 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     float gain = engine->output_gain_.load();
 
     std::lock_guard<AudioEngineMutex> lock(engine->tx_mutex_);
+
+    // TXLAT: the empty->playing transition is when audio ACTUALLY starts leaving for the
+    // DAC. queue_submit -> first_out is the queue+phase latency the operator is asking about.
+    static bool txlat_was_playing = false;
+    if (!engine->tx_queue_.empty() && !txlat_was_playing && std::getenv("ULTRA_TXLAT_DIAG")) {
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        LOG_MODEM(WARN, "TXLAT first_out us=%lld queued=%zu",
+                  static_cast<long long>(now_us), engine->tx_queue_.size());
+    }
+    txlat_was_playing = !engine->tx_queue_.empty();
 
     for (int i = 0; i < samples; ++i) {
         float out = 0.0f;
