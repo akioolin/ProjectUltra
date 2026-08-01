@@ -212,60 +212,10 @@ static bool test_confirmed_crater_arms_climb_dwell() {
 
 // EESM self-calibration identity: on a FLAT channel the predictor must
 // reproduce the anchor table exactly — pass at the anchor, fail below it.
-static bool test_prediction_flat_identity() {
-    TEST("EESM flat-channel identity vs the anchor table");
-    const Modulation m = Modulation::QAM16;
-    const CodeRate c = CodeRate::R2_3;
-    const float A_db = calibrationAnchorDbFor(m, c);
-    if (A_db >= kRungDisabledDb) FAIL("16QAM R2/3 unexpectedly disabled");
-    std::vector<float> flat(51, std::pow(10.0f, (A_db + 0.1f) / 10.0f));
-    if (!rungPredictedSustainable(flat.data(), flat.size(), m, c, 0.0f))
-        FAIL("flat channel 0.1 dB above the anchor must pass at margin 0");
-    std::vector<float> below(51, std::pow(10.0f, (A_db - 0.5f) / 10.0f));
-    if (rungPredictedSustainable(below.data(), below.size(), m, c, 0.0f))
-        FAIL("flat channel 0.5 dB below the anchor must fail");
-    // Margin shifts the bar: at-anchor fails once any margin applies.
-    std::vector<float> at(51, std::pow(10.0f, A_db / 10.0f));
-    if (rungPredictedSustainable(at.data(), at.size(), m, c, 2.5f))
-        FAIL("at-anchor flat channel must fail with a 2.5 dB margin");
-    PASS();
-    return true;
-}
-
-// The F149 crest trap: mean SNR reads generous while a parked notch has 20 %
-// of carriers dead — dense rungs must FAIL prediction; QPSK must survive.
-static bool test_prediction_rejects_notched_channel() {
-    TEST("notched channel rejects 16QAM R2/3 while QPSK R2/3 passes");
-    std::vector<float> g(51);
-    for (size_t i = 0; i < g.size(); ++i) {
-        g[i] = (i % 5 == 0) ? std::pow(10.0f, -10.0f / 10.0f)   // 20% at -10 dB
-                            : std::pow(10.0f, 24.0f / 10.0f);   // rest at 24 dB
-    }
-    if (rungPredictedSustainable(g.data(), g.size(), Modulation::QAM16,
-                                 CodeRate::R2_3, 2.5f))
-        FAIL("16QAM R2/3 must fail on a 20%-notched channel (the crest trap)");
-    if (!rungPredictedSustainable(g.data(), g.size(), Modulation::QPSK,
-                                  CodeRate::R2_3, 2.5f))
-        FAIL("QPSK R2/3 must survive the same notched channel");
-    PASS();
-    return true;
-}
-
-// DIRECT MULTI-RUNG JUMP — TEST RETIRED 2026-08-01 with the feature it covered.
-//
-// It asserted that >=2 calm per-carrier gamma snapshots authorise a DIRECT multi-rung jump
-// (QPSK R2/3 -> 16QAM R2/3), which was the RX-AUTHORITY PREDICTIVE CLIMB's whole purpose.
-// That path is gone (connection.cpp): it answered "will this rung decode" rather than
-// "which rung delivers more bps", so its bar was LOWER for lower-eta rungs and it handed
-// back QPSK R3/4 (2066 bps @20) in place of 8PSK R2/3 (2450 incl. craters); measured, when
-// it disagreed with the map it downgraded 51x against 6 upgrades. It was also the ONLY
-// reader of the gamma vector that carried kOfdmLegacyAnchorScaleOffsetDb, so retiring it
-// removed that offset consumer.
-//
-// The test is DELETED rather than adjusted because there is no longer any code path that
-// can produce a multi-rung jump from gamma snapshots. Climbing is now either the one-rung
-// walk (legacy path) or the latent-state controller's posterior argmax, and the latter has
-// its own coverage in test_latent_rate_controller.cpp.
+// test_prediction_flat_identity / test_prediction_rejects_notched_channel — DELETED
+// 2026-08-01 with rungPredictedSustainable(). Its only production caller was the
+// RX-authority predictive climb (retired), so the predictor had no reader left outside
+// these tests. See docs/REMOVAL_BACKLOG.md R12.
 
 static bool test_two_crater_rule() {
     TEST("single crater holds; second consecutive crater clamps below");
@@ -825,8 +775,6 @@ int main() {
     std::cout << "RX-AUTHORITY suite\n";
     bool ok = true;
     ok &= test_verdict_maps_snr_to_rung();
-    ok &= test_prediction_flat_identity();
-    ok &= test_prediction_rejects_notched_channel();
     ok &= test_two_crater_rule();
     ok &= test_confirmed_crater_arms_climb_dwell();
     ok &= test_ema_hold_absorbs_supported_crater();

@@ -231,6 +231,49 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 
 ---
 
+### R12. Retired rate-control experiments + the dead predictive-climb predictor — `QUEUED 2026-08-01`
+
+Six knob-guarded experiments whose target code is gone or whose result is closed. All
+default-off; none is reachable on the v0.5.1 default path.
+
+**Scope (delete):**
+- `rungPredictedSustainable()` (`waveform_selection.hpp`) and its two anchor-selection knobs
+  `ULTRA_RUNG_CLASS_ANCHOR` / `ULTRA_FER_FLOOR_ANCHOR`. Its ONLY production caller was the
+  RX-authority predictive climb, retired 2026-08-01; the sole remaining references are in
+  `tests/test_rx_authority.cpp`. Delete those tests with it.
+- `goodput_rate_controller.hpp` + `tests/test_goodput_rate_controller.cpp` +
+  `ULTRA_GOODPUT_RATE` and its block in `updateRxAuthorityCommand`. Superseded by
+  `ULTRA_LATENT_RATE`, which shipped the same thesis (value estimate for EVERY rung,
+  stateless argmax, stability in the estimator) and measured +14.5% p=0.022 against this
+  one's +8.0% n=3 wash.
+- `ULTRA_TRUST_LADDER_PICK` block. Superseded: its hypothesis WON but the latent controller
+  is the better expression of it.
+- `ULTRA_RUNG_DWELL_MS` block + `rx_auth_last_change_*` members. FALSIFIED on the rig
+  (−13.8%, 1/4 positive); its premise was reverse causation.
+- `ULTRA_ADAPTIVE_RTO` + the `adaptive_floor` parameter on `updateRTO`. Hypothesis RETRACTED:
+  the adaptive floor moves the RTO 0-20%, not 7.5x, because measured srtt (~11-14 s) already
+  sits at the configured value.
+- `ULTRA_CONNECT_ACK_RESCUE_DEFER` block. FALSIFIED (3/3 handshake deadlocks vs ~1-in-20).
+
+**KEEP — the anti-footgun list. Do NOT over-cut:**
+- `snapRungIndexDownToEnabled` and every call site. F145 is a REAL 50 s deadlock (commit
+  `63358e6`): disabled anchor rows are HOLES and raw index arithmetic walks into them.
+- `kMeasuredFerFloor` / `rungFerFloorDb` (`waveform_selection.hpp`). Real data — 9 rungs x 3
+  classes x SNR 6-28 x seeds {7,11}, n=80/point — pinned by `test_waveform_policy.cpp`. It is
+  the measurement a per-class `theta_r` should be fitted from, which is the latent
+  controller's known next gap (its table is ITU-Good-only).
+- `rungClassAnchorDb` — it has a SECOND caller in `connection.cpp` beyond the deleted knob.
+- `updateRTO` itself and the RFC6298 estimator: only the `adaptive_floor` parameter goes.
+- The CONNECT_ACK rescue **defect is still OPEN** — a sync correlation is not proof the peer
+  decoded our ACK. Deleting the failed fix must not delete the KNOWN_BUGS record of the bug.
+
+**Blocker:** none. All six are unreachable on the default path.
+
+**Explicitly NOT in scope:** the legacy SNR-anchor ladder and its corrective stack. That is
+the `ULTRA_LATENT_RATE=0` escape hatch, deliberately retained for 0.5.1 so the default flip
+has a fallback; it carries the last `kOfdmLegacyAnchorScaleOffsetDb` reference and dies in
+0.5.2 after field exposure.
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

@@ -548,11 +548,11 @@ inline constexpr CoherentRung kMeasuredFerFloor[] = {
     {Modulation::QAM16, CodeRate::R3_4, {16.0f, kRungDisabledDb, kRungDisabledDb}},
 };
 
-// Measured decodability floor for one rung on the CURRENT fading class. Unlike
-// rungClassAnchorDb() there is NO fallback to another column: an unmeasured or
-// never-reached cell returns kRungDisabledDb so the predictor refuses the rung rather
-// than borrowing a more permissive class's number. Borrowing is precisely how the
-// class-blind minimum became AWGN-calibrated on every channel.
+// KEEPER (docs/REMOVAL_BACKLOG.md R12 anti-footgun): the FER-floor lookup survives the
+// removal of the predictor that used to call it. A never-reached cell returns
+// kRungDisabledDb so a caller refuses the rung rather than borrowing a more permissive
+// class's number — borrowing is precisely how the class-blind minimum became
+// AWGN-calibrated on every channel.
 inline float rungFerFloorDb(Modulation mod, CodeRate rate, float fading_index) {
     const int cls = static_cast<int>(classifyFading(fading_index));
     for (const auto& r : kMeasuredFerFloor) {
@@ -563,72 +563,20 @@ inline float rungFerFloorDb(Modulation mod, CodeRate rate, float fading_index) {
     return kRungDisabledDb;
 }
 
-// ULTRA_RUNG_CLASS_ANCHOR (2026-07-29, default-OFF): calibrate the predictor on the
-// anchor for the CURRENT fading class instead of the class-blind minimum.
+// rungPredictedSustainable() — DELETED 2026-08-01 (docs/REMOVAL_BACKLOG.md R12), together
+// with its ULTRA_RUNG_CLASS_ANCHOR / ULTRA_FER_FLOOR_ANCHOR anchor-selection knobs.
 //
-// THE DEFECT. calibrationAnchorDbFor() deliberately returns the MINIMUM across the
-// three class columns (see its body), which is the AWGN column in practice, and this
-// predictor uses it as alpha's calibration. So the live per-group rung predictor is
-// calibrated to AWGN NO MATTER WHAT CHANNEL IS IN USE. Measured optimism on ITU Good
-// against FER-vs-SNR curves (measure_ack_fer, 9 rungs, seeds 7+11, n=80/point; the
-// SNR at which each rung first reaches <=10% FER):
+// It answered "will this rung DECODE", which is the wrong question for rate selection: the
+// bar is LOWER for lower-efficiency rungs, so it handed back QPSK R3/4 (2066 bps @20) in
+// place of 8PSK R2/3 (2450 incl. craters). Its only production caller was the RX-authority
+// predictive climb, retired the same day; measured, when that climb disagreed with the map
+// it downgraded 51x against 6 upgrades.
 //
-//   rung        calibrated at   measured needs   optimism
-//   QPSK R1/2      10.0 dB         14.0 dB        -4 dB
-//   QPSK R2/3      12.0 dB         16.0 dB        -4 dB
-//   QPSK R3/4      15.0 dB         20.0 dB        -5 dB
-//   8PSK R2/3      16.0 dB         22.0 dB        -6 dB
-//
-// Every rung is 4-6 dB optimistic on fading BY CONSTRUCTION. That is the
-// over-commit -> crater -> demote -> re-climb cycle, and it is consistent with the
-// measured 4x goodput spread on one channel (410-1620 bps, ITU Moderate @20, 9 GUI
-// runs at identical settings).
-//
-// rungClassAnchorDb() already provides the class-correct anchor and already falls back
-// to the physics floor when the class column is disabled. Passing a NEGATIVE
-// fading_index preserves the legacy class-blind behaviour exactly, so the knob-off path
-// is byte-identical.
-inline bool rungPredictedSustainable(const float* gamma_lin, size_t n,
-                                     Modulation mod, CodeRate rate,
-                                     float margin_db,
-                                     float fading_index = -1.0f) {
-    if (gamma_lin == nullptr || n == 0) return false;
-    const bool use_class_anchor = [] {
-        const char* e = std::getenv("ULTRA_RUNG_CLASS_ANCHOR");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    // ULTRA_FER_FLOOR_ANCHOR (2026-07-30, default-OFF): calibrate on the MEASURED
-    // decodability floor rather than the ladder-selection anchor. See kMeasuredFerFloor
-    // above for why these must be different constants.
-    //
-    // NOTE this is NOT the same as ULTRA_RUNG_CLASS_ANCHOR, which merely read a different
-    // COLUMN of the same (crossover-based) table and was measured HARMFUL on the rig: the
-    // Good-vs-AWGN gaps are non-uniform (QPSK R3/4 +5 dB, 8PSK R2/3 +1 dB), so it inverted
-    // the ladder ordering and tripled 12-CW usage. Using a self-consistent FER-floor table
-    // avoids that failure mode because every entry is the same KIND of quantity.
-    const bool use_fer_floor = [] {
-        const char* e = std::getenv("ULTRA_FER_FLOOR_ANCHOR");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    const float anchor_db =
-        (use_fer_floor && fading_index >= 0.0f)
-            ? rungFerFloorDb(mod, rate, fading_index)
-            : (use_class_anchor && fading_index >= 0.0f)
-                ? rungClassAnchorDb(mod, rate, fading_index)
-                : calibrationAnchorDbFor(mod, rate);
-    if (anchor_db >= kRungDisabledDb) return false;
-    const float c = getCodeRateValue(rate);
-    if (c <= 0.0f || c >= 1.0f) return false;
-    const float A = std::pow(10.0f, anchor_db / 10.0f);
-    const float alpha = -A / std::log(1.0f - c);
-    const float shift = std::pow(10.0f, -margin_db / 10.0f);
-    double cap = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const float g = gamma_lin[i] > 0.0f ? gamma_lin[i] * shift : 0.0f;
-        cap += 1.0 - std::exp(-static_cast<double>(g) / alpha);
-    }
-    return cap / static_cast<double>(n) >= static_cast<double>(c);
-}
+// KEPT deliberately (do not remove these while cleaning): kMeasuredFerFloor / rungFerFloorDb
+// above — real data at n=80/point across 9 rungs x 3 classes, pinned by
+// test_waveform_policy.cpp, and the right source to fit a PER-CLASS theta_r for the latent
+// controller, whose table is currently ITU-Good-only. Also rungClassAnchorDb, which has a
+// separate caller in connection.cpp.
 
 // Nearest locally-enabled rung at or below idx (canonical order is monotone in
 // speed), kRungIdxNone if nothing at/below is enabled. EVERY consumer of rung
