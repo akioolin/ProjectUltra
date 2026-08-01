@@ -39,7 +39,7 @@ constexpr float kPayloadPerFrameS = 6.19f / 5.0f;
 constexpr float kFixedPerCycleS = 1.41f + 1.79f;
 constexpr int kFramesPerGroup = 5;
 
-LatentRateController::Pick pick(const LatentRateController& c) {
+LatentRateController::Pick pick(LatentRateController& c) {
     return c.best(kPayloadPerFrameS, kFixedPerCycleS, kFramesPerGroup);
 }
 
@@ -206,6 +206,53 @@ void test_correlated_frames_are_tempered() {
           "tempered evidence sharpens more slowly than treating frames as independent");
 }
 
+
+// ── 8. TIE-BREAK UPWARD — the counterweight to the pessimism ──────────────────
+// Rig-motivated: deciding from the 25th percentile cost 1.2 dB (mean 16.2 vs p25 15.0),
+// exactly the gap to the QPSK R2/3 -> 8PSK R2/3 crossover at ~15.5, so the controller sat
+// one rung low for whole transfers. It still beat the ladder by 14.5% on stability alone —
+// it WON while using the good rung LESS (0.4 vs 1.2 changes/run) — but the rung gain was
+// left unclaimed. The likelihood also SATURATES (a rung that always succeeds stops carrying
+// information), so no amount of further evidence lifts x past the plateau on its own.
+void test_tie_break_probes_upward() {
+    // Park x_p25 exactly where the rig plateaued (15.0). Seed slightly above with a tight
+    // prior: the 25th percentile sits ~0.674 sigma below the mean, so seeding 15.0 directly
+    // would put p25 at 14.5 and the near-tie would not yet hold.
+    LatentRateController c;
+    c.seedPrior(15.2f, 0.3f);
+
+    int probes = 0, higher_than_argmax = 0;
+    uint8_t argmax_rung = kRungIdxNone;
+    for (int i = 0; i < 40; ++i) {
+        const auto p = pick(c);
+        if (i == 0) argmax_rung = p.rung;   // first decision is never a probe (counter != 0)
+        if (p.tie_break_probe) {
+            ++probes;
+            if (p.rung > argmax_rung) ++higher_than_argmax;
+        }
+    }
+    CHECK(probes > 0, "the tie-break fires when rungs are near-tied (got " << probes << ")");
+    CHECK(probes <= 40 / LatentRateController::kTieBreakPeriod + 1,
+          "and no more often than once per kTieBreakPeriod decisions");
+    CHECK(higher_than_argmax == probes,
+          "every probe selects a rung ABOVE the argmax — probing downward would be pointless");
+
+    // BOUNDED COST. A probe is only taken when the higher rung is within
+    // kTieBreakMarginFrac of the best, so the expected loss is margin/period.
+    const float worst_case_loss = LatentRateController::kTieBreakMarginFrac /
+                                  static_cast<float>(LatentRateController::kTieBreakPeriod);
+    CHECK(worst_case_loss < 0.05f,
+          "expected cost of probing is bounded below 5% of one group (" << worst_case_loss << ")");
+
+    // It must NOT fire when the rungs are far apart — that would be a plain over-commit.
+    LatentRateController far;
+    far.seedPrior(4.0f, 0.5f);        // deep in QPSK territory, dense rungs nowhere near
+    int far_probes = 0;
+    for (int i = 0; i < 40; ++i) if (pick(far).tie_break_probe) ++far_probes;
+    CHECK(far_probes == 0,
+          "no probe when the higher rungs are not within the margin (got " << far_probes << ")");
+}
+
 }  // namespace
 
 int main() {
@@ -217,6 +264,7 @@ int main() {
     test_dead_and_capped_probabilities();
     test_relax_widens_and_is_the_only_forgetting();
     test_correlated_frames_are_tempered();
+    test_tie_break_probes_upward();
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": "
               << (tests_run - tests_failed) << "/" << tests_run << " checks\n";
     return tests_failed == 0 ? 0 : 1;

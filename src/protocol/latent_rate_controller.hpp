@@ -148,6 +148,29 @@ public:
     static constexpr float kDeadProb = 0.10f;
     static constexpr float kCapProb = 0.90f;
 
+    // TIE-BREAK UPWARD — the counterweight the pessimism above requires.
+    //
+    // Deciding from the 25th percentile is right (over-committing costs a cratered group
+    // ~9.5 s; under-committing costs one group's rate delta) but it is NOT free: on the rig
+    // it cost 1.2 dB (posterior mean 16.2 against x_p25 15.0), which was exactly the gap to
+    // the QPSK R2/3 -> 8PSK R2/3 crossover at ~15.5. The controller therefore sat one rung
+    // low for whole transfers and still beat the ladder by 14.5% on stability alone
+    // (8PSK changes 0.4/run against baseline's 1.2 — it WON while using the good rung LESS).
+    //
+    // The second reason it sticks is structural: the likelihood SATURATES. QPSK R2/3
+    // (theta 8.0) caps at p = kLatentMaxSuccess once x >= 17.5, after which a clean 5/5 group
+    // carries no information at all — a rung that always succeeds tells you only "x is above
+    // my threshold", never how far above. No amount of further evidence lifts x past that.
+    //
+    // So when the higher rung is predicted within kTieBreakMarginFrac of the best, take it
+    // one decision in kTieBreakPeriod. This is Minstrel's INC bucket, and its expected cost
+    // is bounded BY CONSTRUCTION: at most margin/period = 15%/4 = 3.75% of one group's
+    // goodput, against unlocking a rung worth ~+20%. Crucially the probe is not wasted even
+    // when it loses — the outcome updates the posterior, which is the only way to learn
+    // about the saturated region at all.
+    static constexpr float kTieBreakMarginFrac = 0.15f;
+    static constexpr int kTieBreakPeriod = 4;
+
     // Pessimism. LTS uses min{sampled theta, posterior mean}; the asymmetry is real here too
     // — over-committing costs a cratered group (~9.5 s) while under-committing costs the
     // rate delta on one group. Decide from the 25th percentile of the posterior, not its
@@ -239,11 +262,13 @@ public:
         uint8_t rung = kRungIdxNone;
         float goodput = 0.0f;
         float x_used = 0.0f;
+        bool tie_break_probe = false;   // this decision took the higher near-tied rung
     };
 
     Pick best(float payload_s_per_frame, float fixed_s_per_cycle, int frames_per_group,
-              uint8_t ceiling = kRungIdxNone) const {
+              uint8_t ceiling = kRungIdxNone) {
         Pick out;
+        float g_by_rung[kRungIdxCount] = {};
         out.x_used = percentile(kDecilePessimism);
         const int M = std::max(1, frames_per_group);
         for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
@@ -263,6 +288,26 @@ public:
             const float cycle = air + fixed_s_per_cycle;
             const float g = (cycle > 0.0f) ? (eta * p / cycle) : 0.0f;
             if (g > out.goodput) { out.goodput = g; out.rung = r; }
+            if (r < kRungIdxCount) { g_by_rung[r] = g; }
+        }
+
+        // TIE-BREAK UPWARD. Walk DOWN from the top so we find the HIGHEST rung that is
+        // within the margin, not merely the runner-up: on a flat region several rungs can be
+        // near-tied and the informative probe is the highest of them.
+        ++decisions_;
+        if (out.rung != kRungIdxNone && out.goodput > 0.0f &&
+            (decisions_ % kTieBreakPeriod) == 0) {
+            for (int r = static_cast<int>(kRungIdxCount) - 1;
+                 r > static_cast<int>(out.rung); --r) {
+                const float g = g_by_rung[r];
+                if (g <= 0.0f) continue;
+                if (g >= out.goodput * (1.0f - kTieBreakMarginFrac)) {
+                    out.rung = static_cast<uint8_t>(r);
+                    out.goodput = g;
+                    out.tie_break_probe = true;
+                    break;
+                }
+            }
         }
         return out;
     }
@@ -291,6 +336,7 @@ public:
     }
     bool havePrior() const { return have_prior_; }
     int observations() const { return observations_; }
+    int decisions() const { return decisions_; }
 
     static float successProb(float x, float theta) {
         const float z = kLatentSlopePerDb * (x - theta);
@@ -312,6 +358,7 @@ private:
     float logp_[kBins] = {};
     bool have_prior_ = false;
     int observations_ = 0;
+    int decisions_ = 0;
 };
 
 }  // namespace protocol
