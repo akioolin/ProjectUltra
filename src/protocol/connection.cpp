@@ -2576,7 +2576,7 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
 
-    // ── LATENT-STATE PATH (ULTRA_LATENT_RATE, default OFF) ──────────────────────
+    // ── LATENT-STATE PATH (ULTRA_LATENT_RATE, DEFAULT-ON; =0 restores the legacy ladder)
     //
     // Consumes NO SNR ESTIMATE. It fits a latent operating point from OUTCOMES (frames
     // SACKed per group) against a link model measured directly as FER-vs-SNR
@@ -2813,77 +2813,32 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             // the last confirmed crater; hold until it turns over.
             cmd = cur;
         }
-        // ── RX-AUTHORITY PREDICTIVE CLIMB (ULTRA_RX_PREDICTIVE_CLIMB, opt-out
-        // =0; docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ── when fresh
-        // per-carrier snapshots exist (>=2, delivered AND cratered groups —
-        // the survivor-bias kill), the climb target is the highest enabled
-        // rung whose EESM prediction passes on ALL of them: a DIRECT
-        // multi-rung jump backed by measurement, not a bet. The scalar
-        // haircut + one-rung walk below remain the FALLBACK (no snapshots /
-        // MC-DPSK / knob off). The post-crater dwell above and the crater
-        // penalties (ride the margin here) stay as posterior correctors.
-        static const bool kPredictiveClimb = []() {
-            const char* e = std::getenv("ULTRA_RX_PREDICTIVE_CLIMB");
-            return !(e && e[0] == '0' && e[1] == '\0');
-        }();
-        bool predictive_climb_ran = false;
-        if (kPredictiveClimb && cmd > cur && rx_auth_gamma_count_ >= 2) {
-            // Freshness is a property of the SNAPSHOTS, not of any rung —
-            // collect the usable ones once, then walk the ladder top-down.
-            const auto now_tp = std::chrono::steady_clock::now();
-            size_t fresh_idx[kRxAuthGammaRing];
-            size_t fresh = 0;
-            for (size_t k = 0; k < rx_auth_gamma_count_; ++k) {
-                const auto age_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now_tp - rx_auth_gamma_time_[k]).count();
-                if (age_ms <= kRxAuthGammaMaxAgeMs &&
-                    !rx_auth_gamma_ring_[k].empty()) {
-                    fresh_idx[fresh++] = k;
-                }
-            }
-            if (fresh >= 2) {
-                predictive_climb_ran = true;
-                constexpr float kClimbMarginDbP = 2.5f;
-                uint8_t best = kRungIdxNone;
-                for (uint8_t r = kRungIdxCount - 1; r > cur; --r) {
-                    const CoherentPick p = coherentRungFromIndex(r);
-                    if (!coherentRungLocallyEnabled(p.mod, p.rate)) continue;
-                    const float margin =
-                        kClimbMarginDbP + rx_auth_rung_penalty_db_[r];
-                    bool all_pass = true;
-                    for (size_t f = 0; f < fresh; ++f) {
-                        const auto& g = rx_auth_gamma_ring_[fresh_idx[f]];
-                        // Pass the measured fading index so ULTRA_RUNG_CLASS_ANCHOR can
-                        // calibrate on the CURRENT class instead of the class-blind
-                        // (AWGN) minimum, which is 4-6 dB optimistic on fading. Knob-off
-                        // ignores it and behaves byte-identically.
-                        if (!rungPredictedSustainable(g.data(), g.size(), p.mod,
-                                                      p.rate, margin,
-                                                      fading_index_)) {
-                            all_pass = false;
-                            break;
-                        }
-                    }
-                    if (all_pass) {
-                        best = r;
-                        break;
-                    }
-                }
-                if (best != kRungIdxNone && best > cur) {
-                    if (best != cmd) {
-                        LOG_MODEM(INFO,
-                                  "Connection: RX-AUTHORITY predictive climb -> idx %u "
-                                  "(map said %u; %zu snapshots all pass)",
-                                  best, cmd, fresh);
-                    }
-                    cmd = best;
-                } else {
-                    cmd = cur;  // nothing above proven on measurement: hold
-                }
-            }
-        }
-        if (!predictive_climb_ran && cmd > cur) {
+        // RX-AUTHORITY PREDICTIVE CLIMB — RETIRED 2026-08-01.
+        //
+        // It gated every up-command on an EESM prediction over a ring of per-carrier gamma
+        // snapshots, and it was the ONLY reader of the gamma vector that
+        // streaming_burst_interleave.cpp marked up with kOfdmLegacyAnchorScaleOffsetDb.
+        // Removing it removes that offset consumer.
+        //
+        // Why it went rather than being fixed (25-agent corrective-stack audit, 2026-07-31):
+        //  - It answers the WRONG QUESTION. rungPredictedSustainable asks "will this rung
+        //    decode", not "which rung delivers more bps", so its bar is LOWER for lower-eta
+        //    rungs. It handed back QPSK R3/4 (2066 bps @20) in place of 8PSK R2/3 (2450 incl.
+        //    craters), undoing the 2026-07-26 anchor re-measure whose entire point was to put
+        //    8PSK R2/3's Good anchor at the throughput crossover.
+        //  - Measured asymmetry: when it disagreed with the map it downgraded 51x and
+        //    upgraded 6x.
+        //  - Its hold (cmd = cur) is INVISIBLE in the clamp statistics, because the verdict
+        //    log only prints when cmd != cur — so the measured "46% of decisions clamped"
+        //    UNDERSTATES the real rate.
+        //  - The conjunction "all fresh snapshots must pass" over a 4-deep ring with a 180 s
+        //    max age means one weak snapshot blocks every climb until four newer ones
+        //    displace it.
+        //
+        // The latent-state controller supersedes it properly: it predicts EVERY rung from a
+        // posterior fitted to outcomes, which is the job this was attempting with a single
+        // pass/fail test on a stale ring.
+        if (cmd > cur) {
             // CLIMB HYSTERESIS + crater margin: an up-command must survive a
             // haircut — the base 2.5 dB guards against slow swells; the target
             // rung's crater penalty demands the channel PROVE headroom the anchors
@@ -2897,7 +2852,7 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                 coherentRungIndexFor(guarded.mod, guarded.rate);
             if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
         }
-        if (!predictive_climb_ran && cmd > cur) {
+        if (cmd > cur) {
             // F149 ONE-RUNG CLIMB (FALLBACK path — the predictive climb above
             // replaces it whenever measurements exist): a climb is a bet on
             // headroom no delivered group has proven — bet the minimum stake.

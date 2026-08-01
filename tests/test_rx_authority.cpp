@@ -251,49 +251,22 @@ static bool test_prediction_rejects_notched_channel() {
     return true;
 }
 
-// DIRECT MULTI-RUNG JUMP: with >=2 fresh calm flat snapshots, one clean verdict
-// commands the measured-sustainable rung outright (idx 3 -> 8), no laddering.
-static bool test_predictive_direct_jump() {
-    TEST("2 calm snapshots let one verdict jump QPSK R2/3 -> 16QAM R2/3");
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 24.0f, 0.05f, Modulation::QPSK);
-    // 30 dB flat, not 26: the predictive jump must clear the TARGET rung's requirement with
-    // margin, and 16QAM R2/3's Good anchor moved 20 -> 26 in the 2026-07-26 fading re-measure.
-    // At 26 dB flat the evidence exactly equals the anchor with no margin, so the jump is
-    // correctly refused. The property under test (>=2 calm snapshots authorise a DIRECT
-    // multi-rung jump) is unchanged.
-    std::vector<float> calm(51, std::pow(10.0f, 30.0f / 10.0f));  // 30 dB flat
-    c.setBurstCarrierGammas(calm);
-    c.setBurstCarrierGammas(calm);
-    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-    TA::verdict(c, true, 0.95f);
-    if (TA::rxCmd(c) != kRungIdxQam16R23)
-        FAIL("verdict was idx " + std::to_string(TA::rxCmd(c)) +
-             " (want direct jump to 16QAM R2/3 = " +
-             std::to_string(kRungIdxQam16R23) + ")");
+// DIRECT MULTI-RUNG JUMP — TEST RETIRED 2026-08-01 with the feature it covered.
+//
+// It asserted that >=2 calm per-carrier gamma snapshots authorise a DIRECT multi-rung jump
+// (QPSK R2/3 -> 16QAM R2/3), which was the RX-AUTHORITY PREDICTIVE CLIMB's whole purpose.
+// That path is gone (connection.cpp): it answered "will this rung decode" rather than
+// "which rung delivers more bps", so its bar was LOWER for lower-eta rungs and it handed
+// back QPSK R3/4 (2066 bps @20) in place of 8PSK R2/3 (2450 incl. craters); measured, when
+// it disagreed with the map it downgraded 51x against 6 upgrades. It was also the ONLY
+// reader of the gamma vector that carried kOfdmLegacyAnchorScaleOffsetDb, so retiring it
+// removed that offset consumer.
+//
+// The test is DELETED rather than adjusted because there is no longer any code path that
+// can produce a multi-rung jump from gamma snapshots. Climbing is now either the one-rung
+// walk (legacy path) or the latent-state controller's posterior argmax, and the latter has
+// its own coverage in test_latent_rate_controller.cpp.
 
-    // Same scalar picture but ONE snapshot is notched: the jump must not fire
-    // past what every snapshot proves — 16QAM R2/3 rejected.
-    Connection d;
-    TA::makeConnectedOFDM(d, CodeRate::R2_3, 24.0f, 0.05f, Modulation::QPSK);
-    std::vector<float> notch(51);
-    for (size_t i = 0; i < notch.size(); ++i) {
-        notch[i] = (i % 5 == 0) ? std::pow(10.0f, -10.0f / 10.0f)
-                                : std::pow(10.0f, 24.0f / 10.0f);
-    }
-    d.setBurstCarrierGammas(calm);
-    d.setBurstCarrierGammas(notch);
-    d.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-    TA::verdict(d, true, 0.95f);
-    if (TA::rxCmd(d) >= kRungIdxQam16R23)
-        FAIL("a notched snapshot in the window must veto the 16QAM R2/3 jump "
-             "(got idx " + std::to_string(TA::rxCmd(d)) + ")");
-    PASS();
-    return true;
-}
-
-// TWO-CRATER rule: a single crater holds the rung (irreducible null — the ARQ's
-// job); the SECOND consecutive crater clamps below it whatever the map says.
 static bool test_two_crater_rule() {
     TEST("single crater holds; second consecutive crater clamps below");
 
@@ -832,6 +805,13 @@ static bool test_group_size_gate_streak() {
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
+    // ULTRA_LATENT_RATE went DEFAULT-ON 2026-08-01 and returns EARLY from
+    // updateRxAuthorityCommand, bypassing every legacy clamp. This whole suite exercises
+    // that legacy ladder — the two-crater rule, climb dwell, EMA hold, rung penalties — so
+    // it must select the path it is written for. This is not a workaround: the legacy path
+    // is a supported opt-out for 0.5.1 and it needs coverage as long as it ships.
+    // The latent controller has its own suite in test_latent_rate_controller.cpp.
+    setenv("ULTRA_LATENT_RATE", "0", 1);
     setenv("ULTRA_DENSE_FAST_DEMOTE", "0", 1);  // explicit baseline; the test toggles it
     setenv("ULTRA_ENABLE_PSK8_LADDER", "1", 1);
     unsetenv("ULTRA_DESCRIPTOR_MODE_SWITCH");  // legacy path -> pending_* observable
@@ -847,7 +827,6 @@ int main() {
     ok &= test_verdict_maps_snr_to_rung();
     ok &= test_prediction_flat_identity();
     ok &= test_prediction_rejects_notched_channel();
-    ok &= test_predictive_direct_jump();
     ok &= test_two_crater_rule();
     ok &= test_confirmed_crater_arms_climb_dwell();
     ok &= test_ema_hold_absorbs_supported_crater();

@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================================
-// LATENT-STATE RATE CONTROLLER  (ULTRA_LATENT_RATE, default OFF)
+// LATENT-STATE RATE CONTROLLER  (ULTRA_LATENT_RATE, DEFAULT-ON since 2026-08-01)
 // ============================================================================
 //
 // WHY THIS SHAPE — what every deployed rate controller does and we did not
@@ -65,7 +65,7 @@
 // This controller therefore consumes NO SNR ESTIMATE AT ALL. It is the reason the offset can
 // leave the rate path.
 //
-// SCOPE. Pure logic, no I/O, no clock, no RNG. Default OFF.
+// SCOPE. Pure logic, no I/O, no clock, no RNG.
 
 #include <algorithm>
 #include <cmath>
@@ -77,10 +77,32 @@
 namespace ultra {
 namespace protocol {
 
+// DEFAULT-ON since 2026-08-01. Opt out with ULTRA_LATENT_RATE=0, which restores the legacy
+// SNR-anchor ladder and its corrective stack.
+//
+// EVIDENCE FOR THE FLIP:
+//   - Rig A/B, 8 interleaved pairs at IONOS MPG@20: +14.5% mean, median +18.4%, 7/8
+//     positive, 1.64 vs 1.45 kbps. Paired t = 2.92, df=7 -> p = 0.022. The ONLY result in
+//     this campaign to clear p<0.05 (the others: +8.0% goodput ctl, -13.8% dwell, +20.7%
+//     trust-pick, +26.2% bundle, +5.2% forced rung — none significant).
+//   - Faithful gate PASSES on BOTH classes: Good@20 and Moderate@20, CRC clean.
+//   - Moderate is the one that mattered, because theta_r was measured on ITU Good ONLY. It
+//     works anyway: on Moderate the posterior settled to x ~ 11-12 against 15-17 on Good and
+//     held QPSK R1/2-R2/3 instead of 8PSK. A worse channel simply produces a lower x, so the
+//     argmax lands correctly without a per-class table. That is the common-mode absorption
+//     doing real work, not merely cancelling a calibration constant.
+//
+// HONEST CAVEATS carried into the release:
+//   - Significant by the t-test, NOT by the sign test (7/8, p=0.070). Established, not
+//     settled.
+//   - The tie-break probe (kTieBreakMarginFrac / kTieBreakPeriod) raises the mean slightly
+//     and DOUBLES the variance (+16.5% sd 27.3% over 7 pairs, losing significance). It is
+//     compiled in and fires, and its bimodal signature is documented in the CHANGELOG; if a
+//     regression appears, that is the first thing to gate on posterior confidence.
 inline bool latentRateControllerEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_LATENT_RATE");
-        return e != nullptr && e[0] == '1' && e[1] == '\0';
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON
     }();
     return on;
 }

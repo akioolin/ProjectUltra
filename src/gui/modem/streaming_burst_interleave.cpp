@@ -514,10 +514,16 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
     }
     if (!bb.empty() && sum_all > 0.0) {
         std::nth_element(bb.begin(), bb.begin() + bb.size() / 2, bb.end());
-        // kOfdmLegacyAnchorScaleOffsetDb: the EESM anchor table was measured on
-        // the pre-2026-07-07 estimator scale (see connection_policy.hpp).
-        const float med_db = bb[bb.size() / 2] +
-            protocol::connection_policy::ofdmAnchorScaleOffsetDb();
+        // NO SCALE MARKUP (2026-08-01). This renormalisation used to add
+        // kOfdmLegacyAnchorScaleOffsetDb because the EESM anchor table it fed was measured
+        // on the pre-2026-07-07 estimator scale. The ONLY consumer of that table was the
+        // RX-authority predictive climb, which has been RETIRED (connection.cpp): it
+        // answered "will this rung decode" rather than "which rung delivers more bps", and
+        // when it disagreed with the map it downgraded 51x against 6x upgrades. With its
+        // reader gone there is no table left to be compatible with, so the markup is simply
+        // deleted rather than carried. The vector remains for the ULTRA_GAMMA_DOMAIN_LOG
+        // diagnostic and is now on the honest in-band scale throughout.
+        const float med_db = bb[bb.size() / 2];
         const double target = std::pow(10.0, static_cast<double>(med_db) / 10.0);
         const double mean_lin = sum_all / static_cast<double>(mean.size());
         if (mean_lin > 1e-12) {
@@ -526,10 +532,9 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
         }
     }
     // 2026-07-29 diag: the PER calibration in calibration/ofdm_per_v1.csv was fitted
-    // against RAW getCarrierGammaSnapshot() gamma, but this vector is renormalized to
-    // the in-band scale (and carries ofdmAnchorScaleOffsetDb). Applying the raw-fitted
-    // table here without accounting for that would be a domain mismatch -- the fifth of
-    // this class found today. Log both means so the shift is MEASURED, not assumed.
+    // against RAW getCarrierGammaSnapshot() gamma while this vector is renormalized to the
+    // in-band scale. (It no longer carries any anchor-scale markup — see above.) Log both
+    // means so the remaining domain shift stays MEASURED rather than assumed.
     if (std::getenv("ULTRA_GAMMA_DOMAIN_LOG") != nullptr) {
         double raw_sum = 0.0;
         for (size_t i = 0; i < mean_raw_for_diag.size(); ++i) {
