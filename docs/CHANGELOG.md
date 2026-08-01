@@ -10,6 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-01 — RIG: the latent-state controller is the first SIGNIFICANT throughput result
+
+8 interleaved pairs, IONOS MPG@20, 50 KB, knob on the receiver (RX authority), both ends on
+identical code.
+
+| pair | latent | base | delta |
+|---|---|---|---|
+| 1 | 1.75 | 1.44 | +21.5% |
+| 2 | 1.60 | 1.33 | +20.3% |
+| 3 | 1.60 | 1.74 | -8.0% |
+| 4 | 1.52 | 1.50 | +1.3% |
+| 5 | 1.70 | 1.30 | +30.8% |
+| 6 | 1.70 | 1.31 | +29.8% |
+| 7 | 1.63 | 1.40 | +16.4% |
+| 8 | 1.61 | 1.55 | +3.9% |
+
+**Mean +14.5%, median +18.4%, 7/8 positive. Latent 1.64 vs base 1.45 kbps.**
+**Paired t = 2.92, df=7 -> two-tailed p = 0.022. SIGNIFICANT at 0.05.**
+
+HONEST CAVEAT: significant by the t-test, NOT by the sign test (7/8, p=0.070). The t-test is
+the more powerful here because it uses magnitudes and the paired differences are roughly
+symmetric, but the two disagree — established, not settled. Every other A/B this session
+(+8.0% goodput ctl, -13.8% dwell, +20.7% trust-pick, +26.2% bundle, +5.2% forced rung)
+failed to clear either test.
+
+### The mechanism is NOT the expected one, and that matters
+
+    mode changes : latent 2.2/run vs base 5.0
+    8PSK changes : latent 0.4/run vs base 1.2   <-- the WINNER uses the good rung LESS
+
+The baseline reaches 8PSK R2/3 three times as often and still loses. The entire +14.5% comes
+from STABILITY, not from rung selection. That is Minstrel's thesis holding on this link —
+stability belongs in the ESTIMATOR, not the ACTUATOR — and it retires the framing this
+campaign ran on, that the problem was "picking the right rung".
+
+### Headroom left unclaimed, and why
+
+x_p25 plateaus at 15.0 against a QPSK R2/3 -> 8PSK R2/3 crossover at ~15.5. Two causes:
+  - The likelihood SATURATES. QPSK R2/3 (theta 8.0) caps at p=0.965 once x >= 17.5, after
+    which a clean 5/5 group carries no information — a rung that always succeeds tells you
+    only "x is above my threshold", never how far above. Censoring is inherent.
+  - The 25th-percentile pessimism costs 1.2 dB (mean 16.2 vs p25 15.0), exactly the gap. The
+    reference design pairs that pessimism with a TIE-BREAK-UPWARD probe ("when the top two
+    G_r are within switchMargin, take the higher rung 1 group in 4; expected cost bounded by
+    the margin"). That was omitted here. Adding it should STACK the rung gain on top of the
+    stability gain rather than replace it.
+
+### The pre-stated risk did not materialise
+
+sigma_relax was flagged in advance as the one free parameter, with the specific failure mode
+that too-small values freeze the posterior — which would look EXCELLENT on OTASim
+(stationary Watterson, no ionospheric drift) and fail on the rig. On the rig the posterior
+stayed live: sd 1.4-2.1 throughout, tracking k = 3/5..5/5. The run that could catch it did
+not fire it.
+
+### Null control
+
+25 LATENT-RATE lines/run on the latent arm, 0 on baseline, in every pair.
+
+---
+
 ## 2026-07-30 — FIXED: sync cursor can run past live audio (BUG-SYNC-CURSOR-AHEAD)
 
 Operator challenge that started it: "we cant have handshake flake, find out what really
