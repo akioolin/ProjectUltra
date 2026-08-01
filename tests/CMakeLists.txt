@@ -381,6 +381,10 @@ add_executable(test_goodput_rate_controller test_goodput_rate_controller.cpp)
 target_link_libraries(test_goodput_rate_controller PRIVATE ultra_core)
 add_test(NAME GoodputRateController COMMAND test_goodput_rate_controller)
 
+add_executable(test_latent_rate_controller test_latent_rate_controller.cpp)
+target_link_libraries(test_latent_rate_controller PRIVATE ultra_core)
+add_test(NAME LatentRateController COMMAND test_latent_rate_controller)
+
 # Pins CP geometry so prose cannot drift from the arithmetic (2026-07-28: three comments
 # claimed MEDIUM@1024 = "256 samples / 5.3ms"; actual is 96 / 2.00 ms).
 add_executable(test_cyclic_prefix_geometry test_cyclic_prefix_geometry.cpp)

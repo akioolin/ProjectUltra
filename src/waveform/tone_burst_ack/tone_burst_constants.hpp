@@ -111,13 +111,41 @@ inline constexpr uint32_t kSymbolMsWeakSNR = 200;  // SNR < -5 dB
 // low SNR — the unsafe direction).
 inline constexpr float kFastAckEdgeAwgnDb = 18.0f;
 inline constexpr float kFastAckEdgeFadingDb = 16.0f;
+// MEASURED 2026-08-01 by tools/measure_ack_staircase — decode success of a real
+// encode -> Watterson -> detect+decode round trip (production path, timing search enabled),
+// 24 trials per cell, edge = lowest SNR clearing 95%:
+//
+//     symbol_ms |  AWGN  |  Good fading
+//        12 ms  |  -4 dB |   +10 dB
+//        25 ms  |  -8 dB |   + 2 dB
+//        50 ms  | -10 dB |   + 2 dB      (dominated: 25 ms is shorter at the same edge)
+//       100 ms  | -10 dB |   - 2 dB
+//       200 ms  | -10 dB |   - 2 dB      (dominated by 100 ms)
+//
+// THE SNR HERE IS THE HONEST IN-BAND READING. These edges replace a table that was tuned
+// against the pre-2026-07-07 OFDM estimator, which read ~8.7 dB high; app.cpp compensated by
+// adding connection_policy::kOfdmLegacyAnchorScaleOffsetDb back to every OFDM-sourced
+// reading. That single constant could not correct a two-column table: it left AWGN 13 dB too
+// CONSERVATIVE (effective edge 9.3 dB against a measured -4) while making fading 2.7 dB too
+// AGGRESSIVE (effective 7.3 against a measured +10, i.e. firing the 12 ms ACK below where it
+// decodes — and a failed ACK costs a full retransmission cycle, ~9.5 s).
+//
+// MARGIN: +2 dB (one sweep step) over the measured edge. The sweep runs on the channel model
+// alone and omits real-radio impairments (cheap-card distortion, level drift, ALC), so the
+// measured edge is optimistic for hardware. 24 trials also gives only ~+-10% per cell.
+inline constexpr float kAckEdgeMarginDb = 2.0f;
+
 inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
-    const float fast_edge = fading_present ? kFastAckEdgeFadingDb : kFastAckEdgeAwgnDb;
-    if (snr_db >= fast_edge) return kSymbolMsHighSNR;  // 12 ms -> 408 ms airtime
-    if (snr_db >= 12.0f) return kSymbolMsMidSNR;    // 25 ms -> 850 ms (baseline)
-    if (snr_db >= 5.0f)  return kSymbolMsLowSNR;    // 50 ms -> 1700 ms
-    if (snr_db >= -5.0f) return kSymbolMsMargSNR;   // 100 ms -> 3400 ms
-    return kSymbolMsWeakSNR;                         // 200 ms -> 6800 ms
+    if (fading_present) {
+        if (snr_db >= 10.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;  // 12 ms -> 408 ms
+        if (snr_db >=  2.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;   // 25 ms -> 850 ms
+        if (snr_db >= -2.0f + kAckEdgeMarginDb) return kSymbolMsMargSNR;  // 100 ms -> 3400 ms
+        return kSymbolMsWeakSNR;                                          // 200 ms, best effort
+    }
+    if (snr_db >=  -4.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;
+    if (snr_db >=  -8.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;
+    if (snr_db >= -10.0f + kAckEdgeMarginDb) return kSymbolMsMargSNR;
+    return kSymbolMsWeakSNR;
 }
 
 // ============================================================================

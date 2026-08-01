@@ -563,6 +563,15 @@ if(ULTRA_BUILD_TOOLS)
     ultra_enable_tool_test_warnings(tools/otasim_ctl.cpp)
     target_link_libraries(otasim_ctl PRIVATE ultra_otasim_client)
 
+    add_executable(measure_ack_staircase
+        tools/measure_ack_staircase.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/measure_ack_staircase.cpp)
+    target_include_directories(measure_ack_staircase PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(measure_ack_staircase PRIVATE ultra_core ota_channel_core)
+
     add_executable(measure_ack_fer
         tools/measure_ack_fer.cpp
         ${ULTRA_STREAMING_MODEM_SOURCES}

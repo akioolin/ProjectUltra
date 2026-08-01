@@ -535,18 +535,47 @@ void test_costas_autocorrelation_peak() {
 
 void test_symbol_ms_staircase() {
     std::printf("[test] symbol_ms_staircase\n");
-    // §15.5 staircase: symbolMsForSNR maps measured in-band SNR -> symbol
-    // duration (shorter ACK at high SNR, longer for robust detection at low SNR).
-    EXPECT_EQ(symbolMsForSNR(25.0f), kSymbolMsHighSNR);   // >= 18 dB -> 12 ms
-    EXPECT_EQ(symbolMsForSNR(18.0f), kSymbolMsHighSNR);   // boundary inclusive
-    EXPECT_EQ(symbolMsForSNR(17.9f), kSymbolMsMidSNR);    // 12-18 dB -> 25 ms
-    EXPECT_EQ(symbolMsForSNR(12.0f), kSymbolMsMidSNR);    // boundary inclusive
-    EXPECT_EQ(symbolMsForSNR(11.9f), kSymbolMsLowSNR);    // 5-12 dB -> 50 ms
-    EXPECT_EQ(symbolMsForSNR(5.0f),  kSymbolMsLowSNR);    // boundary inclusive
-    EXPECT_EQ(symbolMsForSNR(4.9f),  kSymbolMsMargSNR);   // -5..5 dB -> 100 ms
-    EXPECT_EQ(symbolMsForSNR(-5.0f), kSymbolMsMargSNR);   // boundary inclusive
-    EXPECT_EQ(symbolMsForSNR(-5.1f), kSymbolMsWeakSNR);   // < -5 dB -> 200 ms
+    // RE-MEASURED 2026-08-01 (tools/measure_ack_staircase). The previous expectations
+    // encoded the ORIGINAL, unmeasured edges (18/12/5/-5 dB) and are replaced, not
+    // accommodated: a real encode -> Watterson -> detect+decode sweep (24 trials/cell,
+    // production timing search) puts the 95%-decode edges at
+    //
+    //     symbol_ms |  AWGN  | Good fading
+    //        12 ms  |  -4 dB |   +10 dB
+    //        25 ms  |  -8 dB |   + 2 dB
+    //       100 ms  | -10 dB |   - 2 dB
+    //
+    // i.e. the old AWGN edge was ~22 dB too conservative, sending 850 ms ACKs where 408 ms
+    // decodes perfectly. app.cpp used to add kOfdmLegacyAnchorScaleOffsetDb (+8.70 dB) to
+    // OFDM-sourced readings to make the old edges line up; one constant cannot correct a
+    // two-column table, and it left AWGN 13 dB conservative while making fading 2.7 dB
+    // AGGRESSIVE. Both the compensation and the old edges are gone.
+    //
+    // Edges below carry the +2 dB kAckEdgeMarginDb (the sweep omits real-radio impairment).
+    // AWGN column (fading_present defaults to false):
+    EXPECT_EQ(symbolMsForSNR(25.0f), kSymbolMsHighSNR);
+    EXPECT_EQ(symbolMsForSNR(-2.0f), kSymbolMsHighSNR);   // measured -4 + 2 margin
+    EXPECT_EQ(symbolMsForSNR(-2.1f), kSymbolMsMidSNR);
+    EXPECT_EQ(symbolMsForSNR(-6.0f), kSymbolMsMidSNR);    // measured -8 + 2
+    EXPECT_EQ(symbolMsForSNR(-6.1f), kSymbolMsMargSNR);
+    EXPECT_EQ(symbolMsForSNR(-8.0f), kSymbolMsMargSNR);   // measured -10 + 2
+    EXPECT_EQ(symbolMsForSNR(-8.1f), kSymbolMsWeakSNR);
     EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsWeakSNR);
+
+    // FADING column — materially stricter, which is the point: a deep null inside a short
+    // symbol is unrecoverable, so 12 ms needs +10 dB on Good against -4 dB on AWGN.
+    EXPECT_EQ(symbolMsForSNR(25.0f, true), kSymbolMsHighSNR);
+    EXPECT_EQ(symbolMsForSNR(12.0f, true), kSymbolMsHighSNR);  // measured +10 + 2
+    EXPECT_EQ(symbolMsForSNR(11.9f, true), kSymbolMsMidSNR);
+    EXPECT_EQ(symbolMsForSNR(4.0f,  true), kSymbolMsMidSNR);   // measured +2 + 2
+    EXPECT_EQ(symbolMsForSNR(3.9f,  true), kSymbolMsMargSNR);
+    EXPECT_EQ(symbolMsForSNR(0.0f,  true), kSymbolMsMargSNR);  // measured -2 + 2
+    EXPECT_EQ(symbolMsForSNR(-0.1f, true), kSymbolMsWeakSNR);
+
+    // The fading edge must never be LOOSER than the AWGN one at the same duration —
+    // fading strictly costs margin, and inverting that would key a short ACK into a null.
+    EXPECT(symbolMsForSNR(5.0f, true) >= symbolMsForSNR(5.0f, false));
+    EXPECT(symbolMsForSNR(0.0f, true) >= symbolMsForSNR(0.0f, false));
 
     // Monotonic non-increasing: a better channel never yields a LONGER ACK.
     uint32_t prev = symbolMsForSNR(-30.0f);

@@ -2576,6 +2576,80 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
 
+    // ── LATENT-STATE PATH (ULTRA_LATENT_RATE, default OFF) ──────────────────────
+    //
+    // Consumes NO SNR ESTIMATE. It fits a latent operating point from OUTCOMES (frames
+    // SACKed per group) against a link model measured directly as FER-vs-SNR
+    // (docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md §1), so every group updates the
+    // predicted success of ALL rungs at once and the evidence survives a rung change.
+    //
+    // THE POINT OF THE SHAPE: with P_r = f(x - theta_r) and x fitted from outcomes, adding a
+    // constant to every theta_r is absorbed by x. COMMON-MODE CALIBRATION ERROR CANCELS
+    // EXACTLY. That is what lets the rate path stop consuming
+    // connection_policy::kOfdmLegacyAnchorScaleOffsetDb (+8.70 dB) — a compatibility shim
+    // for an estimator bug fixed on 2026-07-07, which the code itself documents as leaving
+    // the ladder ~5.6 dB optimistic on this hardware and over-committing by ~2 rungs. On
+    // THIS path snr_avg is never read, so the offset cannot influence the decision.
+    //
+    // No dwell, no ratchet, no penalty array, no crater trigger: Minstrel's discipline, that
+    // stability belongs in the estimator and not in the actuator.
+    if (latentRateControllerEnabled()) {
+        const auto now_tp = std::chrono::steady_clock::now();
+        float group_s = 10.0f;
+        if (goodput_last_verdict_valid_) {
+            const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now_tp - goodput_last_verdict_).count();
+            if (dt_ms > 1000 && dt_ms < 60000) group_s = static_cast<float>(dt_ms) / 1000.0f;
+        }
+        goodput_last_verdict_ = now_tp;
+        goodput_last_verdict_valid_ = true;
+
+        if (!latent_ctl_.havePrior()) {
+            // Seed from the connect-time pick expressed as a LADDER POSITION, not as an SNR:
+            // use the theta of the rung we entered on. That keeps even the prior free of the
+            // calibration chain.
+            latent_ctl_.seedPrior(latentThetaForRung(cur), 3.0f);
+        }
+
+        // Group size. The burst path runs 5-frame groups on this bench ("Burst group
+        // complete (5 frames)" in every rig log). M scales only the evidence weight and the
+        // airtime term, and the correlation tempering dominates the former, so +-1 shifts
+        // nothing material. Plumb the true value if group sizing becomes adaptive.
+        constexpr int M = 5;
+        const int k = (delivered_fraction >= 0.0f)
+                          ? static_cast<int>(std::lround(delivered_fraction * M))
+                          : (all_ok ? M : 0);
+        latent_ctl_.observe(cur, k, M);
+        // Forget at the rate the ionosphere actually moves. THE ONE FREE PARAMETER; see the
+        // header. Too small freezes the controller and looks perfect on OTASim (stationary
+        // Watterson, no ITV) while failing on the rig.
+        static const float kRelaxDb = [] {
+            if (const char* e = std::getenv("ULTRA_LATENT_RELAX_DB")) {
+                const float v = std::strtof(e, nullptr);
+                if (v >= 0.0f && v <= 5.0f) return v;
+            }
+            return 0.35f;
+        }();
+        latent_ctl_.relax(kRelaxDb);
+
+        // Measured scheduling geometry (same source as the link model).
+        constexpr float kPayloadPerFrameS = 6.19f / 5.0f;
+        const float fixed_s = 1.41f + 1.79f;
+        const auto best = latent_ctl_.best(kPayloadPerFrameS, fixed_s, M);
+        uint8_t lat_cmd = (best.rung != kRungIdxNone) ? best.rung : cur;
+        if (lat_cmd != cur) {
+            const uint8_t snapped = snapRungIndexDownToEnabled(lat_cmd);
+            lat_cmd = (snapped != kRungIdxNone) ? snapped : cur;
+        }
+        rx_authority_cmd_ = lat_cmd;
+        LOG_MODEM(INFO,
+                  "Connection: LATENT-RATE idx %u -> %u  x_p25=%.1f mean=%.1f sd=%.1f "
+                  "obs=%d  k=%d/%d  group=%.1fs  (NO SNR CONSUMED)",
+                  cur, lat_cmd, best.x_used, latent_ctl_.posteriorMean(),
+                  latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s);
+        return;
+    }
+
     // ── GOODPUT-MAXIMIZING PATH (ULTRA_GOODPUT_RATE, default OFF) ────────────────
     // REPLACES everything below, deliberately. The SNR-anchor pick plus its ~10
     // correctives measured 10.6% WORSE than pinning 8PSK R2/3 on the rig (2026-07-30,

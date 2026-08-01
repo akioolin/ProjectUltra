@@ -707,15 +707,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     std::sort(v.begin(), v.end());
                     staircase_snr = v[v.size() / 2];
                 }
-                // kOfdmLegacyAnchorScaleOffsetDb: the 16/18 dB staircase edges
-                // were hardware-proven against the pre-2026-07-07 OFDM estimator
-                // scale — compensate OFDM-sourced readings until the edges are
-                // re-measured (see connection_policy.hpp). IDLE readings were
-                // always on the honest scale and pass through unchanged.
-                if (src == SNRSource::OFDM_BROADBAND) {
-                    staircase_snr += protocol::connection_policy::
-                        kOfdmLegacyAnchorScaleOffsetDb;
-                }
+                // NO SCALE COMPENSATION. The staircase edges were RE-MEASURED on the
+                // honest in-band scale (tools/measure_ack_staircase, 2026-08-01), so every
+                // source — OFDM_BROADBAND and IDLE alike — is now consumed in the units it
+                // is actually reported in. The former
+                // `+= kOfdmLegacyAnchorScaleOffsetDb` existed only because the old edges
+                // were tuned against the pre-2026-07-07 estimator; it also could not be
+                // right for both columns at once (13 dB too conservative on AWGN, 2.7 dB
+                // too aggressive on fading). Deleted with the table it patched.
                 symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
                     staircase_snr, fading_present);
             }

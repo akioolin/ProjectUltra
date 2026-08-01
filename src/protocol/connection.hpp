@@ -7,6 +7,7 @@
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
 #include "goodput_rate_controller.hpp"
+#include "latent_rate_controller.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
@@ -1175,6 +1176,9 @@ private:
     // SNR-anchor pick + corrective stack in updateRxAuthorityCommand when enabled; inert
     // and untouched when off. See goodput_rate_controller.hpp for why it reads no SNR.
     GoodputRateController goodput_ctl_;
+    // ULTRA_LATENT_RATE: outcome-fitted latent state; consumes no SNR, so no calibration
+    // offset can reach the rate decision.
+    LatentRateController latent_ctl_;
     std::chrono::steady_clock::time_point goodput_last_verdict_{};
     bool goodput_last_verdict_valid_ = false;
 
