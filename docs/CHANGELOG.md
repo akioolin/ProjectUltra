@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-01 — RIG: the tie-break probe raises the mean and DOUBLES the variance (net: keep it off)
+
+7 usable interleaved pairs (one voided), IONOS MPG@20, 50 KB, same harness as the
+pre-probe run.
+
+| pair | latent | base | delta | 8PSK reached |
+|---|---|---|---|---|
+| 1 | 1.97 | 1.48 | +33.1% | yes |
+| 2 | 2.15 | 1.55 | +38.7% | yes |
+| 3 | 1.63 | 1.49 | +9.4% | yes |
+| 4 | 1.39 | 1.61 | -13.7% | **no** |
+| 5 | 1.98 | 1.43 | +38.5% | yes |
+| 6 | 1.44 | 1.97 | -26.9% | **no** |
+| 7 | 1.92 | 1.41 | +36.2% | yes |
+
+### The comparison that matters
+
+|  | mean | sd | sign | t-test |
+|---|---|---|---|---|
+| WITHOUT tie-break (8 pairs) | +14.5% | **14.0%** | 7/8 | **p = 0.022 SIGNIFICANT** |
+| WITH tie-break (7 pairs) | +16.5% | **27.3%** | 5/7 | p = 0.45 not significant |
+
+The probe raised the mean slightly and DOUBLED the variance, losing the significance. The
+prediction recorded before the run — that the rung gain would "stack on top of the stability
+gain rather than replace it" — was HALF RIGHT: it does stack when the probe lands, but it
+also trades away the low-variance property that made the pre-probe version significant in
+the first place. Stability was the whole reason that version won.
+
+### The mechanism is unambiguous
+
+Outcome splits exactly on whether the probe reached 8PSK R2/3:
+    reached  -> +33.1, +38.7, +9.4, +38.5, +36.2   (four runs above +33%, peak 2.15 kbps
+                                                     against the 2450 anchor ceiling)
+    did not  -> -13.7, -26.9
+Bimodal, not noisy. When it lands it is the largest gain measured in the whole campaign;
+when it does not it burns groups on a rung that was not ready.
+
+### Verified working as designed
+
+The probe does exactly what it was built for. On pair 1, at x_p25 = 15.0 — the precise value
+the pre-probe run plateaued at for 15 consecutive groups — it jumped idx 3 -> 5, then HELD,
+and the posterior climbed freely to 17.5. That is the saturation escape: QPSK R2/3's
+likelihood is capped so no evidence can lift x, but 8PSK R2/3's is informative again, so one
+probe unlocks it permanently.
+
+### Conclusion
+
+SHIP CANDIDATE IS THE PRE-PROBE CONTROLLER (+14.5%, p=0.022). The probe stays OFF.
+
+The defect is not the probe but its UNCONDITIONALITY: firing every kTieBreakPeriod decisions
+regardless of posterior confidence is what creates the downside. Gating it on a tight
+posterior (sd < ~1.5) would keep the upside and drop the probes taken while the estimate is
+still vague. Untested — and given this campaign's record of results that looked good at n=3,
+it needs 8 pairs before being believed.
+
+---
+
 ## 2026-08-01 — RIG: the latent-state controller is the first SIGNIFICANT throughput result
 
 8 interleaved pairs, IONOS MPG@20, 50 KB, knob on the receiver (RX authority), both ends on
