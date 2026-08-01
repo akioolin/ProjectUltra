@@ -10,6 +10,69 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## v0.5.1-pre-alpha (2026-08-01) — latent-state rate control DEFAULT-ON
+
+### Headline
+
+OFDM rate selection now runs the latent-state controller by default. Rig-measured **+14.5%**
+(8 interleaved pairs, IONOS MPG@20, 1.64 vs 1.45 kbps, paired t=2.92 df=7 -> **p=0.022**) —
+the only result in this campaign to clear p<0.05.
+
+`ULTRA_LATENT_RATE=0` restores the legacy SNR-anchor ladder.
+
+### What actually produced the gain (not what we predicted)
+
+    mode changes : latent 2.2/run vs legacy 5.0
+    8PSK changes : latent 0.4/run vs legacy 1.2   <-- the WINNER uses the best rung LESS
+
+The legacy ladder reaches 8PSK R2/3 three times as often and still loses. The entire gain is
+STABILITY, not rung selection — which inverts the premise the campaign ran on. It matches
+what every deployed system does (Minstrel-HT, iwlwifi, OLLA, STANAG 5066 DRC): keep a value
+estimate for EVERY rate, decide by stateless argmax, and put stability in the ESTIMATOR
+rather than in a stack of actuator-side correctives. Ours had ~10 such correctives clamping
+46% of decisions down a mean of 1.61 rungs.
+
+### Retired
+
+**RX-AUTHORITY PREDICTIVE CLIMB.** It answered "will this rung decode" rather than "which
+delivers more bps", so its bar was LOWER for lower-eta rungs; measured, when it disagreed
+with the map it downgraded 51x against 6 upgrades. Its hold was invisible in the clamp
+statistics (the verdict log prints only when cmd != cur), so "46% clamped" understates the
+truth. Its test went with it — no code path can produce a gamma-driven multi-rung jump now.
+
+### kOfdmLegacyAnchorScaleOffsetDb (+8.70 dB): 2 of 3 consumers gone
+
+| consumer | status |
+|---|---|
+| tone-ACK staircase | **DELETED** — edges re-measured on the honest scale (tools/measure_ack_staircase). The old AWGN edge was ~22 dB too conservative, sending 850 ms ACKs where 408 ms decodes. One constant could never correct a two-column table: it left AWGN 13 dB conservative while making fading 2.7 dB AGGRESSIVE. |
+| EESM gamma anchoring | **DELETED** with the predictive climb, its only reader. |
+| ladder SNR markup | remains, reachable ONLY via `ULTRA_LATENT_RATE=0`. Dies when the fallback is removed in 0.5.2. |
+
+The controller consumes NO SNR at all: with `P_r = f(x - theta_r)` and x fitted from
+outcomes, adding a constant to every theta_r is absorbed by x, so common-mode calibration
+error cancels exactly.
+
+### Moderate validated — the gap that mattered
+
+theta_r was measured on ITU **Good** only, and the latent path runs on every OFDM connection.
+It works anyway: on Moderate the posterior settled to x ~ 11-12 against 15-17 on Good, and
+held QPSK R1/2-R2/3 instead of 8PSK. A worse channel simply produces a lower x. Faithful gate
+PASSES with defaults on both classes (good@20 1690 bps, moderate@20 800 bps, CRC clean).
+
+### Caveats shipped with the release
+
+- Significant by the t-test, **not** by the sign test (7/8, p=0.070). Established, not settled.
+- The tie-break probe is compiled in and fires. It raises the mean slightly and **doubles the
+  variance** (+16.5%, sd 27.3%, 7 pairs, not significant), bimodal: +33..+39% when it reaches
+  8PSK, -14/-27% when it does not. First thing to gate on posterior confidence if a
+  regression appears.
+- Rig A/B power: paired sd is 14-36%, so n>=8 pairs resolves ~15% and n=3 resolves nothing.
+  Four claims were retracted this campaign for believing small samples or cross-side numbers.
+
+Full suite 100/100. CMake VERSION 0.3.5 -> 0.5.1 (was stale by two releases).
+
+---
+
 ## 2026-08-01 — RIG: the tie-break probe raises the mean and DOUBLES the variance (net: keep it off)
 
 7 usable interleaved pairs (one voided), IONOS MPG@20, 50 KB, same harness as the
