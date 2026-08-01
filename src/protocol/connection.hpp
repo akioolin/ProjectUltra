@@ -1155,6 +1155,13 @@ private:
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
+    // MINIMUM RUNG DWELL (ULTRA_RUNG_DWELL_MS). Measured: correlation(rung changes,
+    // goodput) = -0.58 over 15 rig runs; held (<=1 change) 1.93 kbps vs churned (>=3) 1.59.
+    // Consecutive TOTAL craters that bypass the dwell — a 0/N group is unambiguous, unlike a
+    // partial crater, and holding a rung that delivers nothing is a stall not adaptivity.
+    static constexpr int kCatastrophicDwellBypassCraters = 2;
+    std::chrono::steady_clock::time_point rx_auth_last_change_{};
+    bool rx_auth_last_change_valid_ = false;
     // BUG-CONNECT-ACK-RESCUE-DISARM: bound how many times an accepted OFDM sync may postpone
     // the CONNECT_ACK rescue. Unbounded deferral starves the recovery exactly as the old
     // unconditional disarm destroyed it. Two burst airtimes is ample for a genuine burst to

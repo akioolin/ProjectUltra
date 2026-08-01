@@ -2976,6 +2976,158 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             }
         }
     }
+    // ── TRUST THE LADDER'S PICK (ULTRA_TRUST_LADDER_PICK, default OFF) ──────────
+    //
+    // MEASURED 2026-07-31, IONOS rig, 135 RX-AUTHORITY verdicts:
+    //
+    //     ladder picked (raw)          actually commanded
+    //       8PSK R2/3   66%              QPSK R2/3   45%
+    //       QPSK R2/3   28%              QPSK R3/4   24%
+    //       16QAM R2/3   3%              8PSK R2/3   26%
+    //
+    //     46% of verdicts clamped away from the pick, mean drop 1.61 rungs (max 4),
+    //     with fading correctly classified Good in 72% and snr_avg typically 21-24 dB.
+    //
+    // THE SELECTOR IS NOT THE DEFECT. selectCoherentOFDM picks 8PSK R2/3 two-thirds of the
+    // time — the correct answer, since FADING_ANCHOR_MEASUREMENT_2026_07_26 measures it as
+    // the best rung anywhere on ITU Good (2450 bps @20 INCLUDING its crater rate). The
+    // corrective stack applied AFTER the pick then drags the command down 1.61 rungs.
+    //
+    // This also explains two failed experiments this session. Forcing that rung won (+26%,
+    // 2.55 kbps record) not because "holding is good" but because forcing BYPASSES the
+    // stack. And a minimum-dwell knob measured -13.8%, because the changes are not the
+    // ladder re-deciding — they are clamps firing — so throttling change frequency merely
+    // froze whatever a clamp had already dragged us down to.
+    //
+    // ON: command the ladder's pick, retaining only what is structurally required:
+    //   - the ENABLED-LADDER SNAP. A command naming a disabled rung is UNOBEYABLE: the
+    //     sender holds and a cratering rung pins forever (F145, a real 50 s deadlock).
+    //     Disabled anchor rows are HOLES and raw index arithmetic walks into them.
+    //   - a CATASTROPHIC-CRATER ESCAPE. Repeated 0/N groups mean the rung delivers literally
+    //     nothing; that is a stall, not a rung to hold, and unlike a partial crater it is
+    //     unambiguous. Everything else — the two-crater rule, ratcheting penalties, climb
+    //     dwell, EMA hold, the one-rung walk, the 2-rung down limit — is a throughput
+    //     heuristic and is skipped.
+    //
+    // Default OFF: each corrective was added after a real incident (F122/F125/F126/F149/
+    // F160 oscillation and stall episodes), and the honest position is that this trades a
+    // known-measured 46% clamping rate against those recurrence risks. Rig A/B before any
+    // default flip; the regression signature to watch for is rung oscillation between
+    // adjacent rungs every few groups with craters following each up-switch.
+    if (cur != kRungIdxNone && cur < kRungIdxCount) {
+        static const bool kTrustLadderPick = [] {
+            const char* e = std::getenv("ULTRA_TRUST_LADDER_PICK");
+            return e != nullptr && e[0] == '1' && e[1] == '\0';
+        }();
+        if (kTrustLadderPick) {
+            const bool catastrophic =
+                full_crater && rx_auth_crater_streak_ >= kCatastrophicDwellBypassCraters;
+            const uint8_t raw_pick = coherentRungIndexFor(mapped.mod, mapped.rate);
+            if (!catastrophic && raw_pick != kRungIdxNone && raw_pick < kRungIdxCount) {
+                const uint8_t snapped = snapRungIndexDownToEnabled(raw_pick);
+                if (snapped != kRungIdxNone && snapped != cmd) {
+                    LOG_MODEM(INFO,
+                              "Connection: TRUST-LADDER-PICK overriding clamps: cmd %u -> %u "
+                              "(ladder raw=%u, snapped=%u) snr_avg=%.1f fading=%.2f q=%.2f",
+                              cmd, snapped, raw_pick, snapped, snr_avg, eff_fading, quality);
+                    cmd = snapped;
+                }
+            } else if (catastrophic) {
+                LOG_MODEM(WARN,
+                          "Connection: TRUST-LADDER-PICK yielding to %d consecutive TOTAL "
+                          "craters (keeping clamped cmd %u, ladder wanted %u)",
+                          rx_auth_crater_streak_, cmd, raw_pick);
+            }
+        }
+    }
+
+    // ── MINIMUM RUNG DWELL (ULTRA_RUNG_DWELL_MS, default 0 = off) ────────────────
+    //
+    // MEASURED 2026-07-30/31, IONOS MPG@20, 15 completed runs. Bucketing every run by how
+    // many times its rung changed:
+    //
+    //     changes | runs | mean kbps | best
+    //           1 |    7 |    1.93   | 2.55   <- session record, ~= this rung's physical
+    //           3 |    5 |    1.68   | 1.89      ceiling on ITU Good @20 (2450 bps)
+    //           4 |    1 |    1.45   |
+    //           5 |    1 |    1.57   |
+    //           6 |    1 |    1.27   |
+    //
+    // correlation(changes, goodput) = -0.58. Held (<=1) 1.93 vs churned (>=3) 1.59 = +22%.
+    //
+    // WHY CHURN IS THE DEFECT, not a symptom of a bad estimator:
+    //  - The steering variable does not predict the outcome. Across 1292 rig frames,
+    //    instantaneous SNR and frame success OVERLAP COMPLETELY (craters at 18.6 dB, clean
+    //    frames at 13.1 dB). Sampling that faster cannot help.
+    //  - The loop runs inside the coherence time. At MPG, f_d = 0.1 Hz so Tc ~ 4.2 s while a
+    //    burst is 8-10 s — LONGER than the channel stays correlated. Every decision is acted
+    //    on after its evidence has decorrelated.
+    //  - Craters are irreducible on Rayleigh, so "crater => rung too high" is a category
+    //    error. docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md measures 8PSK R2/3 as the best
+    //    rung on Good@20 (2450 bps) INCLUDING its crater rate — it wins BECAUSE of the FER
+    //    trade. Demoting away from it to stop craters is backwards.
+    //  - Each change costs a turnaround, a re-acquisition, and the frames cratered while
+    //    switching. That is the -0.58.
+    //
+    // So the fix is not a better estimator or a faster one: it is to STOP RE-DECIDING.
+    // Adaptation must track propagation (minutes), not fading (seconds). The dwell is
+    // therefore expressed in COHERENCE TIMES and derived from the live fading estimate —
+    // Tc = kClarkeCoherenceNumerator / f_d — not as a wall-clock constant, so it stays
+    // correct across channel classes by construction (MPG 0.1 Hz -> ~63 s; a rougher
+    // channel decorrelates sooner and the dwell shortens with it).
+    //
+    // ESCAPE: sustained TOTAL craters bypass the dwell. Holding a rung that delivers
+    // literally nothing is not adaptivity, it is a stall — and a 0/N group is unambiguous
+    // in a way a partial crater is not.
+    if (cmd != cur && cur != kRungIdxNone) {
+        static const uint32_t kDwellMsOverride = [] {
+            if (const char* e = std::getenv("ULTRA_RUNG_DWELL_MS")) {
+                const long v = std::atol(e);
+                if (v >= 0 && v <= 600000) return static_cast<uint32_t>(v);
+            }
+            return 0u;  // default OFF
+        }();
+        if (kDwellMsOverride > 0) {
+            const float doppler =
+                connection_policy::designDopplerForFadingIndex(eff_fading);
+            const float tc_s = (doppler > 0.0f)
+                ? connection_policy::kClarkeCoherenceNumerator / doppler
+                : 4.23f;
+            // The knob sets the dwell directly; the coherence figure is logged beside it so
+            // a wrong-timescale setting is visible rather than silent.
+            const uint32_t dwell_ms = kDwellMsOverride;
+            const auto now_tp = std::chrono::steady_clock::now();
+            const bool have_prev = rx_auth_last_change_valid_;
+            const auto held_ms =
+                have_prev
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                          now_tp - rx_auth_last_change_).count()
+                    : static_cast<long long>(dwell_ms);
+            const bool catastrophic =
+                full_crater && rx_auth_crater_streak_ >= kCatastrophicDwellBypassCraters;
+            if (!catastrophic && have_prev && held_ms < static_cast<long long>(dwell_ms)) {
+                LOG_MODEM(INFO,
+                          "Connection: RUNG-DWELL suppressing %u -> %u (held %llds of "
+                          "%ums = %.1f x Tc %.1fs); adaptation tracks propagation, not fading",
+                          cur, cmd, static_cast<long long>(held_ms / 1000), dwell_ms,
+                          dwell_ms / 1000.0f / tc_s, tc_s);
+                cmd = cur;
+            } else if (catastrophic && have_prev &&
+                       held_ms < static_cast<long long>(dwell_ms)) {
+                LOG_MODEM(WARN,
+                          "Connection: RUNG-DWELL BYPASSED by %d consecutive TOTAL craters "
+                          "(%u -> %u after only %llds) — a rung delivering nothing is a "
+                          "stall, not a rung to hold",
+                          rx_auth_crater_streak_, cur, cmd,
+                          static_cast<long long>(held_ms / 1000));
+            }
+        }
+    }
+    if (cmd != cur) {
+        rx_auth_last_change_ = std::chrono::steady_clock::now();
+        rx_auth_last_change_valid_ = true;
+    }
+
     // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
     // (3) — the WAITING-REBASE voice encoding stays unambiguous (it is also
     // type=NACK, but keep the value space disjoint regardless).
