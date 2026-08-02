@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
+#include "test_env_compat.hpp"
 
 using namespace ultra::waveform::tone_burst_ack;
 

@@ -10,7 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-08-02 — FIX: Z81 repair-anchor contract, live-audio sync deferral, and faithful burst measurement (UNCOMMITTED; fresh IONOS validation pending)
+## 2026-08-02 — FIX: Windows test builds — setenv/unsetenv are POSIX
+
+### What was broken
+
+The Windows CI leg failed to COMPILE the test suite. `setenv`/`unsetenv` are POSIX
+and absent from MSVC, so every test that toggles an `ULTRA_*` knob errored with
+`C3861: 'setenv': identifier not found`. Linux, macOS, sanitizer and coverage all
+passed, so this presented as a red Windows job with no Windows test coverage at
+all — a silent gap rather than a failing assertion.
+
+**12** test files were affected, not the two the compiler happened to stop on
+(`test_iterative_chest_remod.cpp`, `test_sync_controller_phase.cpp`). Three other
+test files already carried a correct local `#ifdef _WIN32 / _putenv_s` guard, which
+is precisely why the pattern was easy to miss when adding new ones.
+
+NOT introduced by v0.5.2: the offending call in `test_iterative_chest_remod.cpp`
+arrived in `4055831`, which predates `v0.5.1-pre-alpha`. `main` was green at
+`808942a` only because none of that branch work had reached `main` yet; the
+2026-08-02 fast-forward carried a pre-existing break onto `main` for the first time.
+
+### What changed
+
+`tests/test_env_compat.hpp` (new) maps `setenv`/`unsetenv` onto `_putenv_s` under
+`_WIN32` only, at global scope where MSVC declares neither name so no collision is
+possible. `_putenv_s(name, "")` is the documented Windows idiom for REMOVING a
+variable. All 12 affected files include it; **no call sites changed**.
+
+### Why this shape
+
+A shared header rather than a 13th scattered `#ifdef`: local guards are what let
+ten of these through. Off Windows the header is a no-op, so the POSIX build is
+byte-unaffected and `::setenv(...)` / `setenv(...)` both keep working.
+
+### Verification
+
+`cmake --build build -j4 && ctest -j4` → 101/101. Zero unguarded `setenv` remain
+in `tests/`. Windows compilation is verified by CI, not locally — a macOS gate
+structurally cannot see this class of break, which is how it reached a release tag.
+
+---
+
+## 2026-08-02 — FIX: Z81 repair-anchor contract, live-audio sync deferral, and faithful burst measurement
 
 ### What was actually broken
 

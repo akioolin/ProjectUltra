@@ -43,6 +43,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "test_env_compat.hpp"
 
 using namespace ultra;
 namespace v2 = ultra::protocol::v2;

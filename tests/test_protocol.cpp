@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <system_error>
 #include <algorithm>
+#include "test_env_compat.hpp"
 
 using namespace ultra::protocol;
 using ultra::Bytes;
