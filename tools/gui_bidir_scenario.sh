@@ -56,7 +56,10 @@ sleep 3
 grep -q OTASIM_SERVE_READY "$OUT/serve.log" || { echo "serve FAILED"; cat "$OUT/serve.log"; exit 1; }
 echo "[rig]   serve READY"
 
-export ULTRA_LDPC_Z=81 ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=1 ULTRA_LOCK_RATE=1
+# Long LDPC must be selected by a descriptor-safe scoped profile. The historical
+# raw ULTRA_LDPC_Z=81 export could desynchronize singleton DATA and is intentionally
+# ignored by Connection. Keep this general bidirectional scenario on production Z27.
+export ULTRA_ADAPTIVE_RATE=1 ULTRA_LOCK_RATE=1
 
 echo "[rig] launch BRAVO (auto-accept + send fileB) + ALPHA (connect + send fileA), both --half-duplex"
 "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO --session-id lobby \

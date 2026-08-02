@@ -492,12 +492,12 @@ private:
 
         engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
                                                 uint16_t group_seq,
-                                                bool force_full_preamble) {
-            // §16.4 escalation: resend → full chirp+LTS group-start anchor.
-            if (force_full_preamble) {
-                modem_.forceNextBurstFullPreamble();
-            }
-            queueTx(transmitBurst(frames, group_seq));
+                                                uint8_t anchor_reason) {
+            const ultra::gui::BurstAnchorOptions anchor_options{
+                anchor_reason != ultra::protocol::Connection::kAnchorReasonNone,
+                anchor_reason ==
+                    ultra::protocol::Connection::kAnchorReasonModeSwitch};
+            queueTx(transmitBurst(frames, group_seq, anchor_options));
         });
 
         // The protocol->modem TX direction for the tone-burst GROUP_ACK — the half the
@@ -505,11 +505,36 @@ private:
         // ModemEngine to encode the tone-burst ACK and we queue it to the audio sink; and
         // the protocol arms the always-on RX monitor to listen for the reply.
         engine_.setTransmitToneBurstAckCallback(
-            [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
+            [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba,
+                   bool inbound_group_complete) {
+                const bool recent_rx = modem_.rxSignalActive(
+                    ultra::protocol::connection_policy::
+                        kDescriptorLostReverseTxHoldMs);
+                const bool channel_busy = modem_.channelBusyForTx();
+                const uint64_t air_remaining = modem_.burstAirSamplesRemaining();
+                // The headless TNC has no GUI-style deferred-ACK scheduler.  A
+                // physical group boundary is causally safe even if the energy
+                // detector retains a stale busy reading; an asynchronous/timer
+                // ACK is safe only when *all* independent inbound sensors agree.
+                // Dropping merely delegates cumulative feedback to the sender's
+                // retry/RTO path and is preferable to blanking our own receiver.
+                const bool uncertain_inbound =
+                    !inbound_group_complete && (recent_rx || channel_busy);
+                if (air_remaining > 0 || uncertain_inbound) {
+                    LOG_WARN("AUDIO",
+                             "Dropped tone ACK while inbound OFDM may still be on "
+                             "air (group_complete=%d recent_rx=%d cca_busy=%d "
+                             "air_samples=%llu)",
+                             inbound_group_complete ? 1 : 0,
+                             recent_rx ? 1 : 0,
+                             channel_busy ? 1 : 0,
+                             static_cast<unsigned long long>(air_remaining));
+                    return;  // sender's retransmit/RTO path re-requests cumulative state
+                }
                 queueTx(modem_.transmitToneBurstAck(tba));
             });
         engine_.setArmToneBurstAckMonitorCallback([this](uint32_t window_ms) {
-            modem_.armToneBurstAckMonitor(window_ms);
+            modem_.rearmToneBurstAckMonitor(window_ms);
         });
 
         engine_.setPingTxCallback([this]() {
@@ -748,13 +773,14 @@ private:
     }
 
     std::vector<float> transmitBurst(const std::vector<Bytes>& frames,
-                                     uint16_t group_seq = 0) {
+                                     uint16_t group_seq = 0,
+                                     ultra::gui::BurstAnchorOptions anchor_options = {}) {
         // Match the encoder Z to the connection's per-burst traffic-class policy (Z=81 /
         // n=1944 for file bursts) so encoder-Z == chunker-Z == the BURST_HEADER descriptor.
         // The GUI does the identical push (app.cpp); without it file bursts ship at the
         // default Z=27 and the receiver group-decodes 0/6.
         modem_.setBurstLiftingZ(static_cast<uint8_t>(engine_.selectBurstLiftingZ()));
-        return modem_.transmitBurst(frames, group_seq);
+        return modem_.transmitBurst(frames, group_seq, anchor_options);
     }
 
     std::vector<float> transmitPing() {

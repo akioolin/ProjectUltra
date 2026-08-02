@@ -6,14 +6,23 @@ for r in rows:
     if len(r)<12: continue
     snr=int(r[0]); mod=r[3]; rate=r[4]; n=int(r[7]); ok=int(r[11])
     agg[(mod,rate,snr)].append(ok/n)
-# spectral efficiency for the delivered-rate estimate
+# Historical FER-derived delivered-rate estimate.  Keep the original scheduling
+# assumption so old sweeps remain comparable, but use PRODUCTION carrier geometry:
+# 59 occupied carriers with spacing-8 pilots leaves 51 data carriers.  The former
+# CAR=59 silently counted all eight pilots as payload and overstated every result by
+# 59/51 = 15.7%.
 eta={('qpsk','r3_4'):2*0.75,('qam8','r2_3'):3*2/3,('qam8','r3_4'):3*0.75,('qam16','r2_3'):4*2/3}
-CAR=59; SYM=48000/1152; SCHED=0.659*0.90
+TOTAL_CARRIERS=59
+PILOT_SPACING=8
+DATA_CARRIERS=TOTAL_CARRIERS-((TOTAL_CARRIERS+PILOT_SPACING-1)//PILOT_SPACING)
+SYM=48000/1152
+SCHED=0.659*0.90
+print(f"geometry: {TOTAL_CARRIERS} occupied - {TOTAL_CARRIERS-DATA_CARRIERS} pilots = {DATA_CARRIERS} data carriers; historical scheduling={SCHED:.4f}")
 print(f"{'rung':<14}{'SNR':>5}{'FER':>8}{'pass rate':>11}{'eff. delivered bps':>20}")
 best={}
 for (mod,rate,snr),v in sorted(agg.items(), key=lambda x:(x[0][0],x[0][1],x[0][2])):
     pr=statistics.mean(v); fer=1-pr
-    raw=eta[(mod,rate)]*CAR*SYM
+    raw=eta[(mod,rate)]*DATA_CARRIERS*SYM
     # throughput with ARQ: delivered ~ raw * pass_rate * scheduling
     dl=raw*pr*SCHED
     name=f"{mod} {rate}"

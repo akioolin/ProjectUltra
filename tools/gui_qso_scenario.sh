@@ -37,6 +37,7 @@ DISCONNECT_AFTER=20
 EXIT_AFTER=""
 FILE_KB=10
 OUT=""
+PAYLOAD_SEED=""
 
 usage() {
   printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--expect-mod 16QAM] [--out DIR]\n' "$0"
@@ -143,7 +144,7 @@ done
 : "${ULTRA_LOCK_RATE:=0}"            ; export ULTRA_LOCK_RATE
 # No longer pinned (now code defaults, reconciled 2026-05-30):
 #   ULTRA_BURST_TRANSPORT  -> default ON (the production OFDM file path)
-#   ULTRA_LDPC_Z           -> derived by the traffic-class policy (81 for file bursts)
+#   ULTRA_LDPC_Z           -> retired unsafe raw override (ignored by Connection)
 #   ULTRA_BURST_GROUP_FRAMES -> default 6 (mask-width-matched)
 # All three remain overridable via env (=0 / value); shown in the echo only when set.
 echo "config: ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
@@ -157,6 +158,11 @@ mkdir -p "$OUT"
 TOKENS="$OUT/tokens.conf"
 PAYLOAD="$OUT/qam16_${FILE_KB}KB.bin"
 FILE_BYTES=$((FILE_KB * 1024))
+# A/B runs at the same channel seed must also transmit the same bits. The old
+# /dev/urandom fixture changed both the code and payload between arms, weakening
+# a paired FEC comparison. Override separately when desired, otherwise bind the
+# deterministic payload to the OTASim seed.
+PAYLOAD_SEED="${ULTRA_SCENARIO_PAYLOAD_SEED:-$SEED}"
 if [[ -z "$EXIT_AFTER" ]]; then
   EXIT_AFTER="$(estimate_exit_after)"
 fi
@@ -396,6 +402,8 @@ write_summary() {
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
     echo "FILE_BYTES=$FILE_BYTES"
+    echo "PAYLOAD_SEED=$PAYLOAD_SEED"
+    echo "PAYLOAD_SHA256=$PAYLOAD_SHA256"
     echo "EXIT_AFTER=$EXIT_AFTER"
     echo "ELAPSED_SEC=$elapsed"
     echo "ACTUAL_DATA_MODE=\"$actual_data_mode\""   # quoted: multi-word (e.g. "QPSK R2/3") must stay source-safe
@@ -464,7 +472,20 @@ pkill -f "$ROOT/build/ultra_gui" 2>/dev/null || true
 pkill -f "$ROOT/build/ota_simulator serve" 2>/dev/null || true
 sleep 2
 
-dd if=/dev/urandom of="$PAYLOAD" bs=1024 count="$FILE_KB" status=none
+python3 - "$PAYLOAD" "$FILE_BYTES" "$PAYLOAD_SEED" <<'PY'
+import random
+import sys
+
+path, count, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3], 0)
+rng = random.Random(seed)
+with open(path, "wb") as out:
+    remaining = count
+    while remaining:
+        block = min(remaining, 65536)
+        out.write(bytes(rng.randrange(256) for _ in range(block)))
+        remaining -= block
+PY
+PAYLOAD_SHA256="$(shasum -a 256 "$PAYLOAD" | awk '{print $1}')"
 printf 'alpha_tok:ALPHA:alpha\nbravo_tok:BRAVO:bravo\n' > "$TOKENS"
 
 ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \

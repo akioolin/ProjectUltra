@@ -1,5 +1,6 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
+#include "gui/modem/streaming_frame_policy.hpp"
 #include "ota_channel_core/channel.hpp"
 #include "ofdm/genie_tx_capture.hpp"
 #include "ofdm/genie_true_h.hpp"
@@ -94,11 +95,11 @@ struct Args {
     // taps are frozen and truth H is time-invariant -- otherwise the tap state
     // read after the frame is not the state the LTS saw.
     bool chest_nmse = false;
-    int ldpc_z = 27;               // LDPC lifting size: 27 (N=648) or 81 (N=1944, burst
-                                   // long-LDPC keystone). Sets the encoder member via
-                                   // setLDPCLiftingZ so the codeword size AND the
-                                   // BURST_HEADER descriptor agree; the RX learns Z=81
-                                   // from the wire descriptor (BUG-HARNESS-002 Defect 3).
+    int ldpc_z = 27;               // LDPC lifting size: 27 (N=648) or 81 (N=1944).
+                                   // The encoder uses its production setter. For
+                                   // non-burst frame measurements, the decoder uses
+                                   // an explicit test-only override because there is
+                                   // no BURST_HEADER on that isolated path.
 };
 
 struct Counts {
@@ -326,6 +327,13 @@ void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
     }
     decoder.setFixedFrameCodewords(args.frame_cw);
     decoder.setCarrierLdpcInterleaver(args.carrier_interleave);
+    if (args.ldpc_z == 81 && args.config != MeasureConfig::BurstChunk) {
+        // Connected-mode configuration is deferred until processBuffer(). Apply it
+        // now so the test-only Z hook reaches the newly-created OFDM waveform, then
+        // keep that override for every reset() in this measurement session.
+        decoder.applyPendingConfigForTesting();
+        decoder.setLDPCLiftingZForTesting(81);
+    }
 }
 
 Bytes randomPayload(std::mt19937_64& rng, size_t size) {
@@ -1074,6 +1082,7 @@ BurstCounts measureBurst(const Args& args) {
 
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     BurstCounts bc;
+    const std::vector<float> preburst_idle(kPumpChunkSamples, 0.0f);
 
     for (int c = 0; c < args.n; ++c) {
         // Fresh capture per chunk: encoder pushes during encode, decoder reads in the
@@ -1146,6 +1155,19 @@ BurstCounts measureBurst(const Args& args) {
             expected.push_back(std::move(ser));
         }
 
+        // encodeBurstLight() does not transmit the ARQ-owned bytes verbatim: for a
+        // multi-frame, non-interleaved OFDM turn it clears stale physical-tail bits
+        // and stamps PHYSICAL_BURST_END into the final private wire copy.  Compare
+        // against that actual wire image.  Otherwise a perfect N/N decode is reported
+        // as (N-1)/N solely because the final frame's CRC-protected flags byte differs.
+        // This used to make every group=2 AWGN Z=81 control read 1/2 and zero complete
+        // chunks even though the decoder log showed both frames successful.
+        expected = gui::streaming_frame_policy::preparePhysicalBurstFrames(
+            expected,
+            gui::streaming_frame_policy::shouldStampPhysicalBurstEnd(
+                expected.size(), protocol::WaveformMode::OFDM_CHIRP,
+                /*supports_data_preamble=*/true, args.burst_interleave));
+
         // HARNESS FIDELITY (2026-07-29): FULL chirp+LTS anchor at the group start.
         //
         // Without this the harness could never exercise the burst-transport RX path
@@ -1162,24 +1184,24 @@ BurstCounts measureBurst(const Args& args) {
         // Production does not have this problem: it forces the full anchor on the
         // session's first burst (forceNextFrameFullPreamble on entering connected
         // OFDM) and on every resend. Each chunk here builds a FRESH encoder, i.e. a
-        // fresh session, so the production-equivalent latch must be armed per chunk.
-        // Uses the group-start-specific latch, which the BURST_HEADER descriptor's
-        // encodeFrame cannot consume.
+        // fresh session, so the production-equivalent per-request full-anchor option
+        // must be supplied for each chunk. It reaches only the DATA group-start; the
+        // BURST_HEADER descriptor cannot consume or detach it from this encode.
         //
         // Env-gated (ULTRA_MEASURE_BURST_FULL_ANCHOR=1, default OFF) so the historical
         // burst_chunk numbers stay reproducible and the two regimes can be A/B'd.
+        gui::BurstAnchorOptions burst_anchor_options;
         {
             const char* e = std::getenv("ULTRA_MEASURE_BURST_FULL_ANCHOR");
             if (e != nullptr && e[0] == '1') {
-                encoder.forceNextBurstGroupStartFullPreamble();
+                burst_anchor_options.force_full_group_start = true;
             }
         }
 
-        const auto tx = encoder.encodeBurstLight(frames);
+        const auto tx = encoder.encodeBurstLight(frames, burst_anchor_options);
         if (tx.empty()) {
             throw std::runtime_error("burst encoder produced no samples");
         }
-        channel.transmitFromA(tx);
 
         std::vector<Bytes> recovered;
         bool any_sync = false;
@@ -1201,11 +1223,26 @@ BurstCounts measureBurst(const Args& args) {
         decoder.setBurstGroupCallback(
             [&recovered](uint16_t /*group_seq*/, const std::vector<Bytes>& group_frames,
                          bool /*all_ok*/, float /*quality*/, uint16_t /*frame_mask*/,
-                         bool /*interleaved*/, uint8_t /*group_size*/) {
+                         bool /*interleaved*/, uint8_t /*group_size*/,
+                         bool /*geometry_proven*/) {
                 for (const auto& f : group_frames) {
                     recovered.push_back(f);
                 }
             });
+
+        // A production receiver is already consuming idle audio before PTT opens.
+        // A fresh harness decoder was instead born on the descriptor's very first
+        // sample. Its first 4800-sample process call initializes correlation_pos at
+        // the write head, permanently skipping a chirp that starts at absolute zero.
+        // Pump one real channel interval first: this advances the fading/noise model
+        // and initializes the decoder cursor while the medium is idle, then leaves
+        // the descriptor chirp wholly searchable from its first sample.
+        channel.transmitFromA(preburst_idle);
+        auto idle_rx = channel.receiveForB(preburst_idle.size());
+        decoder.feedAudio(idle_rx.data(), idle_rx.size());
+        decoder.processBuffer();
+
+        channel.transmitFromA(tx);
 
         // HARNESS FIDELITY (2026-07-28): two floors on how long we pump.
         //
@@ -1277,21 +1314,6 @@ int main(int argc, char** argv) {
         }
         ultra::setLogLevel(log_level);
         const Args args = parseArgs(argc, argv);
-
-        // 2026-05-29 (BUG-HARNESS-002 Defect 3 fix): the decoder learns the LDPC
-        // lifting size ONLY from the env ULTRA_LDPC_Z or the burst descriptor; the
-        // descriptor-consume path does not fire reliably in this harness, so for a
-        // controlled Z=81 (N=1944 long-LDPC burst keystone) screen we set the env
-        // here (decoder block-size getter + decodeFixedFrame ldpc_z both read it) to
-        // match the encoder member set via setLDPCLiftingZ in configureEncoder. This
-        // mirrors production, where the connection layer fixes Z on BOTH ends.
-        if (args.ldpc_z == 81) {
-#ifdef _WIN32
-            _putenv_s("ULTRA_LDPC_Z", "81");
-#else
-            setenv("ULTRA_LDPC_Z", "81", /*overwrite=*/1);
-#endif
-        }
 
         // 2026-05-29 diag: enable the true per-symbol data-aided channel genie
         // (H=Y/X) process-wide. Off unless ULTRA_GENIE_DATA_AIDED=1. Both the
