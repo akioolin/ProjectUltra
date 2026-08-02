@@ -3,9 +3,10 @@
 // IEEE 802.11n LDPC Base Matrices for n=648 (Z=27)
 //
 // These are the STANDARD parity-check matrices from IEEE 802.11n-2009.
-// They have optimized cycle structure (minimum girth >= 6) and carefully
-// designed degree distributions, giving much better BP decoding performance
-// than randomly generated matrices.
+// They have standardized sparse degree distributions and generally good cycle
+// structure.  Do not claim a blanket girth >= 6 here: the standard R3/4
+// prototype below contains two exact QC 4-cycle relations at Z=27 (and those
+// relations remain when this same prototype is lifted to Z=81).
 //
 // Each entry: -1 = Z×Z zero matrix, 0..26 = Z×Z identity shifted right by that amount.
 // The full H matrix is (mb*Z) × (24*Z) = (mb*27) × 648.
@@ -157,11 +158,11 @@ inline const int* getBaseData(CodeRate rate) {
 // ============================================================================
 
 // Zp = lifting/circulant size for this expansion. Zp==Z (27) reproduces the standard
-// n=648 code byte-identically. Zp=81 lifts the SAME known-good base matrices to n=1944:
-// lifting with the existing shifts (all < 27) preserves girth>=6 — a 4-cycle needs
-// s1-s2+s3-s4 == 0 (mod Zp); the base has none mod 27, and with four shifts <27 the sum
-// lies in (-54,54), so mod 81 it can only vanish if it is exactly 0, which the base
-// already excludes. Verify computationally with hasFourCycle() before trusting a new Zp.
+// n=648 code byte-identically. Zp=81 lifts the SAME base prototypes to n=1944.  For a
+// prototype that is 4-cycle-free at Z=27, retaining shifts <27 also remains clean at
+// Z=81: a new cycle would require s1-s2+s3-s4 == 0 (mod Zp).  The R3/4 prototype is
+// the documented exception because it already has exact-zero relations; lifting it
+// does not remove them. Verify each rate computationally with hasFourCycle().
 inline ExpandedLDPC expand(CodeRate rate, int Zp) {
     const int* base = getBaseData(rate);
     int mb = getBaseRows(rate);

@@ -60,7 +60,7 @@ void SyncController::noteGroupBoundary(size_t descriptor_end_abs, size_t expecte
 // delivered group" block) so the decoder no longer writes consecutive_sync_misses_ /
 // frame_arrival_confidence_ / warm_sync_active_ / expect_full_ofdm_anchor_ directly. Same writes,
 // same log, same order → byte-identical.
-void SyncController::noteGroupDelivered(uint32_t group_seq) {
+void SyncController::noteGroupDelivered(uint32_t group_seq, bool retransmission_required) {
     // Force WARM: misses=0 + active=true ⇒ derivePhase()==WARM (§7 collapse — verified byte-identical:
     // active was always already true here, the faithful translation of the old warm_sync_phase_=WARM).
     consecutive_sync_misses_ = 0;
@@ -80,20 +80,24 @@ void SyncController::noteGroupDelivered(uint32_t group_seq) {
     // that announcement: full-search a chirp group, light-search a skip group — IMMEDIATELY, no
     // grinding through light rejects (the ~30 s/resend stall that crawled K=3). A dropped descriptor
     // leaves next_group_light_anchor_ false → expect full (safe). Reactive resends are unannounced
-    // (always full chirp); the K-gated fast §16.4 escalation catches those mismatches.
+    // and always full chirp. When this group needs a resend, the previous descriptor's NEXT_LIGHT
+    // bit no longer describes the next physical burst; force full immediately instead of missing
+    // the resend descriptor and grinding through the §16.4 light-reject escalation first.
     static const int kAnchorSkipK = [] {
         const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-        return (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (matches the encoder default)
+        return (e && *e) ? std::max(1, std::atoi(e)) : 1;  // matches reliability-default encoder
     }();
-    expect_full_ofdm_anchor_ = (kAnchorSkipK <= 1) || !next_group_light_anchor_;
+    expect_full_ofdm_anchor_ = retransmission_required ||
+                               (kAnchorSkipK <= 1) || !next_group_light_anchor_;
     LOG_MODEM(INFO,
         "[%s] s16-warm-handoff: refreshed warm-sync state on "
         "delivered group_seq=%u (conf=%.2f phase=WARM misses=0, "
-        "next-anchor=%s K=%d)",
+        "next-anchor=%s K=%d resend=%d)",
         log_prefix_.c_str(),
         static_cast<unsigned>(group_seq),
         frame_arrival_confidence_,
-        expect_full_ofdm_anchor_ ? "FULL-chirp" : "LIGHT-skip(announced)", kAnchorSkipK);
+        expect_full_ofdm_anchor_ ? "FULL-chirp" : "LIGHT-skip(announced)", kAnchorSkipK,
+        retransmission_required ? 1 : 0);
 }
 
 // --- arrival-tracking transition logic (§7.4 A2) ---------------------------------------------
@@ -354,6 +358,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
     SearchWindowResult result;
     std::vector<float> search_buffer;
     size_t search_start = 0;
+    size_t search_start_abs = 0;
     bool used_warm_timed_window = false;
     bool used_warm_narrow_window = false;
     size_t warm_narrow_end_abs = 0;
@@ -665,6 +670,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
         for (size_t i = 0; i < min_search; i++) {
             search_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(search_start + i)];
         }
+        search_start_abs = ring_.ringPosToAbsoluteLocked(search_start);
 
         if (used_warm_timed_window) {
             ring_.correlation_pos_ = ring_.absoluteToRingLocked(warm_narrow_end_abs);
@@ -684,6 +690,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
     result.ready = true;
     result.search_buffer = std::move(search_buffer);
     result.search_start = search_start;
+    result.search_start_abs = search_start_abs;
     result.min_search = min_search;
     result.used_warm_timed_window = used_warm_timed_window;
     result.used_warm_narrow_window = used_warm_narrow_window;
@@ -760,7 +767,7 @@ bool SyncController::detectConnectedLightSync(
     // grind (the wire flag arms full-search on chirp groups directly).
     static const uint64_t kEscalateStreak = [] {
         const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-        const int k = (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (matches the encoder)
+        const int k = (e && *e) ? std::max(1, std::atoi(e)) : 1;  // matches reliability-default encoder
         return (k > 1) ? uint64_t{4} : signal_policy::kConnectedOFDMReanchorEscalateStreak;
     }();
     if (!found && connected &&

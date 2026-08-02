@@ -13,15 +13,13 @@ namespace gui {
 namespace streaming_decode_policy {
 
 // ============================================================================
-// BUG-BURST-STALE-GEOMETRY (2026-07-28) — ULTRA_COMMANDED_GEOMETRY, DEFAULT-ON
+// BUG-BURST-STALE-GEOMETRY (2026-07-28) — ULTRA_COMMANDED_GEOMETRY, DEFAULT-OFF
 // ============================================================================
-// Covers BOTH halves of the fix (they are independent defects on one path):
-//   (A) never arm a burst group from a TRUNCATED group-start frame
-//       (streaming_ofdm_decode.cpp, the `frame_truncated` guard in
-//       decodeCurrentFrame), and
+// Controls only the commanded-geometry experiment:
 //   (B) on a MISSED burst descriptor, slice with the rung THIS receiver
 //       COMMANDED instead of the latched one (resolveCommandedGeometry).
-// `=0` restores the pre-fix behaviour for both, exactly.
+// The independent truncation/alignment repair (A) is an unconditional correctness
+// guard and MUST NOT be coupled to this default-off experiment.
 //
 // DELIBERATELY NOT a function-local `static const` lambda (the house pattern for
 // most knobs): a function-local static latches the env on FIRST call, so one
@@ -63,6 +61,57 @@ inline bool commandedGeometryEnabled() {
 // ONE definition, two consumers (D2 provisional-HARQ keys + the commanded-geometry
 // cadence guard) so they cannot drift apart.
 inline constexpr uint64_t kBurstCadenceRtoGapSamples = 15ull * 48000ull;
+
+// A decoded descriptor normally hands its trusted timing directly to the
+// following light-LTS DATA marker. A sender-announced full current-group anchor
+// is an explicit exception: retaining the light prediction would point inside
+// the chirp prefix. Mode hops remain the other exception because their carrier
+// geometry invalidates the warm channel state.
+inline constexpr bool keepDescriptorWarmHandoff(bool phase_is_warm,
+                                                float confidence,
+                                                bool current_group_full_anchor,
+                                                bool descriptor_mode_switch_enabled,
+                                                bool descriptor_mode_hop) {
+    return phase_is_warm && confidence > 0.0f &&
+           !current_group_full_anchor &&
+           !(descriptor_mode_switch_enabled && descriptor_mode_hop);
+}
+
+// ULTRA_HARQ_PROVISIONAL remains a deliberately narrow, default-off experiment.
+// A failed CW0 hides both the ARQ identity and PHYSICAL_BURST_END.  The receiver
+// may predict the identity only for the one currently-authorized profile, and
+// only where the descriptor proves this is a non-tail physical member.  Keeping
+// the last member out is important: a retry may regroup the same ARQ seq at a
+// different physical position, and tail/non-tail DATA frames have different
+// protected bits.
+//
+// This helper contains every cheap gate that is known before pulling the ARQ
+// mirror callback.  The caller separately verifies that the returned context is
+// valid and contains this logical position.
+inline constexpr bool allowProvisionalHarq(bool opt_in,
+                                           bool burst_transport,
+                                           bool exact_descriptor_proven,
+                                           bool burst_interleave,
+                                           bool rto_gap_context,
+                                           bool prediction_invalid,
+                                           bool context_callback_available,
+                                           Modulation modulation,
+                                           CodeRate rate,
+                                           int logical_index,
+                                           int declared_group_size) {
+    return opt_in && burst_transport && exact_descriptor_proven &&
+           !burst_interleave && !rto_gap_context && !prediction_invalid &&
+           context_callback_available && modulation == Modulation::QPSK &&
+           rate == CodeRate::R3_4 && logical_index >= 0 &&
+           declared_group_size >= 2 &&
+           logical_index < declared_group_size - 1;
+}
+
+inline constexpr bool provisionalHarqContextCoversPosition(
+    bool context_valid, int logical_index, size_t predicted_seq_count) {
+    return context_valid && logical_index >= 0 &&
+           static_cast<size_t>(logical_index) < predicted_seq_count;
+}
 
 inline size_t estimateRobustOFDMControlSamples(size_t default_control_samples,
                                                Modulation data_mod,

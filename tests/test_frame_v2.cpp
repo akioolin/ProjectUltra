@@ -1,10 +1,12 @@
 #include <iostream>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
 #include <utility>
 #include <vector>
+#include "ultra/fec.hpp"
 #include "../src/protocol/frame_v2.hpp"
 #include "../src/protocol/file_stream_header.hpp"
 
@@ -202,7 +204,9 @@ void test_burst_header_roundtrip() {
         auto original = ControlFrame::makeBurstHeader(
             "VA2MVR", "W1AW", 7, /*group_size=*/8, /*cw_per_frame=*/8,
             Modulation::QPSK, CodeRate::R3_4,
-            ControlFrame::BURST_FLAG_INTERLEAVE | ControlFrame::BURST_FLAG_CARRIER_LDPC);
+            ControlFrame::BURST_FLAG_INTERLEAVE |
+                ControlFrame::BURST_FLAG_CARRIER_LDPC |
+                ControlFrame::BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR);
 
         auto serialized = original.serialize();
         auto parsed = ControlFrame::deserialize(serialized);
@@ -216,12 +220,14 @@ void test_burst_header_roundtrip() {
         assert(info.code_rate == CodeRate::R3_4);
         assert(info.burst_interleave == true);
         assert(info.carrier_ldpc == true);
+        assert(info.current_group_full_anchor == true);
 
         // Flags-off variant must read back false.
         auto plain = ControlFrame::makeBurstHeader("VA2MVR", "W1AW", 0, 4, 4,
                                                    Modulation::DQPSK, CodeRate::R1_2, 0);
         auto plain_info = ControlFrame::deserialize(plain.serialize())->getBurstHeaderInfo();
         assert(!plain_info.burst_interleave && !plain_info.carrier_ldpc);
+        assert(!plain_info.current_group_full_anchor);
         assert(plain_info.group_size == 4 && plain_info.cw_per_frame == 4);
 
         // 2026-05-28: lifting_z field round-trip + backward-compat semantics.
@@ -946,6 +952,140 @@ void test_fixed_frame_variable_cw_roundtrip_per_rate() {
     }
 }
 
+void test_fixed_frame_long_lift_repeated_roundtrip() {
+    TEST("fixed frame cw4/Z81 repeated decoder-cache roundtrip") {
+        constexpr CodeRate rate = CodeRate::R2_3;
+        constexpr int cw_count = 4;
+        constexpr int lifting_z = 81;
+        const size_t capacity = getFixedFramePayloadCapacityZ(
+            rate, cw_count, lifting_z);
+
+        // Repeated calls exercise the cached decoder after its retry-mutated
+        // runtime state has been checked back in.  Payload and sequence change
+        // each time so this cannot pass by accidentally reusing prior output.
+        for (uint16_t seq = 200; seq < 204; ++seq) {
+            Bytes payload(capacity);
+            for (size_t i = 0; i < payload.size(); ++i) {
+                payload[i] = static_cast<uint8_t>((i * 29 + seq) & 0xFF);
+            }
+
+            auto frame = makeFixedDataFrame("VA2MVR", "W1AW", seq, payload,
+                                            rate, cw_count, lifting_z);
+            auto serialized = frame.serialize();
+            auto encoded = encodeFixedFrame(serialized, rate, cw_count,
+                                            /*use_channel_interleave=*/false,
+                                            /*bits_per_symbol=*/153, lifting_z);
+            auto soft_bits = bytesToSoftBits(encoded);
+            auto status = decodeFixedFrame(
+                soft_bits, rate, cw_count,
+                /*use_channel_deinterleave=*/false,
+                /*bits_per_symbol=*/153,
+                /*harq_buffer=*/nullptr, /*harq_key=*/nullptr, lifting_z);
+
+            assert(status.fixed_frame);
+            assert(status.decoded.size() == static_cast<size_t>(cw_count));
+            assert(status.allSuccess());
+            assert(status.reassemble() == serialized);
+            auto parsed = DataFrame::deserialize(status.reassemble());
+            assert(parsed.has_value());
+            assert(parsed->seq == seq);
+            assert(parsed->payload == payload);
+        }
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_fixed_frame_r34_long_lift_roundtrip() {
+    TEST("fixed frame QPSK-rate R3/4 cw3/Z81 clean roundtrip") {
+        constexpr CodeRate rate = CodeRate::R3_4;
+        constexpr int cw_count = 3;
+        constexpr int lifting_z = 81;
+        const size_t capacity = getFixedFramePayloadCapacityZ(
+            rate, cw_count, lifting_z);
+
+        Bytes payload(capacity);
+        for (size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = static_cast<uint8_t>((i * 37 + 0x5A) & 0xFF);
+        }
+
+        auto frame = makeFixedDataFrame("VA2MVR", "W1AW", 234, payload,
+                                        rate, cw_count, lifting_z);
+        const auto serialized = frame.serialize();
+        const auto encoded = encodeFixedFrame(
+            serialized, rate, cw_count,
+            /*use_channel_interleave=*/false,
+            /*bits_per_symbol=*/102, lifting_z);
+        const auto soft_bits = bytesToSoftBits(encoded);
+        const auto status = decodeFixedFrame(
+            soft_bits, rate, cw_count,
+            /*use_channel_deinterleave=*/false,
+            /*bits_per_symbol=*/102,
+            /*harq_buffer=*/nullptr, /*harq_key=*/nullptr, lifting_z);
+
+        assert(status.fixed_frame);
+        assert(status.decoded.size() == static_cast<size_t>(cw_count));
+        assert(status.allSuccess());
+        assert(status.reassemble() == serialized);
+        const auto parsed = DataFrame::deserialize(status.reassemble());
+        assert(parsed.has_value());
+        assert(parsed->seq == 234);
+        assert(parsed->payload == payload);
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_fixed_frame_encoder_cache_wire_identity() {
+    TEST("fixed frame encoder cache preserves rate/Z wire identity") {
+        struct EncoderCase {
+            CodeRate rate;
+            int lifting_z;
+            uint8_t salt;
+        };
+        const std::array<EncoderCase, 11> cases{{
+            {CodeRate::R1_4, 27,  0x11},
+            {CodeRate::R1_4, 81,  0x22},
+            {CodeRate::R1_2, 27,  0x33},
+            {CodeRate::R1_2, 81,  0x44},
+            {CodeRate::R2_3, 27,  0x55},
+            {CodeRate::R2_3, 81,  0x66},
+            {CodeRate::R3_4, 27,  0x77},
+            {CodeRate::R3_4, 81,  0x88},
+            {CodeRate::R5_6, 27,  0x99},
+            {CodeRate::R5_6, 81,  0xAA},
+            {CodeRate::R2_3, 81,  0xBB},
+        }};
+
+        // Alternate rates and lifting geometries, including a return to a
+        // previously-used cache slot.  Compare against an independent fresh
+        // encoder so a matching decoder-cache error cannot hide a bad key.
+        for (const auto& tc : cases) {
+            const size_t info_bytes = getBytesPerCodewordZ(tc.rate, tc.lifting_z);
+            Bytes info(info_bytes);
+            for (size_t i = 0; i < info.size(); ++i) {
+                info[i] = static_cast<uint8_t>((i * 37u + tc.salt) & 0xFFu);
+            }
+
+            const Bytes cached = encodeFixedFrame(
+                info, tc.rate, /*cw_count=*/1,
+                /*use_channel_interleave=*/false,
+                /*bits_per_symbol=*/153, tc.lifting_z);
+            ultra::LDPCEncoder fresh(tc.rate, tc.lifting_z);
+            const Bytes expected = fresh.encode(info);
+            assert(cached == expected);
+        }
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
 void test_codeword_status() {
     TEST("codeword status tracking") {
         CodewordStatus status;
@@ -1461,6 +1601,9 @@ int main() {
     test_fixed_frame_helpers();
     test_fixed_frame_reassemble_preserves_marker_boundary_byte();
     test_fixed_frame_variable_cw_roundtrip_per_rate();
+    test_fixed_frame_long_lift_repeated_roundtrip();
+    test_fixed_frame_r34_long_lift_roundtrip();
+    test_fixed_frame_encoder_cache_wire_identity();
     test_codeword_status();
     test_frame_type_helpers();
     test_large_text_message();

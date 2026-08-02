@@ -47,7 +47,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // (hooks captured by copy here AND in the burst-group binding below — both delivery
     // paths must feed the frontend's SNR observation.)
     modem.setRawDataCallback(
-        [&modem, &protocol, hooks](const Bytes& data) {
+        [&modem, &protocol, hooks](const Bytes& data, bool physical_turn_complete) {
             const auto stats = modem.getStats();
             const float snr_db = stats.snr_db;
             const SNRSource snr_source = stats.snr_source;
@@ -72,7 +72,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
                                              modem.getDopplerCoherenceDopplerHz(),
                                              modem.getDopplerCoherenceValid());
             }
-            protocol.onRxData(data);
+            protocol.onRxData(data, physical_turn_complete);
             if (hooks.after_rx_data) {
                 hooks.after_rx_data(data, snr_db, fading, snr_source, use_quality);
             }
@@ -83,7 +83,8 @@ inline void wireModemToProtocol(ModemEngine& modem,
     modem.setBurstGroupCallback(
         [&modem, &protocol, hooks](uint16_t group_seq, const std::vector<Bytes>& frames,
                                    bool all_ok, float quality, uint16_t frame_mask,
-                                   bool interleaved, uint8_t group_size) {
+                                   bool interleaved, uint8_t group_size,
+                                   bool geometry_proven) {
             // BUG-ACK-STAIRCASE-FADE-BIN layer 2 (2026-07-01): burst-as-unit delivery
             // bypasses setRawDataCallback, so the frontend's SNR observation STARVED
             // during file transfers — the GUI's §15.5 ACK-duration cache held the stale
@@ -150,7 +151,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
             // the verdict this group's ACK carries consumes it.
             protocol.setBurstCarrierGammas(modem.getLastGroupCarrierGammas());
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
-                                          interleaved, group_size);
+                                          interleaved, group_size, geometry_proven);
         });
 
     // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH): a mode-hop BURST_HEADER
@@ -160,7 +161,11 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // byte-identical while OFF. Same decoder-thread -> engine-mutex class as the
     // burst-group forwarding above.
     modem.setAnchoredBurstNoGroupCallback(
-        [&protocol]() { protocol.onAnchoredBurstNoGroup(); });
+        [&protocol](bool payload_seen) {
+            protocol.onAnchoredBurstNoGroup(payload_seen);
+        });
+    modem.setBurstOutcomeUnknownCallback(
+        [&protocol]() { protocol.onBurstOutcomeUnknown(); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);
@@ -177,6 +182,15 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // fast resend (NACK). THIS is the other half ultra_tnc was missing (the GROUP_ACK
     // reverse path), so its sender never learned a group landed and retransmitted to the
     // retry cap.
+    // CRC-12 validates the wire bits, not whether those bits can describe the
+    // sender's current ARQ window. Gate each CRC-valid timing candidate before the
+    // monitor commits/disarms so a strong impossible collision cannot hide a weaker
+    // valid ACK later in the same audio window.
+    modem.setToneBurstAckAcceptancePredicate(
+        [&protocol](
+            const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) {
+            return protocol.isToneBurstAckCandidatePlausible(payload);
+        });
     modem.setToneBurstAckCallback(
         [&protocol](const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
             protocol.onToneBurstAck(d);

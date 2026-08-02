@@ -88,8 +88,10 @@ int main() {
     printf("\n=== production encoder/decoder round-trip (clean channel) ===\n");
     reportRT("R1/2 Z=27", CodeRate::R1_2, 27);   // canary: confirms LLR sign + n=648 path
     reportRT("R2/3 Z=27", CodeRate::R2_3, 27);
+    reportRT("R3/4 Z=27", CodeRate::R3_4, 27);   // weak graph still must round-trip cleanly
     reportRT("R1/2 Z=81", CodeRate::R1_2, 81);   // the long code through the real codec
     reportRT("R2/3 Z=81", CodeRate::R2_3, 81);
+    reportRT("R3/4 Z=81", CodeRate::R3_4, 81);   // pins non-byte-aligned k=1458 packing
 
     printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "PASSED",
            g_failures, g_failures == 1 ? "" : "s");

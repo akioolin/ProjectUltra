@@ -170,8 +170,8 @@ struct DecoderProfile {
     LLRHistogram llr_dist_cw0_peek;
 
     // HARQ key-build outcomes. Decoded-header keys are preferred; provisional
-    // keys are QAM16-only fallback keys built from the receiver's ARQ/session
-    // context when CW0 is too faded to decode on the first copy.
+    // keys are a default-off, narrowly-gated QPSK R3/4 fallback built from the
+    // receiver's ARQ/session context when CW0 is too faded to decode.
     std::atomic<uint64_t> harq_key_build_success{0};
     std::atomic<uint64_t> harq_key_build_failed{0};
     std::atomic<uint64_t> harq_key_build_provisional{0};

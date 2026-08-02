@@ -46,7 +46,7 @@ struct ARQStats {
     int failed = 0;                     // Exceeded max retries
     int out_of_order = 0;               // Out-of-order frames (SR)
     int sacks_sent = 0;                 // Selective ACKs sent (SR)
-    int sacks_received = 0;             // Selective ACKs received (SR)
+    int sacks_received = 0;             // Sender-valid ACK/SACKs received, incl. valid duplicates (SR)
     int hole_events = 0;                // ACK hole indications observed
     int stale_acks_ignored = 0;         // ACK rejected as too old
     int future_acks_ignored = 0;        // ACK rejected as implausibly ahead

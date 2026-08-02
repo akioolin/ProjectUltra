@@ -345,10 +345,95 @@ public:
         float cfo_hz = 0.0f;           // Estimated CFO
         int up_chirp_start = -1;       // True up-chirp start (CFO-corrected)
         int down_chirp_start = -1;     // True down-chirp start (CFO-corrected)
+        // Raw strongest UP peak considered by this detector pass.  Unlike
+        // up_chirp_start, this is populated even when the matching DOWN chirp is
+        // not yet present (or the pair fails the CFO sanity gate).  It lets the
+        // chronological wrapper below exclude an incomplete, later anchor and
+        // retry the already-complete prefix instead of advancing past it.
+        int strongest_up_candidate_start = -1;
         float up_correlation = 0.0f;   // Up-chirp correlation value
         float down_correlation = 0.0f; // Down-chirp correlation value
         float gap_error_samples = 0.0f; // actual_gap - expected_gap, before CFO correction
     };
+
+    // detectDualChirp() deliberately returns the strongest global UP peak,
+    // which is useful for an isolated signal but is unsafe when one 2.5 s
+    // streaming window contains both:
+    //
+    //   [weaker complete BURST_HEADER anchor] ... [stronger next-group anchor]
+    //
+    // If the later DOWN chirp is incomplete, the strongest-only detector reports
+    // a miss and the search cursor advances beyond the descriptor.  If it is
+    // complete but its announced training start is beyond the copied window, it
+    // defers the wrong anchor.  Only in those unusable-strongest cases, peel
+    // successively earlier prefixes and recover the first complete, CFO-sane
+    // pair whose training start is readable.  A normal usable detection returns
+    // immediately with zero extra FFT passes; that both preserves strongest-peak
+    // semantics and prevents a marginal earlier false pair outranking it.
+    DualChirpResult detectDualChirpWithEarlierRecovery(
+        SampleSpan samples, float threshold = 0.15f) const {
+        const DualChirpResult strongest_window_result =
+            detectDualChirp(samples, threshold);
+        if (!config_.use_dual_chirp) {
+            return strongest_window_result;
+        }
+
+        const size_t chirp_len = up_chirp_template_.size();
+        const size_t gap_samples = static_cast<size_t>(
+            config_.sample_rate * config_.gap_ms / 1000.0f);
+        const size_t minimum_pair_span = 2 * chirp_len + gap_samples;
+        const auto training_start_is_readable =
+            [chirp_len, gap_samples](const DualChirpResult& candidate,
+                                    size_t readable_samples) {
+                if (!candidate.success || candidate.down_chirp_start < 0) {
+                    return false;
+                }
+                const size_t down_start =
+                    static_cast<size_t>(candidate.down_chirp_start);
+                return down_start <= readable_samples &&
+                       chirp_len + gap_samples <= readable_samples - down_start;
+            };
+
+        if (training_start_is_readable(strongest_window_result, samples.size())) {
+            return strongest_window_result;
+        }
+
+        int prefix_end = strongest_window_result.strongest_up_candidate_start;
+        // A 120k full-anchor window can physically contain at most a handful of
+        // non-overlapping dual chirps.  Keep a hard ceiling anyway so malformed
+        // audio cannot turn candidate peeling into unbounded FFT work.
+        constexpr int kMaxEarlierCandidatePasses = 4;
+        for (int pass = 0;
+             pass < kMaxEarlierCandidatePasses &&
+             prefix_end >= 0 &&
+             static_cast<size_t>(prefix_end) >= minimum_pair_span;
+             ++pass) {
+            const size_t prefix_size = static_cast<size_t>(prefix_end);
+            const DualChirpResult earlier = detectDualChirp(
+                samples.first(prefix_size), threshold);
+            if (training_start_is_readable(earlier, samples.size())) {
+                LOG_SYNC(INFO,
+                         "ChirpSync: earlier-anchor recovery accepted "
+                         "up=%d before unusable strongest_up=%d (pass=%d)",
+                         earlier.up_chirp_start,
+                         strongest_window_result.strongest_up_candidate_start,
+                         pass + 1);
+                return earlier;
+            }
+
+            const int next_prefix_end = earlier.strongest_up_candidate_start;
+            if (next_prefix_end < 0 || next_prefix_end >= prefix_end) {
+                break;
+            }
+            prefix_end = next_prefix_end;
+        }
+
+        // Preserve the strongest-window candidate and diagnostics when no
+        // earlier usable pair exists.  A successful-but-future result continues
+        // into the decoder's exact-window deferral path; a genuine miss still
+        // exposes up_correlation for threshold diagnostics.
+        return strongest_window_result;
+    }
 
     DualChirpResult detectDualChirp(SampleSpan samples, float threshold = 0.15f) const {
         DualChirpResult result;
@@ -419,6 +504,7 @@ public:
         if (up_pos < 0) {
             return result;  // Up chirp not found
         }
+        result.strongest_up_candidate_start = up_pos;
 
         // Detect DOWN chirp (search in limited window after UP chirp)
         // Expected down chirp is at: up_pos + chirp_len + gap_samples

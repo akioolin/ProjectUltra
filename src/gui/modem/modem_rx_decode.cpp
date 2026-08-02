@@ -14,7 +14,7 @@ namespace v2 = protocol::v2;
 // FRAME DELIVERY AND NOTIFICATION
 // ============================================================================
 
-void ModemEngine::deliverFrame(const Bytes& frame_data) {
+void ModemEngine::deliverFrame(const Bytes& frame_data, bool physical_turn_complete) {
     // Prefer the LIVE local callsign (tracks runtime MYCALL changes); fall back to the logging
     // label only when it was never set (preserves prior GUI behavior where label == callsign).
     // Using the stale label here silently dropped inbound frames addressed to the operator's
@@ -45,7 +45,7 @@ void ModemEngine::deliverFrame(const Bytes& frame_data) {
     }
 
     if (raw_data_callback_) {
-        raw_data_callback_(frame_data);
+        raw_data_callback_(frame_data, physical_turn_complete);
     }
 
     last_rx_complete_time_ = std::chrono::steady_clock::now();

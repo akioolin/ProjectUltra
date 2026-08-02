@@ -244,7 +244,8 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
                 LOG_MODEM(INFO,
                           "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
                           "frame_mask=0x%04X rate_hint=%u drive_advisory=%u peak=%.1f "
-                          "symbol_ms=%u hamming_corrected=%d stream_offset=%llu",
+                          "normalized_peak=%.3f min_conf=%.3f symbol_ms=%u "
+                          "hamming_corrected=%d stream_offset=%llu",
                           log_prefix_.c_str(),
                           static_cast<unsigned>(d.payload.group_seq),
                           d.payload.type ==
@@ -255,6 +256,10 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
                           static_cast<unsigned>(d.payload.rate_hint),
                           static_cast<unsigned>(d.payload.drive_advisory),
                           d.correlation_peak,
+                          d.correlation_peak /
+                              ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::
+                                  idealCostasPeak(d.symbol_ms_used),
+                          d.min_symbol_confidence,
                           static_cast<unsigned>(d.symbol_ms_used),
                           d.hamming_corrected_blocks,
                           static_cast<unsigned long long>(d.detected_stream_offset));
@@ -273,14 +278,23 @@ void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
             const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
             LOG_MODEM(INFO,
                       "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
-                      "peak=%.1f symbol_ms=%u stream_offset=%llu",
+                      "mask=0x%04X epoch=%u peak=%.1f normalized_peak=%.3f "
+                      "min_conf=%.3f hamming_corrected=%d symbol_ms=%u "
+                      "stream_offset=%llu",
                       log_prefix_.c_str(),
                       static_cast<unsigned>(d.payload.group_seq),
                       d.payload.type ==
                               ultra::waveform::tone_burst_ack::AckType::Nack
                           ? "NACK"
                           : "ACK",
+                      static_cast<unsigned>(d.payload.frame_mask),
+                      static_cast<unsigned>(d.payload.move_epoch),
                       d.correlation_peak,
+                      d.correlation_peak /
+                          ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::
+                              idealCostasPeak(d.symbol_ms_used),
+                      d.min_symbol_confidence,
+                      d.hamming_corrected_blocks,
                       static_cast<unsigned>(d.symbol_ms_used),
                       static_cast<unsigned long long>(d.detected_stream_offset));
             if (cb) cb(d);
@@ -289,6 +303,50 @@ void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
 
 StreamingDecoder::~StreamingDecoder() {
     stop();
+}
+
+void StreamingDecoder::rebuildFrameDecoderInterleaverForLiftingZ(int lifting_z) {
+    size_t bps = mcDpskBitsPerSymbol(mc_dpsk_config_);
+    if (protocol::isOFDMMode(mode_)) {
+        bps = static_cast<size_t>(std::max(1, ofdm_data_carriers_)) *
+              getBitsPerSymbol(current_modulation_);
+    }
+    const size_t codeword_bits =
+        lifting_z == 81 ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
+    frame_decoder_.interleaver_ =
+        std::make_unique<ChannelInterleaver>(std::max<size_t>(1, bps),
+                                             codeword_bits);
+}
+
+void StreamingDecoder::clearActiveBurstDescriptorGeometry() {
+    // Keep all owners of active lifting geometry in lockstep. In
+    // particular, OFDMChirpWaveform::configure()/reset() intentionally preserve
+    // its lifting size, so merely clearing the descriptor latch is insufficient.
+    const int target_z = testing_lifting_z_override_ == 81 ? 81 : 27;
+    if (waveform_) {
+        waveform_->setActiveLDPCLiftingZ(static_cast<uint8_t>(target_z));
+    }
+    sync_controller_.have_burst_descriptor_ = false;
+    descriptor_group_size_locked_ = false;
+    rebuildFrameDecoderInterleaverForLiftingZ(target_z);
+}
+
+void StreamingDecoder::deferActiveBurstDescriptorGeometryResetLocked() {
+    // Do not touch waveform_ here: lifecycle and audio-ingest callers can race
+    // a decode-thread waveform call even though they hold ring_.buffer_mutex_.
+    // Clearing the latch makes public/logical geometry immediately honest; the
+    // live object is repaired before the next decode work is allowed to start.
+    sync_controller_.have_burst_descriptor_ = false;
+    descriptor_group_size_locked_ = false;
+    pending_active_burst_geometry_reset_.store(true, std::memory_order_release);
+}
+
+void StreamingDecoder::applyPendingActiveBurstDescriptorGeometryReset() {
+    if (!pending_active_burst_geometry_reset_.exchange(
+            false, std::memory_order_acq_rel)) {
+        return;
+    }
+    clearActiveBurstDescriptorGeometry();
 }
 
 void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
@@ -483,14 +541,19 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     if (overflow.overflow) {
         sync_controller_.ring_.correlation_pos_ = overflow.new_correlation_pos;
         sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.ringPosToAbsoluteLocked(sync_controller_.ring_.correlation_pos_));
+        // The saved detector window belongs to audio the overflow policy has
+        // explicitly discarded. It cannot be replayed in the new receive epoch.
+        deferred_future_sync_ = {};
 
         // Once overloaded, any in-flight frame context is stale. Force a clean
         // resync from current audio instead of chasing old sync positions.
         bool reset_decode_state = false;
-        if (state_ != DecoderState::SEARCHING) {
+        if (state_ != DecoderState::SEARCHING ||
+            sync_controller_.have_burst_descriptor_) {
             state_ = DecoderState::SEARCHING;
             pending_total_cw_ = 0;
             burst_blocks_decoded_ = 0;
+            deferActiveBurstDescriptorGeometryResetLocked();
             burst_soft_buffer_.clear();
             burst_predecoded_.clear();
             descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
@@ -597,6 +660,9 @@ void StreamingDecoder::processBuffer() {
         // this processBuffer iteration. The actual configure() / waveform_
         // reconstruction (replaces modulator_/demodulator_/chirp_sync_
         // unique_ptrs) runs here at a clean boundary — never mid-decode.
+        // Retire descriptor-owned Z before any queued waveform rebuild. This
+        // covers lifecycle/overflow resets requested off the decode thread.
+        applyPendingActiveBurstDescriptorGeometryReset();
         // Connected-OFDM-mode rebuild MUST run before descriptor-driven rate
         // change (it constructs the waveform_ that the rate change then
         // reconfigures). Both routes through deferred pending so RX never
@@ -741,8 +807,11 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     const bool waveform_mode_changed = mode_ != mode;
     mode_ = mode;
     connected_ = connected;
+    deferred_future_sync_ = {};
 
-    // Disconnect backstop for the burst BURST_HEADER z-latch
+    // Any mode/connection transition terminates the old physical group. Keep
+    // the descriptor latch and the waveform's live block geometry in lockstep;
+    // configure()/reset() intentionally preserve the latter.
     // (sync_controller_.have_burst_descriptor_ / activeBurstLiftingZ). 2026-06-05
     // (BUG-TNC-B2F-002): the latch is now cleared PER GROUP at group-end
     // (finalizeBurstGroup, streaming_burst_interleave.cpp) — the correct z lifecycle
@@ -752,9 +821,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     // Winlink-B2F FF terminator, any interactive frame after a file transfer) gated
     // as mid-burst and mis-sized as z=81. This `!connected` clear remains as a
     // backstop for a session that ends before a group finalizes.
-    if (!connected) {
-        sync_controller_.have_burst_descriptor_ = false;
-    }
+    deferActiveBurstDescriptorGeometryResetLocked();
 
     if (waveform_mode_changed) {
         // BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (root-caused 2026-07-29): assigning to
@@ -817,6 +884,20 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
+    burst_arm_provenance_ = BurstArmProvenance::NONE;
+    burst_substantive_members_ = 0;
+    burst_unproven_start_abs_ = 0;
+    burst_air_end_provisional_.store(false, std::memory_order_relaxed);
+    provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+    burst_air_end_abs_.store(0, std::memory_order_relaxed);
+    // Mode/session transitions invalidate the absolute sample identity that armed
+    // the no-group backstop. Leaving either field behind can make the new mode fire
+    // a synthetic crater ACK against an anchor from the previous receive epoch.
+    anchored_burst_backstop_armed_ = false;
+    anchored_burst_backstop_arm_abs_ = 0;
+    anchored_burst_payload_seen_ = false;
+    burst_data_start_abs_ = 0;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     use_burst_interleave_ = false;  // Re-enabled by caller if needed
@@ -871,8 +952,26 @@ bool StreamingDecoder::expectsFullOFDMAnchorForTesting() const {
     return sync_controller_.expect_full_ofdm_anchor_;
 }
 
+void StreamingDecoder::armAnchoredBurstBackstopForTesting(size_t arm_abs) {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    anchored_burst_backstop_armed_ = true;
+    anchored_burst_backstop_arm_abs_ = arm_abs;
+    anchored_burst_payload_seen_ = false;
+}
+
+bool StreamingDecoder::anchoredBurstBackstopArmedForTesting() const {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    return anchored_burst_backstop_armed_;
+}
+
+size_t StreamingDecoder::anchoredBurstBackstopArmAbsForTesting() const {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    return anchored_burst_backstop_arm_abs_;
+}
+
 void StreamingDecoder::applyPendingConfigForTesting() {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    applyPendingActiveBurstDescriptorGeometryReset();
     applyPendingConnectedOFDMMode();
     applyPendingDescriptorDataMode();
 }
@@ -982,6 +1081,18 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     const ModemConfig& config = pending_connected_ofdm_config_;
     const Modulation mod = pending_connected_ofdm_mod_;
     const CodeRate rate = pending_connected_ofdm_rate_;
+    // The descriptor latch, not the size-write guard, owns physical Z. The
+    // latter is released once a marked group starts accumulating, while the
+    // descriptor's Z remains authoritative until that group finalizes/aborts.
+    const bool preserve_descriptor_geometry =
+        sync_controller_.have_burst_descriptor_;
+    const int reconfigured_lifting_z = testing_lifting_z_override_ != 0
+        ? testing_lifting_z_override_
+        : (preserve_descriptor_geometry ? sync_controller_.activeBurstLiftingZ()
+                                        : 27);
+    if (!preserve_descriptor_geometry) {
+        sync_controller_.have_burst_descriptor_ = false;
+    }
 
     // FIXED-GRID (2026-07-06): a connected same-grid OFDM reconfig (mode-hop that
     // keeps FFT/carriers/pilot spacing) must NOT force the full-anchor expectation —
@@ -1018,6 +1129,12 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     if (waveform_) {
         waveform_->configure(mod, rate);
         waveform_->setCarrierMask(carrier_mask_);
+        // A descriptor-mode callback can rebuild the waveform while the
+        // descriptor-declared group is already in flight. Re-apply the wire
+        // lifting after configure() so the new demodulator does not silently
+        // fall back to its constructor default (Z=27 / 648 bits).
+        waveform_->setActiveLDPCLiftingZ(
+            static_cast<uint8_t>(reconfigured_lifting_z));
     }
 
     // Query waveform for effective pilot layout after configure().
@@ -1027,7 +1144,11 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
 
     size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
         ofdm_carriers_, pilot_spacing > 0, pilot_spacing, mod));
-    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    const size_t active_codeword_bits = reconfigured_lifting_z == 81
+        ? size_t{1944}
+        : v2::LDPC_CODEWORD_BITS;
+    frame_decoder_.interleaver_ =
+        std::make_unique<ChannelInterleaver>(bps, active_codeword_bits);
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
@@ -1134,7 +1255,10 @@ void StreamingDecoder::applyDataModeUnlocked(Modulation mod, CodeRate rate) {
     // Use data carriers (not total) to account for pilot overhead
     int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_data_carriers_;
     size_t bps = static_cast<size_t>(carriers) * getBitsPerSymbol(mod);
-    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    const size_t active_codeword_bits =
+        activeBurstLiftingZ() == 81 ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
+    frame_decoder_.interleaver_ =
+        std::make_unique<ChannelInterleaver>(bps, active_codeword_bits);
     LOG_MODEM(INFO, "StreamingDecoder: interleaver updated for %s (%zu bits/symbol)",
               modulationToString(mod), bps);
 }
@@ -1343,6 +1467,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     sync_controller_.ring_.write_pos_ = 0;
     sync_controller_.ring_.correlation_pos_ = 0;
     sync_position_ = 0;
+    deferred_future_sync_ = {};
     sync_correlation_ = 0.0f;
     sync_gap_error_samples_ = 0.0f;
     samples_since_sync_ = 0;
@@ -1376,10 +1501,25 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     cg_snapshot_ = CommandedGeometry{};
     cg_snapshot_sync_pos_ = 0;
     burst_blocks_decoded_ = 0;
+    deferActiveBurstDescriptorGeometryResetLocked();
     burst_soft_buffer_.clear();
     burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
+    burst_arm_provenance_ = BurstArmProvenance::NONE;
+    burst_substantive_members_ = 0;
+    burst_unproven_start_abs_ = 0;
+    burst_air_end_provisional_.store(false, std::memory_order_relaxed);
+    provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+    burst_air_end_abs_.store(0, std::memory_order_relaxed);
+    // total_fed_ was rewound above, so every absolute-sample backstop identity
+    // must rewind with it. An inert stale timestamp is also cleared: a lifecycle
+    // reset establishes one self-contained receive epoch, not just an unarmed bit.
+    anchored_burst_backstop_armed_ = false;
+    anchored_burst_backstop_arm_abs_ = 0;
+    anchored_burst_payload_seen_ = false;
+    burst_data_start_abs_ = 0;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     constellation_cache_.clear();

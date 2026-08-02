@@ -259,6 +259,74 @@ void test_bootstrap_caps() {
           "AWGN below the R1/2 gate caps to the QPSK R1/4 ladder floor");
 }
 
+void test_rx_authority_initial_rung_cap() {
+    auto p = capRxAuthorityInitialRung(Modulation::QAM8, CodeRate::R2_3, true);
+    CHECK(p.mod == Modulation::QPSK && p.rate == CodeRate::R1_2,
+          "RX authority caps a dense automatic entry to the measured R1/2 probe");
+
+    p = capRxAuthorityInitialRung(Modulation::QPSK, CodeRate::R3_4, true);
+    CHECK(p.mod == Modulation::QPSK && p.rate == CodeRate::R1_2,
+          "RX authority caps the live-failing R3/4 bootstrap to R1/2");
+
+    p = capRxAuthorityInitialRung(Modulation::QPSK, CodeRate::R2_3, true);
+    CHECK(p.mod == Modulation::QPSK && p.rate == CodeRate::R1_2,
+          "RX authority caps R2/3 until coherent evidence exists");
+
+    p = capRxAuthorityInitialRung(Modulation::QPSK, CodeRate::R1_2, true);
+    CHECK(p.mod == Modulation::QPSK && p.rate == CodeRate::R1_2,
+          "R1/2 entry remains unchanged");
+
+    p = capRxAuthorityInitialRung(Modulation::QPSK, CodeRate::R1_4, true);
+    CHECK(p.mod == Modulation::QPSK && p.rate == CodeRate::R1_4,
+          "a more robust R1/4 entry is never raised");
+
+    p = capRxAuthorityInitialRung(Modulation::QAM8, CodeRate::R2_3, false);
+    CHECK(p.mod == Modulation::QAM8 && p.rate == CodeRate::R2_3,
+          "authority-disabled policy leaves the selected entry untouched");
+
+    p = capRxAuthorityInitialRung(Modulation::QAM8, CodeRate::R2_3, true,
+                                  /*operator_forced=*/true);
+    CHECK(p.mod == Modulation::QAM8 && p.rate == CodeRate::R2_3,
+          "resolved operator force bypasses the automatic physical-entry cap");
+}
+
+void test_environment_force_validity() {
+    setenv("ULTRA_FORCE_DATA_MOD", "8PSK", 1);
+    setenv("ULTRA_FORCE_DATA_RATE", "R2_3", 1);
+    CHECK(forcedDataModulationFromEnvironment() == Modulation::QAM8 &&
+              forcedDataCodeRateFromEnvironment() == CodeRate::R2_3 &&
+              environmentForcesDataProfile(),
+          "valid 8PSK R2/3 env profile is an operator force");
+    CHECK(capInitialOFDMRate(11.0f, 0.04f, CodeRate::R3_4,
+                             Modulation::QPSK) == CodeRate::R3_4,
+          "valid forced data rate bypasses the legacy bootstrap rate cap");
+
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+    Modulation partial_mod = Modulation::AUTO;
+    CodeRate partial_rate = CodeRate::AUTO;
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP,
+                      partial_mod, partial_rate, 0.50f);
+    CHECK(partial_mod == Modulation::QAM8 && partial_rate == CodeRate::R2_3,
+          "modulation-only force resolves the automatic rate instead of leaving it unset");
+
+    setenv("ULTRA_FORCE_DATA_MOD", "8PSK", 1);
+    setenv("ULTRA_FORCE_DATA_RATE", "R2_3_typo", 1);
+    const EnvironmentForcedDataProfile malformed =
+        forcedDataProfileFromEnvironment();
+    CHECK(malformed.malformed && malformed.modulation_present &&
+              malformed.code_rate_present &&
+              forcedDataModulationFromEnvironment() == Modulation::AUTO &&
+              forcedDataCodeRateFromEnvironment() == CodeRate::AUTO &&
+              !environmentForcesDataProfile(),
+          "mixed valid+invalid env profile fails atomically, never partially");
+    CHECK(capInitialOFDMRate(11.0f, 0.04f, CodeRate::R3_4,
+                             Modulation::QPSK) == CodeRate::R1_2,
+          "invalid forced-rate text does not bypass automatic bootstrap cap");
+
+    unsetenv("ULTRA_FORCE_DATA_MOD");
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+}
+
 void test_entry_cap_r34() {
     // ULTRA_ENTRY_CAP_R34 (default OFF, pinned "0" in main BEFORE any policy call —
     // the knob is read ONCE via static lambda). Knob-OFF behavior must be byte-identical
@@ -490,15 +558,17 @@ void test_fer_floor_monotonic() {
 }
 
 int main() {
-    // ULTRA_ENTRY_CAP_R34 is read ONCE (static lambda): pin it OFF before the first
-    // policy call so the knob-off checks are hermetic regardless of the parent env.
+    // ULTRA_ENTRY_CAP_R34 is read ONCE (static lambda): remove any parent override
+    // before the first policy call and prove that the documented unset default is OFF.
     // The knob-ON path is tested through capInitialOFDMRateImpl's explicit seam.
-    setenv("ULTRA_ENTRY_CAP_R34", "0", 1);
+    unsetenv("ULTRA_ENTRY_CAP_R34");
 
     test_ofdm_rate_thresholds();
     test_narrow_data_mode();
     test_coherent_ladder_selection();
     test_bootstrap_caps();
+    test_rx_authority_initial_rung_cap();
+    test_environment_force_validity();
     test_entry_cap_r34();
     test_waveform_recommendations();
     test_data_mode_policy();

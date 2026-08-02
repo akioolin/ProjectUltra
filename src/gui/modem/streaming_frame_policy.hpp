@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 namespace ultra {
 namespace gui {
@@ -212,6 +213,47 @@ inline bool allowSyncRecovery(float sync_correlation) {
     return sync_correlation >= kMinSyncRecoveryCorrelation;
 }
 
+// The descriptor for group N announces whether group N+1 will use a chirp-less
+// LIGHT anchor.  The reactive streak is credited from the just-observed prior
+// delivery while group N is being encoded, so the announcement must use the
+// post-credit streak.  Using the pre-credit streak creates a one-group wire
+// contradiction exactly when the gate opens: N announces FULL, then N+1 sends
+// LIGHT and the receiver rejects the entire burst while waiting for a chirp.
+inline bool shouldAnnounceNextLightAnchor(uint32_t anchor_ordinal,
+                                          int anchor_skip_k,
+                                          uint32_t clean_streak_after_credit,
+                                          uint32_t clean_streak_threshold) {
+    return anchor_skip_k > 1 &&
+           clean_streak_after_credit >= clean_streak_threshold &&
+           static_cast<int>((anchor_ordinal + 1u) %
+                            static_cast<uint32_t>(anchor_skip_k)) != 0;
+}
+
+// One source of truth for BURST_HEADER payload[4]. In particular, the
+// current-group anchor bit must be derived from the same one-shot that chooses
+// the physical preamble; otherwise sender and receiver silently disagree at
+// the exact timeout-repair boundary where robust acquisition matters most.
+inline constexpr uint8_t burstDescriptorFlags(bool burst_interleave,
+                                               bool carrier_ldpc,
+                                               bool next_light_anchor,
+                                               bool current_group_full_anchor) {
+    uint8_t flags = 0;
+    if (burst_interleave) {
+        flags |= protocol::v2::ControlFrame::BURST_FLAG_INTERLEAVE;
+    }
+    if (carrier_ldpc) {
+        flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
+    }
+    if (next_light_anchor) {
+        flags |= protocol::v2::ControlFrame::BURST_FLAG_NEXT_LIGHT_ANCHOR;
+    }
+    if (current_group_full_anchor) {
+        flags |=
+            protocol::v2::ControlFrame::BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR;
+    }
+    return flags;
+}
+
 inline bool isNonDataFrame(bool success, const uint8_t* frame_data, size_t frame_size) {
     if (!success || !frame_data || frame_size < 3) {
         return false;
@@ -219,6 +261,74 @@ inline bool isNonDataFrame(bool success, const uint8_t* frame_data, size_t frame
 
     const auto type = static_cast<protocol::v2::FrameType>(frame_data[2]);
     return protocol::v2::isControlFrame(type) || protocol::v2::isConnectFrame(type);
+}
+
+inline bool shouldStampPhysicalBurstEnd(size_t frame_count,
+                                        protocol::WaveformMode mode,
+                                        bool supports_data_preamble,
+                                        bool burst_interleave) {
+    return frame_count > 1 && protocol::isOFDMMode(mode) &&
+           supports_data_preamble && !burst_interleave;
+}
+
+// Produce wire-owned DATA copies. The ARQ's serialized frames remain logical and
+// byte-stable; a retry may regroup a seq at a different physical position, so every
+// emission first clears the marker before stamping the exact final wire frame.
+inline std::vector<Bytes> preparePhysicalBurstFrames(
+    const std::vector<Bytes>& frames, bool stamp_physical_end) {
+    std::vector<Bytes> wire_frames = frames;
+    for (size_t i = 0; i < wire_frames.size(); ++i) {
+        auto frame = protocol::v2::DataFrame::deserialize(wire_frames[i]);
+        if (!frame || frame->type == protocol::v2::FrameType::DATA_REPAIR ||
+            !protocol::v2::isDataFrame(frame->type)) {
+            continue;
+        }
+        frame->flags = static_cast<uint8_t>(
+            frame->flags & ~protocol::v2::Flags::PHYSICAL_BURST_END);
+        if (stamp_physical_end && i + 1 == wire_frames.size()) {
+            frame->flags = static_cast<uint8_t>(
+                frame->flags | protocol::v2::Flags::PHYSICAL_BURST_END);
+        }
+        wire_frames[i] = frame->serialize();
+    }
+    return wire_frames;
+}
+
+inline bool hasPhysicalBurstEndMarker(bool decode_success,
+                                      bool connected,
+                                      bool is_ofdm,
+                                      bool burst_transport,
+                                      const Bytes& frame_data) {
+    if (!decode_success || !connected || !is_ofdm || !burst_transport ||
+        frame_data.size() < 4) {
+        return false;
+    }
+    const auto header = protocol::v2::parseHeader(frame_data);
+    return header.valid && !header.is_control &&
+           protocol::v2::isDataFrame(header.type) &&
+           header.type != protocol::v2::FrameType::DATA_REPAIR &&
+           (frame_data[3] & protocol::v2::Flags::PHYSICAL_BURST_END) != 0;
+}
+
+inline bool shouldClearProvisionalBurstAirGate(bool decode_success,
+                                               bool non_data_frame,
+                                               bool gate_is_provisional,
+                                               bool anchor_is_proven_full_chirp,
+                                               uint64_t provisional_anchor_abs,
+                                               uint64_t frame_sync_abs) {
+    if (!decode_success || !gate_is_provisional) {
+        return false;
+    }
+    // A classic frame decoded at the exact accepted anchor is a standalone
+    // physical turn, even when its protocol flags are non-FINAL. A later light
+    // frame belongs to the descriptor/marked-head-loss fallback and must retain
+    // the original physical-air deadline. A protocol FINAL is only a logical
+    // payload boundary: interleaver padding or other physical group members may
+    // still follow it, so FINAL cannot authorize reverse egress. Control frames
+    // are standalone on this classic decode route.
+    return non_data_frame ||
+           (anchor_is_proven_full_chirp &&
+            frame_sync_abs == provisional_anchor_abs);
 }
 
 inline size_t consumedSamplesForDecodedFrame(bool success,

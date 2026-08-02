@@ -83,6 +83,13 @@ struct DecodeResult {
     bool success = false;           // True if frame decoded successfully
     Bytes frame_data;               // Decoded frame payload
     v2::FrameType frame_type = v2::FrameType::PROBE;
+    // True only when the decoder has physical proof that this classic frame
+    // closes the peer's current transmission (a standalone frame at the
+    // accepted full anchor, or a CRC-protected physical-burst-end marker).
+    // This is deliberately distinct from decode success: the protocol uses it
+    // to emit a causally safe reverse ACK without mistaking an arbitrary/timer
+    // callback for a half-duplex turn boundary.
+    bool physical_turn_complete = false;
     float snr_db = 0.0f;            // Consumer-facing routed value; see snr_source.
     SNRSource snr_source = SNRSource::NONE;
     float cfo_hz = 0.0f;            // Measured CFO
@@ -198,10 +205,13 @@ using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
 // NOT interleaved, frame_mask is a true per-frame SACK and the sender resends only the
 // 0-bit frames + refills the burst (the Good/AWGN SR-ARQ path). 16 bits end-to-end
 // (2026-07-02, matches the tone-burst wire mask kPayloadFrameMaskBits).
+// geometry_proven is true only when group_size came from a decoded BURST_HEADER
+// descriptor or from a CRC-valid PHYSICAL_BURST_END DATA frame. A configured/stale
+// fallback size is carried for accounting but is not transmitter-owned evidence.
 using BurstGroupCallback =
     std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
                        float quality, uint16_t frame_mask, bool interleaved,
-                       uint8_t group_size)>;
+                       uint8_t group_size, bool geometry_proven)>;
 // DESC-SWITCH (ULTRA_DESCRIPTOR_MODE_SWITCH Phase 1, docs/MODE_SWITCH_PIGGYBACK_
 // DESIGN_2026_07_03.md §5.1 step 4b): fired when a consumed BURST_HEADER descriptor
 // declares a mod/rate that DIFFERS from the decoder's current data mode (the demod
@@ -336,7 +346,11 @@ public:
     // NO env: the descriptor is the wire contract. A frame decoded before its
     // group's descriptor arrives correctly falls back to 27. Owned by the
     // SyncController (§7.6); replaces 5 scattered getenv("ULTRA_LDPC_Z") reads.
-    int activeBurstLiftingZ() const { return sync_controller_.activeBurstLiftingZ(); }
+    int activeBurstLiftingZ() const {
+        return testing_lifting_z_override_ != 0
+            ? testing_lifting_z_override_
+            : sync_controller_.activeBurstLiftingZ();
+    }
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -424,9 +438,17 @@ public:
     bool commandedRungDeclinedForTesting() const {
         return commanded_rung_declined_.load(std::memory_order_relaxed);
     }
+    void armAnchoredBurstBackstopForTesting(size_t arm_abs);
+    bool anchoredBurstBackstopArmedForTesting() const;
+    size_t anchoredBurstBackstopArmAbsForTesting() const;
     // Seed the learned rung->geometry table without a wire descriptor (tests only —
     // production populates it ONLY from decoded BURST_HEADER descriptors).
     void seedRungGeometryForTesting(Modulation mod, CodeRate rate, int cw, int lifting_z);
+    // Force the active LDPC lifting size without a wire descriptor (tests/tools
+    // only). The override persists across reset(), matching a measure_ack_fer
+    // session that reuses one configured decoder for many independent frames.
+    // Production never calls this: its sole authority remains BURST_HEADER.
+    void setLDPCLiftingZForTesting(int lifting_z);
     // Replay the adoption-evidence observation a decoded BURST_HEADER would make.
     void noteDescriptorRungForTesting(Modulation mod, CodeRate rate) {
         noteDescriptorRungObserved(mod, rate);
@@ -437,8 +459,20 @@ public:
     // TRUNCATED (the sizing requirement grew between the readiness check and the
     // decode) and was deferred instead of arming the group from a short slice.
     uint32_t truncatedBurstHoldsForTesting() const { return truncated_burst_holds_; }
+    bool truncationHoldActiveForTesting() const {
+        return truncation_hold_sync_pos_ != 0 || truncation_hold_frame_len_ != 0;
+    }
     uint32_t commandedGeometryArmsForTesting() const { return commanded_geometry_arms_; }
     DecoderState stateForTesting() const { return state_; }
+    size_t waveformFrameSamplesForTesting(int cw_count) const {
+        return waveform_
+            ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(cw_count))
+            : 0u;
+    }
+    void expireBurstTimeoutForTesting() {
+        burst_start_time_ = std::chrono::steady_clock::now() -
+                            std::chrono::hours(1);
+    }
 
     // ========================================================================
     // STATUS
@@ -553,8 +587,14 @@ public:
         return last_group_carrier_gammas_;  // decode-thread only (group callback)
     }
     void setRealTimeAudio(bool v) { sync_controller_.real_time_audio_ = v; }
-    void setAnchoredBurstNoGroupCallback(std::function<void()> cb) {
+    void setAnchoredBurstNoGroupCallback(std::function<void(bool payload_seen)> cb) {
         anchored_burst_no_group_callback_ = std::move(cb);
+    }
+    // A marker-armed candidate was abandoned without trustworthy group geometry.
+    // This is state-only provenance: consumers may cancel a pending experiment,
+    // but must not synthesize an ACK, delivery outcome, or rate observation.
+    void setBurstOutcomeUnknownCallback(std::function<void()> cb) {
+        burst_outcome_unknown_callback_ = std::move(cb);
     }
     void stampRxSubstantive() const {
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -669,17 +709,26 @@ public:
     // frame_mask) to make the tone-burst path the authoritative ACK source.
     using ToneBurstAckCallback =
         ultra::waveform::tone_burst_ack::ToneBurstAckCallback;
+    using ToneBurstAckAcceptancePredicate =
+        ultra::waveform::tone_burst_ack::ToneBurstAckAcceptancePredicate;
     using ToneBurstAckDetection =
         ultra::waveform::tone_burst_ack::ToneBurstAckDetection;
 
     // Replace the tone-burst detection callback. Default callback emits an
     // INFO log line summarizing the detection.
     void setToneBurstAckCallback(ToneBurstAckCallback cb);
+    void setToneBurstAckAcceptancePredicate(
+        ToneBurstAckAcceptancePredicate predicate) {
+        tone_burst_monitor_.setAcceptancePredicate(std::move(predicate));
+    }
 
     // For tests + diagnostics: how many tone-burst ACKs has the always-on
     // monitor decoded since construction or last reset.
     uint64_t toneBurstAcksDetected() const {
         return tone_burst_monitor_.detectionsEmitted();
+    }
+    uint64_t toneBurstAckCandidatesRejected() const {
+        return tone_burst_monitor_.semanticCandidatesRejected();
     }
 
     // §15 step 4d-late: arm the tone-burst monitor for an expected ACK
@@ -694,6 +743,13 @@ public:
             static_cast<size_t>(ultra::waveform::tone_burst_ack::kSampleRate) *
             window_ms / 1000u;
         tone_burst_monitor_.arm(window_samples);
+    }
+
+    void rearmToneBurstMonitor(uint32_t window_ms) {
+        const size_t window_samples =
+            static_cast<size_t>(ultra::waveform::tone_burst_ack::kSampleRate) *
+            window_ms / 1000u;
+        tone_burst_monitor_.rearm(window_samples);
     }
 
 private:
@@ -720,6 +776,23 @@ private:
     Modulation pending_descriptor_mod_ = Modulation::DQPSK;
     CodeRate pending_descriptor_rate_ = CodeRate::R1_4;
     void applyPendingDescriptorDataMode();  // called at top of processBuffer
+
+    // End the descriptor-owned LDPC geometry as one invariant-preserving
+    // operation.  The descriptor latch is the decoder-side source of truth,
+    // while OFDMChirpWaveform and FrameDecoder own live sample/LLR geometry;
+    // clearing only one leaves the next Z=27 control/BURST_HEADER sized or
+    // deinterleaved against Z=81. The explicit test-only lifting override
+    // remains authoritative. This synchronous form is DECODE-THREAD-ONLY.
+    void clearActiveBurstDescriptorGeometry();
+    void rebuildFrameDecoderInterleaverForLiftingZ(int lifting_z);
+
+    // feedAudio(), reset(), and setMode() may run while the decode thread is
+    // inside a waveform method. They clear the logical descriptor latch under
+    // ring_.buffer_mutex_ but defer mutation of the live waveform/interleaver
+    // until the safe top-of-processBuffer boundary.
+    void deferActiveBurstDescriptorGeometryResetLocked();
+    void applyPendingActiveBurstDescriptorGeometryReset();
+    std::atomic<bool> pending_active_burst_geometry_reset_{false};
 
     // DESC-SWITCH Phase 1 knob (ULTRA_DESCRIPTOR_MODE_SWITCH, read once in the ctor —
     // lockstep with the Connection-side read; default OFF = byte-identical). Gates the
@@ -793,6 +866,7 @@ private:
     // Burst interleave accumulation
     enum class BurstFrameResult {
         SUCCESS,    // Soft bits appended; may be demodulated data or an erasure block
+        PHYSICAL_TAIL, // CRC-valid DATA says this is the exact final physical member
         WAITING,    // Not enough samples yet — caller should return and wait
         FAILED,     // Unrecoverable alignment/state failure — abort group
     };
@@ -813,7 +887,10 @@ private:
     };
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
-    void finalizeBurstGroup();
+    // exact_physical_group_size is used only when a CRC-protected DATA tail proves
+    // the wire ended before stale fallback geometry. Zero keeps descriptor/configured
+    // geometry (including late-join head-erasure reconstruction).
+    void finalizeBurstGroup(int exact_physical_group_size = 0);
     // LATE-JOIN (ULTRA_DESC_ARMED_ACCUM, docs/DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md):
     // arm accumulation from a mid-group member sync when the group HEAD died (the
     // BUG-BURST-HEADNULL-DROP recovery). Returns false when a full data frame is not
@@ -857,6 +934,22 @@ private:
     // Continuous correlation state machine (like real receivers)
     DecoderState state_ = DecoderState::SEARCHING;
     size_t sync_position_ = 0;        // Buffer position where sync was found
+    // A dual-chirp detector may prove the chirps before the following training
+    // samples have reached the live ring. Preserve the exact searched audio and
+    // replay that deterministic detector window after the announced training
+    // position arrives. This avoids both losing the candidate and ever parking
+    // sync_position_ beyond total_fed_. Protected by ring_.buffer_mutex_.
+    struct DeferredFutureSyncSearch {
+        bool valid = false;
+        uint32_t generation = 0;
+        size_t wait_until_abs = 0;
+        size_t search_start_abs = 0;
+        std::vector<float> search_buffer;
+        bool used_warm_timed_window = false;
+        bool used_warm_narrow_window = false;
+        size_t warm_narrow_end_abs = 0;
+        size_t warm_narrow_candidate_span_samples = 0;
+    } deferred_future_sync_;
     size_t samples_since_sync_ = 0;   // How many samples collected since sync
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // Chirp sync-quality score
@@ -1057,7 +1150,12 @@ private:
     // framed — the Connection then emits a re-confirm ack + crater verdict.
     bool anchored_burst_backstop_armed_ = false;
     size_t anchored_burst_backstop_arm_abs_ = 0;
-    std::function<void()> anchored_burst_no_group_callback_;
+    // Payload decoded through the classic fallback while the descriptor/group
+    // callback was missing. The timer still owes a cumulative async SACK if the
+    // physical tail is lost, but this evidence forbids fabricating a 0/N crater.
+    bool anchored_burst_payload_seen_ = false;
+    std::function<void(bool payload_seen)> anchored_burst_no_group_callback_;
+    std::function<void()> burst_outcome_unknown_callback_;
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as
@@ -1106,14 +1204,27 @@ private:
     // the member clock drives the group-end inference in accumulateBurstFrames.
     bool late_join_head_missing_ = false;
     std::chrono::steady_clock::time_point late_join_last_frame_time_{};
+    enum class BurstArmProvenance : uint8_t {
+        NONE,
+        DESCRIPTOR,
+        COMMANDED_GEOMETRY,
+        UNPROVEN_MARKER,
+        DESCRIPTOR_LATE_JOIN,
+    };
+    BurstArmProvenance burst_arm_provenance_ = BurstArmProvenance::NONE;
+    size_t burst_substantive_members_ = 0;
+    uint64_t burst_unproven_start_abs_ = 0;
+    // A sign-only negated-LTS decision can classify a standalone repair/noise as a
+    // group head. Such an arm earns group semantics only after a second substantive
+    // physical member arrives at the declared stride.
+    bool abandonUnprovenMarkerGroup(const char* reason);
     // HARQ provisional keys (2026-07-01, restricted design — fable_analysis/09 §3.4):
     // when a burst logical frame's CW0 peek fails, key its soft bits by the
     // POSITION-PREDICTED seq (receiver's ARQ mirror, pulled once per group via
-    // harq_context_callback_) so the resend can chase-combine. Gates: burst
-    // finalize loop only (index >= 0), >=4 bits/sym mods, warm-anchored groups
-    // (escalated/timeout groups have a different fill rule — D2), prediction not
-    // yet invalidated by a decoded-header mismatch (prefix consistency), and the
-    // descriptor's src_hash matching the session peer.
+    // harq_context_callback_) so the resend can chase-combine. The default-off
+    // experiment is restricted to descriptor-proven QPSK R3/4, non-interleaved,
+    // non-tail members. Warm-cadence, prediction-consistency and session-context
+    // gates remain mandatory; late-join and timeout groups are excluded.
     int burst_logical_index_ = -1;
     std::optional<fec::SoftCombineBuffer::ProvisionalContext> burst_harq_ctx_;
     bool burst_harq_ctx_pulled_ = false;
@@ -1152,6 +1263,11 @@ private:
         uint8_t lifting_z = 27;
     };
     std::array<LearnedRungGeometry, protocol::kRungIdxCount> learned_rung_geometry_{};
+
+    // Non-zero only when an explicitly test-only caller needs to exercise the
+    // long-LDPC frame path without first sending a production BURST_HEADER.
+    // Single-threaded test contract; deliberately not an environment variable.
+    int testing_lifting_z_override_ = 0;
 
     // Sample-clock stamp of the last GROUP START — NOT the last DESCRIPTOR. A run of
     // missed descriptors would inflate last_descriptor_abs_sample_ past the RTO gap
@@ -1229,13 +1345,22 @@ private:
     std::vector<float> last_group_carrier_gammas_;
     void accumulateBurstCarrierGamma();
     void finalizeGroupCarrierGammas();
-    // F176 GEOMETRIC ACK GATE: absolute sample at which the group currently
-    // being received stops ARRIVING (descriptor-declared geometry:
-    // frame_sync_abs + group_size × frame_len). The ack paths defer until the
-    // ring's fed counter passes it — the receiver never keys an ack into the
+    // F176 GEOMETRIC ACK GATE: absolute sample at which the burst currently
+    // being received stops ARRIVING. An accepted expected full anchor first
+    // publishes a conservative provisional ceiling; descriptor/marker-backed
+    // group geometry replaces it with the exact end. The ack paths defer until
+    // the ring's fed counter passes it — the receiver never keys an ack into the
     // tail of the burst it is acking, regardless of what the (fade-fragile)
-    // energy CCA thinks. 0 = no group in flight.
+    // energy CCA thinks. 0 = no burst in flight.
     std::atomic<uint64_t> burst_air_end_abs_{0};
+    std::atomic<bool> burst_air_end_provisional_{false};
+    std::atomic<uint64_t> provisional_burst_anchor_abs_{0};
+    // True only when the provisional anchor came from an actual dual-chirp lock.
+    // A connected DATA-sync fallback may conservatively arm the same air gate,
+    // but its own sample position is not proof that the DATA is a singleton.
+    std::atomic<bool> provisional_burst_anchor_full_chirp_{false};
+    void armProvisionalBurstAirGate(uint64_t anchor_abs, bool proven_full_chirp);
+    void clearProvisionalBurstAirGate();
     // F221: absolute sample where the group's DATA frames begin (just past the
     // consumed BURST_HEADER). The air-end derives from this + N x the group's
     // ACTUAL per-frame sample count (burst_min_block_) — the first cut used the

@@ -298,7 +298,7 @@ void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
     connection_.setFileSentCallback(std::move(cb));
 }
 
-void ProtocolEngine::onRxData(const Bytes& data) {
+void ProtocolEngine::onRxData(const Bytes& data, bool physical_turn_complete) {
     PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
@@ -309,7 +309,11 @@ void ProtocolEngine::onRxData(const Bytes& data) {
         rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
 
         defer_tx_ = true;
-        processRxBuffer();
+        // Provenance applies only to a frame completed by THIS modem callback.
+        // It is passed by value into this parse attempt and never retained, so
+        // malformed/incomplete input cannot lend completion proof to a later
+        // unrelated frame.
+        processRxBuffer(physical_turn_complete);
         defer_tx_ = false;
         callbacks = takePendingCallbacksLocked();
     }
@@ -340,13 +344,20 @@ bool ProtocolEngine::onToneBurstAck(
     return connection_.onToneBurstAck(detection);
 }
 
+bool ProtocolEngine::isToneBurstAckCandidatePlausible(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.isToneBurstAckCandidatePlausible(payload);
+}
+
 void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                           const std::vector<Bytes>& frames, bool all_ok,
                                           float quality, uint16_t frame_mask,
-                                          bool interleaved, uint8_t group_size) {
+                                          bool interleaved, uint8_t group_size,
+                                          bool geometry_proven) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
-                                     interleaved, group_size);
+                                     interleaved, group_size, geometry_proven);
 }
 
 void ProtocolEngine::setBurstCarrierGammas(const std::vector<float>& gammas) {
@@ -354,9 +365,14 @@ void ProtocolEngine::setBurstCarrierGammas(const std::vector<float>& gammas) {
     connection_.setBurstCarrierGammas(gammas);
 }
 
-void ProtocolEngine::onAnchoredBurstNoGroup() {
+void ProtocolEngine::onAnchoredBurstNoGroup(bool payload_seen) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.noteAnchoredBurstNoGroup();
+    connection_.noteAnchoredBurstNoGroup(payload_seen);
+}
+
+void ProtocolEngine::onBurstOutcomeUnknown() {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteBurstOutcomeUnknown();
 }
 
 void ProtocolEngine::onDescriptorModeChange(Modulation mod, CodeRate rate,
@@ -380,7 +396,7 @@ std::string ProtocolEngine::lastAdaptiveAction() const {
     return connection_.lastAdaptiveAction();
 }
 
-void ProtocolEngine::processRxBuffer() {
+void ProtocolEngine::processRxBuffer(bool input_physical_turn_complete) {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {
         constexpr uint8_t magic_bytes[2] = {
@@ -522,8 +538,13 @@ void ProtocolEngine::processRxBuffer() {
                           frame_size);
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "frame.rx", fields);
+            // A callback can contain leading buffered bytes or multiple frames.
+            // The physical boundary belongs only to the final frame ending this
+            // supplied callback; earlier concatenated members remain ordinary.
+            const bool frame_closes_physical_turn =
+                input_physical_turn_complete && rx_buffer_.size() == frame_size;
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
-            connection_.onFrameReceived(frame_data);
+            connection_.onFrameReceived(frame_data, frame_closes_physical_turn);
         } else {
             LOG_MODEM(WARN, "Protocol: CRC failed, skipping frame");
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
@@ -569,6 +590,11 @@ std::string ProtocolEngine::getRemoteCallsign() const {
 bool ProtocolEngine::isConnected() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.isConnected();
+}
+
+bool ProtocolEngine::isInitiator() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.isInitiator();
 }
 
 ConnectionStats ProtocolEngine::getStats() const {

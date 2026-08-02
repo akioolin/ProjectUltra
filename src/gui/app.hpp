@@ -77,12 +77,10 @@ public:
                                               // (tests bidirectional reply + half-duplex turn reversal)
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
-        // --disconnect-on-file-done: end the session as soon as the file transfer finishes,
-        // instead of idling until the fixed auto_disconnect_after_sec timer. A scripted run
-        // sized that timer for the WORST-case transfer, so a fast transfer sat connected doing
-        // nothing for the remainder (measured: file complete at t~250 s with the timer at 360 =
-        // 110 s of dead air per run). The existing DISCONNECTED grace-quit then fires normally
-        // on BOTH ends, so this needs no separate exit path.
+        // --disconnect-on-file-done: in a one-way caller-as-sender scenario, let the scripted
+        // connection initiator end the session as soon as successful sender completion proves
+        // the final file ACK was consumed. The responder may also receive this option, but
+        // waits for the caller's close so the final ACK cannot trigger a crossed teardown.
         bool disconnect_on_file_done = false;
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
         bool half_duplex_interactive = false; // bidirectional role-swap (both stations send)
@@ -185,6 +183,9 @@ private:
         // while connected (queueRealTxSamples only defers pre-connection or
         // in_qso_data), so control frames are structurally exempt from the purge.
         uint32_t data_mode_gen = 0;
+        // Bound to this exact pre-encode burst.  Never represent this with the
+        // encoder's shared one-shot while the request is still CCA-deferred.
+        BurstAnchorOptions burst_anchor_options{};
     };
     std::deque<DeferredTx> deferred_tx_;
     std::chrono::steady_clock::time_point deferred_tx_deadline_{};
@@ -239,10 +240,10 @@ private:
     bool scenario_file_cancel_timer_started_ = false;
     bool scenario_file_cancel_issued_ = false;
     bool scenario_disconnect_issued_ = false;
-    // --disconnect-on-file-done handshake. SET in the file-complete callbacks (which run
-    // under ProtocolEngineMutex, so they must NOT touch protocol_) and CONSUMED in
-    // tickScenario() outside the lock. Atomic because the setter and consumer are
-    // different threads.
+    // --disconnect-on-file-done handshake. SET after successful outbound file completion
+    // (the callback runs under ProtocolEngineMutex, so it must NOT touch protocol_) and
+    // CONSUMED in tickScenario() outside the lock. The consumer enforces caller-only teardown
+    // ownership. Atomic because the setter and consumer are different threads.
     std::atomic<bool> file_done_disconnect_pending_{false};
     std::chrono::steady_clock::time_point scenario_start_;
     std::chrono::steady_clock::time_point scenario_connected_first_at_;
@@ -312,14 +313,15 @@ private:
     // sender's audio was actively arriving — a half-duplex violation that blanks
     // our own RX of the incoming group head and manufactures craters; the primary
     // ACK path had no channel sense at all, only the repeat did). If CCA reads
-    // busy at ACK time, defer submission to the GUI tick: send on first quiet, or
-    // at the hard deadline regardless (bounded — the sender's ACK-listen window is
-    // ~18 s, so a <=2.5 s defer never strands it; the deadline also breaks any
-    // mutual-defer cycle). Same mutex discipline as the repeat stash.
+    // busy at ACK time, defer submission to the GUI tick. Decoder/geometry evidence
+    // makes an asynchronous ACK drop at its deadline; energy-only busy may send at
+    // the deadline because the adaptive floor can falsely classify ambient noise.
+    // Same mutex discipline as the repeat stash.
     std::vector<float> ack_defer_samples_;
     std::chrono::steady_clock::time_point ack_defer_deadline_{};
     bool ack_defer_pending_ = false;
     int ack_defer_quiet_ticks_ = 0;
+    bool ack_defer_inbound_group_complete_ = false;
     void maybeFireDeferredAck();
     void submitToneAckSamples(const std::vector<float>& samples);
     std::vector<float> ack_repeat_last_armed_samples_;  // F222: one repeat per distinct ack
@@ -482,7 +484,8 @@ private:
     void deferTxFrame(const Bytes& frame, const char* context,
                       bool expect_full_ofdm_anchor_after_tx);
     void deferTxBurst(const std::vector<Bytes>& frames, const char* context,
-                      uint16_t group_seq = 0);
+                      uint16_t group_seq = 0,
+                      BurstAnchorOptions anchor_options = {});
     uint32_t nextInQsoDataBackoffMs();
     void flushDeferredTxIfReady();
     // BUG-MC-RETRY-SPURIOUS fix 4: drop deferred DATA-class TX rendered under a

@@ -117,6 +117,17 @@ inline float ofdmAnchorScaleOffsetDb() {
 
 
 inline constexpr uint32_t kOFDMSampleRate = 48000;
+// Hard production ceiling for one OFDM key-down. The configured base ceiling is
+// lower (and may be streak-escalated), but ULTRA_MAX_BURST_AIRTIME_MS is clamped
+// to this value. Decoder-side half-duplex guards use the same ceiling when the
+// burst descriptor was lost and exact group geometry is therefore unavailable.
+inline constexpr uint32_t kMaxBurstAirtimeCeilingMs = 12000;
+// If an asynchronous ACK is requested after decoder evidence but without a
+// descriptor-derived air-end, keep reverse TX silent for one entire maximum
+// OFDM turn plus margin from the latest evidence. This is conservative by
+// construction and bounded by the same production key-down ceiling.
+inline constexpr int64_t kDescriptorLostReverseTxHoldMs =
+    static_cast<int64_t>(kMaxBurstAirtimeCeilingMs) + 1000;
 inline constexpr uint32_t kWideOFDMFFTSamples = 1024;
 inline constexpr uint32_t kWideOFDMLongCPSamples = 128;
 inline constexpr uint32_t kWideOFDMSymbolSamples = kWideOFDMFFTSamples + kWideOFDMLongCPSamples;
@@ -330,6 +341,64 @@ inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
 inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
 inline constexpr uint32_t kCarrierSenseSackCoalesceMs = 30;
 inline constexpr int kCarrierSenseAckRepeatCount = 1;
+
+// A silent ACK repeat is an optional diversity copy, never progress-critical.  If the
+// decoder has seen any recent RX signal, hold that copy in every waveform: descriptor-
+// lost OFDM bursts have no declared air-end, and the live MPG@20 trace proved that CCA
+// can call their faded tails idle.  False synchronizer accepts may postpone an opt-in
+// repeat, which is strictly safer than keying it over a possible inbound burst.
+inline bool shouldHoldSilentAckRepeatForBroadSignal(WaveformMode mode,
+                                                     int64_t now_ms,
+                                                     int64_t signal_ms,
+                                                     int64_t hold_ms =
+                                                         kDescriptorLostReverseTxHoldMs) {
+    (void)mode;
+    return signal_ms > 0 &&
+           now_ms >= signal_ms && now_ms - signal_ms < hold_ms;
+}
+
+// ULTRA_ACK_REPEAT_SILENT_MS parser.  The diversity repeat is safety-default OFF;
+// only an explicit, wholly valid interval enables it.  Keep `0` as an explicit
+// opt-out and fail closed on malformed/out-of-range values.
+inline uint32_t silentAckRepeatDelayMs(const char* value) {
+    if (!value || value[0] == '\0') {
+        return 0u;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return 0u;
+    }
+    if (parsed == 0) {
+        return 0u;
+    }
+    return (parsed >= 300 && parsed <= 5000)
+        ? static_cast<uint32_t>(parsed)
+        : 0u;
+}
+
+// Primary tone-ACK listen-before-talk decision.  Decoder RX evidence is independent
+// of the energy CCA and the descriptor-derived air-end: it is the only surviving
+// signal in the descriptor/header-loss case where a valid classic DATA member arms
+// the delayed SACK timer but no burst geometry was published.  Keep this as a pure
+// policy primitive so GUI/headless front ends can share the same three-way gate.
+inline bool shouldDeferToneBurstAck(bool cca_enabled,
+                                    bool channel_busy,
+                                    uint64_t burst_air_samples_remaining,
+                                    bool recent_decoder_rx_evidence,
+                                    bool inbound_group_complete) {
+    return (cca_enabled && channel_busy) ||
+           burst_air_samples_remaining > 0 ||
+           (!inbound_group_complete && recent_decoder_rx_evidence);
+}
+
+// RX-evidence hold used while a primary ACK is pending on the GUI tick.  It is
+// derived solely from physical-egress provenance, never from whether evidence
+// happened to be present when the ACK was first deferred: a descriptor-loss
+// sync/decode stamp may arrive later in the same inbound burst.
+inline constexpr int64_t deferredToneAckRxHoldMs(bool inbound_group_complete) {
+    return inbound_group_complete ? 0 : kDescriptorLostReverseTxHoldMs;
+}
 inline constexpr uint32_t kWideOFDMAckTimeoutFloorMs = 8000;
 
 struct OFDMFrameTiming {
@@ -1306,11 +1375,14 @@ inline bool shouldUseWarmShortAnchorDescriptor(WaveformMode waveform,
     return rate == CodeRate::R3_4 || getBitsPerSymbol(modulation) >= 4;
 }
 
-inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
-                                           CodeRate rate,
-                                           int cw_count = v2::kDefaultFixedFrameCodewords,
-                                           int data_lifting_z = 27) {
-    cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+// Exact physical timing for a serialized DATA frame. Unlike wideOFDMFrameTiming(),
+// this deliberately accepts the full uint8_t total_cw wire range: the single-block
+// file path uses variable-CW frames larger than the fixed/interleaved 16-CW ceiling.
+inline OFDMFrameTiming wideOFDMFrameTimingForCodewords(Modulation mod,
+                                                       CodeRate rate,
+                                                       int cw_count,
+                                                       int data_lifting_z = 27) {
+    cw_count = std::clamp(cw_count, 1, 255);
     constexpr float symbol_ms =
         (1000.0f * static_cast<float>(kWideOFDMSymbolSamples)) /
         static_cast<float>(kOFDMSampleRate);
@@ -1325,6 +1397,25 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
     return timing;
 }
 
+inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
+                                           CodeRate rate,
+                                           int cw_count = v2::kDefaultFixedFrameCodewords,
+                                           int data_lifting_z = 27) {
+    return wideOFDMFrameTimingForCodewords(
+        mod, rate, v2::sanitizeFixedFrameCodewords(cw_count), data_lifting_z);
+}
+
+// Conservative receiver-side extent after accepting the training position of
+// an expected full OFDM anchor. In the longest wire shape that anchor belongs to
+// the BURST_HEADER descriptor; the descriptor's remaining QPSK-R1/4 LTS+payload
+// precedes a DATA burst that may consume the entire production airtime ceiling.
+// A group-start anchor without a descriptor is shorter, so this remains safe.
+inline uint32_t maxWideOFDMPhysicalTurnAfterAnchorTrainingMs() {
+    const OFDMFrameTiming descriptor =
+        wideOFDMFrameTiming(Modulation::QPSK, CodeRate::R1_4, 1, 27);
+    return kMaxBurstAirtimeCeilingMs + descriptor.ack_ms;
+}
+
 inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
                                        CodeRate rate,
                                        size_t frame_count,
@@ -1337,16 +1428,89 @@ inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
 
     const OFDMFrameTiming timing =
         wideOFDMFrameTiming(mod, rate, cw_count, data_lifting_z);
-    uint64_t burst_ms = static_cast<uint64_t>(frame_count) * timing.data_ms;
+    // Every nonempty physical OFDM turn has one full chirp+LTS anchor. In
+    // particular, encodeBurstLight({one frame}) deliberately calls encodeFrame()
+    // rather than encodeFrameLight(), so omitting this term for a singleton makes
+    // its play-head and retry deadline 1.2 seconds early.
+    uint64_t burst_ms = static_cast<uint64_t>(frame_count) * timing.data_ms +
+                        kWideOFDMFullAnchorExtraMs;
     if (frame_count > 1) {
-        // StreamingEncoder::encodeBurstLight() emits a full chirp anchor on the
-        // first OFDM burst frame, then either light LTS-only preambles or
-        // adaptive short chirp+LTS reanchors for continuations.
-        burst_ms += kWideOFDMFullAnchorExtraMs;
+        // Continuations use light LTS-only preambles or an adaptive short reanchor.
         burst_ms += static_cast<uint64_t>(frame_count - 1) *
                     static_cast<uint64_t>(continuation_reanchor_ms);
     }
     return static_cast<uint32_t>(std::min<uint64_t>(burst_ms, 0xFFFFFFFFull));
+}
+
+// Derive the number of DATA frames that fit in one physical OFDM key-down.
+// This is deliberately a pure geometry function: both the transmitter's burst
+// builder and any rate selector comparing candidate rungs must use the same
+// calculation.  In particular, an observed five-frame group says nothing about
+// how many frames a different modulation/rate/CW candidate would fit.
+inline size_t wideOFDMBurstFrameBudget(Modulation mod,
+                                       CodeRate rate,
+                                       int cw_count,
+                                       size_t max_frames,
+                                       uint32_t ceiling_ms,
+                                       uint32_t continuation_reanchor_ms = 0,
+                                       int data_lifting_z = 27) {
+    if (max_frames <= 1) {
+        return std::max<size_t>(1, max_frames);
+    }
+    size_t frames = 1;
+    while (frames < max_frames) {
+        const uint32_t airtime_ms = wideOFDMBurstAirtimeMs(
+            mod, rate, frames + 1, cw_count,
+            continuation_reanchor_ms, data_lifting_z);
+        if (airtime_ms > ceiling_ms) {
+            break;
+        }
+        ++frames;
+    }
+    return frames;
+}
+
+inline uint32_t configuredBaseBurstAirtimeMs() {
+    static const uint32_t value = [] {
+        uint32_t configured = 8600;
+        if (const char* env = std::getenv("ULTRA_MAX_BURST_AIRTIME_MS")) {
+            const long parsed = std::strtol(env, nullptr, 10);
+            if (parsed >= 5000 && parsed <= kMaxBurstAirtimeCeilingMs) {
+                configured = static_cast<uint32_t>(parsed);
+            }
+        }
+        return configured;
+    }();
+    return value;
+}
+
+// Production ceiling for a candidate rung after the clean-delivery evidence
+// available at this decision.  Keeping this alongside the pure frame-budget
+// function prevents the selector and sender from silently acquiring different
+// definitions of a physical cycle.
+inline uint32_t burstAirtimeCeilingMs(Modulation mod,
+                                      CodeRate rate,
+                                      int clean_group_streak) {
+    constexpr uint32_t kEscalatedBurstAirtimeMs = 11500;
+    static const bool kEscalationEnabled = [] {
+        const char* e = std::getenv("ULTRA_BURST_ESCALATION");
+        return !(e && e[0] == '0' && e[1] == '\0');
+    }();
+    const int non_dense_streak = [] {
+        const char* e = std::getenv("ULTRA_BURST_ESC_STREAK");
+        if (e == nullptr) return 0;
+        const long parsed = std::strtol(e, nullptr, 10);
+        return (parsed >= 2 && parsed <= 8) ? static_cast<int>(parsed) : 0;
+    }();
+    const bool dense_rung =
+        coherentRungIndexFor(mod, rate) >= kRungIdxQam8R23;
+    const bool streak_proven =
+        dense_rung ? clean_group_streak >= 2
+                   : (non_dense_streak > 0 && clean_group_streak >= non_dense_streak);
+    const uint32_t base = configuredBaseBurstAirtimeMs();
+    return (kEscalationEnabled && streak_proven)
+               ? std::max(base, kEscalatedBurstAirtimeMs)
+               : base;
 }
 
 inline uint32_t wideOFDMSackDelayMs(Modulation mod,
@@ -1515,16 +1679,35 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
     return recommendCWCount(rate, waveform);
 }
 
-inline int recommendCWCountForChannel(Modulation mod,
-                                      CodeRate rate,
-                                      WaveformMode waveform,
-                                      float fading_index,
-                                      float snr_db,
-                                      float doppler_hz = -1.0f) {
+// Counterfactual CW geometry for a receiver-issued rate command.  The tone-ACK
+// command carries only the target ladder rung; it does not carry the receiver's
+// local fading estimate or a requested CW count.  The sender chooses its actual
+// channel-refined CW and announces that value in the following burst descriptor.
+// Until that descriptor arrives, the only peer-independent geometry the receiver
+// can price is the deterministic baseline (or the explicit operator override).
+// Feeding receiver-local fading into this prediction can invent a wire shape the
+// sender never uses (fixed04: predicted CW=5/N=9 while the Pi sent CW=8/N=5).
+inline int receiverRateCommandCandidateCWCount(Modulation mod,
+                                               CodeRate rate,
+                                               WaveformMode waveform,
+                                               int forced_cw_count = 0) {
+    return forced_cw_count != 0
+        ? v2::sanitizeFixedFrameCodewords(forced_cw_count)
+        : recommendCWCount(mod, rate, waveform);
+}
+
+// Coherence-only CW refinement.  This is the shareable form for code paths
+// (notably the outcome-fitted latent rate selector) that intentionally consume
+// no SNR estimate.  The channel-facing wrapper below retains its near-AWGN
+// bypass, then delegates here.
+inline int recommendCWCountForFading(Modulation mod,
+                                     CodeRate rate,
+                                     WaveformMode waveform,
+                                     float fading_index,
+                                     float doppler_hz = -1.0f) {
     const int baseline = recommendCWCount(mod, rate, waveform);
     if (waveform != WaveformMode::OFDM_CHIRP ||
-        !ofdm_link_adaptation::isCoherentModulation(mod) ||
-        isNearAwgnOFDM(fading_index, snr_db)) {
+        !ofdm_link_adaptation::isCoherentModulation(mod)) {
         return baseline;
     }
 
@@ -1550,6 +1733,19 @@ inline int recommendCWCountForChannel(Modulation mod,
         }
     }
     return v2::sanitizeFixedFrameCodewords(selected);
+}
+
+inline int recommendCWCountForChannel(Modulation mod,
+                                      CodeRate rate,
+                                      WaveformMode waveform,
+                                      float fading_index,
+                                      float snr_db,
+                                      float doppler_hz = -1.0f) {
+    if (isNearAwgnOFDM(fading_index, snr_db)) {
+        return recommendCWCount(mod, rate, waveform);
+    }
+    return recommendCWCountForFading(
+        mod, rate, waveform, fading_index, doppler_hz);
 }
 
 inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
@@ -1603,6 +1799,34 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
 // hold the receiver applies (wideOFDMSackDelayMs / setSackDelay) makes sender and receiver agree
 // across every mod/rate. Conservative by design: an over-long deadline only delays a genuinely-lost
 // ACK's resend slightly; an under-long one triggers spurious whole-burst resends (far worse).
+// Finish the unified DATA-round timeout from exact physical geometry. This is shared
+// by the homogeneous fixed-frame policy below and Connection's heterogeneous/variable-
+// CW wire inspection, so both retain the same receiver, decode, ACK and turnaround
+// margins. remaining_data_ms is the data airtime after the first frame; the receiver's
+// group-timeout envelope is half that remainder plus 3 seconds. Multi-frame encoder
+// reliability mode can add a second full group-start anchor beyond the descriptor's
+// anchor, supplied as reliability_extra_anchor_ms. A singleton already uses encodeFrame()
+// and has no second group-start preamble, so its reserve is zero.
+inline uint32_t unifiedBurstAckTimeoutFromPhysicalGeometryMs(
+        uint32_t burst_ms,
+        uint32_t remaining_data_ms,
+        uint32_t max_data_frame_ms,
+        Modulation control_mod,
+        uint32_t reliability_extra_anchor_ms,
+        uint32_t reanchor_ms = 0) {
+    const OFDMFrameTiming control_timing =
+        wideOFDMFrameTiming(control_mod, CodeRate::R1_4);
+    const uint32_t rx_response_ms = remaining_data_ms / 2u + 3000u;
+    const uint32_t decode_margin_ms =
+        std::max<uint32_t>(700, max_data_frame_ms / 2u) + 700u;
+    const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
+    constexpr uint32_t kRoundTripSlackMs = 1500;
+    const uint64_t total = static_cast<uint64_t>(burst_ms) + rx_response_ms +
+                           decode_margin_ms + ack_return_ms +
+                           kRoundTripSlackMs + reliability_extra_anchor_ms;
+    return static_cast<uint32_t>(std::min<uint64_t>(total, 0xFFFFFFFFull));
+}
+
 inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
                                          CodeRate data_rate,
                                          int cw_count,
@@ -1615,9 +1839,6 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
     const size_t frames = std::max<size_t>(1, burst_frames);
     const OFDMFrameTiming timing =
         wideOFDMFrameTiming(data_mod, data_rate, sanitized_cw, data_lifting_z);
-    const OFDMFrameTiming control_timing =
-        wideOFDMFrameTiming(control_mod, CodeRate::R1_4);
-
     // (1) actual on-air burst airtime (frames + first-frame anchor), mod/rate/cw/z-derived.
     const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
         data_mod, data_rate, frames, sanitized_cw, reanchor_ms, data_lifting_z);
@@ -1636,24 +1857,14 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
     // window-hold arming, which the burst-path receiver does not apply); the
     // parameter stays for call-site stability.
     (void)configured_sack_delay_ms;
-    const uint32_t rx_response_ms =
-        (frames > 1 ? static_cast<uint32_t>(
-                          (frames - 1) * static_cast<size_t>(timing.data_ms) / 2)
-                    : 0u) +
-        3000u;
-    // (3) peer LDPC decode-jitter envelope — a floor plus half a data-frame, so it scales with size.
-    const uint32_t decode_margin_ms =
-        std::max<uint32_t>(700, timing.data_ms / 2) + 700;
-    // (4) one prompt 1-CW group-ack returns (+ any re-anchor); diversity repeats don't gate.
-    const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
-    constexpr uint32_t kRoundTripSlackMs = 1500;  // T/R turnaround + jitter cushion
-    // §16.4 reserve: a warm-sync-cold escalation re-keys a RELIABILITY-mode burst with a SECOND full
-    // anchor beyond what wideOFDMBurstAirtimeMs models; budget it unconditionally (free on clean
-    // cycles, the ack-monitor auto-disarms the instant an ACK decodes).
-    const uint32_t reliability_full_anchor_ms = kWideOFDMFullAnchorExtraMs;
-
-    return burst_ms + rx_response_ms + decode_margin_ms + ack_return_ms +
-           kRoundTripSlackMs + reliability_full_anchor_ms;
+    const uint64_t remaining_data_ms =
+        static_cast<uint64_t>(frames - 1) * timing.data_ms;
+    return unifiedBurstAckTimeoutFromPhysicalGeometryMs(
+        burst_ms,
+        static_cast<uint32_t>(std::min<uint64_t>(remaining_data_ms, 0xFFFFFFFFull)),
+        timing.data_ms, control_mod,
+        frames > 1 ? kWideOFDMFullAnchorExtraMs : 0u,
+        reanchor_ms);
 }
 
 inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
@@ -1824,6 +2035,14 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
 // peer withholds its SACK this long before keying up, so the sender's deadline must budget it — the
 // same omission the wide-OFDM burst path had (IONOS MPG E5).
 inline constexpr uint32_t kToneBurstReceiverSackHoldMs = 1500;
+
+// An anchored no-group timeout proves that the normal descriptor/group callback
+// was lost, not that zero payload frames decoded. Classic fallback DATA is exact
+// positive delivery evidence; without descriptor geometry its k/M is unknown, so
+// withhold the selector observation while still allowing a cumulative async SACK.
+inline constexpr bool shouldGradeAnchoredBackstopAsCrater(bool payload_seen) {
+    return !payload_seen;
+}
 
 inline uint32_t computeNarrowOFDMAckTimeoutMs(
         Modulation mod,

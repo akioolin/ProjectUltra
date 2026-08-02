@@ -18,12 +18,19 @@ public:
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
         uint8_t cw_index = 0;
+        // LDPC lifting changes both the LLR vector length and bit geometry.
+        // It is part of the physical retransmission identity, not metadata.
+        uint8_t lifting_z = 27;
         // PHY parameters that change LLR scaling and bit ordering. If
         // any of these differ between attempts, stored LLRs aren't
         // comparable and combining would corrupt the decode. Including
         // them in the key forces a fresh entry instead of mis-combining.
         Modulation modulation = Modulation::DQPSK;
         uint8_t channel_interleave = 0;  // 0 = off, 1 = on
+        // A physical-tail DATA retry is not byte-identical to a non-tail retry
+        // of the same ARQ seq (header CRC and frame CRC both change). Partition
+        // their LLR histories so regrouping can never corrupt chase combining.
+        uint8_t physical_burst_end = 0;
         // Hash of (waveform_mode, ofdm_data_carriers). Bits-per-symbol
         // is implied by the modulation field above; pilot spacing
         // changes within the same waveform mode are NOT distinguished
@@ -39,8 +46,10 @@ public:
                    rate == other.rate &&
                    cw_count == other.cw_count &&
                    cw_index == other.cw_index &&
+                   lifting_z == other.lifting_z &&
                    modulation == other.modulation &&
                    channel_interleave == other.channel_interleave &&
+                   physical_burst_end == other.physical_burst_end &&
                    carrier_count_hash == other.carrier_count_hash;
         }
     };
@@ -61,8 +70,10 @@ public:
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
         uint8_t cw_index = 0;
+        int lifting_z = 27;
         Modulation modulation = Modulation::DQPSK;
         bool channel_interleave = false;
+        bool physical_burst_end = false;
         int waveform_mode = 0;          // protocol::WaveformMode underlying byte
         int ofdm_data_carriers = 0;
     };

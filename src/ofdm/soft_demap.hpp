@@ -6,6 +6,7 @@
 #include "ultra/types.hpp"
 #include "demodulator_constants.hpp"
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 #include <array>
 #include <algorithm>
@@ -45,15 +46,11 @@ inline std::vector<float> demapQPSK(Complex sym, float noise_var) {
     return {clipLLR(sym.real() * scale), clipLLR(sym.imag() * scale)};
 }
 
-// Coherent 8PSK soft demapping. This is the absolute-phase version of the
-// differential D8PSK Gray constellation: same 22.5 degree offset and same
-// bit mapping, but no previous-symbol multiplication. Max-log-MAP compares
-// squared Euclidean distances to all eight unit-radius symbols.
-inline std::vector<float> demap8PSK(Complex sym, float noise_var) {
-    std::vector<float> llrs(3, 0.0f);
-
-    const float nv = std::max(noise_var, MIN_CARRIER_NOISE_VAR);
-    const float scale = 2.0f / nv;
+// Coherent 8PSK max-log metrics. Keep this calculation in one place: the same
+// posterior metric is used both by the LDPC demapper and by the coherent
+// decision-directed channel-update gate. A private copy of this routine used to
+// let the two paths silently drift apart.
+inline std::array<float, 3> psk8MaxLogDistanceDeltas(Complex sym) {
     static constexpr int gray_bits[8] = {0, 1, 3, 2, 6, 7, 5, 4};
     static const float pi = 3.14159265358979f;
 
@@ -65,6 +62,7 @@ inline std::vector<float> demap8PSK(Complex sym, float noise_var) {
         dist_sq[i] = std::norm(diff);
     }
 
+    std::array<float, 3> deltas{};
     for (int bit = 0; bit < 3; ++bit) {
         const int mask = 1 << (2 - bit);
         float min_d0 = 1.0e30f;
@@ -76,7 +74,58 @@ inline std::vector<float> demap8PSK(Complex sym, float noise_var) {
                 min_d0 = std::min(min_d0, dist_sq[i]);
             }
         }
-        llrs[bit] = clipLLR(scale * (min_d1 - min_d0));
+        deltas[bit] = min_d1 - min_d0;
+    }
+    return deltas;
+}
+
+// soft_demap's coherent scalar demappers receive the post-equalizer variance of
+// ONE real component. For circular complex noise with per-real variance sigma^2,
+// max-log is
+//
+//   log P(b=0|y)/P(b=1|y) ~= (d1^2 - d0^2) / (2 sigma^2).
+//
+// The legacy 8PSK-only coefficient is 2/sigma^2, while the dimensionally correct
+// per-real-variance coefficient is 0.5.  Keep the legacy default until a measured
+// decoding win exists: an 800-frame Good@20 A/B was exactly tied because normalized
+// min-sum is largely invariant to uniform LLR scaling.  The environment override
+// keeps the calibrated 0.5 arm available without silently changing production.
+inline float psk8MaxLogCoefficient() {
+    static const float coeff = []() {
+        if (const char* env = std::getenv("ULTRA_8PSK_MAXLOG_COEFF")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (std::isfinite(v) && v > 0.0f && v <= 4.0f) {
+                return v;
+            }
+        }
+        return 2.0f;
+    }();
+    return coeff;
+}
+
+inline std::array<float, 3> demap8PSKUnclipped(
+    Complex sym, float noise_var, float max_log_coeff = psk8MaxLogCoefficient()) {
+    const float scale = max_log_coeff /
+                        std::max(noise_var, MIN_CARRIER_NOISE_VAR);
+    const auto deltas = psk8MaxLogDistanceDeltas(sym);
+    return {scale * deltas[0], scale * deltas[1], scale * deltas[2]};
+}
+
+inline float psk8MinAbsLLRNoClip(Complex sym, float noise_var) {
+    const auto llrs = demap8PSKUnclipped(sym, noise_var);
+    return std::min(std::abs(llrs[0]),
+                    std::min(std::abs(llrs[1]), std::abs(llrs[2])));
+}
+
+// Coherent 8PSK soft demapping. This is the absolute-phase version of the
+// differential D8PSK Gray constellation: same 22.5 degree offset and same
+// bit mapping, but no previous-symbol multiplication.
+inline std::vector<float> demap8PSK(Complex sym, float noise_var) {
+    const auto raw = demap8PSKUnclipped(sym, noise_var);
+    std::vector<float> llrs;
+    llrs.reserve(raw.size());
+    for (float llr : raw) {
+        llrs.push_back(clipLLR(llr));
     }
 
     return llrs;

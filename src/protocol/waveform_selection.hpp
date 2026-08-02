@@ -300,6 +300,15 @@ enum : uint8_t {
     kRungIdxCount = 10,  // first unassigned
 };
 
+// The authority field is five bits wide while canonical rung indices occupy only the
+// low nibble. Bit 4 marks the bounded R1/2->R2/3 startup command as a one-shot physical
+// probe. An upgraded sender rolls back before retransmitting if that probe receives no
+// ACK; an older sender safely ignores the out-of-range value.
+inline constexpr uint8_t kRungAuthorityStartupProbeFlag = 0x10;
+inline constexpr uint8_t kRungAuthorityIndexMask = 0x0F;
+static_assert(kRungIdxCount <= kRungAuthorityStartupProbeFlag,
+              "canonical rung indices must fit below the startup-probe flag");
+
 // (mod, rate) -> canonical index; kRungIdxNone when the pair is not a coherent rung.
 inline uint8_t coherentRungIndexFor(Modulation mod, CodeRate rate) {
     if (mod == Modulation::QPSK) {
@@ -339,6 +348,85 @@ inline CoherentPick coherentRungFromIndex(uint8_t idx) {
         case kRungIdxQam16R34: return {Modulation::QAM16, CodeRate::R3_4};
         default: return {Modulation::QPSK, CodeRate::R1_4};
     }
+}
+
+// Parse the live measurement overrides atomically.  A present-but-invalid field makes
+// the whole environment profile malformed: accepting the other half would silently turn
+// a typo into a different physical experiment.  A valid field with the other field
+// UNSET remains a supported partial override; its complement is selected automatically.
+struct EnvironmentForcedDataProfile {
+    Modulation modulation = Modulation::AUTO;
+    CodeRate code_rate = CodeRate::AUTO;
+    bool modulation_present = false;
+    bool code_rate_present = false;
+    bool malformed = false;
+
+    bool forced() const {
+        return !malformed &&
+               (modulation != Modulation::AUTO || code_rate != CodeRate::AUTO);
+    }
+};
+
+inline EnvironmentForcedDataProfile forcedDataProfileFromEnvironment() {
+    EnvironmentForcedDataProfile profile;
+    if (const char* env = std::getenv("ULTRA_FORCE_DATA_MOD")) {
+        profile.modulation_present = true;
+        const std::string s(env);
+        if      (s == "DBPSK")                  profile.modulation = Modulation::DBPSK;
+        else if (s == "BPSK")                   profile.modulation = Modulation::BPSK;
+        else if (s == "DQPSK")                  profile.modulation = Modulation::DQPSK;
+        else if (s == "QPSK")                   profile.modulation = Modulation::QPSK;
+        else if (s == "D8PSK")                  profile.modulation = Modulation::D8PSK;
+        else if (s == "QAM8" || s == "8PSK")   profile.modulation = Modulation::QAM8;
+        else if (s == "QAM16" || s == "16QAM") profile.modulation = Modulation::QAM16;
+        else if (s == "QAM32" || s == "32QAM") profile.modulation = Modulation::QAM32;
+        else                                      profile.malformed = true;
+    }
+    if (const char* env = std::getenv("ULTRA_FORCE_DATA_RATE")) {
+        profile.code_rate_present = true;
+        const std::string s(env);
+        if      (s == "R1_4" || s == "r1_4") profile.code_rate = CodeRate::R1_4;
+        else if (s == "R1_3" || s == "r1_3") profile.code_rate = CodeRate::R1_3;
+        else if (s == "R1_2" || s == "r1_2") profile.code_rate = CodeRate::R1_2;
+        else if (s == "R2_3" || s == "r2_3") profile.code_rate = CodeRate::R2_3;
+        else if (s == "R3_4" || s == "r3_4") profile.code_rate = CodeRate::R3_4;
+        else if (s == "R5_6" || s == "r5_6") profile.code_rate = CodeRate::R5_6;
+        else                                    profile.malformed = true;
+    }
+    if (profile.malformed) {
+        // Fail the environment override as one unit; never preserve a valid half next
+        // to a typo.  Callers that own logging can diagnose presence/malformed explicitly.
+        profile.modulation = Modulation::AUTO;
+        profile.code_rate = CodeRate::AUTO;
+    }
+    return profile;
+}
+
+inline Modulation forcedDataModulationFromEnvironment() {
+    return forcedDataProfileFromEnvironment().modulation;
+}
+
+inline CodeRate forcedDataCodeRateFromEnvironment() {
+    return forcedDataProfileFromEnvironment().code_rate;
+}
+
+inline bool environmentForcesDataProfile() {
+    return forcedDataProfileFromEnvironment().forced();
+}
+
+// The CONNECT measurement is made on MC-DPSK and does not predict the first
+// coherent-OFDM payload margin reliably on a fading channel.  RX authority has
+// no coherent observations yet, so its automatic bootstrap is deliberately the
+// proven QPSK R1/2 rung; the first real OFDM group then hands control to the
+// measured-outcome ladder.  An already-resolved operator force bypasses this cap.
+inline CoherentPick capRxAuthorityInitialRung(Modulation mod,
+                                              CodeRate rate,
+                                              bool authority_enabled,
+                                              bool operator_forced = false) {
+    if (!authority_enabled || operator_forced) return {mod, rate};
+    const uint8_t idx = coherentRungIndexFor(mod, rate);
+    if (idx == kRungIdxNone || idx <= kRungIdxQpskR12) return {mod, rate};
+    return {Modulation::QPSK, CodeRate::R1_2};
 }
 
 // A commanded rung is obeyable only if the LOCAL ladder knows it (env knobs may
@@ -813,7 +901,7 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
 inline bool entryCapR34Enabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_ENTRY_CAP_R34");
-        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
+        return e != nullptr && std::atoi(e) != 0;  // experimental; default OFF
     }();
     return on;
 }
@@ -916,7 +1004,7 @@ inline CodeRate capInitialOFDMRateImpl(float snr_db,
                                        bool data_aided,
                                        bool entry_cap_r34_on) {
     // ULTRA_FORCE_DATA_RATE: the operator is probing a specific rung — no demotion.
-    if (std::getenv("ULTRA_FORCE_DATA_RATE") != nullptr) {
+    if (forcedDataCodeRateFromEnvironment() != CodeRate::AUTO) {
         return candidate;
     }
     // ULTRA_R23_BASIS (2026-06-17, default ON; set =0 to disable): decouple the ENTRY rate
@@ -1044,42 +1132,31 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 inline void recommendDataMode(float snr_db, WaveformMode waveform,
                                Modulation& mod, CodeRate& rate, float fading_index = 0.0f) {
     // 2026-05-28 test-only override: ULTRA_FORCE_DATA_MOD / ULTRA_FORCE_DATA_RATE
-    // bypass the ladder ENTIRELY (including MC-DPSK / OFDM_NARROW / ladder rungs)
-    // so we can probe decode reliability of a specific (mod, rate) rung on a live
-    // channel. Placed at the top so every return path is short-circuited.
-    {
-        bool forced_any = false;
-        if (const char* env = std::getenv("ULTRA_FORCE_DATA_MOD")) {
-            const std::string s(env);
-            Modulation forced = Modulation::AUTO;
-            if      (s == "DBPSK")                       forced = Modulation::DBPSK;
-            else if (s == "BPSK")                        forced = Modulation::BPSK;
-            else if (s == "DQPSK")                       forced = Modulation::DQPSK;
-            else if (s == "QPSK")                        forced = Modulation::QPSK;
-            else if (s == "D8PSK")                       forced = Modulation::D8PSK;
-            else if (s == "QAM8" || s == "8PSK")         forced = Modulation::QAM8;
-            else if (s == "QAM16" || s == "16QAM")       forced = Modulation::QAM16;
-            else if (s == "QAM32" || s == "32QAM")       forced = Modulation::QAM32;
-            if (forced != Modulation::AUTO) { mod = forced; forced_any = true; }
+    // bypass the corresponding automatic choice so we can probe a specific rung on a
+    // live channel.  A complete pair short-circuits the selector; a one-field force
+    // resolves the unforced half normally instead of returning it uninitialized.
+    const EnvironmentForcedDataProfile environment_force =
+        forcedDataProfileFromEnvironment();
+    const Modulation forced_mod = environment_force.modulation;
+    const CodeRate forced_rate = environment_force.code_rate;
+    const auto apply_environment_force = [&] {
+        if (forced_mod != Modulation::AUTO) {
+            mod = forced_mod;
         }
-        if (const char* env = std::getenv("ULTRA_FORCE_DATA_RATE")) {
-            const std::string s(env);
-            CodeRate forced = CodeRate::AUTO;
-            if      (s == "R1_4" || s == "r1_4") forced = CodeRate::R1_4;
-            else if (s == "R1_3" || s == "r1_3") forced = CodeRate::R1_3;
-            else if (s == "R1_2" || s == "r1_2") forced = CodeRate::R1_2;
-            else if (s == "R2_3" || s == "r2_3") forced = CodeRate::R2_3;
-            else if (s == "R3_4" || s == "r3_4") forced = CodeRate::R3_4;
-            else if (s == "R5_6" || s == "r5_6") forced = CodeRate::R5_6;
-            if (forced != CodeRate::AUTO) { rate = forced; forced_any = true; }
+        if (forced_rate != CodeRate::AUTO) {
+            rate = forced_rate;
         }
-        if (forced_any) return;
+    };
+    if (forced_mod != Modulation::AUTO && forced_rate != CodeRate::AUTO) {
+        apply_environment_force();
+        return;
     }
 
     // MC-DPSK always uses DQPSK R1/4 for robustness
     if (waveform == WaveformMode::MC_DPSK) {
         mod = Modulation::DQPSK;
         rate = CodeRate::R1_4;
+        apply_environment_force();
         return;
     }
 
@@ -1105,6 +1182,7 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         } else {
             rate = CodeRate::R1_4;
         }
+        apply_environment_force();
         return;
     }
 
@@ -1137,6 +1215,7 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     const CoherentPick pick = selectCoherentOFDM(snr_db, fading_index);
     mod = pick.mod;
     rate = pick.rate;
+    apply_environment_force();
 }
 
 // Conservative raw-PHY bitrate estimate per waveform mode. Used by

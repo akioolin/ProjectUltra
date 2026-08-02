@@ -4,6 +4,7 @@
 
 #include "streaming_encoder.hpp"
 #include "streaming_control_profile.hpp"
+#include "streaming_frame_policy.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
@@ -490,12 +491,31 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     return result;
 }
 
-std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& frame_data_list) {
+std::vector<float> StreamingEncoder::encodeBurstLight(
+    const std::vector<Bytes>& frame_data_list,
+    BurstAnchorOptions anchor_options) {
     if (frame_data_list.empty()) return {};
     if (!waveform_) {
         LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
         return {};
     }
+
+    const bool current_group_full_anchor =
+        anchor_options.force_full_group_start;
+    const bool current_group_keep_skip_streak =
+        current_group_full_anchor && anchor_options.keep_skip_streak;
+
+    // The ARQ owns logical frames; physical grouping belongs to this encoder call.
+    // Sanitize a private copy on every emission so a seq regrouped by selective
+    // retry cannot retain stale tail status. Only a multi-frame, independently
+    // decodable OFDM burst gets the zero-airtime end marker in Phase 1.
+    const bool stamp_physical_end =
+        streaming_frame_policy::shouldStampPhysicalBurstEnd(
+            frame_data_list.size(), mode_, waveform_->supportsDataPreamble(),
+            use_burst_interleave_);
+    const std::vector<Bytes> wire_frame_data_list =
+        streaming_frame_policy::preparePhysicalBurstFrames(
+            frame_data_list, stamp_physical_end);
 
     // A one-frame connected OFDM DATA turn has no following in-burst frame to
     // refresh timing if the receiver's warm LTS state is stale. Treat it as a
@@ -510,17 +530,17 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                           log_prefix_.c_str());
             }
             force_full_preamble_once_ = false;
-            return encodeFrame(frame_data_list[0]);
+            return encodeFrame(wire_frame_data_list[0]);
         }
-        return encodeFrameLight(frame_data_list[0]);
+        return encodeFrameLight(wire_frame_data_list[0]);
     }
 
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
         force_full_preamble_once_ = false;
         size_t total_cw = 0;
         std::vector<Bytes> encoded_frames;
-        encoded_frames.reserve(frame_data_list.size());
-        for (const auto& fd : frame_data_list) {
+        encoded_frames.reserve(wire_frame_data_list.size());
+        for (const auto& fd : wire_frame_data_list) {
             Bytes encoded = encodeFrameBytes(fd);
             if (encoded.empty()) {
                 LOG_MODEM(WARN, "[%s] MC-DPSK burst: dropping empty encoded frame",
@@ -547,7 +567,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
 
     // Phase 1: LDPC encode all frames
     std::vector<Bytes> encoded_frames;
-    for (const auto& fd : frame_data_list) {
+    for (const auto& fd : wire_frame_data_list) {
         encoded_frames.push_back(encodeFrameBytes(fd));
     }
 
@@ -617,6 +637,11 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // Phase 3: Modulate with preambles
     std::vector<float> result;
 
+    // current_group_full_anchor is the per-call wire truth for the
+    // immediately-following DATA group. The separate
+    // force_full_preamble_once_ belongs to the descriptor/control frame and is
+    // consumed by encodeFrame below; it must not turn an ordinary first-attempt
+    // DATA marker into a second redundant full preamble.
     // Self-describing burst head (§14.17/§14.19): for an interleaved OFDM group,
     // emit a full-anchor 1-CW BURST_HEADER descriptor that DECLARES the group's
     // decode params (group size, cw/frame, mod/rate, interleave flags). The RX
@@ -626,8 +651,10 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // full chirp+LTS anchor and seeds the warm timing the group-start marker rides.
     if (emit_burst_descriptor_ && interleaved_groups > 0 &&
         protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
-        // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, DEFAULT-ON 2026-06-20: default 2
-        // = skip every other group's chirp, REACTIVE-gated; ULTRA_ANCHOR_SKIP_K=1 opts out to full
+        // #69 PERIODIC FULL ANCHOR + WARM-SKIP (ULTRA_ANCHOR_SKIP_K, default 1 = full chirp every
+        // group; K=2 explicitly opts into every-other-group reactive skip). The 2026-08-01 live
+        // integrity run invalidated the former default-on claim: 2/3 LIGHT descriptors were lost
+        // versus 1/30 chirp-bearing descriptors, producing 17-70 s recovery episodes.
         // chirp every group). Research (project_chirp_anchor_skip_not_shrink): the chirp is
         // near-optimal (TB=1200 = fade margin; shrinking it craters), so SKIP it on benign groups
         // instead of shrinking it. Emit the full chirp only when ordinal % K == 0; skipped groups
@@ -642,10 +669,10 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         // that crawled K=3). Resends are reactive (can't be announced); the RX's K-gated fast §16.4
         // escalation catches those. Computed BEFORE makeBurstHeader so the flag lands in the payload.
         const bool warm_descriptor =
-            !(force_full_preamble_once_ || force_burst_group_start_full_preamble_);
+            !(force_full_preamble_once_ || current_group_full_anchor);
         static const int kAnchorSkipK = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-            return (e && *e) ? std::max(1, std::atoi(e)) : 2;  // DEFAULT-ON (K=2 reactive); =1 to disable
+            return (e && *e) ? std::max(1, std::atoi(e)) : 1;  // reliability default; =2 opt-in
         }();
         // REACTIVE GATE (2026-06-20, radio-agnostic) — the gate that lets the skip default-on safely.
         // The IONOS rig DISPROVED a PREDICTED coherence label: a Moderate channel read clean-Good for
@@ -687,7 +714,8 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH");
             return e && e[0] == '1' && e[1] == '\0';
         }();
-        const bool keep_streak = kKeepStreakOnSwitch && anchor_full_keep_streak_once_;
+        const bool keep_streak =
+            kKeepStreakOnSwitch && current_group_keep_skip_streak;
         if (!warm_descriptor && !keep_streak) anchor_skip_clean_streak_ = 0;
         const bool reactive_skip_enabled =
             kAnchorSkipK > 1 && anchor_skip_clean_streak_ >= kReactiveCleanStreak;
@@ -695,25 +723,22 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         const bool skip_chirp_descriptor =
             reactive_skip_enabled && warm_descriptor &&
             (static_cast<int>(anchor_ordinal % static_cast<uint32_t>(kAnchorSkipK)) != 0);
-        // Announce the NEXT group's anchor by the periodic pattern, BUT only while reactively enabled
-        // (a resend overrides to full chirp; the RX fast-escalates on that mismatch).
+        // Credit the prior clean delivery represented by warm_descriptor before deciding what this
+        // descriptor announces for the NEXT group.  The current group's own anchor decision above
+        // intentionally uses the pre-credit streak: it may only go LIGHT when the PREVIOUS descriptor
+        // announced that fact.  Live IONOS caught the old boundary contradiction at ordinal 12 -> 13:
+        // ordinal 12 announced FULL from the pre-credit streak, the credit opened the gate, and ordinal
+        // 13 emitted LIGHT; the receiver correctly waited for a chirp and lost the whole group.
+        if (warm_descriptor) ++anchor_skip_clean_streak_;  // count the just-observed clean prior group
         const bool next_group_light =
-            reactive_skip_enabled &&
-            (static_cast<int>((anchor_ordinal + 1) % static_cast<uint32_t>(kAnchorSkipK)) != 0);
-        if (warm_descriptor) ++anchor_skip_clean_streak_;  // count this clean group toward the streak
+            streaming_frame_policy::shouldAnnounceNextLightAnchor(
+                anchor_ordinal, kAnchorSkipK, anchor_skip_clean_streak_, kReactiveCleanStreak);
 
-        uint8_t flags = 0;
-        if (use_burst_interleave_) {
-            // per-burst flag: groups in THIS burst are cross-frame interleaved (the RX
-            // deinterleaves iff this is set). OFF on Good/AWGN -> per-frame decode.
-            flags |= protocol::v2::ControlFrame::BURST_FLAG_INTERLEAVE;
-        }
-        if (use_carrier_ldpc_interleaver_) {
-            flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
-        }
-        if (next_group_light) {
-            flags |= protocol::v2::ControlFrame::BURST_FLAG_NEXT_LIGHT_ANCHOR;
-        }
+        // per-burst flags: interleave applies to THIS group; anchor bits
+        // describe the immediately-following DATA group and the next descriptor.
+        const uint8_t flags = streaming_frame_policy::burstDescriptorFlags(
+            use_burst_interleave_, use_carrier_ldpc_interleaver_,
+            next_group_light, current_group_full_anchor);
         auto descriptor = protocol::v2::ControlFrame::makeBurstHeader(
             burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/burst_group_seq_,
             static_cast<uint8_t>(BURST_GROUP_SIZE),
@@ -774,17 +799,12 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     }
 
     // §16.4: the group-start full-chirp anchor fires for a session's first burst
-    // (force_full_preamble_once_) OR a RESEND (force_burst_group_start_full_preamble_,
-    // which the descriptor's encodeFrame above cannot consume). Either forces the
-    // group-start preamble below to the full chirp+LTS instead of warm light LTS.
+    // (force_full_preamble_once_) OR this exact request's resend/mode-switch
+    // anchor. Either forces the group-start preamble below to the full chirp+LTS
+    // instead of warm light LTS.
     const bool force_first_full_preamble =
-        force_full_preamble_once_ || force_burst_group_start_full_preamble_;
+        force_full_preamble_once_ || current_group_full_anchor;
     force_full_preamble_once_ = false;
-    force_burst_group_start_full_preamble_ = false;
-    // Consumed with the force latch it qualifies — a stale keep-streak mark must never
-    // survive to excuse the NEXT burst's recool (that would silently disarm the
-    // delivery-evidence gate the skip depends on for safety).
-    anchor_full_keep_streak_once_ = false;
 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)
@@ -854,7 +874,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             // the FFT window. MUST match the group-start preamble above. (§14.25)
             preamble = connectedDataPreambleForFrame();
         } else {
-            const auto header = protocol::v2::parseHeader(frame_data_list[i]);
+            const auto header = protocol::v2::parseHeader(wire_frame_data_list[i]);
             const bool is_data_frame =
                 header.valid && protocol::v2::isDataFrame(header.type);
             preamble = connectedDataPreambleForFrame();

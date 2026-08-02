@@ -19,9 +19,11 @@
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "gui/modem/streaming_frame_policy.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "helpers/temp_dir.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -111,6 +113,44 @@ struct ConnectionAdaptiveTestAccess {
         c.configureArqForCurrentDataMode();
     }
 
+    static void makeConnectedNarrowOFDM(Connection& c) {
+        c.local_call_ = "W1ABC";
+        c.remote_call_ = "K2DEF";
+        c.state_ = ConnectionState::CONNECTED;
+        c.is_initiator_ = true;
+        c.handshake_confirmed_ = true;
+        c.negotiated_mode_ = WaveformMode::OFDM_NARROW;
+        c.data_modulation_ = Modulation::DQPSK;
+        c.data_code_rate_ = CodeRate::R1_4;
+        c.data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
+        c.config_.fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+        c.measured_snr_db_ = 8.0f;
+        c.fading_index_ = 0.30f;
+        makeLocalIss(c);
+        c.arq_.setCallsigns(c.local_call_, c.remote_call_);
+        c.configureArqForCurrentDataMode();
+    }
+
+    static void makeConnectedMCDPSK(Connection& c) {
+        c.local_call_ = "W1ABC";
+        c.remote_call_ = "K2DEF";
+        c.state_ = ConnectionState::CONNECTED;
+        c.is_initiator_ = true;
+        c.handshake_confirmed_ = true;
+        c.negotiated_mode_ = WaveformMode::MC_DPSK;
+        c.data_modulation_ = Modulation::DBPSK;
+        c.data_code_rate_ = CodeRate::R1_4;
+        c.data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
+        c.config_.fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+        c.config_.mc_dpsk_num_carriers = 8;
+        c.config_.mc_dpsk_samples_per_symbol = 1024;
+        c.measured_snr_db_ = 5.0f;
+        c.fading_index_ = 0.30f;
+        makeLocalIss(c);
+        c.arq_.setCallsigns(c.local_call_, c.remote_call_);
+        c.configureArqForCurrentDataMode();
+    }
+
     static void makeResponderWithConnectAckRescue(Connection& c,
                                                   WaveformMode mode = WaveformMode::OFDM_CHIRP) {
         c.local_call_ = "K2DEF";
@@ -143,6 +183,32 @@ struct ConnectionAdaptiveTestAccess {
         c.enterConnected();
     }
 
+    static void enterConnected(Connection& c, bool automatic_rate_allowed) {
+        c.enterConnected(automatic_rate_allowed);
+    }
+
+    static void makeConnectingWithOutboundForce(Connection& c,
+                                                Modulation mod,
+                                                CodeRate rate) {
+        c.local_call_ = "W1ABC";
+        c.remote_call_ = "K2DEF";
+        c.state_ = ConnectionState::CONNECTING;
+        c.outbound_forced_modulation_ = mod;
+        c.outbound_forced_code_rate_ = rate;
+    }
+
+    static void handleConnectAck(Connection& c, const v2::ConnectFrame& frame) {
+        c.handleConnectAck(frame, "K2DEF");
+    }
+
+    static void noteDataTurnPayloadStarted(Connection& c, size_t payload_bytes) {
+        c.noteDataTurnPayloadStarted(payload_bytes);
+    }
+
+    static bool interactiveInitiatorYieldDone(const Connection& c) {
+        return c.interactive_initiator_yield_done_;
+    }
+
     static void transmitFrame(Connection& c, const Bytes& frame) {
         c.transmitFrame(frame);
     }
@@ -165,6 +231,15 @@ struct ConnectionAdaptiveTestAccess {
 
     static int modeChangeMaxRetries() {
         return Connection::MODE_CHANGE_MAX_RETRIES;
+    }
+
+    static int modeChangeRetryCount(const Connection& c) {
+        return c.mode_change_retry_count_;
+    }
+
+    static void setCoherenceDoppler(Connection& c, float doppler_hz) {
+        c.coherence_doppler_hz_ = doppler_hz;
+        c.coherence_valid_ = true;
     }
 
     static bool handshakeConfirmed(const Connection& c) {
@@ -265,6 +340,81 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getAckTimeout();
     }
 
+    static void disableAdaptiveRate(Connection& c) {
+        c.adaptive_rate_enabled_ = false;
+    }
+
+    static size_t dataPayloadCapacity(const Connection& c) {
+        return c.currentDataPayloadCapacity();
+    }
+
+    static size_t burstFrameBudget(const Connection& c) {
+        return c.burstAirtimeBudgetFrames(c.arq_.getWindowSize());
+    }
+
+    static uint32_t unifiedBurstTimeout(const Connection& c, size_t frames) {
+        return c.unifiedBurstAckTimeoutMs(frames);
+    }
+
+    static uint32_t physicalRoundTimeout(
+        const Connection& c, const std::vector<Bytes>& frames) {
+        return c.physicalDataRoundTiming(frames).ack_timeout_ms;
+    }
+
+    static uint32_t physicalRoundAirtime(
+        const Connection& c, const std::vector<Bytes>& frames) {
+        return c.physicalDataRoundTiming(frames).airtime_ms;
+    }
+
+    static bool fragmentedMessagePending(const Connection& c) {
+        return !c.pending_tx_fragments_.empty();
+    }
+
+    static bool sendFixedData(Connection& c, const Bytes& payload, uint8_t flags) {
+        return c.arq_.sendFixedDataWithFlags(payload, flags);
+    }
+
+    static bool sendVariableData(Connection& c, const Bytes& payload, uint8_t flags) {
+        return c.arq_.sendVariableDataWithFlags(payload, flags);
+    }
+
+    static size_t rearmExactDataRound(Connection& c,
+                                      const std::vector<Bytes>& frames,
+                                      uint32_t timeout_ms) {
+        return c.arq_.rearmTransmittedDataFrames(frames, timeout_ms);
+    }
+
+    static void setArqMaxRetries(Connection& c, int retries) {
+        c.arq_.setMaxRetries(retries);
+    }
+
+    static bool arqMoveEpochEnabled(const Connection& c) {
+        return c.arq_.moveEpochEnabled();
+    }
+
+    static size_t arqInFlightBytes(const Connection& c) {
+        return c.arq_.getTxInFlightBytes();
+    }
+
+    static int arqMaxInFlightRetryCount(const Connection& c) {
+        return c.arq_.maxInFlightRetryCount();
+    }
+
+    static int arqFixedFrameLiftingZ(const Connection& c) {
+        return c.arq_.getFixedFrameLiftingZ();
+    }
+
+    static int arqFixedFrameCodewords(const Connection& c) {
+        return c.arq_.getFixedFrameCodewords();
+    }
+
+    static void simulatePreviousBurstAired(Connection& c) {
+        // These unit tests advance protocol time with tick(), not steady_clock. Clear
+        // the wall-clock audio play-head between synthetic ACK turns to model the real
+        // rig, where an ACK cannot arrive until the preceding burst has left the DAC.
+        c.last_data_burst_end_valid_ = false;
+    }
+
     static int arqAckRepeatCount(const Connection& c) {
         return c.arq_.getAckRepeatCount();
     }
@@ -311,9 +461,307 @@ struct ConnectionAdaptiveTestAccess {
         return c.data_frame_cw_count_;
     }
 
+    static void setDataGeometry(Connection& c, Modulation mod, CodeRate rate,
+                                int logical_cw) {
+        c.data_modulation_ = mod;
+        c.data_code_rate_ = rate;
+        c.data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(logical_cw);
+        c.config_.fixed_frame_codewords = c.data_frame_cw_count_;
+        c.configureArqForCurrentDataMode();
+    }
+
+    static int physicalDataFrameCWCount(const Connection& c) {
+        return c.physicalDataFrameCodewords();
+    }
+
+    static bool experimental8PSKLongLDPCActive(const Connection& c) {
+        return c.usesExperimental8PSKLongLDPC();
+    }
+
+    static bool experimentalQPSKR34LongLDPCActive(const Connection& c) {
+        return c.usesExperimentalQPSKR34LongLDPC();
+    }
+
+    static void failFileTransfer(Connection& c) {
+        c.file_transfer_.onSendFailed();
+    }
+
+    static size_t currentPayloadCapacity(const Connection& c) {
+        return c.currentDataPayloadCapacity();
+    }
+
     // RX-RATE-CMD (Phase 2, ULTRA_RX_RATE_CMD) hooks.
     static uint8_t rxRateCmdPending(const Connection& c) {
         return c.rx_rate_cmd_pending_;
+    }
+
+    // LATENT-RATE/QSO-scope regression hooks. Keep the production entry point in the
+    // loop so these tests pin the exact k/M plumbing rather than re-testing only the
+    // standalone estimator.
+    static void updateRxAuthorityExact(Connection& c, bool all_ok, float quality,
+                                       bool full_crater, float delivered_fraction,
+                                       uint8_t delivered_frames, uint8_t group_size,
+                                       bool geometry_proven = true) {
+        c.updateRxAuthorityCommand(all_ok, quality, full_crater, delivered_fraction,
+                                   delivered_frames, group_size, geometry_proven);
+    }
+
+    static int latentObservations(const Connection& c) {
+        return c.latent_ctl_.observations();
+    }
+
+    static int latentDecisions(const Connection& c) {
+        return c.latent_ctl_.decisions();
+    }
+
+    static bool latentHasPrior(const Connection& c) {
+        return c.latent_ctl_.havePrior();
+    }
+
+    static float latentPosteriorMean(const Connection& c) {
+        return c.latent_ctl_.posteriorMean();
+    }
+
+    static bool latentVerdictClockValid(const Connection& c) {
+        return c.goodput_last_verdict_valid_;
+    }
+
+    static void setLatentBootstrapRung(Connection& c, uint8_t rung) {
+        c.latent_bootstrap_rung_ = rung;
+    }
+
+    static uint8_t latentBootstrapRung(const Connection& c) {
+        return c.latent_bootstrap_rung_;
+    }
+
+    static uint8_t rxAuthorityCommand(const Connection& c) {
+        return c.rx_authority_cmd_;
+    }
+
+    static void setCurrentCoherentMode(Connection& c, Modulation mod, CodeRate rate) {
+        c.data_modulation_ = mod;
+        c.data_code_rate_ = rate;
+    }
+
+    static void setLatentStartupProbeAllowed(Connection& c, bool allowed) {
+        c.latent_startup_probe_allowed_ = allowed;
+    }
+
+    static bool latentStartupProbeAllowed(const Connection& c) {
+        return c.latent_startup_probe_allowed_;
+    }
+
+    static bool rateAdaptationActive(const Connection& c) {
+        return c.rateAdaptationActive();
+    }
+
+    static bool latentStartupProbeWaiting(const Connection& c) {
+        return c.latent_startup_probe_waiting_;
+    }
+
+    static bool latentStartupProbeSpent(const Connection& c) {
+        return c.latent_startup_probe_spent_;
+    }
+
+    static int latentStartupProbeCleanGroups(const Connection& c) {
+        return c.latent_startup_probe_clean_groups_;
+    }
+
+    static int latentStartupProbePendingBaseGroups(const Connection& c) {
+        return c.latent_startup_probe_pending_base_groups_;
+    }
+
+    static bool latentStartupProbeRollbackPending(const Connection& c) {
+        return c.latent_startup_probe_rollback_pending_;
+    }
+
+    static bool latentStartupProbeFailed(const Connection& c) {
+        return c.latent_startup_probe_failed_;
+    }
+
+    static void setLatentStartupProbeCleanGroups(Connection& c, int groups) {
+        c.latent_startup_probe_clean_groups_ = groups;
+    }
+
+    static void setLatentStartupProbeSpent(Connection& c, bool spent) {
+        c.latent_startup_probe_spent_ = spent;
+    }
+
+    static void seedLatentPrior(Connection& c, float x, float sigma_db) {
+        c.latent_ctl_.seedPrior(x, sigma_db);
+        c.latent_bootstrap_rung_ = kRungIdxNone;
+    }
+
+    static void maybeObeyAuthorityCommand(Connection& c, uint8_t rung,
+                                           bool accepted_clean_round = false) {
+        c.maybeObeyAuthorityCommand(rung, accepted_clean_round);
+    }
+
+    static bool startupProbeHasSufficientPayload(const Connection& c) {
+        return c.startupProbeHasSufficientPayload();
+    }
+
+    static bool authorityClimbHasSufficientPayload(
+        const Connection& c, Modulation mod, CodeRate rate,
+        int post_ack_clean_streak = 0) {
+        return c.authorityClimbHasSufficientPayload(
+            mod, rate, post_ack_clean_streak);
+    }
+
+    static bool retireFileMetadata(Connection& c) {
+        const Bytes metadata = c.file_transfer_.getNextChunk();
+        if (metadata.empty() ||
+            metadata.front() != static_cast<uint8_t>(PayloadType::FILE_START)) {
+            return false;
+        }
+        c.file_transfer_.onChunkAcked();
+        return true;
+    }
+
+    // Reproduce the production ordering inside onToneBurstAck(): authority is
+    // evaluated while refill is deferred, the accepted clean round advances the
+    // sender streak, then exactly one file refill forms the post-switch burst.
+    static void obeyAuthorityAtCleanAckBoundary(Connection& c, uint8_t rung) {
+        c.arq_callback_defer_refill_ = true;
+        c.maybeObeyAuthorityCommand(rung, /*accepted_clean_round=*/true);
+        c.noteArqRoundOutcome(/*progress_frames=*/1, "test-clean-tone-ack");
+        if (c.file_transfer_.getState() == FileTransferState::SENDING) {
+            c.deferred_file_refill_ = true;
+        }
+        c.arq_callback_defer_refill_ = false;
+        c.runDeferredArqRefill();
+    }
+
+    static size_t targetProfileChunkBytes(const Connection& c,
+                                          Modulation mod,
+                                          CodeRate rate) {
+        const int cw = (c.config_.forced_cw_count != 0)
+            ? v2::sanitizeFixedFrameCodewords(c.config_.forced_cw_count)
+            : connection_policy::recommendCWCountForChannel(
+                  mod, rate, c.negotiated_mode_,
+                  connection_policy::coherenceAdjustedFadingIndex(
+                      c.fading_index_, c.coherence_score_, c.coherence_valid_),
+                  c.wireSnrDb());
+        const size_t payload = (c.selectBurstLiftingZ() == 81)
+            ? v2::getFixedFramePayloadCapacityZ(rate, cw, 81)
+            : v2::getFixedFramePayloadCapacity(rate, cw);
+        return payload - FileTransferController::FILE_DATA_OVERHEAD;
+    }
+
+    static size_t targetProfileBurstFrames(const Connection& c,
+                                            Modulation mod,
+                                            CodeRate rate,
+                                            int clean_streak = -1) {
+        const int cw = (c.config_.forced_cw_count != 0)
+            ? v2::sanitizeFixedFrameCodewords(c.config_.forced_cw_count)
+            : connection_policy::recommendCWCountForChannel(
+                  mod, rate, c.negotiated_mode_,
+                  connection_policy::coherenceAdjustedFadingIndex(
+                      c.fading_index_, c.coherence_score_, c.coherence_valid_),
+                  c.wireSnrDb());
+        size_t window = connection_policy::ofdmWindowSizeForChannel(
+            mod, rate, c.fading_index_, c.rateSelectionSnrDb());
+        window = std::min<size_t>(
+            window, connection_policy::kToneBurstAckWindowCapFrames);
+        const uint32_t ceiling_ms = connection_policy::burstAirtimeCeilingMs(
+            mod, rate,
+            clean_streak >= 0 ? clean_streak : c.burst_clean_group_streak_);
+        const uint32_t reanchor_ms =
+            connection_policy::shouldUseWideOFDMShortReanchor(
+                c.negotiated_mode_, mod, c.fading_index_)
+                ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+                : 0;
+        return connection_policy::wideOFDMBurstFrameBudget(
+            mod, rate, cw, window, ceiling_ms, reanchor_ms,
+            c.selectBurstLiftingZ());
+    }
+
+    static uint8_t txAuthorityLastObeyed(const Connection& c) {
+        return c.tx_authority_last_obeyed_;
+    }
+
+    static size_t startupProbeTargetChunkBytes(const Connection& c) {
+        return targetProfileChunkBytes(c, Modulation::QPSK, CodeRate::R2_3);
+    }
+
+    static void setForcedCWCount(Connection& c, int cw) {
+        c.config_.forced_cw_count = cw;
+    }
+
+    static bool txLatentStartupProbeActive(const Connection& c) {
+        return c.tx_latent_startup_probe_active_;
+    }
+
+    static bool txLatentStartupProbeAirborne(const Connection& c) {
+        return c.tx_latent_startup_probe_airborne_;
+    }
+
+    static void setTxLatentStartupProbeState(Connection& c, bool active,
+                                              bool airborne, uint8_t base) {
+        c.tx_latent_startup_probe_active_ = active;
+        c.tx_latent_startup_probe_airborne_ = airborne;
+        c.tx_latent_startup_probe_base_rung_ = base;
+    }
+
+    static void handleLatentStartupProbeTimeoutRollback(Connection& c) {
+        c.handleLatentStartupProbeTimeoutRollback();
+    }
+
+    static uint8_t pendingModeChangeReason(const Connection& c) {
+        return c.pending_reason_;
+    }
+
+    static void setBurstCleanGroupStreak(Connection& c, int streak) {
+        c.burst_clean_group_streak_ = streak;
+    }
+
+    static int burstCleanGroupStreak(const Connection& c) {
+        return c.burst_clean_group_streak_;
+    }
+
+    static void seedQsoScopedAdaptiveState(Connection& c) {
+        c.consecutive_escape_drops_ = 2;
+        c.rx_auth_last_change_ = std::chrono::steady_clock::now();
+        c.rx_auth_last_change_valid_ = true;
+    }
+
+    static int consecutiveEscapeDrops(const Connection& c) {
+        return c.consecutive_escape_drops_;
+    }
+
+    static void executeEscapeDrop(Connection& c, const char* trigger) {
+        c.executeEscapeDrop(trigger);
+    }
+
+    static bool rxAuthorityDwellClockValid(const Connection& c) {
+        return c.rx_auth_last_change_valid_;
+    }
+
+    static void enterDisconnected(Connection& c) {
+        c.enterDisconnected("unit-test boundary");
+    }
+
+    // Two-phase timeout-egress hooks. They model exactly the callback context used by
+    // SelectiveRepeatARQ::tick(), without needing to wait through a full synthetic RTO.
+    static void stageArqTimeoutBatch(Connection& c,
+                                     const std::vector<Bytes>& frames) {
+        c.arq_tick_in_progress_ = true;
+        c.handleArqTimeoutBatch(frames);
+        c.arq_tick_in_progress_ = false;
+    }
+
+    static size_t stagedArqTimeoutFrames(const Connection& c) {
+        return c.staged_timeout_batch_.size();
+    }
+
+    static void flushStagedArqTimeoutBatch(Connection& c) {
+        c.flushStagedArqTimeoutBatch();
+    }
+
+    static void markModeChangePending(Connection& c,
+                                      uint32_t timeout_ms = 60000) {
+        c.mode_change_pending_ = true;
+        c.mode_change_timeout_ms_ = timeout_ms;
     }
 };
 
@@ -359,18 +807,44 @@ void test_local_mode_change_timeout_keeps_current_arq_mode() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "test setup should leave MODE_CHANGE pending");
-    // 2026-07-03 (post rig-bisect W5/W5b/W6): the retry floors at the FULL burst
-    // ACK deadline — the peer may not ACK until its whole outstanding burst is
-    // decoded, and faster retries key onto the ACK in flight (W5 livelock, W5b
-    // stall; W6 at the full deadline ran clean). The deadline is ratiometric
-    // (scales with mod/rate/window); ULTRA_MODE_CHANGE_RETRY_MS pins for A/B.
-    CHECK(retry_ms >= ConnectionAdaptiveTestAccess::arqAckTimeout(c),
-          "MODE_CHANGE retry must cover the full data-burst ACK deadline");
-    CHECK(retry_ms >= 1000,
-          "MODE_CHANGE retry must cover a control round trip (anchor+ctl x2)");
+    // MODE_CHANGE is one hardened QPSK-R1/4 control frame in each direction.
+    // It must not borrow the current 16-frame DATA deadline (fixed_default_03:
+    // 44.75 s of dead air after all three ACK copies were already gone). Reuse
+    // the field-proven one-frame control policy: at this geometry it floors at
+    // 8 s, including audio/decode margin, and also exceeds one Good-channel Tc.
+    const uint32_t expected_control_ms =
+        connection_policy::computeWideOFDMAckTimeoutMs(
+            Modulation::QPSK, CodeRate::R1_4,
+            /*window_size=*/1,
+            connection_policy::kCarrierSenseSackCoalesceMs,
+            /*ack_repeat_count=*/1,
+            /*cw_count=*/1);
+    CHECK(expected_control_ms == 8000,
+          "QPSK-R1/4 single-control deadline should retain the proven 8 s floor");
+    CHECK(retry_ms == expected_control_ms,
+          "wide MODE_CHANGE retry should use one-control physical geometry");
+    CHECK(retry_ms < ConnectionAdaptiveTestAccess::arqAckTimeout(c),
+          "MODE_CHANGE retry must be decoupled from the multi-frame DATA deadline");
+    const uint32_t good_tc_ms = connection_policy::coherenceTimeMsForDoppler(
+        connection_policy::kGoodHFDesignDopplerHz);
+    CHECK(retry_ms >= std::min(
+              good_tc_ms, connection_policy::kRetxTroughDeferAbsCapMs),
+          "MODE_CHANGE retries should be at least one capped Good-channel Tc apart");
+
+    // A very slow measured fade must not resurrect a multi-tens-of-seconds pause:
+    // raw Tc at 0.01 Hz is 42.3 s, but the shared trough-pacing engineering cap is
+    // 8 s, equal to the already-safe control/decode deadline here.
+    ConnectionAdaptiveTestAccess::setCoherenceDoppler(c, 0.01f);
+    const uint32_t slow_fade_retry_ms =
+        ConnectionAdaptiveTestAccess::modeChangeRetryMs(c);
+    CHECK(connection_policy::coherenceTimeMsForDoppler(0.01f) >
+              connection_policy::kRetxTroughDeferAbsCapMs,
+          "slow-fade fixture should exercise the coherence cap");
+    CHECK(slow_fade_retry_ms == expected_control_ms,
+          "slow measured Doppler must be capped at the 8 s control deadline");
 
     for (int i = 0; i < ConnectionAdaptiveTestAccess::modeChangeMaxRetries() + 1; ++i) {
-        c.tick(retry_ms);
+        c.tick(slow_fade_retry_ms);
     }
 
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
@@ -379,6 +853,42 @@ void test_local_mode_change_timeout_keeps_current_arq_mode() {
           "unacknowledged MODE_CHANGE must keep the proven shared data rate");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R2_3,
           "unacknowledged MODE_CHANGE must not reconfigure local ARQ alone");
+}
+
+void test_mode_change_retry_waits_for_clear_channel_without_spending_budget() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.50f, Modulation::QPSK);
+
+    bool channel_busy = true;
+    c.setChannelBusyQuery([&channel_busy] { return channel_busy; });
+
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+
+    c.requestModeChange(Modulation::QPSK, CodeRate::R1_2, 20.0f,
+                        v2::ModeChangeReason::CHANNEL_DEGRADED);
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::modeChangeRetryMs(c);
+    CHECK(tx_frames.size() == 1, "initial MODE_CHANGE request should transmit once");
+
+    c.tick(retry_ms);
+    CHECK(tx_frames.size() == 1,
+          "due MODE_CHANGE retry must not key over an inbound ACK/signal");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangeRetryCount(c) == 0,
+          "carrier-sense hold must not consume MODE_CHANGE retry budget");
+
+    c.tick(connection_policy::kCarrierSenseSackCoalesceMs);
+    CHECK(tx_frames.size() == 1,
+          "busy channel should keep holding across retry polls");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangeRetryCount(c) == 0,
+          "repeated busy polls must remain retry-budget neutral");
+
+    channel_busy = false;
+    c.tick(connection_policy::kCarrierSenseSackCoalesceMs);
+    CHECK(tx_frames.size() == 2,
+          "MODE_CHANGE should retry promptly after the channel clears");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangeRetryCount(c) == 1,
+          "only committed clear-channel egress should consume retry budget");
 }
 
 void test_remote_mode_change_reconfigures_arq() {
@@ -399,7 +909,7 @@ void test_remote_mode_change_reconfigures_arq() {
           "remote MODE_CHANGE should recompute ARQ window (default wide window)");
 }
 
-void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
+void test_remote_mode_change_ack_is_single_by_default() {
     Connection c;
     std::vector<Bytes> tx_frames;
     c.setTransmitCallback([&](const Bytes& data) {
@@ -408,15 +918,12 @@ void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
 
-    // DATA acks: ONE prompt tone-burst ack per burst (lost acks are backstopped by the
-    // sender's ARQ retransmit). But the MODE_CHANGE ACK rides the fragile 1-CW control
-    // path and gates every rate move — since 2026-07-03 it gets FADING-AWARE repeats
-    // (3 staggered copies on a fading channel; rig measured 5 receptions per climb at
-    // single-copy). This Connection has fading 0.48 -> expect 3 MC-ACK copies while the
-    // ARQ data-ack count stays 1.
+    // One prompt ACK preserves the clean success path. The pending sender supplies
+    // useful time diversity with an 8 s request retry; receiver ACK copies at
+    // ~0.25/0.83 s were both inside one 2.34 s measured fade and can collide with
+    // resumed DATA after copy 1 succeeds.
     CHECK(ConnectionAdaptiveTestAccess::arqAckRepeatCount(c) == 1,
           "tone-burst OFDM path uses a single prompt DATA ack (no diversity chain)");
-    const int repeat_count = 3;  // fading-aware MC-ACK repeat count at fading >= 0.15
 
     auto frame = v2::ControlFrame::makeModeChange(
         "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
@@ -428,17 +935,15 @@ void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
 
     const uint32_t drain_ms =
         selective_repeat_arq_policy::ackRepeatDelayForCopy(
-            ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c), repeat_count) +
+            ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c), 3) +
         selective_repeat_arq_policy::kAckRepeatMaxJitterMs;
     c.tick(drain_ms);
 
-    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count),
-          "remote MODE_CHANGE ACK should reuse the active OFDM ACK repeat count");
-    for (const auto& data : tx_frames) {
-        auto ack = v2::ControlFrame::deserialize(data);
-        CHECK(ack && ack->type == v2::FrameType::ACK && ack->seq == 44,
-              "every MODE_CHANGE ACK diversity copy should acknowledge the request seq");
-    }
+    CHECK(tx_frames.size() == 1,
+          "default MODE_CHANGE response must not emit same-fade ACK copies");
+    auto ack = v2::ControlFrame::deserialize(tx_frames.front());
+    CHECK(ack && ack->type == v2::FrameType::ACK && ack->seq == 44,
+          "the immediate MODE_CHANGE ACK should acknowledge the request seq");
 }
 
 // BUG-MC-RETRY-SPURIOUS fix 1: the MODE_CHANGE retry deadline HOLDS while our own
@@ -498,29 +1003,20 @@ void test_duplicate_mode_change_single_reack_no_reapply() {
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
 
-    const int repeat_count = 3;  // fading-aware MC-ACK repeat count at fading >= 0.15
-    const uint32_t drain_ms =
-        selective_repeat_arq_policy::ackRepeatDelayForCopy(
-            ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c), repeat_count) +
-        selective_repeat_arq_policy::kAckRepeatMaxJitterMs;
-
     auto frame = v2::ControlFrame::makeModeChange(
         "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
         19.8f, 0.48f, v2::ModeChangeReason::CHANNEL_DEGRADED);
 
-    // First copy: full behavior — apply + one GUI notify + full fading-aware ACK set.
+    // First copy: apply + one GUI notify + one immediate ACK.
     c.onFrameReceived(frame.serialize());
     CHECK(c.getDataCodeRate() == CodeRate::R1_2,
           "first MODE_CHANGE copy should apply the requested rate");
     CHECK(notify_count == 1, "first MODE_CHANGE copy should notify the GUI once");
     CHECK(tx_frames.size() == 1, "first MODE_CHANGE copy should ACK immediately");
-    c.tick(drain_ms);
-    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count),
-          "first MODE_CHANGE copy should emit the full fading-aware ACK set");
 
     // Duplicate copy (same seq, same mod/rate): exactly ONE re-ACK, nothing else.
     c.onFrameReceived(frame.serialize());
-    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 1,
+    CHECK(tx_frames.size() == 2,
           "duplicate MODE_CHANGE should emit exactly one re-ACK copy");
     auto dup_ack = v2::ControlFrame::deserialize(tx_frames.back());
     CHECK(dup_ack && dup_ack->type == v2::FrameType::ACK && dup_ack->seq == 44,
@@ -530,13 +1026,13 @@ void test_duplicate_mode_change_single_reack_no_reapply() {
           "duplicate MODE_CHANGE must leave the applied mode untouched");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_2,
           "duplicate MODE_CHANGE must not re-run applyDataMode/ARQ reconfig");
-    c.tick(drain_ms);
-    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 1,
+    c.tick(2000);
+    CHECK(tx_frames.size() == 2,
           "duplicate MODE_CHANGE must not schedule a fresh ACK repeat set");
 
     // Every further duplicate reception earns one more diversity re-ACK.
     c.onFrameReceived(frame.serialize());
-    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count) + 2,
+    CHECK(tx_frames.size() == 3,
           "each duplicate reception should earn exactly one re-ACK copy");
     CHECK(notify_count == 1, "repeated duplicates must stay notify-silent");
 
@@ -858,6 +1354,42 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
           "light switch descriptors cost 25 s each)");
 }
 
+// Sender-initiated stuck/collapse escapes are triggered by ACK silence.  Silence
+// cannot prove the receiver decoded a new descriptor, so even with descriptor +
+// move-epoch enabled they must hold the old local geometry and use synchronized
+// MODE_CHANGE. Receiver-commanded demotes remain the separately-tested sanctioned
+// mid-window descriptor path because the command itself proves reverse control.
+void test_silent_escape_never_unilaterally_descriptor_switches() {
+    auto run = [](Modulation mod) {
+        setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+        setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+        Connection c;
+        setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+        unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+        std::vector<Bytes> tx_frames;
+        c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R2_3, 20.0f, 0.30f, mod);
+
+        ConnectionAdaptiveTestAccess::executeEscapeDrop(c, "unit-test ACK silence");
+
+        CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+              "a silent escape must arm synchronized MODE_CHANGE");
+        CHECK(c.getDataModulation() == mod && c.getDataCodeRate() == CodeRate::R2_3,
+              "a silent escape must hold the old local geometry until peer ACK");
+        CHECK(countModeChangeFrames(tx_frames) == 1,
+              "a silent escape must put exactly one MODE_CHANGE request on the wire");
+        CHECK(c.getStats().descriptor_mode_switches == 0,
+              "a silent escape must never count a unilateral descriptor commit");
+        CHECK(ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 1,
+              "the collapse-episode counter must still record the escape");
+    };
+
+    run(Modulation::QPSK);
+    run(Modulation::QAM16);
+}
+
 // Knob-ON receiver adopt: a mode-hop descriptor notification runs the RX-relevant
 // subset of applyDataMode (mode + CW + ARQ reconfig + GUI notify) and must NOT send
 // any ACK (no MODE_CHANGE ACK machinery); a re-announced descriptor is idempotent,
@@ -933,6 +1465,1935 @@ ToneBurstAckDetection makeRungCmdDetection(uint8_t group_seq, uint8_t rung_cmd) 
     return d;
 }
 
+void test_stale_epoch_tone_ack_has_no_connection_side_effects() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<Bytes> transmitted;
+    int drive_advisories = 0;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setDriveAdvisoryCallback(
+        [&](uint8_t, uint8_t) { ++drive_advisories; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              c, Bytes{0x10}, v2::Flags::FINAL),
+          "old-era DATA should enter the sender");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 0,
+          "fixture should begin in move epoch zero");
+    ConnectionAdaptiveTestAccess::abortArqPendingTx(c);
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 1,
+          "aborting live DATA must advance the move epoch");
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              c, Bytes{0x20}, v2::Flags::FINAL),
+          "new-era DATA should enter the sender");
+    CHECK(transmitted.size() == 2,
+          "fixture should have emitted exactly the old- and new-era DATA frames");
+
+    const size_t bytes_before = ConnectionAdaptiveTestAccess::arqInFlightBytes(c);
+    const int acks_before = c.getStats().arq.acks_received;
+    const std::string action_before = c.lastAdaptiveAction();
+
+    ToneBurstAckDetection stale;
+    stale.payload.group_seq = 1;  // valid support for the new seq, wrong era only
+    stale.payload.frame_mask = 0;
+    stale.payload.rate_hint = 7;
+    stale.payload.type = AckType::Ack;
+    stale.payload.move_epoch = 0;
+    stale.payload.rung_cmd = kRungCmdNone;
+    stale.payload.drive_advisory =
+        ultra::waveform::tone_burst_ack::kDriveAdvisoryUp;
+    CHECK(!c.onToneBurstAck(stale),
+          "old-era tone ACK must be rejected by Connection");
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == bytes_before,
+          "stale-era ACK must not retire new-era bytes");
+    CHECK(c.getStats().arq.acks_received == acks_before &&
+              c.getStats().arq.stale_epoch_acks_ignored == 1,
+          "stale-era ACK should only increment its rejection diagnostic");
+    CHECK(drive_advisories == 0 && c.lastAdaptiveAction() == action_before,
+          "stale-era ACK must not steer ALC or rate feedback");
+    CHECK(transmitted.size() == 2,
+          "stale-era ACK must not trigger a refill or retransmission");
+
+    stale.payload.move_epoch = 1;
+    CHECK(c.onToneBurstAck(stale),
+          "same ACK in the current era should be accepted");
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "current-era ACK should retire the live DATA frame");
+    CHECK(drive_advisories == 1,
+          "accepted ACK should still deliver its ALC advisory");
+}
+
+void test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    c.setBurstChannelObservation(20.0f, 0.30f, 0.8f, true, 0.1f);
+
+    const uint8_t rung = coherentRungIndexFor(Modulation::QPSK, CodeRate::R2_3);
+    LatentRateController exact_reference;
+    exact_reference.seedPrior(latentThetaForRung(rung), 3.0f);
+    exact_reference.observe(rung, /*k=*/6, /*M=*/8);
+    exact_reference.relax(0.35f);
+    LatentRateController old_rounded_reference;
+    old_rounded_reference.seedPrior(latentThetaForRung(rung), 3.0f);
+    old_rounded_reference.observe(rung, /*k=*/4, /*M=*/5);
+    old_rounded_reference.relax(0.35f);
+
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        c, /*all_ok=*/false, /*quality=*/0.75f, /*full_crater=*/false,
+        /*delivered_fraction=*/0.75f, /*delivered_frames=*/6, /*group_size=*/8);
+    const float production_mean =
+        ConnectionAdaptiveTestAccess::latentPosteriorMean(c);
+    CHECK(ConnectionAdaptiveTestAccess::latentObservations(c) == 1 &&
+              ConnectionAdaptiveTestAccess::latentDecisions(c) == 1,
+          "one 6/8 verdict should produce one latent observation and decision");
+    CHECK(std::fabs(production_mean - exact_reference.posteriorMean()) < 1e-4f,
+          "Connection must feed the estimator the descriptor's exact 6/8 geometry");
+    CHECK(std::fabs(production_mean - old_rounded_reference.posteriorMean()) > 1e-3f,
+          "exact 6/8 evidence must not collapse back to the old rounded 4/5 proxy");
+    CHECK(ConnectionAdaptiveTestAccess::latentHasPrior(c) &&
+              ConnectionAdaptiveTestAccess::latentVerdictClockValid(c),
+          "a real verdict should arm the QSO-scoped latent state and cadence clock");
+
+    // The physical startup cap is QPSK R1/2, but the automatic connect selector may
+    // have picked a much stronger rung.  A clean safety probe must update that original
+    // prior; seeding from the capped rung would manufacture a long slow-start.
+    Connection capped;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        capped, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    capped.setBurstChannelObservation(20.0f, 0.30f, 0.8f, true, 0.1f);
+    const uint8_t automatic_rung =
+        coherentRungIndexFor(Modulation::QPSK, CodeRate::R3_4);
+    ConnectionAdaptiveTestAccess::setLatentBootstrapRung(capped, automatic_rung);
+    LatentRateController bootstrap_reference;
+    bootstrap_reference.seedPrior(latentThetaForRung(automatic_rung), 3.0f);
+    bootstrap_reference.observe(
+        coherentRungIndexFor(Modulation::QPSK, CodeRate::R1_2), 5, 5);
+    bootstrap_reference.relax(0.35f);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        capped, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(std::fabs(ConnectionAdaptiveTestAccess::latentPosteriorMean(capped) -
+                    bootstrap_reference.posteriorMean()) < 1e-4f,
+          "capped first group must update the pre-cap automatic selector prior");
+    CHECK(ConnectionAdaptiveTestAccess::latentBootstrapRung(capped) == kRungIdxNone,
+          "the pre-cap bootstrap must be consumed exactly once");
+
+    ConnectionAdaptiveTestAccess::setBurstCleanGroupStreak(c, 3);
+    ConnectionAdaptiveTestAccess::seedQsoScopedAdaptiveState(c);
+    ConnectionAdaptiveTestAccess::setLatentBootstrapRung(c, automatic_rung);
+    ConnectionAdaptiveTestAccess::enterDisconnected(c);
+    CHECK(!ConnectionAdaptiveTestAccess::latentHasPrior(c) &&
+              ConnectionAdaptiveTestAccess::latentObservations(c) == 0 &&
+              ConnectionAdaptiveTestAccess::latentDecisions(c) == 0 &&
+              !ConnectionAdaptiveTestAccess::latentVerdictClockValid(c) &&
+              ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c) == 0 &&
+              ConnectionAdaptiveTestAccess::latentBootstrapRung(c) == kRungIdxNone &&
+              ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 0 &&
+              !ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c),
+          "disconnect must clear posterior, cadence, burst-size, escape-episode, and "
+          "rung-dwell evidence (prior=" << ConnectionAdaptiveTestAccess::latentHasPrior(c)
+              << " obs=" << ConnectionAdaptiveTestAccess::latentObservations(c)
+              << " decisions=" << ConnectionAdaptiveTestAccess::latentDecisions(c)
+              << " clock=" << ConnectionAdaptiveTestAccess::latentVerdictClockValid(c)
+              << " burst_streak=" << ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c)
+              << " escapes=" << ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c)
+              << " dwell=" << ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c)
+              << " bootstrap=" << static_cast<int>(
+                     ConnectionAdaptiveTestAccess::latentBootstrapRung(c)) << ")");
+
+    // Connected entry is independently defensive: even a reused Connection object with
+    // state manufactured before the callback boundary cannot leak it into the new QSO.
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    c.setBurstChannelObservation(20.0f, 0.30f, 0.8f, true, 0.1f);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        c, false, 0.75f, false, 0.75f, 6, 8);
+    ConnectionAdaptiveTestAccess::setBurstCleanGroupStreak(c, 2);
+    ConnectionAdaptiveTestAccess::seedQsoScopedAdaptiveState(c);
+    ConnectionAdaptiveTestAccess::setLatentBootstrapRung(c, automatic_rung);
+    CHECK(ConnectionAdaptiveTestAccess::latentObservations(c) == 1,
+          "second fixture must re-populate the estimator before connected entry");
+    ConnectionAdaptiveTestAccess::enterConnected(c);
+    CHECK(!ConnectionAdaptiveTestAccess::latentHasPrior(c) &&
+              ConnectionAdaptiveTestAccess::latentObservations(c) == 0 &&
+              ConnectionAdaptiveTestAccess::latentDecisions(c) == 0 &&
+              !ConnectionAdaptiveTestAccess::latentVerdictClockValid(c) &&
+              ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c) == 0 &&
+              ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 0 &&
+              !ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c) &&
+              ConnectionAdaptiveTestAccess::latentBootstrapRung(c) == automatic_rung,
+          "connected entry must clear outcome state while preserving this QSO's pre-cap seed");
+}
+
+void test_latent_startup_probe_is_one_group_and_fails_closed() {
+    const uint8_t r12 = coherentRungIndexFor(Modulation::QPSK, CodeRate::R1_2);
+    const uint8_t r23 = coherentRungIndexFor(Modulation::QPSK, CodeRate::R2_3);
+
+    auto make_startup = [](Connection& c) {
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+        c.setBurstChannelObservation(20.0f, 0.30f, 0.8f, true, 0.1f);
+        ConnectionAdaptiveTestAccess::setLatentBootstrapRung(
+            c, coherentRungIndexFor(Modulation::QPSK, CodeRate::R1_2));
+    };
+
+    // fixed04's corrected startup shape is a tail-proven 4/4 repair followed by a
+    // descriptor-proven 5/5 group.  One clean group is insufficient; the clean pair
+    // earns exactly one R2/3 trial instead of waiting ~16 observations at saturated R1/2.
+    Connection pass;
+    make_startup(pass);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pass, true, 1.0f, false, 1.0f, 4, 4);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(pass) == r12 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pass),
+          "one trusted clean R1/2 group must not launch the startup probe");
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pass, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(pass) == r23 &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pass) &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeSpent(pass),
+          "two trusted clean R1/2 groups should command one-rung R2/3 exploration");
+
+    // Command loss/adoption latency must not consume extra probes.  A clean intervening
+    // R1/2 group re-carries the same absolute target until the descriptor announces R2/3.
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pass, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(pass) == r23 &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pass),
+          "clean pre-adoption R1/2 group should keep the one standing R2/3 command");
+    ConnectionAdaptiveTestAccess::setCurrentCoherentMode(
+        pass, Modulation::QPSK, CodeRate::R2_3);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pass, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(pass) == r23 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pass) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(pass),
+          "a clean physical R2/3 probe should retain R2/3 and spend the QSO probe");
+
+    // The higher-rung downside is bounded to one physical group: its first imperfect
+    // result emits the R1/2 rollback command immediately, independently of the argmax.
+    Connection lossy;
+    make_startup(lossy);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        lossy, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        lossy, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::setCurrentCoherentMode(
+        lossy, Modulation::QPSK, CodeRate::R2_3);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        lossy, false, 0.8f, false, 0.8f, 4, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(lossy) == r12 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(lossy) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(lossy),
+          "the first imperfect R2/3 probe group must command immediate R1/2 rollback");
+
+    // Missing descriptor/tail geometry cannot masquerade as a clean trial even if a
+    // fallback fraction says 100%.  It fails closed to the base rung.
+    Connection unknown;
+    make_startup(unknown);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        unknown, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        unknown, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::setCurrentCoherentMode(
+        unknown, Modulation::QPSK, CodeRate::R2_3);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        unknown, true, 1.0f, false, 1.0f, 0, 0);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(unknown) == r12 &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(unknown),
+          "unknown probe geometry must roll back even when fallback quality looks clean");
+
+    // A stale fallback can report a plausible full-size 5/5.  Provenance, not the
+    // numerical fraction, decides whether it reaches the posterior or clean-pair gate.
+    Connection stale_fallback;
+    make_startup(stale_fallback);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        stale_fallback, true, 1.0f, false, 1.0f, 5, 5, /*geometry_proven=*/true);
+    const int obs_before_stale =
+        ConnectionAdaptiveTestAccess::latentObservations(stale_fallback);
+    const float mean_before_stale =
+        ConnectionAdaptiveTestAccess::latentPosteriorMean(stale_fallback);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        stale_fallback, true, 1.0f, false, 1.0f, 5, 5,
+        /*geometry_proven=*/false);
+    CHECK(ConnectionAdaptiveTestAccess::latentObservations(stale_fallback) ==
+                  obs_before_stale &&
+              std::fabs(ConnectionAdaptiveTestAccess::latentPosteriorMean(
+                            stale_fallback) - mean_before_stale) < 1e-5f &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeCleanGroups(
+                  stale_fallback) == 0 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(stale_fallback),
+          "unproven fallback 5/5 must not update/relax the posterior or qualify startup");
+
+    // The same fail-closed rule applies before descriptor adoption: degraded base-rung
+    // evidence cancels the pending command without spending a higher-rung group.
+    Connection pending_loss;
+    make_startup(pending_loss);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_loss, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_loss, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_loss, false, 0.8f, false, 0.8f, 4, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(pending_loss) == r12 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pending_loss) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(pending_loss),
+          "imperfect R1/2 evidence while adoption is pending must cancel the probe");
+
+    // ACK diversity is finite.  Two additional clean base groups may re-carry the
+    // flagged target; a third non-adoption expires it and latches the QSO safety ceiling.
+    Connection pending_expiry;
+    make_startup(pending_expiry);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_expiry, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_expiry, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_expiry, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_expiry, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pending_expiry) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbePendingBaseGroups(
+                  pending_expiry) == 2,
+          "startup target may be re-carried across at most two clean base groups");
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        pending_expiry, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(!ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(pending_expiry) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeFailed(pending_expiry) &&
+              ConnectionAdaptiveTestAccess::rxAuthorityCommand(pending_expiry) == r12,
+          "third base non-adoption must expire and fail-close the startup probe");
+
+    // A failed physical target cannot be undone by its own posterior update or by later
+    // clean base groups.  Settle adoption, then provide ample optimistic evidence: the
+    // QSO-scoped failed-probe ceiling remains R1/2.
+    CHECK(ConnectionAdaptiveTestAccess::latentStartupProbeRollbackPending(lossy) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeFailed(lossy),
+          "lossy target must arm rollback hold and the failed-probe ceiling");
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        lossy, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(lossy) == r12 &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeRollbackPending(lossy),
+          "rollback must keep riding while the sender still reports the target rung");
+    ConnectionAdaptiveTestAccess::setCurrentCoherentMode(
+        lossy, Modulation::QPSK, CodeRate::R1_2);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        lossy, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(!ConnectionAdaptiveTestAccess::latentStartupProbeRollbackPending(lossy) &&
+              ConnectionAdaptiveTestAccess::rxAuthorityCommand(lossy) == r12,
+          "one trusted clean adopted base group settles rollback without an immediate climb");
+    for (int i = 0; i < 6; ++i) {
+        ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+            lossy, true, 1.0f, false, 1.0f, 5, 5);
+        CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(lossy) <= r12,
+              "failed startup probe must never re-enter R2/3 in the same QSO");
+    }
+
+    // Startup exploration must not override a natural safety demotion.
+    Connection natural_down;
+    make_startup(natural_down);
+    ConnectionAdaptiveTestAccess::seedLatentPrior(natural_down, -4.0f, 0.25f);
+    ConnectionAdaptiveTestAccess::setLatentStartupProbeCleanGroups(natural_down, 1);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        natural_down, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(natural_down) < r12 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(natural_down),
+          "clean-pair exploration must not override the model's natural demotion");
+
+    // An operator-forced data mode is a measurement contract.  Automatic exploration
+    // must never override it, regardless of clean outcomes.
+    Connection forced;
+    make_startup(forced);
+    ConnectionAdaptiveTestAccess::setLatentStartupProbeAllowed(forced, false);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        forced, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        forced, true, 1.0f, false, 1.0f, 5, 5);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(forced) != r23 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(forced) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(forced),
+          "forced-mode QSO must never launch automatic startup exploration");
+
+    Connection callback_gate;
+    make_startup(callback_gate);
+    bool callback_saw_forced_gate = false;
+    callback_gate.setConnectedCallback([&]() {
+        callback_saw_forced_gate =
+            !ConnectionAdaptiveTestAccess::latentStartupProbeAllowed(callback_gate);
+    });
+    ConnectionAdaptiveTestAccess::enterConnected(
+        callback_gate, /*automatic_rate_allowed=*/false);
+    CHECK(callback_saw_forced_gate &&
+              !ConnectionAdaptiveTestAccess::rateAdaptationActive(callback_gate),
+          "forced-QSO gate must freeze every rate actuator before on_connected");
+
+    // The pin is QSO-scoped, not dependent on a live env variable.  Once the handshake
+    // establishes an explicit profile, clearing all force/lock knobs must not let a later
+    // receiver command or escape path move it.
+    unsetenv("ULTRA_FORCE_DATA_MOD");
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+    unsetenv("ULTRA_LOCK_RATE");
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(
+        callback_gate, coherentRungIndexFor(Modulation::QPSK, CodeRate::R1_4));
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(callback_gate) &&
+              !ConnectionAdaptiveTestAccess::rateAdaptationActive(callback_gate),
+          "forced-QSO pin must survive env removal and reject authority movement");
+
+    // Environment force knobs bypass the CONNECT forced fields, so production must
+    // inspect the live measurement contract too.  ULTRA_LOCK_RATE has the same priority.
+    Connection env_forced;
+    make_startup(env_forced);
+    setenv("ULTRA_FORCE_DATA_RATE", "R1_2", 1);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        env_forced, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        env_forced, true, 1.0f, false, 1.0f, 5, 5);
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(env_forced) != r23 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(env_forced) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(env_forced),
+          "ULTRA_FORCE_DATA_RATE must suppress the automatic startup probe");
+
+    Connection locked;
+    make_startup(locked);
+    setenv("ULTRA_LOCK_RATE", "1", 1);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        locked, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        locked, true, 1.0f, false, 1.0f, 5, 5);
+    unsetenv("ULTRA_LOCK_RATE");
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(locked) != r23 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(locked) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeSpent(locked),
+          "ULTRA_LOCK_RATE must suppress the automatic startup probe");
+
+    // ULTRA_MAX_OFDM_RATE is an absolute ladder ceiling, including the latent early-return
+    // path.  Seed an intentionally strong prior: neither the normal argmax nor the startup
+    // probe may escape the requested canonical QPSK ceiling.
+    Connection cap_r12;
+    make_startup(cap_r12);
+    ConnectionAdaptiveTestAccess::setLatentBootstrapRung(
+        cap_r12, coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3));
+    setenv("ULTRA_MAX_OFDM_RATE", "R1_2", 1);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        cap_r12, true, 1.0f, false, 1.0f, 5, 5);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        cap_r12, true, 1.0f, false, 1.0f, 5, 5);
+    unsetenv("ULTRA_MAX_OFDM_RATE");
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(cap_r12) <= r12 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(cap_r12),
+          "latent selector and startup probe must honor absolute R1/2 ceiling");
+
+    Connection cap_r23;
+    make_startup(cap_r23);
+    ConnectionAdaptiveTestAccess::setLatentBootstrapRung(
+        cap_r23, coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3));
+    setenv("ULTRA_MAX_OFDM_RATE", "R2_3", 1);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        cap_r23, true, 1.0f, false, 1.0f, 5, 5);
+    unsetenv("ULTRA_MAX_OFDM_RATE");
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(cap_r23) <= r23,
+          "latent selector must honor absolute R2/3 ceiling on a strong prior");
+
+    // QSO lifecycle resets every arm/pending/spent counter.  The next automatic link may
+    // earn its own one-shot probe, but no command state crosses the disconnect boundary.
+    ConnectionAdaptiveTestAccess::enterDisconnected(lossy);
+    CHECK(ConnectionAdaptiveTestAccess::latentStartupProbeAllowed(lossy) &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeWaiting(lossy) &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeSpent(lossy) &&
+              ConnectionAdaptiveTestAccess::latentStartupProbeCleanGroups(lossy) == 0 &&
+              ConnectionAdaptiveTestAccess::latentStartupProbePendingBaseGroups(lossy) == 0 &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeRollbackPending(lossy) &&
+              !ConnectionAdaptiveTestAccess::latentStartupProbeFailed(lossy),
+          "disconnect must reset the bounded startup-probe state for the next QSO");
+}
+
+void test_forced_connect_ack_conflict_fails_closed() {
+    Connection conflict;
+    ConnectionAdaptiveTestAccess::makeConnectingWithOutboundForce(
+        conflict, Modulation::QAM8, CodeRate::R2_3);
+    const auto conflicting_ack = v2::ConnectFrame::makeConnectAck(
+        "K2DEF", "W1ABC", static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+        Modulation::QPSK, CodeRate::R1_2, 20.0f, 0.50f, 8);
+    ConnectionAdaptiveTestAccess::handleConnectAck(conflict, conflicting_ack);
+    CHECK(conflict.getState() == ConnectionState::DISCONNECTED,
+          "forced CONNECT_ACK mismatch must abort instead of creating a split PHY");
+
+    Connection matching;
+    ConnectionAdaptiveTestAccess::makeConnectingWithOutboundForce(
+        matching, Modulation::QAM8, CodeRate::R2_3);
+    const auto matching_ack = v2::ConnectFrame::makeConnectAck(
+        "K2DEF", "W1ABC", static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+        Modulation::QAM8, CodeRate::R2_3, 20.0f, 0.50f, 12);
+    ConnectionAdaptiveTestAccess::handleConnectAck(matching, matching_ack);
+    CHECK(matching.getState() == ConnectionState::CONNECTED &&
+              matching.getDataModulation() == Modulation::QAM8 &&
+              matching.getDataCodeRate() == CodeRate::R2_3 &&
+              !ConnectionAdaptiveTestAccess::rateAdaptationActive(matching),
+          "matching forced CONNECT_ACK must connect exactly and pin all actuators");
+
+    // A responder-local force was not present in our outbound CONNECT fields. Its ACK
+    // provenance bit is therefore the only way the initiator can retain the same
+    // QSO-scoped pin and avoid later moving the responder through MODE_CHANGE.
+    Connection responder_forced;
+    ConnectionAdaptiveTestAccess::makeConnectingWithOutboundForce(
+        responder_forced, Modulation::AUTO, CodeRate::AUTO);
+    auto responder_forced_ack = v2::ConnectFrame::makeConnectAck(
+        "K2DEF", "W1ABC", static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+        Modulation::QAM8, CodeRate::R2_3, 20.0f, 0.50f, 12);
+    responder_forced_ack.flags |= v2::Flags::CONNECT_FORCED_PROFILE;
+    ConnectionAdaptiveTestAccess::handleConnectAck(responder_forced,
+                                                    responder_forced_ack);
+    CHECK(responder_forced.getState() == ConnectionState::CONNECTED &&
+              responder_forced.getDataModulation() == Modulation::QAM8 &&
+              responder_forced.getDataCodeRate() == CodeRate::R2_3 &&
+              !ConnectionAdaptiveTestAccess::rateAdaptationActive(responder_forced),
+          "responder-only forced ACK must pin initiator actuators for the whole QSO");
+}
+
+void test_startup_probe_sender_guards_and_timeout_rollback() {
+    const uint8_t r12 = kRungIdxQpskR12;
+    const uint8_t r23 = kRungIdxQpskR23;
+
+    // A prospective 1/2/3-frame file tail cannot produce the trusted M>=4 probe
+    // outcome.  Refuse it before paying a mode transition.
+    Connection shape;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        shape, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    const size_t chunk =
+        ConnectionAdaptiveTestAccess::startupProbeTargetChunkBytes(shape);
+    CHECK(chunk > 0, "target startup-probe chunk size must be non-zero");
+    for (size_t frames = 1; frames <= 3; ++frames) {
+        Connection tail;
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            tail, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+        TempPayloadFile payload("startup_tail", chunk * frames);
+        CHECK(payload.dir.valid() && !payload.path.empty(),
+              "startup-tail payload fixture should be created");
+        ConnectionAdaptiveTestAccess::startFile(tail, payload.path);
+        CHECK(!ConnectionAdaptiveTestAccess::startupProbeHasSufficientPayload(tail),
+              "a 1/2/3-frame target tail must not qualify for startup probing");
+    }
+    Connection enough;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        enough, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TempPayloadFile four_frames("startup_four", chunk * 4);
+    ConnectionAdaptiveTestAccess::startFile(enough, four_frames.path);
+    CHECK(ConnectionAdaptiveTestAccess::startupProbeHasSufficientPayload(enough),
+          "four prospective target frames meet the trusted probe minimum");
+
+    // The ordinary tail-climb guard must not silently narrow the startup probe's
+    // explicit M>=4 contract to the steady-state N=5/8 group size.  Retire FILE_START
+    // first so this is a real four-DATA-frame mid-file tail, then assert the command
+    // emits exactly that one physical probe group.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection four_frame_command;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    size_t four_frame_burst_size = 0;
+    int four_frame_bursts = 0;
+    four_frame_command.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            ++four_frame_bursts;
+            four_frame_burst_size = frames.size();
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        four_frame_command, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TempPayloadFile four_frame_command_payload(
+        "startup_four_command", chunk * 4);
+    ConnectionAdaptiveTestAccess::startFile(
+        four_frame_command, four_frame_command_payload.path);
+    CHECK(ConnectionAdaptiveTestAccess::retireFileMetadata(four_frame_command),
+          "startup command fixture must retire FILE_START before its data tail");
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(
+        four_frame_command,
+        static_cast<uint8_t>(kRungAuthorityStartupProbeFlag | r23));
+    CHECK(four_frame_command.getDataCodeRate() == CodeRate::R2_3 &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeActive(
+                  four_frame_command) &&
+              four_frame_bursts == 1 && four_frame_burst_size == 4,
+          "valid four-frame startup probe must remain one real physical target group");
+
+    // Payload alone is insufficient when an operator-forced long frame makes the
+    // physical target burst shorter than the receiver's trusted M>=4 gate.
+    Connection long_cw;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        long_cw, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setForcedCWCount(long_cw, 16);
+    const size_t long_cw_chunk =
+        ConnectionAdaptiveTestAccess::startupProbeTargetChunkBytes(long_cw);
+    TempPayloadFile long_cw_payload("startup_long_cw", long_cw_chunk * 10);
+    ConnectionAdaptiveTestAccess::startFile(long_cw, long_cw_payload.path);
+    CHECK(!ConnectionAdaptiveTestAccess::startupProbeHasSufficientPayload(long_cw),
+          "startup probe must be refused when target physical geometry fits fewer "
+          "than four frames");
+
+    // A valid flagged command with enough payload commits exactly one target group and
+    // arms sender-side timeout protection before that group reaches the transport.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection flagged_sender;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    int flagged_bursts = 0;
+    int flagged_standalone_data = 0;
+    flagged_sender.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) { ++flagged_bursts; });
+    flagged_sender.setTransmitCallback([&](const Bytes& bytes) {
+        const auto h = v2::parseHeader(bytes);
+        if (h.valid && !h.is_control) ++flagged_standalone_data;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        flagged_sender, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TempPayloadFile probe_payload("startup_probe_sender", chunk * 10);
+    ConnectionAdaptiveTestAccess::startFile(flagged_sender, probe_payload.path);
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(
+        flagged_sender,
+        static_cast<uint8_t>(kRungAuthorityStartupProbeFlag | r23));
+    CHECK(flagged_sender.getDataCodeRate() == CodeRate::R2_3 &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeActive(flagged_sender) &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeAirborne(flagged_sender) &&
+              flagged_bursts == 1,
+          "valid flagged authority command must arm protection and emit one target group");
+
+    // The original launch ACK can be detected again while the target group awaits its
+    // own verdict. It is a valid base-1/no-progress SACK, but must not reach generic
+    // refill and put a second target group on air.
+    ToneBurstAckDetection launch_replay;
+    launch_replay.payload.group_seq = 0x3F;
+    launch_replay.payload.frame_mask = 0;
+    launch_replay.payload.rate_hint = static_cast<uint8_t>(r23 & 0x7);
+    launch_replay.payload.rung_cmd = static_cast<uint8_t>(
+        ((kRungAuthorityStartupProbeFlag | r23) >> 3) & 0x3);
+    launch_replay.payload.type = AckType::Ack;
+    launch_replay.payload.move_epoch = 0;
+    const int replay_retx_before = flagged_sender.getStats().arq.retransmissions;
+    CHECK(flagged_sender.onToneBurstAck(launch_replay) &&
+              flagged_bursts == 1 && flagged_standalone_data == 0 &&
+              flagged_sender.getStats().arq.retransmissions == replay_retx_before,
+          "replayed launch ACK must be consumed without a second target egress/refill");
+
+    // Sender-local absolute ceiling wins even when a peer commands a higher rung.
+    Connection capped;
+    std::vector<Bytes> capped_controls;
+    capped.setTransmitCallback([&](const Bytes& b) { capped_controls.push_back(b); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        capped, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    setenv("ULTRA_MAX_OFDM_RATE", "R1_2", 1);
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(capped, r23);
+    unsetenv("ULTRA_MAX_OFDM_RATE");
+    CHECK(capped.getDataCodeRate() == CodeRate::R1_2 &&
+              !ConnectionAdaptiveTestAccess::modeChangePending(capped) &&
+              capped_controls.empty(),
+          "asymmetric peer authority must not bypass the sender's local rate ceiling");
+
+    // Epoch-off, busy-window DOWN commands use synchronized MODE_CHANGE; descriptor
+    // regrid would reinterpret live sequence identities under the old era.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "0", 1);
+    Connection epoch_off;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Bytes> epoch_controls;
+    epoch_off.setTransmitCallback(
+        [&](const Bytes& b) { epoch_controls.push_back(b); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        epoch_off, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    CHECK(!ConnectionAdaptiveTestAccess::arqMoveEpochEnabled(epoch_off),
+          "epoch-off fixture must actually disable move-epoch before construction");
+    ConnectionAdaptiveTestAccess::fillArqWindow(epoch_off, 2);
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(epoch_off, r12);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(epoch_off) &&
+              epoch_off.getDataCodeRate() == CodeRate::R2_3 &&
+              epoch_off.getStats().descriptor_mode_switches == 0 &&
+              countModeChangeFrames(epoch_controls) == 1,
+          "epoch-off mid-window authority demote must synchronize via MODE_CHANGE");
+
+    // Drive the real ARQ tick after one flagged R2/3 group has gone on air. The timeout
+    // transaction must preserve retry budget, suppress all target DATA egress, and arm
+    // the synchronized base rollback. If that rollback cannot be confirmed, no target
+    // intent may resume: the session disconnects.
+    Connection timeout;
+    std::vector<Bytes> timeout_initial_data;
+    int timeout_controls = 0;
+    int timeout_standalone_data = 0;
+    int timeout_bursts = 0;
+    timeout.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) {
+            ++timeout_controls;
+        } else if (h.valid) {
+            ++timeout_standalone_data;
+            timeout_initial_data.push_back(b);
+        }
+    });
+    timeout.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) { ++timeout_bursts; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        timeout, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(timeout);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              timeout, Bytes{0x55}, v2::Flags::FINAL) &&
+              timeout_initial_data.size() == 1,
+          "startup timeout fixture must seed one live target DATA identity");
+    const Bytes target_identity = timeout_initial_data.front();
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              timeout, {target_identity}, 1) == 1,
+          "startup target identity must be rearmed to a deterministic one-tick RTO");
+    ConnectionAdaptiveTestAccess::setTxLatentStartupProbeState(
+        timeout, /*active=*/true, /*airborne=*/true, r12);
+    timeout_controls = 0;
+    timeout_standalone_data = 0;
+    timeout_bursts = 0;
+    timeout_initial_data.clear();
+    timeout.tick(1);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(timeout) &&
+              ConnectionAdaptiveTestAccess::pendingRate(timeout) == CodeRate::R1_2 &&
+              ConnectionAdaptiveTestAccess::pendingModeChangeReason(timeout) ==
+                  v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT &&
+              ConnectionAdaptiveTestAccess::stagedArqTimeoutFrames(timeout) == 0 &&
+              !ConnectionAdaptiveTestAccess::txLatentStartupProbeActive(timeout) &&
+              timeout_controls == 1 && timeout_standalone_data == 0 &&
+              timeout_bursts == 0 && timeout.getStats().arq.timeouts == 1 &&
+              timeout.getStats().arq.retransmissions == 0 &&
+              ConnectionAdaptiveTestAccess::arqMaxInFlightRetryCount(timeout) == 0,
+          "first unACKed target RTO must preserve retry budget, suppress target "
+          "egress, and arm one synchronized base rollback");
+    const uint32_t rollback_retry_ms =
+        ConnectionAdaptiveTestAccess::modeChangeRetryMs(timeout);
+    for (int i = 0;
+         i < ConnectionAdaptiveTestAccess::modeChangeMaxRetries() + 1; ++i) {
+        timeout.tick(rollback_retry_ms);
+    }
+    CHECK(timeout.getState() == ConnectionState::DISCONNECTING &&
+              timeout_standalone_data == 0 && timeout_bursts == 0 &&
+              timeout.getStats().arq.retransmissions == 0,
+          "unconfirmed startup rollback must disconnect without resuming target DATA");
+
+    // A different MODE_CHANGE already in flight at the target RTO is not safely
+    // reorderable. Preserve the probe identity, cancel the staged target egress, and
+    // disconnect rather than silently clearing state or overwriting the control.
+    Connection collided;
+    std::vector<Bytes> collided_data;
+    int collided_controls = 0;
+    int collided_data_tx = 0;
+    int collided_bursts = 0;
+    collided.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) ++collided_controls;
+        else if (h.valid) {
+            ++collided_data_tx;
+            collided_data.push_back(b);
+        }
+    });
+    collided.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) { ++collided_bursts; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        collided, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(collided);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              collided, Bytes{0x66}, v2::Flags::FINAL) &&
+              collided_data.size() == 1,
+          "collided-mode fixture must seed one live target identity");
+    const Bytes collided_identity = collided_data.front();
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              collided, {collided_identity}, 1) == 1,
+          "collided-mode target identity must be rearmed to one tick");
+    ConnectionAdaptiveTestAccess::setTxLatentStartupProbeState(
+        collided, /*active=*/true, /*airborne=*/true, r12);
+    collided.requestModeChange(Modulation::QPSK, CodeRate::R3_4, 20.0f,
+                               v2::ModeChangeReason::CHANNEL_IMPROVED);
+    collided_controls = 0;
+    collided_data_tx = 0;
+    collided_bursts = 0;
+    collided_data.clear();
+    collided.tick(1);
+    CHECK(collided.getState() == ConnectionState::DISCONNECTING &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeActive(collided) &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeAirborne(collided) &&
+              ConnectionAdaptiveTestAccess::stagedArqTimeoutFrames(collided) == 0 &&
+              collided_controls == 1 && collided_data_tx == 0 &&
+              collided_bursts == 0 &&
+              collided.getStats().arq.retransmissions == 0 &&
+              ConnectionAdaptiveTestAccess::arqMaxInFlightRetryCount(collided) == 0,
+          "startup RTO colliding with unrelated MODE_CHANGE must preserve probe state "
+          "and disconnect without target egress");
+
+    // With descriptor switching disabled, the launch itself uses MODE_CHANGE. Losing
+    // every ACK is also geometry-ambiguous: the peer may already be at R2/3, so the
+    // generic give-up path must never resume base DATA.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    Connection legacy_launch;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    int legacy_controls = 0;
+    int legacy_data = 0;
+    int legacy_bursts = 0;
+    legacy_launch.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) ++legacy_controls;
+        else if (h.valid) ++legacy_data;
+    });
+    legacy_launch.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) { ++legacy_bursts; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        legacy_launch, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TempPayloadFile legacy_payload("startup_legacy_launch", chunk * 10);
+    ConnectionAdaptiveTestAccess::startFile(legacy_launch, legacy_payload.path);
+    legacy_controls = legacy_data = legacy_bursts = 0;
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(
+        legacy_launch,
+        static_cast<uint8_t>(kRungAuthorityStartupProbeFlag | r23));
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(legacy_launch) &&
+              ConnectionAdaptiveTestAccess::pendingModeChangeReason(legacy_launch) ==
+                  v2::ModeChangeReason::STARTUP_PROBE_BEGIN &&
+              ConnectionAdaptiveTestAccess::txLatentStartupProbeActive(legacy_launch) &&
+              !ConnectionAdaptiveTestAccess::txLatentStartupProbeAirborne(legacy_launch) &&
+              legacy_controls == 1 && legacy_data == 0 && legacy_bursts == 0,
+          "legacy startup launch must be explicitly tagged and emit control only");
+    const uint32_t launch_retry_ms =
+        ConnectionAdaptiveTestAccess::modeChangeRetryMs(legacy_launch);
+    for (int i = 0;
+         i < ConnectionAdaptiveTestAccess::modeChangeMaxRetries() + 1; ++i) {
+        legacy_launch.tick(launch_retry_ms);
+    }
+    CHECK(legacy_launch.getState() == ConnectionState::DISCONNECTING &&
+              legacy_data == 0 && legacy_bursts == 0,
+          "unconfirmed legacy startup launch must disconnect without split-geometry DATA");
+}
+
+void test_authority_climb_prices_the_real_file_tail() {
+    const uint8_t qpsk_r23 = kRungIdxQpskR23;
+    const uint8_t psk8_r23 = kRungIdxQam8R23;
+
+    // Derive the boundary from the same post-ACK target profile used in production.
+    // The receiver prices after including the just-decoded clean group, while sender
+    // round accounting commits that same evidence later in the ACK callback.  Start at
+    // one clean group and require the guard plus actual refill to see the resulting
+    // streak=2 escalated target geometry.  This generalizes final_default_07: the
+    // selector priced a full 8PSK group but only three physical tail frames existed.
+    constexpr int kPreAckCleanStreak = 1;
+    constexpr int kPostAckCleanStreak = 2;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection shape;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        shape, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    const size_t target_chunk =
+        ConnectionAdaptiveTestAccess::targetProfileChunkBytes(
+            shape, Modulation::QAM8, CodeRate::R2_3);
+    const size_t target_group =
+        ConnectionAdaptiveTestAccess::targetProfileBurstFrames(
+            shape, Modulation::QAM8, CodeRate::R2_3,
+            kPostAckCleanStreak);
+    CHECK(target_chunk > 0 && target_group >= 2,
+          "8PSK target geometry must expose a real multi-frame burst boundary");
+
+    // N-1 target frames are a different, shorter counterfactual than the full-cycle
+    // geometry the latent argmax priced.  HOLD must emit neither descriptor DATA nor
+    // a legacy MODE_CHANGE, and it must remain re-evaluable (no authority dedup latch).
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection short_tail;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    int short_controls = 0;
+    int short_bursts = 0;
+    short_tail.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) ++short_controls;
+    });
+    short_tail.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) { ++short_bursts; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        short_tail, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setBurstCleanGroupStreak(
+        short_tail, kPreAckCleanStreak);
+    TempPayloadFile short_payload(
+        "authority_short_tail", target_chunk * (target_group - 1));
+    ConnectionAdaptiveTestAccess::startFile(short_tail, short_payload.path);
+    CHECK(ConnectionAdaptiveTestAccess::retireFileMetadata(short_tail),
+          "short-tail fixture must retire FILE_START before pricing DATA frames");
+    CHECK(!ConnectionAdaptiveTestAccess::authorityClimbHasSufficientPayload(
+              short_tail, Modulation::QAM8, CodeRate::R2_3,
+              kPostAckCleanStreak),
+          "N-1 prospective target frames must fail the full-group price invariant");
+    ConnectionAdaptiveTestAccess::obeyAuthorityAtCleanAckBoundary(
+        short_tail, psk8_r23);
+    CHECK(short_tail.getDataModulation() == Modulation::QPSK &&
+              !ConnectionAdaptiveTestAccess::modeChangePending(short_tail) &&
+              short_tail.getStats().descriptor_mode_switches == 0 &&
+              short_controls == 0 && short_bursts == 1 &&
+              ConnectionAdaptiveTestAccess::txAuthorityLastObeyed(short_tail) !=
+                  psk8_r23,
+          "short-tail UP hold must avoid switch egress/dedup while normal current-rung "
+          "refill continues");
+
+    // Exactly one complete target group still permits the normal descriptor climb.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection full_group;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    int full_group_bursts = 0;
+    size_t full_group_burst_size = 0;
+    full_group.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            ++full_group_bursts;
+            full_group_burst_size = frames.size();
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        full_group, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setBurstCleanGroupStreak(
+        full_group, kPreAckCleanStreak);
+    TempPayloadFile full_payload(
+        "authority_full_group", target_chunk * target_group);
+    ConnectionAdaptiveTestAccess::startFile(full_group, full_payload.path);
+    CHECK(ConnectionAdaptiveTestAccess::retireFileMetadata(full_group),
+          "full-group fixture must retire FILE_START before pricing DATA frames");
+    CHECK(ConnectionAdaptiveTestAccess::authorityClimbHasSufficientPayload(
+              full_group, Modulation::QAM8, CodeRate::R2_3,
+              kPostAckCleanStreak),
+          "N prospective target frames must meet the full-group price invariant");
+    ConnectionAdaptiveTestAccess::obeyAuthorityAtCleanAckBoundary(
+        full_group, psk8_r23);
+    CHECK(full_group.getDataModulation() == Modulation::QAM8 &&
+              !ConnectionAdaptiveTestAccess::modeChangePending(full_group) &&
+              full_group.getStats().descriptor_mode_switches == 1 &&
+              full_group_bursts == 1 &&
+              full_group_burst_size == target_group &&
+              ConnectionAdaptiveTestAccess::txAuthorityLastObeyed(full_group) ==
+                  psk8_r23,
+          "a complete mid-file target group must climb and emit the exact physical "
+          "group that was priced");
+
+    // The hold sits before both commit transports.  Descriptor-disabled operation
+    // must not reinterpret tryDescriptorModeSwitch(false) as permission to pay a
+    // legacy MODE_CHANGE for the same unprofitable tail.
+    Connection legacy_tail;
+    int legacy_controls = 0;
+    legacy_tail.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) ++legacy_controls;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        legacy_tail, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setBurstCleanGroupStreak(
+        legacy_tail, kPreAckCleanStreak);
+    TempPayloadFile legacy_payload(
+        "authority_legacy_tail", target_chunk * (target_group - 1));
+    ConnectionAdaptiveTestAccess::startFile(legacy_tail, legacy_payload.path);
+    CHECK(ConnectionAdaptiveTestAccess::retireFileMetadata(legacy_tail),
+          "legacy-tail fixture must retire FILE_START before pricing DATA frames");
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(
+        legacy_tail, psk8_r23, /*accepted_clean_round=*/true);
+    CHECK(legacy_tail.getDataModulation() == Modulation::QPSK &&
+              !ConnectionAdaptiveTestAccess::modeChangePending(legacy_tail) &&
+              legacy_controls == 0,
+          "descriptor-disabled short-tail hold must not fall through to MODE_CHANGE");
+
+    // Reliability is asymmetric: a DOWN command may be the only way to recover a
+    // failed FINAL-bearing member, so even a one-frame tail must bypass the UP-only
+    // economic guard and enter the synchronized fallback when no descriptor can ride.
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
+    Connection down_tail;
+    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
+    int down_controls = 0;
+    down_tail.setTransmitCallback([&](const Bytes& b) {
+        const auto h = v2::parseHeader(b);
+        if (h.valid && h.is_control) ++down_controls;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        down_tail, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM8);
+    TempPayloadFile down_payload("authority_down_tail", 64);
+    ConnectionAdaptiveTestAccess::startFile(down_tail, down_payload.path);
+    CHECK(ConnectionAdaptiveTestAccess::retireFileMetadata(down_tail),
+          "down-tail fixture must retire FILE_START before its one-frame DATA tail");
+    ConnectionAdaptiveTestAccess::maybeObeyAuthorityCommand(down_tail, qpsk_r23);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(down_tail) &&
+              down_tail.getDataModulation() == Modulation::QAM8 &&
+              down_controls == 1,
+          "short-tail reliability demotion must bypass the climb price guard");
+}
+
+void test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry() {
+    Connection committed;
+    int committed_bursts = 0;
+    int committed_standalone = 0;
+    int committed_ack_arms = 0;
+    std::vector<Bytes> committed_frames;
+    committed.setTransmitCallback(
+        [&](const Bytes& frame) {
+            ++committed_standalone;
+            committed_frames.push_back(frame);
+        });
+    committed.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) {
+            ++committed_bursts;
+        });
+    committed.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t) { ++committed_ack_arms; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        committed, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(committed);
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(committed, 3);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              committed, Bytes{0x31}, v2::Flags::FINAL),
+          "commit fixture should seed one live DATA identity");
+    CHECK(committed_standalone == 1,
+          "initial DATA should leave through the standalone callback");
+    // Re-arm the exact identity to a deterministic one-tick deadline, then discard
+    // initial-egress observations so only the timeout transaction is measured.
+    const Bytes committed_identity = committed_frames.front();
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              committed, {committed_identity}, 1) == 1,
+          "commit fixture should rearm the exact serialized identity");
+    committed_bursts = 0;
+    committed_standalone = 0;
+    committed_ack_arms = 0;
+    committed_frames.clear();
+    committed.tick(1);
+    CHECK(ConnectionAdaptiveTestAccess::stagedArqTimeoutFrames(committed) == 0 &&
+              committed_bursts == 0 && committed_standalone == 1 &&
+              committed_ack_arms == 1,
+          "unchanged geometry should commit exactly one singleton timeout egress");
+    CHECK(committed.getStats().arq.timeouts == 1 &&
+              committed.getStats().arq.retransmissions_timeout == 1 &&
+              ConnectionAdaptiveTestAccess::arqMaxInFlightRetryCount(committed) == 1,
+          "committed timeout egress must consume exactly one retry transaction");
+
+    Connection obsolete;
+    int obsolete_physical_tx = 0;
+    int obsolete_ack_arms = 0;
+    std::vector<Bytes> obsolete_frames;
+    obsolete.setTransmitCallback(
+        [&](const Bytes& frame) {
+            ++obsolete_physical_tx;
+            obsolete_frames.push_back(frame);
+        });
+    obsolete.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>&, uint16_t, uint8_t) {
+            ++obsolete_physical_tx;
+        });
+    obsolete.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t) { ++obsolete_ack_arms; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        obsolete, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(obsolete);
+    // max_retries=1 is the sharp edge: the old pre-transaction implementation
+    // terminal-failed inside ARQ::tick before Connection could discard the batch.
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(obsolete, 1);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              obsolete, Bytes{0x41}, v2::Flags::FINAL),
+          "obsolete fixture should seed one live DATA identity");
+    const Bytes obsolete_identity = obsolete_frames.front();
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              obsolete, {obsolete_identity}, 1) == 1,
+          "obsolete fixture should rearm the exact serialized identity");
+    obsolete_physical_tx = 0;
+    obsolete_ack_arms = 0;
+    obsolete_frames.clear();
+    ConnectionAdaptiveTestAccess::markModeChangePending(obsolete);
+    obsolete.tick(1);
+    CHECK(ConnectionAdaptiveTestAccess::stagedArqTimeoutFrames(obsolete) == 0,
+          "obsolete staged batch should be consumed by the discard path");
+    CHECK(obsolete_physical_tx == 0 && obsolete_ack_arms == 0,
+          "mode/geometry transition must discard old-rung timeout egress completely");
+    CHECK(obsolete.getStats().arq.timeouts == 1 &&
+              obsolete.getStats().arq.retransmissions == 0 &&
+              obsolete.getStats().arq.failed == 0 &&
+              ConnectionAdaptiveTestAccess::arqMaxInFlightRetryCount(obsolete) == 0 &&
+              ConnectionAdaptiveTestAccess::arqInFlightBytes(obsolete) > 0,
+          "discard must preserve retry budget and cannot terminal-fail a live identity");
+
+    // The canceled intent is transition-suspended, not merely reset to another scalar
+    // RTO: a long tick inside the same MODE_CHANGE must remain completely inert.
+    obsolete.tick(1000);
+    CHECK(obsolete_physical_tx == 0 && obsolete_ack_arms == 0 &&
+              obsolete.getStats().arq.timeouts == 1 &&
+              obsolete.getStats().arq.retransmissions == 0 &&
+              obsolete.getStats().arq.failed == 0,
+          "pending MODE_CHANGE must not repeatedly regenerate or consume canceled intents");
+}
+
+void test_arq_control_feedback_does_not_arm_data_ack_monitor() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<uint32_t> ack_monitor_windows;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { ack_monitor_windows.push_back(window_ms); });
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    // Exercise the ARQ's serialized-control callback rather than calling
+    // Connection::transmitFrame() directly. Connection has installed its protocol-side
+    // tone callback, but this fixture deliberately has no physical tone-TX callback.
+    // It must therefore retain the legacy plane: explicit frame NACK plus cumulative
+    // SACK. Neither control frame may replace/extend the sender's DATA listen window.
+    auto final_out_of_order = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 1, Bytes{0x42}, CodeRate::R2_3);
+    final_out_of_order.flags |= v2::Flags::FINAL;
+    c.onFrameReceived(final_out_of_order.serialize());
+
+    CHECK(transmitted.size() == 2,
+          "legacy final-gap feedback should emit explicit NACK plus cumulative SACK");
+    for (const auto& frame : transmitted) {
+        const auto header = v2::parseHeader(frame);
+        CHECK(header.valid && header.is_control,
+              "legacy final-gap feedback must consist only of control frames");
+    }
+    CHECK(ack_monitor_windows.empty(),
+          "ARQ control feedback must not arm the DATA tone-ACK monitor");
+}
+
+void test_data_ack_monitor_arms_before_synchronous_transport_callback() {
+    Connection c;
+    std::vector<std::string> callback_order;
+    std::vector<uint32_t> ack_monitor_windows;
+    bool synchronous_ack_consumed = false;
+    size_t data_tx_count = 0;
+
+    c.setArmToneBurstAckMonitorCallback([&](uint32_t window_ms) {
+        callback_order.push_back("arm");
+        ack_monitor_windows.push_back(window_ms);
+    });
+    c.setTransmitCallback([&](const Bytes& frame) {
+        const auto data = v2::DataFrame::deserialize(frame);
+        if (!data) return;
+        ++data_tx_count;
+        callback_order.push_back("tx");
+
+        ToneBurstAckDetection ack;
+        ack.payload.group_seq = static_cast<uint8_t>(data->seq & 0x3F);
+        ack.payload.frame_mask = 0;
+        ack.payload.rate_hint = 7;
+        ack.payload.type = AckType::Ack;
+        ack.payload.move_epoch = 0;
+        ack.payload.rung_cmd = kRungCmdNone;
+        synchronous_ack_consumed = c.onToneBurstAck(ack);
+    });
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              c, Bytes{0x51, 0x52}, v2::Flags::FINAL),
+          "standalone DATA should enter the ARQ sender");
+    CHECK(data_tx_count == 1 && synchronous_ack_consumed,
+          "transport callback should synchronously loop one valid tone ACK");
+    CHECK(callback_order.size() == 2 && callback_order[0] == "arm" &&
+              callback_order[1] == "tx",
+          "DATA ACK monitor must arm before handing DATA to a synchronous transport");
+    CHECK(ack_monitor_windows.size() == 1,
+          "synchronous ACK must not leave a second stale monitor arm after transport returns");
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "synchronous cumulative ACK should retire the transmitted DATA identity");
+}
+
+void test_variable_cw_single_frame_uses_advertised_physical_geometry() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<uint32_t> ack_monitor_windows;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { ack_monitor_windows.push_back(window_ms); });
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    // The single-block file path deliberately bypasses fixed-frame chunking. Force
+    // the burst policy to z=81 as an adversarial check: a standalone frame still
+    // physically goes through ModemEngine::transmit(), which resets it to z=27.
+    // The raw override is now intentionally neutered at the Connection boundary
+    // too, because a singleton has no BURST_HEADER in which to announce Z=81.
+    setenv("ULTRA_LDPC_Z", "81", 1);
+    CHECK(c.selectBurstLiftingZ() == 27,
+          "raw ULTRA_LDPC_Z must not create unannounced singleton Z=81 traffic");
+    const bool submitted = ConnectionAdaptiveTestAccess::sendVariableData(
+        c, Bytes(2300, 0x5A), v2::Flags::FINAL);
+    const Bytes serialized = transmitted.empty() ? Bytes{} : transmitted.front();
+    const auto header = v2::parseHeader(serialized);
+    const uint32_t exact_timeout =
+        ConnectionAdaptiveTestAccess::physicalRoundTimeout(c, transmitted);
+    const uint32_t exact_airtime =
+        ConnectionAdaptiveTestAccess::physicalRoundAirtime(c, transmitted);
+    const auto short_timing = connection_policy::wideOFDMFrameTimingForCodewords(
+        Modulation::QPSK, CodeRate::R2_3, header.total_cw, 27);
+    const auto wrong_long_timing = connection_policy::wideOFDMFrameTimingForCodewords(
+        Modulation::QPSK, CodeRate::R2_3, header.total_cw, 81);
+    unsetenv("ULTRA_LDPC_Z");
+    const uint32_t fixed_timeout =
+        ConnectionAdaptiveTestAccess::unifiedBurstTimeout(c, 1);
+
+    CHECK(submitted, "large variable DATA should enter the ARQ sender");
+    CHECK(transmitted.size() == 1,
+          "variable DATA should produce exactly one physical frame");
+    CHECK(header.valid && header.type == v2::FrameType::DATA &&
+              header.total_cw > v2::kMaxFixedFrameCodewords,
+          "fixture must advertise a variable total_cw above the fixed ceiling");
+    CHECK(header.total_cw == 45,
+          "2300-byte R2/3 variable frame should serialize to exactly 45 CW");
+    CHECK(short_timing.data_symbols == 288 && short_timing.data_ms == 6912,
+          "45-CW QPSK R2/3 z27 wire geometry should be 288 symbols / 6912 ms");
+    CHECK(exact_airtime == short_timing.data_ms +
+                               connection_policy::kWideOFDMFullAnchorExtraMs,
+          "singleton airtime must be 45 short CW plus its full 1.2-second anchor");
+    CHECK(exact_airtime == 8112,
+          "45-CW variable singleton should occupy exactly 8112 ms including anchor");
+    CHECK(exact_airtime < wrong_long_timing.data_ms,
+          "standalone variable DATA must remain z=27 even when burst policy forces z=81");
+    CHECK(exact_timeout > fixed_timeout,
+          "variable frame RTO must exceed the stale fixed-frame RTO");
+    CHECK(ack_monitor_windows.size() == 1 &&
+              ack_monitor_windows.front() == std::max<uint32_t>(8000u, exact_timeout),
+          "tone ACK monitor must use the same exact variable-frame geometry");
+
+    // Prove the ARQ slot itself was rearmed from that geometry: the old fixed timeout
+    // must not launch an overlapping resend while the long frame/response is in flight.
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(fixed_timeout);
+    CHECK(transmitted.size() == 1 && c.getStats().arq.timeouts == 0,
+          "variable DATA must not retry at the configured fixed-frame deadline");
+    c.tick(exact_timeout - fixed_timeout - 1);
+    CHECK(transmitted.size() == 1 && c.getStats().arq.timeouts == 0,
+          "variable DATA must remain live until its exact physical deadline");
+    c.tick(1);
+    CHECK(transmitted.size() == 2 && c.getStats().arq.timeouts == 1,
+          "variable DATA should retry exactly at its physical deadline");
+}
+
+void test_narrow_ofdm_keeps_its_waveform_specific_timeout() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<uint32_t> ack_monitor_windows;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { ack_monitor_windows.push_back(window_ms); });
+    ConnectionAdaptiveTestAccess::makeConnectedNarrowOFDM(c);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const uint32_t narrow_timeout =
+        ConnectionAdaptiveTestAccess::arqAckTimeout(c);
+    // This is the erroneous deadline the wide-only exact-round path used to install.
+    const uint32_t wrong_wide_timeout =
+        ConnectionAdaptiveTestAccess::unifiedBurstTimeout(c, 1);
+    CHECK(wrong_wide_timeout < narrow_timeout,
+          "fixture must expose the premature wide-vs-narrow timeout gap");
+
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              c, Bytes{0x4E, 0x42}, v2::Flags::FINAL),
+          "narrow DATA should enter the ARQ sender");
+    CHECK(transmitted.size() == 1,
+          "narrow singleton should produce one physical frame");
+    CHECK(ConnectionAdaptiveTestAccess::physicalRoundTimeout(c, transmitted) == 0,
+          "wide physical-round timing must be out of scope for OFDM_NARROW");
+    CHECK(ack_monitor_windows.size() == 1 &&
+              ack_monitor_windows.front() ==
+                  std::max<uint32_t>(8000u, narrow_timeout),
+          "narrow singleton monitor must retain the narrow policy timeout");
+
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(wrong_wide_timeout);
+    CHECK(transmitted.size() == 1 && c.getStats().arq.timeouts == 0,
+          "narrow DATA must not retry at the shorter wide-only deadline");
+    c.tick(narrow_timeout - wrong_wide_timeout - 1);
+    CHECK(transmitted.size() == 1 && c.getStats().arq.timeouts == 0,
+          "narrow DATA must remain live until its waveform-specific deadline");
+    c.tick(1);
+    CHECK(transmitted.size() == 2 && c.getStats().arq.timeouts == 1,
+          "narrow DATA should retry exactly at its own policy deadline");
+}
+
+void test_mcdpsk_data_arms_one_waveform_specific_monitor_per_physical_turn() {
+    Connection grouped;
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<uint32_t> grouped_monitor_windows;
+    grouped.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    grouped.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { grouped_monitor_windows.push_back(window_ms); });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(grouped);
+    const uint32_t grouped_timeout =
+        ConnectionAdaptiveTestAccess::arqAckTimeout(grouped);
+
+    TempPayloadFile payload("mcdpsk_group_monitor", 64);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "MC-DPSK monitor fixture should be created");
+    CHECK(grouped.sendFile(payload.path),
+          "MC-DPSK file should enter the grouped sender");
+    CHECK(bursts.size() == 1 && bursts.front().size() >= 2,
+          "MC-DPSK fixture should emit one multi-frame physical group");
+    CHECK(grouped_monitor_windows.size() == 1 &&
+              grouped_monitor_windows.front() ==
+                  std::max<uint32_t>(8000u, grouped_timeout),
+          "MC-DPSK group must arm exactly once for its waveform-specific RTT");
+
+    Connection singleton;
+    std::vector<Bytes> standalone;
+    std::vector<uint32_t> singleton_monitor_windows;
+    singleton.setTransmitCallback(
+        [&](const Bytes& frame) { standalone.push_back(frame); });
+    singleton.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { singleton_monitor_windows.push_back(window_ms); });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(singleton);
+    const uint32_t singleton_timeout =
+        ConnectionAdaptiveTestAccess::arqAckTimeout(singleton);
+    CHECK(ConnectionAdaptiveTestAccess::sendVariableData(
+              singleton, Bytes{0x4D, 0x43}, v2::Flags::FINAL),
+          "MC-DPSK singleton DATA should enter the ARQ sender");
+    CHECK(standalone.size() == 1 && singleton_monitor_windows.size() == 1,
+          "MC-DPSK singleton should transmit and arm exactly once");
+    CHECK(singleton_monitor_windows.front() ==
+              std::max<uint32_t>(8000u, singleton_timeout),
+          "MC-DPSK singleton monitor must retain the waveform-specific RTT");
+}
+
+void test_synchronous_burst_ack_cannot_overwrite_outer_committed_frames() {
+    Connection c;
+    std::vector<Bytes> nested_standalone_frames;
+    size_t outer_size_before_ack = 0;
+    size_t outer_size_after_ack = 0;
+    int burst_callback_count = 0;
+
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { nested_standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            ++burst_callback_count;
+            if (burst_callback_count != 1) {
+                return;
+            }
+            outer_size_before_ack = frames.size();
+
+            ToneBurstAckDetection complete_ack;
+            complete_ack.payload.group_seq = static_cast<uint8_t>(
+                (frames.size() - 1) & 0x3F);
+            complete_ack.payload.frame_mask = 0;
+            complete_ack.payload.rate_hint = 7;
+            complete_ack.payload.type = AckType::Ack;
+            complete_ack.payload.move_epoch = 0;
+            complete_ack.payload.rung_cmd = kRungCmdNone;
+            ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+            CHECK(c.onToneBurstAck(complete_ack),
+                  "synchronous burst callback ACK should be consumed");
+            outer_size_after_ack = frames.size();
+        });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 2 && capacity > 0,
+          "fixture needs a full group plus one nested-refill frame");
+    CHECK(c.sendMessage(std::string((frame_count + 1) * capacity, 'r')),
+          "message should enter the synchronous burst transport");
+
+    CHECK(burst_callback_count == 1,
+          "first physical turn should use one multi-frame burst callback");
+    CHECK(outer_size_before_ack == frame_count &&
+              outer_size_after_ack == frame_count,
+          "nested ACK/refill must not clear or overwrite the outer committed vector");
+    CHECK(nested_standalone_frames.size() == 1,
+          "synchronous ACK should refill the one-frame message tail exactly once");
+    auto nested_tail = v2::DataFrame::deserialize(nested_standalone_frames[0]);
+    CHECK(nested_tail && nested_tail->seq == frame_count,
+          "nested refill should carry the next logical sequence identity");
+}
+
+void test_ack_revealed_hole_refill_uses_resend_anchor() {
+    Connection c;
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<uint8_t> anchor_reasons;
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t anchor_reason) {
+            bursts.push_back(frames);
+            anchor_reasons.push_back(anchor_reason);
+        });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 3 && frame_count <= 16 && capacity > 0,
+          "fixture needs two repair holes plus a queued tail member");
+    CHECK(c.sendMessage(std::string((frame_count + 1) * capacity, 'a')),
+          "fragmented message should enter the unified sender");
+    CHECK(bursts.size() == 1 && bursts.front().size() == frame_count,
+          "initial turn should fill one normal burst");
+    CHECK(anchor_reasons.front() == Connection::kAnchorReasonNone,
+          "a first-attempt burst should retain its normal anchor policy");
+
+    // Keep seq 0 and 1 as holes while positively SACKing the rest.  The next
+    // physical turn coalesces those two repairs with the queued tail, so it is a
+    // multi-frame burst rather than the standalone-singleton special case.
+    ToneBurstAckDetection partial_ack;
+    partial_ack.payload.group_seq = 0x3F;
+    partial_ack.payload.frame_mask = static_cast<uint16_t>(
+        ((1u << frame_count) - 1u) & ~0x3u);
+    partial_ack.payload.rate_hint = 7;
+    partial_ack.payload.type = AckType::Ack;
+    partial_ack.payload.move_epoch = 0;
+    partial_ack.payload.rung_cmd = kRungCmdNone;
+
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(partial_ack),
+          "partial tone SACK should be accepted as a fresh turn boundary");
+    CHECK(bursts.size() == 2 && bursts.back().size() >= 3,
+          "repair turn should coalesce both holes with queued new data");
+    CHECK(anchor_reasons.back() == Connection::kAnchorReasonResend,
+          "ACK-revealed hole refill must force the same full anchor as an RTO resend");
+}
+
+void test_fragment_tail_hole_repairs_immediately_and_uses_one_frame_rto() {
+    Connection c;
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<bool> message_results;
+    std::vector<uint32_t> ack_monitor_windows;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { message_results.push_back(success); });
+    c.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { ack_monitor_windows.push_back(window_ms); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const size_t frame_count =
+        ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity =
+        ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 2 && frame_count <= 16,
+          "fixture needs one multi-frame group addressable by the tone bitmap");
+    CHECK(capacity > 0, "fixture needs a nonzero fixed-frame payload capacity");
+
+    const uint32_t full_round_timeout =
+        ConnectionAdaptiveTestAccess::unifiedBurstTimeout(c, frame_count);
+    const uint32_t one_frame_timeout =
+        ConnectionAdaptiveTestAccess::unifiedBurstTimeout(c, 1);
+    CHECK(one_frame_timeout < full_round_timeout,
+          "one-frame repair deadline must be shorter than the full group deadline");
+
+    CHECK(c.sendMessage(std::string(frame_count * capacity, 'x')),
+          "fragmented message should enter the unified sender");
+    CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
+          "message should leave as one exact budget-sized initial group");
+    CHECK(standalone_frames.empty(),
+          "initial multi-frame message must not leak standalone DATA");
+    CHECK(ack_monitor_windows.size() == 1 &&
+              ack_monitor_windows[0] == full_round_timeout,
+          "initial group should arm one exact full-round monitor window");
+
+    for (size_t i = 0; i < frame_count; ++i) {
+        auto frame = v2::DataFrame::deserialize(bursts[0][i]);
+        CHECK(frame && frame->seq == i,
+              "initial group should carry contiguous seq identities");
+    }
+
+    // Receiver has every frame except seq0. base remains -1 and bits 1..N-1 are
+    // positive SACK evidence. This is the message equivalent of the rig's file tail.
+    ToneBurstAckDetection hole_ack;
+    hole_ack.payload.group_seq = 0x3F;
+    hole_ack.payload.frame_mask = static_cast<uint16_t>(
+        ((1u << frame_count) - 1u) & ~1u);
+    hole_ack.payload.rate_hint = 7;
+    hole_ack.payload.type = AckType::Ack;
+    hole_ack.payload.move_epoch = 0;
+    hole_ack.payload.rung_cmd = kRungCmdNone;
+
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(hole_ack), "fresh tail-hole tone SACK should be consumed");
+    CHECK(standalone_frames.size() == 1,
+          "tail hole should trigger one immediate standalone repair");
+    auto repair = v2::DataFrame::deserialize(standalone_frames.back());
+    CHECK(repair && repair->seq == 0,
+          "immediate repair must carry only the missing base frame");
+    CHECK(c.getStats().arq.retransmissions_nack == 1,
+          "tone turn should account exactly one NACK-driven repair");
+    CHECK(c.getStats().arq.timeouts == 0,
+          "immediate tail repair must not wait for an RTO");
+    const uint32_t one_frame_monitor_window =
+        std::max<uint32_t>(8000u, one_frame_timeout);
+    CHECK(ack_monitor_windows.size() == 2 &&
+              ack_monitor_windows[1] == one_frame_monitor_window,
+          "immediate repair should replace the monitor with one-frame geometry");
+
+    // An immediate repeated copy is the same ACK event, not a new transmit turn.
+    CHECK(c.onToneBurstAck(hole_ack), "duplicate tone SACK should be consumed");
+    CHECK(standalone_frames.size() == 1 &&
+              c.getStats().arq.retransmissions_nack == 1,
+          "duplicate tone SACK must not launch a duplicate repair");
+    CHECK(ack_monitor_windows.size() == 2,
+          "duplicate tone SACK must not rearm the ACK monitor");
+
+    // If that repair's ACK is lost, prove the committed slot timer is the one-frame
+    // physical deadline rather than the initial cap/full-group deadline.
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(one_frame_timeout - 1);
+    CHECK(c.getStats().arq.timeouts == 0 && standalone_frames.size() == 1,
+          "repair must not time out before its exact one-frame deadline");
+    c.tick(1);
+    CHECK(c.getStats().arq.timeouts == 1 && standalone_frames.size() == 2,
+          "lost repair ACK should retry exactly at the one-frame deadline");
+    CHECK(ack_monitor_windows.size() == 3 &&
+              ack_monitor_windows[2] == one_frame_monitor_window,
+          "one-frame RTO repair should exact-rearm the same short monitor window");
+
+    ToneBurstAckDetection complete_ack;
+    complete_ack.payload.group_seq =
+        static_cast<uint8_t>((frame_count - 1) & 0x3F);
+    complete_ack.payload.frame_mask = 0;
+    complete_ack.payload.rate_hint = 7;
+    complete_ack.payload.type = AckType::Ack;
+    complete_ack.payload.move_epoch = 0;
+    complete_ack.payload.rung_cmd = kRungCmdNone;
+    CHECK(c.onToneBurstAck(complete_ack),
+          "final cumulative tone ACK should complete the message");
+    CHECK(message_results.size() == 1 && message_results[0],
+          "fragmented message should report one successful completion");
+    CHECK(!ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "message state should clear after final cumulative ACK");
+}
+
+void test_file_tail_identical_keepalive_sack_retries_hole() {
+    Connection c;
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<uint32_t> ack_monitor_windows;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setArmToneBurstAckMonitorCallback(
+        [&](uint32_t window_ms) { ack_monitor_windows.push_back(window_ms); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    // Fading=0.30 keeps this off the near-AWGN single-block shortcut. A tiny file
+    // produces FILE_START + final FILE_DATA in one initial fixed-frame turn, leaving
+    // no unsent chunks to hide whether the tail-hole repair was duplicated.
+    TempPayloadFile payload("identical_keepalive_file_tail_sack", 64);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "file-tail fixture should be created");
+    CHECK(c.sendFile(payload.path), "file-tail fixture should enter the sender");
+    CHECK(bursts.size() == 1 && bursts.front().size() >= 2 &&
+              bursts.front().size() <= 16,
+          "tiny file should emit one tone-addressable multi-frame turn");
+    CHECK(standalone_frames.empty(),
+          "initial tiny-file turn should not leak standalone DATA");
+
+    const size_t frame_count = bursts.front().size();
+    ToneBurstAckDetection hole_ack;
+    hole_ack.payload.group_seq = 0x3F;
+    hole_ack.payload.frame_mask = static_cast<uint16_t>(
+        ((1u << frame_count) - 1u) & ~1u);
+    hole_ack.payload.rate_hint = 7;
+    hole_ack.payload.type = AckType::Ack;
+    hole_ack.payload.move_epoch = 0;
+    hole_ack.payload.rung_cmd = kRungCmdNone;
+
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(hole_ack), "fresh file-tail hole SACK should be consumed");
+    CHECK(standalone_frames.size() == 1,
+          "fresh file-tail hole SACK should emit exactly one singleton repair");
+    auto repair = v2::DataFrame::deserialize(standalone_frames.back());
+    CHECK(repair && repair->seq == 0,
+          "file-tail singleton repair must carry only the missing base identity");
+    CHECK(c.getStats().arq.retransmissions_nack == 1,
+          "fresh file-tail turn should account one NACK-driven repair");
+    CHECK(ack_monitor_windows.size() == 2,
+          "initial file turn plus singleton repair should arm two monitor windows");
+
+    // Model the receiver's keepalive response after that repair/ACK exchange was lost.
+    // Its cumulative payload is necessarily identical, so ARQ reports no new SACK
+    // progress.  It is nevertheless a fresh physical turn and must wake the hole before
+    // the long RTO.  The real ToneBurstAckMonitor permits one detection per arm; direct
+    // Connection calls here intentionally model detections from two successive arms.
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(hole_ack),
+          "identical keepalive file-tail SACK should be consumed");
+    CHECK(bursts.size() == 1 && standalone_frames.size() == 2,
+          "identical keepalive SACK should emit one new singleton repair turn");
+    auto keepalive_repair = v2::DataFrame::deserialize(standalone_frames.back());
+    CHECK(keepalive_repair && keepalive_repair->seq == 0,
+          "keepalive-triggered repair must retain the missing base identity");
+    CHECK(c.getStats().arq.retransmissions_nack == 2,
+          "keepalive-triggered repair should be accounted as a second NACK resend");
+    CHECK(ack_monitor_windows.size() == 3,
+          "keepalive-triggered repair should replace the monitor for its new turn");
+}
+
+void test_terminal_tail_failure_aborts_suspended_window_and_rebases_next_payload() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<bool> message_results;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { message_results.push_back(success); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+    CHECK(ConnectionAdaptiveTestAccess::arqMoveEpochEnabled(c),
+          "fixture requires move-epoch continuation safety");
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 3 && capacity > 0,
+          "fixture needs a multi-frame physical round");
+    CHECK(c.sendMessage(std::string(frame_count * capacity, 't')),
+          "fragmented message should enter the sender");
+    CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
+          "fixture should emit one complete initial burst");
+
+    // Model a cap-shrunk tail round where only seq0..1 actually went on air. Exact
+    // physical re-arming must suspend every other live hole until this round ends.
+    // Both current identities share the same deadline: the first terminal failure
+    // must stop the scan before seq1 produces a second callback/failure.
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              c, std::vector<Bytes>{bursts[0][0], bursts[0][1]}, 100) == 2,
+          "two exact tail identities should be re-armed");
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 1);
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(100);
+
+    CHECK(message_results.size() == 1 && !message_results[0],
+          "terminal tail failure should report one logical message failure");
+    CHECK(c.getStats().arq.failed == 1,
+          "one timeout scan must stop after its first terminal frame failure");
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "terminal failure must abort all suspended residual holes");
+    CHECK(bursts.size() == 1 && standalone_frames.empty(),
+          "failure unwind must not key a doomed residual retry batch");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 1,
+          "terminal abandonment must force a fresh move epoch");
+
+    CHECK(c.sendMessage("after-failure"),
+          "a later operator payload should be accepted after the atomic abort");
+    CHECK(standalone_frames.size() == 1,
+          "later payload should leave on a clean standalone physical round");
+    auto recovery = v2::DataFrame::deserialize(standalone_frames.back());
+    CHECK(recovery && v2::epochFromFlags(recovery->flags) == 1 &&
+              (recovery->flags & v2::Flags::EPOCH_REBASE) != 0,
+          "first post-failure DATA must carry the new epoch rebase anchor");
+}
+
+void test_turn_refill_terminal_failure_discards_open_burst() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<bool> message_results;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { message_results.push_back(success); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 2 && capacity > 0,
+          "fixture needs multiple turn-refill holes");
+    CHECK(c.sendMessage(std::string(frame_count * capacity, 'u')),
+          "fragmented message should emit its initial group");
+    CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
+          "fixture should start with exactly one physical group");
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 1);
+
+    ToneBurstAckDetection no_progress_ack;
+    no_progress_ack.payload.group_seq = 0x3F;  // cumulative base = -1
+    no_progress_ack.payload.frame_mask = 0;    // every original frame is a hole
+    no_progress_ack.payload.rate_hint = 7;
+    no_progress_ack.payload.type = AckType::Ack;
+    no_progress_ack.payload.move_epoch = 0;
+    no_progress_ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(no_progress_ack),
+          "fresh no-progress tone ACK should drive the turn refill");
+
+    CHECK(message_results.size() == 1 && !message_results[0],
+          "turn-driven max-retry failure should report once");
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "turn-driven failure should atomically drain every remaining hole");
+    CHECK(bursts.size() == 1 && standalone_frames.empty(),
+          "an open refill burst must be discarded instead of transmitted after failure");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 1,
+          "turn-driven terminal failure must force the next sequence era");
+}
+
+void test_terminal_base_hole_with_sacked_suffix_reports_once_and_reentrant_send_rebases() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<bool> legacy_results;
+    std::vector<Connection::MessageTxStatusEvent> status_events;
+    bool recovery_started = false;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { legacy_results.push_back(success); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            status_events.push_back(event);
+            if (event.status == Connection::MessageTxStatus::FAILED &&
+                event.text != "callback-recovery") {
+                // This deliberately mutates outbound message tracking from inside the
+                // public FAILED callback. It is safe only if the old record was erased
+                // and the forced epoch abort completed before callback publication.
+                recovery_started = c.sendMessage("callback-recovery");
+            }
+        });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(frame_count >= 2 && frame_count <= 16 && capacity > 0,
+          "fixture needs a tone-addressable multi-frame tail");
+    CHECK(c.sendMessage(std::string(frame_count * capacity, 's')),
+          "fragmented original message should enter the sender");
+    CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
+          "original message should emit one full group");
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 1);
+
+    // Exact live-rig tail shape: base seq0 is missing while every later tail frame
+    // is already SACKed. The seq0 turn-repair reaches max retries; advanceTXWindow
+    // then walks the SACKed suffix, which must NOT publish false successes.
+    ToneBurstAckDetection tail_hole_ack;
+    tail_hole_ack.payload.group_seq = 0x3F;
+    tail_hole_ack.payload.frame_mask = static_cast<uint16_t>(
+        ((1u << frame_count) - 1u) & ~1u);
+    tail_hole_ack.payload.rate_hint = 7;
+    tail_hole_ack.payload.type = AckType::Ack;
+    tail_hole_ack.payload.move_epoch = 0;
+    tail_hole_ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(tail_hole_ack),
+          "fresh SACKed-suffix tail ACK should be consumed");
+
+    CHECK(legacy_results.size() == 1 && !legacy_results[0],
+          "base failure plus SACKed suffix must publish one failure and zero successes");
+    size_t original_failed = 0;
+    size_t original_delivered = 0;
+    for (const auto& event : status_events) {
+        if (event.text == std::string(frame_count * capacity, 's')) {
+            original_failed +=
+                event.status == Connection::MessageTxStatus::FAILED ? 1 : 0;
+            original_delivered +=
+                event.status == Connection::MessageTxStatus::DELIVERED ? 1 : 0;
+        }
+    }
+    CHECK(original_failed == 1 && original_delivered == 0,
+          "original message status must be exactly FAILED, never DELIVERED");
+    CHECK(c.getStats().arq.failed == 1,
+          "SACKed suffix retirement must not create additional frame failures");
+    CHECK(recovery_started && standalone_frames.size() == 1,
+          "FAILED callback should safely submit one replacement message post-abort");
+    auto recovery = v2::DataFrame::deserialize(standalone_frames.back());
+    CHECK(recovery && v2::epochFromFlags(recovery->flags) == 1 &&
+              (recovery->flags & v2::Flags::EPOCH_REBASE) != 0,
+          "reentrant replacement DATA must already carry the new epoch rebase");
+}
+
+void test_delivered_status_callback_can_send_without_corrupting_tracking() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> status_events;
+    bool replacement_started = false;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            status_events.push_back(event);
+            if (event.status == Connection::MessageTxStatus::DELIVERED &&
+                event.text == "delivered-original") {
+                replacement_started = c.sendMessage("delivered-replacement");
+            }
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(c.sendMessage("delivered-original"),
+          "original message should enter the ARQ sender");
+    CHECK(transmitted.size() == 1,
+          "original one-frame message should produce one physical DATA frame");
+
+    ToneBurstAckDetection ack;
+    ack.payload.group_seq = 0;
+    ack.payload.frame_mask = 0;
+    ack.payload.rate_hint = 7;
+    ack.payload.type = AckType::Ack;
+    ack.payload.move_epoch = 0;
+    ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(ack), "completion ACK should be consumed");
+
+    CHECK(replacement_started && transmitted.size() == 2,
+          "DELIVERED callback should safely submit a replacement message");
+    auto replacement = v2::DataFrame::deserialize(transmitted.back());
+    CHECK(replacement && replacement->seq == 1,
+          "replacement should retain the next live ARQ identity");
+
+    size_t original_delivered = 0;
+    size_t replacement_submitted = 0;
+    for (const auto& event : status_events) {
+        if (event.text == "delivered-original" &&
+            event.status == Connection::MessageTxStatus::DELIVERED) {
+            ++original_delivered;
+        }
+        if (event.text == "delivered-replacement" &&
+            event.status == Connection::MessageTxStatus::SUBMITTED) {
+            ++replacement_submitted;
+        }
+    }
+    CHECK(original_delivered == 1 && replacement_submitted == 1,
+          "old delivery should publish once and preserve the new tracking record");
+}
+
+void test_terminal_failure_disconnects_when_move_epoch_is_disabled() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "0", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+    CHECK(!ConnectionAdaptiveTestAccess::arqMoveEpochEnabled(c),
+          "fixture must exercise the legacy sequence semantics");
+
+    const size_t frame_count = ConnectionAdaptiveTestAccess::burstFrameBudget(c);
+    const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
+    CHECK(c.sendMessage(std::string(frame_count * capacity, 'v')),
+          "fixture message should enter the legacy sender");
+    CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
+          "fixture should emit one initial group");
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              c, std::vector<Bytes>{bursts[0][0]}, 100) == 1,
+          "one legacy tail identity should be armed");
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 1);
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(100);
+
+    CHECK(c.getState() == ConnectionState::DISCONNECTING,
+          "without move-epoch, terminal abandonment must reset the QSO via disconnect");
+    CHECK(!c.sendMessage("unsafe-continuation"),
+          "legacy sequence mode must reject new DATA after terminal abandonment");
+    CHECK(!standalone_frames.empty() &&
+              v2::parseHeader(standalone_frames.back()).type == v2::FrameType::DISCONNECT,
+          "legacy fallback should put a DISCONNECT control frame on air");
+}
+
+void test_terminal_file_failure_disconnects_to_reset_peer_assembler() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone_frames;
+    std::vector<bool> file_results;
+    c.setTransmitCallback(
+        [&](const Bytes& frame) { standalone_frames.push_back(frame); });
+    c.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+    c.setFileSentCallback(
+        [&](bool success, const std::string&) { file_results.push_back(success); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    TempPayloadFile payload("terminal_file_failure", 4096);
+    CHECK(payload.dir.valid() && !payload.path.empty(),
+          "terminal file fixture should be created");
+    CHECK(c.sendFile(payload.path), "file transfer should enter the sender");
+    CHECK(!bursts.empty() && !bursts[0].empty(),
+          "file transfer should emit an initial physical group");
+    CHECK(ConnectionAdaptiveTestAccess::rearmExactDataRound(
+              c, std::vector<Bytes>{bursts[0][0]}, 100) == 1,
+          "one file identity should be armed for terminal failure");
+    ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 1);
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    c.tick(100);
+
+    CHECK(file_results.size() == 1 && !file_results[0],
+          "terminal file failure should publish exactly one failed result");
+    CHECK(c.getState() == ConnectionState::DISCONNECTING,
+          "failed file must disconnect even with move-epoch enabled so peer RX resets");
+    CHECK(!standalone_frames.empty() &&
+              v2::parseHeader(standalone_frames.back()).type == v2::FrameType::DISCONNECT,
+          "terminal file failure should send DISCONNECT to reset peer assembler state");
+}
+
 // Knob-OFF identity pin (ULTRA_RX_RATE_CMD=0, the baseline pinned in main): the
 // receiver's emitted tone-ACK carries rung_cmd 0 even for a QAM16 crater, and the
 // sender ignores an incoming DOWN-hard command outright — no mode move, no
@@ -990,6 +3451,13 @@ void test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move() {
     Connection r;  // ctor latches both knobs ON for this instance
     setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);  // restore the pinned baseline
     setenv("ULTRA_RX_RATE_CMD", "0", 1);
+    // New controller regressions below exercise these default-on mechanisms directly.
+    // Pin them before any function-local static reads so an operator test shell cannot
+    // silently select a different controller or suppress the observable ALC side effect.
+    setenv("ULTRA_LATENT_RATE", "1", 1);
+    setenv("ULTRA_LATENT_RELAX_DB", "0.35", 1);
+    setenv("ULTRA_LATENT_TIE_PROBE", "0", 1);
+    setenv("ULTRA_SOFTWARE_ALC", "1", 1);
 
     std::vector<ToneBurstAckPayload> acks;
     r.setTransmitToneBurstAckCallback(
@@ -1038,6 +3506,95 @@ void test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move() {
     r2.onBurstGroupReceived(11, {}, true, 0.95f, /*frame_mask=*/0xFF, true, 8);
     CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == 0,
           "a CLEAN group ends the bad stretch — no stale command may ride");
+}
+
+void test_waiting_rebase_voice_has_per_outcome_event_identity() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    setenv("ULTRA_RX_RATE_CMD", "1", 1);
+    Connection receiver;
+    Connection sender;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    setenv("ULTRA_RX_RATE_CMD", "0", 1);
+
+    std::vector<ToneBurstAckPayload> voices;
+    receiver.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& payload, bool inbound_group_complete) {
+            if (payload.type == AckType::Nack &&
+                payload.rung_cmd ==
+                    ultra::waveform::tone_burst_ack::kRungCmdReserved) {
+                CHECK(inbound_group_complete,
+                      "WAITING-REBASE voice must retain completed-group provenance");
+                voices.push_back(payload);
+            }
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        receiver, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    auto unanchoredMember = [](uint16_t seq, uint8_t value) {
+        auto frame = v2::makeFixedDataFrame(
+            "K2DEF", "W1ABC", seq, Bytes{value}, CodeRate::R2_3);
+        frame.flags = static_cast<uint8_t>(
+            frame.flags | v2::epochToFlags(1) | v2::Flags::MORE_FRAG);
+        return frame.serialize();
+    };
+
+    // The unified descriptor currently reports zero for every physical group.
+    // Two independently completed group outcomes must still produce two voice
+    // event identities while the era-base frame remains missing.
+    receiver.onBurstGroupReceived(
+        /*descriptor group_seq=*/0, {unanchoredMember(5, 0x55)},
+        /*all_ok=*/true, /*quality=*/0.9f, /*frame_mask=*/0x1,
+        /*interleaved=*/false, /*group_size=*/1);
+    receiver.onBurstGroupReceived(
+        /*descriptor group_seq=*/0, {unanchoredMember(6, 0x66)},
+        /*all_ok=*/true, /*quality=*/0.9f, /*frame_mask=*/0x1,
+        /*interleaved=*/false, /*group_size=*/1);
+
+    CHECK(voices.size() == 2,
+          "each unanchored physical group outcome must emit one WAITING-REBASE voice");
+    CHECK(voices[0].group_seq == 0 && voices[1].group_seq == 1,
+          "voice identity must advance mod-64 independently of descriptor group_seq");
+    CHECK(voices[0].frame_mask == 0 && voices[1].frame_mask == 0 &&
+              voices[0].rate_hint == 0 && voices[1].rate_hint == 0,
+          "dedup identity must not alter the reserved voice wire contract");
+
+    // Sender-side behavioral pin: the exact cached copy of event 0 expires the
+    // era-base timer only once, while the next physical outcome (event 1) earns a
+    // new prompt resend. This is the failure the descriptor's constant zero caused.
+    std::vector<Bytes> sender_tx;
+    sender.setTransmitCallback(
+        [&](const Bytes& frame) { sender_tx.push_back(frame); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        sender, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(sender);
+    CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(sender) > 2000,
+          "fixture needs a non-imminent era-base timer");
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(
+              sender, Bytes(16, 0x42), v2::Flags::MORE_FRAG),
+          "fixture era-base DATA must enter the sender ARQ");
+    CHECK(sender_tx.size() == 1,
+          "fixture must start with exactly one era-base transmission");
+
+    ToneBurstAckDetection heard;
+    heard.payload = voices[0];
+    CHECK(sender.onToneBurstAck(heard),
+          "first voice event must be consumed");
+    sender.tick(1);
+    CHECK(sender_tx.size() == 2,
+          "first voice event must trigger a prompt era-base resend");
+
+    CHECK(sender.onToneBurstAck(heard),
+          "cached repeat of the first voice must still be consumed whole");
+    sender.tick(1);
+    CHECK(sender_tx.size() == 2,
+          "cached repeat with the same event identity must not retrigger the resend");
+
+    heard.payload = voices[1];
+    CHECK(sender.onToneBurstAck(heard),
+          "next physical group's voice must be consumed");
+    sender.tick(1);
+    CHECK(sender_tx.size() == 3,
+          "next voice event identity must retrigger a prompt era-base resend");
 }
 
 // Knob-ON sender consume, MID-WINDOW (the Phase-2 case): a DOWN-hard command with
@@ -1132,6 +3689,49 @@ void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
           "connected OFDM entry should not emit an unsolicited KEEPALIVE anchor");
 }
 
+void test_interactive_bootstrap_yield_stops_after_initiator_starts_data() {
+    Connection idle;
+    std::vector<Bytes> idle_tx;
+    idle.setTransmitCallback([&](const Bytes& data) {
+        idle_tx.push_back(data);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        idle, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    idle.setHalfDuplexInteractive(true);
+    idle.tick(1500);
+    CHECK(idle_tx.size() == 1,
+          "an interactive initiator with no DATA must still yield the bootstrap turn");
+    auto turnover = v2::ControlFrame::deserialize(idle_tx.front());
+    CHECK(turnover && turnover->type == v2::FrameType::TURNOVER,
+          "the empty-initiator bootstrap frame must remain TURNOVER");
+
+    Connection active;
+    std::vector<Bytes> active_tx;
+    active.setTransmitCallback([&](const Bytes& data) {
+        active_tx.push_back(data);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        active, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    active.setHalfDuplexInteractive(true);
+
+    // Model a real sendFile/sendBinary start. The TNC can still hold a second
+    // accumulated block outside Connection while this first block drains.
+    ConnectionAdaptiveTestAccess::noteDataTurnPayloadStarted(active, 4097);
+    CHECK(ConnectionAdaptiveTestAccess::interactiveInitiatorYieldDone(active),
+          "starting DATA must retire the empty-initiator bootstrap choreography");
+    active.tick(1500);
+    CHECK(active_tx.empty(),
+          "a momentarily empty Connection window after DATA must not emit a blind TURNOVER");
+
+    auto request = v2::ControlFrame::makeTurnRequest("K2DEF", "W1ABC");
+    active.onFrameReceived(request.serialize());
+    CHECK(active_tx.size() == 1,
+          "retiring the bootstrap yield must not block a real peer turn request");
+    auto requested_turnover = v2::ControlFrame::deserialize(active_tx.front());
+    CHECK(requested_turnover && requested_turnover->type == v2::FrameType::TURNOVER,
+          "an explicit peer request must retain the normal fair TURNOVER path");
+}
+
 void test_normal_ofdm_ack_arms_full_anchor_expectation() {
     Connection c;
     std::vector<Bytes> tx_frames;
@@ -1197,6 +3797,658 @@ void test_normal_ofdm_ack_arms_full_anchor_expectation() {
           "non-OFDM ACK must not arm full-anchor expectation");
 }
 
+void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
+    Connection c;
+    std::vector<bool> group_complete_contexts;
+    c.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload&, bool inbound_group_complete) {
+            group_complete_contexts.push_back(inbound_group_complete);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    auto grouped = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 0, Bytes{0x42}, CodeRate::R2_3);
+    c.onBurstGroupReceived(/*group_seq=*/0, {grouped.serialize()},
+                           /*all_ok=*/true, /*quality=*/0.95f,
+                           /*frame_mask=*/0x1, /*interleaved=*/false,
+                           /*group_size=*/1);
+    CHECK(group_complete_contexts.size() == 1 && group_complete_contexts[0],
+          "endGroupReceiveAndAck must mark its synchronous tone ACK as physically complete");
+
+    const size_t before_classic = group_complete_contexts.size();
+    auto classic = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 1, Bytes{0x43}, CodeRate::R2_3);
+    c.onFrameReceived(classic.serialize());
+    c.tick(10000);  // drain a delayed SACK if the direct frame did not ACK immediately
+    CHECK(group_complete_contexts.size() > before_classic,
+          "a classic DATA member must eventually request tone feedback");
+    for (size_t i = before_classic; i < group_complete_contexts.size(); ++i) {
+        CHECK(!group_complete_contexts[i],
+              "timer/standalone tone ACK must retain asynchronous egress provenance");
+    }
+
+    const size_t before_physical_singleton = group_complete_contexts.size();
+    auto physical_singleton = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 2, Bytes{0x44}, CodeRate::R2_3);
+    physical_singleton.flags |= v2::Flags::MORE_FRAG;
+    c.onFrameReceived(physical_singleton.serialize(),
+                      /*physical_turn_complete=*/true);
+    CHECK(group_complete_contexts.size() == before_physical_singleton + 1,
+          "a physically-complete non-FINAL singleton must ACK exactly once immediately");
+    CHECK(group_complete_contexts.back(),
+          "a physically-complete singleton ACK must carry safe egress provenance");
+
+    const size_t before_final_singleton = group_complete_contexts.size();
+    auto final_singleton = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 3, Bytes{0x45}, CodeRate::R2_3);
+    final_singleton.flags |= v2::Flags::FINAL;
+    c.onFrameReceived(final_singleton.serialize(),
+                      /*physical_turn_complete=*/true);
+    CHECK(group_complete_contexts.size() == before_final_singleton + 1,
+          "a physically-complete FINAL singleton must ACK exactly once");
+    CHECK(group_complete_contexts.back(),
+          "a FINAL singleton ACK must retain physical-boundary provenance");
+
+    const size_t before_duplicate_singleton = group_complete_contexts.size();
+    c.onFrameReceived(final_singleton.serialize(),
+                      /*physical_turn_complete=*/true);
+    CHECK(group_complete_contexts.size() == before_duplicate_singleton + 1,
+          "a duplicate physical singleton must re-confirm the window exactly once");
+    CHECK(group_complete_contexts.back(),
+          "a duplicate singleton re-confirmation is still physically safe");
+
+    const size_t before_final_group = group_complete_contexts.size();
+    auto final_grouped = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 4, Bytes{0x46}, CodeRate::R2_3);
+    final_grouped.flags |= v2::Flags::FINAL;
+    c.onBurstGroupReceived(/*group_seq=*/4, {final_grouped.serialize()},
+                           /*all_ok=*/true, /*quality=*/0.95f,
+                           /*frame_mask=*/0x1, /*interleaved=*/false,
+                           /*group_size=*/1);
+    CHECK(group_complete_contexts.size() > before_final_group,
+          "a FINAL member inside a completed burst must emit tone feedback");
+    for (size_t i = before_final_group; i < group_complete_contexts.size(); ++i) {
+        CHECK(group_complete_contexts[i],
+              "FINAL-immediate and boundary ACKs share completed-burst provenance");
+    }
+
+    const size_t before_anchored_backstop = group_complete_contexts.size();
+    c.noteAnchoredBurstNoGroup();
+    CHECK(group_complete_contexts.size() > before_anchored_backstop,
+          "an anchored no-group burst must emit its recovery tone feedback");
+    for (size_t i = before_anchored_backstop;
+         i < group_complete_contexts.size(); ++i) {
+        CHECK(!group_complete_contexts[i],
+              "anchored no-group recovery is a timer event, not physical-boundary proof");
+    }
+
+    const size_t before_payload_seen_backstop = group_complete_contexts.size();
+    c.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
+    CHECK(group_complete_contexts.size() > before_payload_seen_backstop,
+          "payload-aware backstop must still emit the cumulative recovery ACK");
+    for (size_t i = before_payload_seen_backstop;
+         i < group_complete_contexts.size(); ++i) {
+        CHECK(!group_complete_contexts[i],
+              "payload-aware timer ACK remains asynchronous despite selector suppression");
+    }
+}
+
+void test_physical_tail_acks_prior_orphan_payload_cumulatively() {
+    Connection c;
+    std::vector<ToneBurstAckPayload> acks;
+    std::vector<bool> physical_contexts;
+    c.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool inbound_group_complete) {
+            acks.push_back(ack);
+            physical_contexts.push_back(inbound_group_complete);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    // Model descriptor/head loss: seq0 is the hole, while independently-decoded
+    // fallback members update the ARQ window without a trustworthy boundary.
+    for (uint16_t seq = 1; seq <= 3; ++seq) {
+        auto orphan = v2::makeFixedDataFrame(
+            "K2DEF", "W1ABC", seq, Bytes{static_cast<uint8_t>(0x40 + seq)},
+            CodeRate::R2_3);
+        orphan.flags |= v2::Flags::MORE_FRAG;
+        c.onFrameReceived(orphan.serialize(), /*physical_turn_complete=*/false);
+    }
+    CHECK(acks.empty(),
+          "unmarked orphan DATA must not authorize reverse egress mid-burst");
+
+    auto tail = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 4, Bytes{0x44}, CodeRate::R2_3);
+    tail.flags |= static_cast<uint8_t>(v2::Flags::MORE_FRAG |
+                                      v2::Flags::PHYSICAL_BURST_END);
+    c.onFrameReceived(tail.serialize(), /*physical_turn_complete=*/true);
+
+    CHECK(acks.size() == 1 && physical_contexts.size() == 1,
+          "decoded physical tail must emit exactly one immediate cumulative ACK");
+    CHECK(physical_contexts[0],
+          "tail-triggered cumulative ACK must carry safe physical-boundary provenance");
+    CHECK(acks[0].frame_mask == 0x001E,
+          "tail ACK must preserve all decoded survivors and select only the missing head");
+}
+
+void test_8psk_long_ldpc_file_geometry_and_tail_safety() {
+    constexpr Modulation kMod = Modulation::QAM8;
+    constexpr CodeRate kRate = CodeRate::R2_3;
+    constexpr int kShortCW = 12;
+    constexpr int kLongCW = 4;
+
+    const size_t short_capacity =
+        v2::getFixedFramePayloadCapacity(kRate, kShortCW);
+    const size_t long_capacity =
+        v2::getFixedFramePayloadCapacityZ(kRate, kLongCW, 81);
+    CHECK(short_capacity == long_capacity,
+          "cw12/Z27 and cw4/Z81 must expose identical fixed-frame capacity");
+    const auto short_timing = connection_policy::wideOFDMFrameTiming(
+        kMod, kRate, kShortCW, 27);
+    const auto long_timing = connection_policy::wideOFDMFrameTiming(
+        kMod, kRate, kLongCW, 81);
+    CHECK(short_timing.data_symbols == long_timing.data_symbols &&
+              short_timing.data_ms == long_timing.data_ms,
+          "cw12/Z27 and cw4/Z81 must have identical data airtime");
+
+    // Default-off control: the same zero-byte file is one logical metadata frame,
+    // remains cw12/Z27, and takes the established standalone path.
+    unsetenv("ULTRA_8PSK_LONG_LDPC");
+    TempPayloadFile default_file("ultra_psk8_short", 0);
+    CHECK(!default_file.path.empty(), "default profile fixture should create an empty file");
+    Connection baseline;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        baseline, kRate, 20.0f, 0.30f, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        baseline, kMod, kRate, kShortCW);
+    std::vector<Bytes> baseline_singletons;
+    std::vector<std::vector<Bytes>> baseline_bursts;
+    baseline.setTransmitCallback(
+        [&](const Bytes& frame) { baseline_singletons.push_back(frame); });
+    baseline.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            baseline_bursts.push_back(frames);
+        });
+    CHECK(baseline.sendFile(default_file.path),
+          "default profile should start the zero-byte file");
+    CHECK(baseline_singletons.size() == 1 && baseline_bursts.empty(),
+          "default cw12/Z27 tail should preserve the standalone singleton path");
+    const auto baseline_header = v2::parseHeader(baseline_singletons.front());
+    CHECK(baseline_header.valid && baseline_header.total_cw == kShortCW,
+          "default file frame must remain cw12");
+    CHECK(baseline.selectBurstLiftingZ() == 27,
+          "default file profile must remain Z=27");
+    CHECK(ConnectionAdaptiveTestAccess::currentPayloadCapacity(baseline) ==
+              short_capacity,
+          "default file chunk capacity must match cw12/Z27");
+    baseline.cancelFileTransfer();
+
+    // Opt-in singleton: it must never escape through the descriptor-less
+    // standalone path. The existing ULPAD mechanism creates a two-frame physical
+    // group, keeps logical FINAL on the real frame, and moves PHYSICAL_BURST_END to
+    // the pad that really ends the key-down.
+    setenv("ULTRA_8PSK_LONG_LDPC", "1", 1);
+    TempPayloadFile long_file("ultra_psk8_long", 0);
+    CHECK(!long_file.path.empty(), "long profile fixture should create an empty file");
+    Connection long_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        long_tx, kRate, 20.0f, 0.30f, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        long_tx, kMod, kRate, kShortCW);
+    std::vector<Bytes> unexpected_long_singletons;
+    std::vector<std::vector<Bytes>> long_bursts;
+    std::vector<bool> long_sent_results;
+    int callback_z = 0;
+    long_tx.setTransmitCallback(
+        [&](const Bytes& frame) { unexpected_long_singletons.push_back(frame); });
+    long_tx.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            callback_z = long_tx.selectBurstLiftingZ();
+            long_bursts.push_back(frames);
+        });
+    long_tx.setFileSentCallback(
+        [&](bool success, const std::string&) {
+            long_sent_results.push_back(success);
+        });
+    CHECK(long_tx.sendFile(long_file.path),
+          "long profile should start the zero-byte file");
+    CHECK(unexpected_long_singletons.empty() && long_bursts.size() == 1,
+          "long-Z singleton must be converted to one descriptor-bearing burst");
+    CHECK(callback_z == 81 &&
+              ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(long_tx),
+          "file profile must be armed before first physical egress");
+    CHECK(ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(long_tx) == kLongCW,
+          "active 8PSK profile must use four long codewords");
+    CHECK(ConnectionAdaptiveTestAccess::currentPayloadCapacity(long_tx) ==
+              long_capacity,
+          "tail chunk capacity must be computed from cw4/Z81 before startSend");
+    CHECK(long_bursts.front().size() == 2,
+          "one logical tail plus ULPAD must form a two-frame physical group");
+    for (const auto& frame : long_bursts.front()) {
+        const auto h = v2::parseHeader(frame);
+        CHECK(h.valid && h.total_cw == kLongCW,
+              "real and ULPAD frames must share cw4 in the long group");
+    }
+    auto real_tail = v2::DataFrame::deserialize(long_bursts.front()[0]);
+    auto pad_tail = v2::DataFrame::deserialize(long_bursts.front()[1]);
+    CHECK(real_tail.has_value() && pad_tail.has_value(),
+          "long tail frames must deserialize before physical stamping");
+    CHECK((real_tail->flags & v2::Flags::FINAL) != 0,
+          "logical DATA tail must retain FINAL");
+    CHECK(pad_tail->payload.size() == long_capacity,
+          "ULPAD must be sized from the long-Z capacity");
+    const auto wire_tail = gui::streaming_frame_policy::preparePhysicalBurstFrames(
+        long_bursts.front(), /*stamp_physical_end=*/true);
+    auto wire_real = v2::DataFrame::deserialize(wire_tail[0]);
+    auto wire_pad = v2::DataFrame::deserialize(wire_tail[1]);
+    CHECK(wire_real.has_value() && wire_pad.has_value(),
+          "physically stamped long tail must remain CRC-valid");
+    CHECK((wire_real->flags & v2::Flags::FINAL) != 0 &&
+              (wire_real->flags & v2::Flags::PHYSICAL_BURST_END) == 0,
+          "logical FINAL must not claim the air ends while ULPAD follows");
+    CHECK((wire_pad->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+          "ULPAD must carry the physical end marker");
+
+    ToneBurstAckDetection completion_ack;
+    completion_ack.payload.group_seq = 0;
+    completion_ack.payload.frame_mask = 0;
+    completion_ack.payload.rate_hint = 7;
+    completion_ack.payload.type = AckType::Ack;
+    completion_ack.payload.move_epoch = 0;
+    completion_ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(long_tx);
+    CHECK(long_tx.onToneBurstAck(completion_ack),
+          "zero-byte long profile completion ACK should be consumed");
+    CHECK(long_sent_results.size() == 1 && long_sent_results.front(),
+          "successful transfer must notify the outward callback exactly once");
+    CHECK(!ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(long_tx) &&
+              long_tx.selectBurstLiftingZ() == 27 &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(long_tx) == 27,
+          "successful completion must restore the negotiated short geometry");
+
+    // The older non-final group-size padding branch is differential-only: its
+    // policy predicate accepts DQPSK/D8PSK and deliberately rejects coherent
+    // QAM8.  Prove that invariant here so this profile cannot silently acquire a
+    // second ULPAD path.  The construction code remains Z-aware as a defensive
+    // invariant should the policy later be widened to coherent modes.
+    CHECK(!connection_policy::isSpeculativeHighRateOFDM(kMod, kRate) &&
+              !connection_policy::shouldPadHighRateFadingBurst(
+                  kMod, kRate, /*near_awgn_ofdm=*/false, /*burst_frames=*/5),
+          "coherent QAM8 R2/3 must not enter the differential partial-pad branch");
+    TempPayloadFile large_file("ultra_psk8_long_partial", 10000);
+    CHECK(!large_file.path.empty(), "partial-group fixture should create a large file");
+    Connection partial_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        partial_tx, kRate, 20.0f, 0.30f, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        partial_tx, kMod, kRate, kShortCW);
+    std::vector<std::vector<Bytes>> partial_bursts;
+    partial_tx.setTransmitCallback([](const Bytes&) {});
+    partial_tx.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            partial_bursts.push_back(frames);
+        });
+    CHECK(partial_tx.sendFile(large_file.path),
+          "long profile should start a multi-group file");
+    CHECK(!partial_bursts.empty(), "multi-group file must emit its first burst");
+    int pad_frames = 0;
+    int full_long_data_frames = 0;
+    for (const auto& frame : partial_bursts.front()) {
+        const auto h = v2::parseHeader(frame);
+        CHECK(h.valid && h.total_cw == kLongCW,
+              "non-final real and padded frames must all use cw4");
+        if (h.dst_hash == v2::hashCallsign("ULPAD")) {
+            ++pad_frames;
+            continue;
+        }
+        const auto data = v2::DataFrame::deserialize(frame);
+        CHECK(data.has_value(),
+              "ordinary long-profile ARQ DATA must deserialize");
+        if (data && data->payload.size() == long_capacity) {
+            ++full_long_data_frames;
+        }
+    }
+    CHECK(pad_frames == 0,
+          "coherent QAM8 non-final groups must not acquire differential ULPAD frames");
+    CHECK(full_long_data_frames > 0,
+          "ordinary cw4/Z81 ARQ DATA must preserve the 629-byte serialized payload; "
+          "a Z=27 default would truncate it to 216 bytes");
+
+    // The force-policy bit is part of the experimental predicate. Forcing the
+    // already-logical cw12 value must still reconfigure the physical ARQ tuple;
+    // a same-value early return would strand it at cw4/Z81 while the descriptor
+    // and encoder revert to cw12/Z27.
+    partial_tx.setForcedFrameCodewords(kShortCW, /*forced=*/true);
+    CHECK(!ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(partial_tx) &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(partial_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 27,
+          "same-CW force-policy change must atomically restore cw12/Z27");
+    partial_tx.cancelFileTransfer();
+    CHECK(!ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(partial_tx) &&
+              partial_tx.selectBurstLiftingZ() == 27 &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 27,
+          "explicit cancel must restore the negotiated short geometry");
+
+    // ARQ reset intentionally retains its configuration, so Connection's QSO
+    // boundaries must explicitly strip the transfer-scoped lifting value.
+    Connection disconnected_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        disconnected_tx, kRate, 20.0f, 0.30f, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        disconnected_tx, kMod, kRate, kShortCW);
+    disconnected_tx.setTransmitCallback([](const Bytes&) {});
+    disconnected_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    CHECK(disconnected_tx.sendFile(long_file.path),
+          "disconnect reset fixture should arm the long profile");
+    CHECK(ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(disconnected_tx) == 81,
+          "disconnect reset fixture must reach physical Z=81 first");
+    ConnectionAdaptiveTestAccess::enterDisconnected(disconnected_tx);
+    CHECK(ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(disconnected_tx) == 27,
+          "enterDisconnected must clear the ARQ's retained Z=81 geometry");
+
+    Connection reset_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        reset_tx, kRate, 20.0f, 0.30f, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        reset_tx, kMod, kRate, kShortCW);
+    reset_tx.setTransmitCallback([](const Bytes&) {});
+    reset_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    CHECK(reset_tx.sendFile(long_file.path),
+          "full reset fixture should arm the long profile");
+    CHECK(ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(reset_tx) == 81,
+          "full reset fixture must reach physical Z=81 first");
+    reset_tx.reset();
+    CHECK(ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(reset_tx) == 27,
+          "Connection::reset must clear the ARQ's retained Z=81 geometry");
+
+    // Destruction is a silent lifetime boundary: FileTransferController's own
+    // destructor calls cancel(), but Connection must clear its internal callbacks
+    // first so it cannot dispatch through members already torn down.
+    int destructor_callbacks = 0;
+    {
+        Connection dying_tx;
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            dying_tx, kRate, 20.0f, 0.30f, kMod);
+        ConnectionAdaptiveTestAccess::setDataGeometry(
+            dying_tx, kMod, kRate, kShortCW);
+        dying_tx.setTransmitCallback([](const Bytes&) {});
+        dying_tx.setTransmitBurstCallback(
+            [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+        dying_tx.setFileSentCallback(
+            [&](bool, const std::string&) { ++destructor_callbacks; });
+        CHECK(dying_tx.sendFile(long_file.path),
+              "destructor fixture should own an active long-profile transfer");
+    }
+    CHECK(destructor_callbacks == 0,
+          "Connection destruction must not invoke outward file callbacks");
+
+    // Receiver-side SACK must ignore the addressed-away pad sequence even though
+    // the PHY mask reports both positions decoded.
+    Connection receiver;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        receiver, kRate, 20.0f, 0.30f, kMod);
+    std::vector<ToneBurstAckPayload> pad_acks;
+    receiver.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { pad_acks.push_back(ack); });
+    auto rx_real = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 0, Bytes{0x51}, kRate, kLongCW, 81);
+    rx_real.flags |= v2::Flags::FINAL;
+    auto rx_pad = v2::makeFixedDataFrame(
+        "K2DEF", "ULPAD", 0xFFFE, Bytes{0x7F}, kRate, kLongCW, 81);
+    receiver.onBurstGroupReceived(
+        0, {rx_real.serialize(), rx_pad.serialize()}, true, 0.95f,
+        /*PHY frame_mask=*/0x3, /*interleaved=*/false, /*group_size=*/2,
+        /*geometry_proven=*/true);
+    CHECK(!pad_acks.empty(), "completed long tail must emit a cumulative tone SACK");
+    for (const auto& ack : pad_acks) {
+        // seq0 advanced the cumulative base to 1, so the future-frame bitmap is
+        // correctly empty.  If the addressed-away 0xFFFE pad leaked into ARQ,
+        // either the low-six group identity (62) or a future bitmap bit would move.
+        CHECK(ack.group_seq == 0 && ack.frame_mask == 0x0000 &&
+                  ack.type == AckType::Ack,
+              "ULPAD seq must not alter cumulative ACK identity or future bitmap");
+    }
+
+    unsetenv("ULTRA_8PSK_LONG_LDPC");
+}
+
+void test_qpsk_r34_long_ldpc_file_geometry_and_lifecycle() {
+    constexpr Modulation kMod = Modulation::QPSK;
+    constexpr CodeRate kRate = CodeRate::R3_4;
+    constexpr int kShortCW = 8;
+    constexpr int kLongCW = 3;
+    constexpr float kFading = 0.30f;
+
+    const size_t short_capacity =
+        v2::getFixedFramePayloadCapacity(kRate, kShortCW);
+    const size_t long_capacity =
+        v2::getFixedFramePayloadCapacityZ(kRate, kLongCW, 81);
+    CHECK(short_capacity == 461 && long_capacity == 527,
+          "QPSK R3/4 capacity contract must be cw8/Z27=461 and cw3/Z81=527 bytes");
+
+    constexpr int kShortCodedBits = kShortCW * 648;
+    constexpr int kLongCodedBits = kLongCW * 1944;
+    CHECK(kShortCodedBits == 5184 && kLongCodedBits == 5832 &&
+              kLongCodedBits * 8 == kShortCodedBits * 9,
+          "QPSK long profile must honestly expose its 12.5% coded-bit increase");
+    const auto short_timing = connection_policy::wideOFDMFrameTiming(
+        kMod, kRate, kShortCW, 27);
+    const auto long_timing = connection_policy::wideOFDMFrameTiming(
+        kMod, kRate, kLongCW, 81);
+    CHECK(long_timing.data_symbols > short_timing.data_symbols &&
+              long_timing.data_ms > short_timing.data_ms,
+          "cw3/Z81 must not be reported as an equal-airtime substitute for production cw8/Z27");
+
+    // Default-off control: the production logical geometry and descriptor-less
+    // singleton tail remain byte-for-byte on cw8/Z27.
+    unsetenv("ULTRA_QPSK_R34_LONG_LDPC");
+    unsetenv("ULTRA_8PSK_LONG_LDPC");
+    TempPayloadFile default_file("ultra_qpsk_r34_short", 0);
+    CHECK(!default_file.path.empty(),
+          "QPSK default-profile fixture should create an empty file");
+    Connection baseline;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        baseline, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        baseline, kMod, kRate, kShortCW);
+    std::vector<Bytes> baseline_singletons;
+    std::vector<std::vector<Bytes>> baseline_bursts;
+    baseline.setTransmitCallback(
+        [&](const Bytes& frame) { baseline_singletons.push_back(frame); });
+    baseline.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            baseline_bursts.push_back(frames);
+        });
+    CHECK(baseline.sendFile(default_file.path),
+          "default QPSK profile should start the zero-byte file");
+    CHECK(baseline_singletons.size() == 1 && baseline_bursts.empty(),
+          "default cw8/Z27 tail must preserve the established singleton path");
+    const auto baseline_header = v2::parseHeader(baseline_singletons.front());
+    CHECK(baseline_header.valid && baseline_header.total_cw == kShortCW &&
+              baseline.selectBurstLiftingZ() == 27 &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(baseline) == kShortCW &&
+              ConnectionAdaptiveTestAccess::currentPayloadCapacity(baseline) == short_capacity,
+          "default-off QPSK profile must retain the complete cw8/Z27 tuple");
+    baseline.cancelFileTransfer();
+
+    // Opt-in singleton: the addressed-away pad forces a descriptor-bearing
+    // two-frame burst so the receiver learns both physical cw3 and Z81.
+    setenv("ULTRA_QPSK_R34_LONG_LDPC", "1", 1);
+    TempPayloadFile long_file("ultra_qpsk_r34_long", 0);
+    CHECK(!long_file.path.empty(),
+          "QPSK long-profile fixture should create an empty file");
+    Connection long_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        long_tx, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        long_tx, kMod, kRate, kShortCW);
+    std::vector<Bytes> unexpected_long_singletons;
+    std::vector<std::vector<Bytes>> long_bursts;
+    std::vector<bool> long_sent_results;
+    int callback_z = 0;
+    long_tx.setTransmitCallback(
+        [&](const Bytes& frame) { unexpected_long_singletons.push_back(frame); });
+    long_tx.setTransmitBurstCallback(
+        [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            callback_z = long_tx.selectBurstLiftingZ();
+            long_bursts.push_back(frames);
+        });
+    long_tx.setFileSentCallback(
+        [&](bool success, const std::string&) {
+            long_sent_results.push_back(success);
+        });
+    CHECK(long_tx.sendFile(long_file.path),
+          "QPSK long profile should start the zero-byte file");
+    CHECK(unexpected_long_singletons.empty() && long_bursts.size() == 1 &&
+              long_bursts.front().size() == 2,
+          "QPSK Z81 singleton must become one descriptor-bearing real+ULPAD burst");
+    CHECK(callback_z == 81 &&
+              ConnectionAdaptiveTestAccess::experimentalQPSKR34LongLDPCActive(long_tx) &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(long_tx) == kLongCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameCodewords(long_tx) == kLongCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(long_tx) == 81 &&
+              ConnectionAdaptiveTestAccess::currentPayloadCapacity(long_tx) == long_capacity,
+          "active QPSK profile must atomically select cw3/Z81 for chunker and ARQ");
+    for (const auto& frame : long_bursts.front()) {
+        const auto header = v2::parseHeader(frame);
+        CHECK(header.valid && header.total_cw == kLongCW,
+              "real and ULPAD QPSK long frames must serialize as cw3");
+    }
+    const auto long_pad = v2::DataFrame::deserialize(long_bursts.front().back());
+    CHECK(long_pad.has_value() &&
+              long_pad->dst_hash == v2::hashCallsign("ULPAD") &&
+              long_pad->payload.size() == long_capacity,
+          "QPSK long singleton pad must be addressed away and sized at cw3/Z81 capacity");
+
+    const auto wire_descriptor = v2::ControlFrame::makeBurstHeader(
+        "W1ABC", "K2DEF", /*seq=*/0,
+        static_cast<uint8_t>(long_bursts.front().size()),
+        static_cast<uint8_t>(ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(long_tx)),
+        kMod, kRate, /*interleave_flags=*/0,
+        static_cast<uint8_t>(long_tx.selectBurstLiftingZ()));
+    const auto descriptor_info = wire_descriptor.getBurstHeaderInfo();
+    CHECK(descriptor_info.group_size == 2 && descriptor_info.cw_per_frame == kLongCW &&
+              descriptor_info.lifting_z == 81 && descriptor_info.modulation == kMod &&
+              descriptor_info.code_rate == kRate,
+          "BURST_HEADER tuple derived from the connection must announce QPSK R3/4 cw3/Z81");
+
+    const uint32_t reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            WaveformMode::OFDM_CHIRP, kMod, kFading)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    const uint32_t expected_airtime = connection_policy::wideOFDMBurstAirtimeMs(
+        kMod, kRate, /*frames=*/2, kLongCW, reanchor_ms, /*lifting_z=*/81);
+    const uint32_t expected_timeout = connection_policy::unifiedBurstAckTimeoutMs(
+        kMod, kRate, kLongCW, /*frames=*/2, /*lifting_z=*/81,
+        Modulation::QPSK, ConnectionAdaptiveTestAccess::arqSackDelay(long_tx),
+        reanchor_ms);
+    CHECK(ConnectionAdaptiveTestAccess::physicalRoundAirtime(
+              long_tx, long_bursts.front()) == expected_airtime &&
+              ConnectionAdaptiveTestAccess::physicalRoundTimeout(
+                  long_tx, long_bursts.front()) == expected_timeout &&
+              ConnectionAdaptiveTestAccess::unifiedBurstTimeout(long_tx, 2) == expected_timeout,
+          "QPSK long burst budget and ACK timers must consume the same physical cw3/Z81 geometry");
+
+    ToneBurstAckDetection completion_ack;
+    completion_ack.payload.group_seq = 0;
+    completion_ack.payload.frame_mask = 0;
+    completion_ack.payload.rate_hint = 7;
+    completion_ack.payload.type = AckType::Ack;
+    completion_ack.payload.move_epoch = 0;
+    completion_ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(long_tx);
+    CHECK(long_tx.onToneBurstAck(completion_ack),
+          "QPSK long-profile completion ACK should be consumed");
+    CHECK(long_sent_results.size() == 1 && long_sent_results.front() &&
+              !ConnectionAdaptiveTestAccess::experimentalQPSKR34LongLDPCActive(long_tx) &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(long_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameCodewords(long_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(long_tx) == 27,
+          "successful QPSK completion must restore logical cw8/Z27 before callback return");
+
+    // Forced logical geometry is deliberately excluded even when the value is
+    // still eight: the experiment must never reinterpret an operator override.
+    Connection forced_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        forced_tx, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        forced_tx, kMod, kRate, kShortCW);
+    forced_tx.setForcedFrameCodewords(kShortCW, /*forced=*/true);
+    std::vector<Bytes> forced_singletons;
+    forced_tx.setTransmitCallback(
+        [&](const Bytes& frame) { forced_singletons.push_back(frame); });
+    forced_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    CHECK(forced_tx.sendFile(long_file.path),
+          "forced-CW exclusion fixture should start its file");
+    CHECK(!ConnectionAdaptiveTestAccess::experimentalQPSKR34LongLDPCActive(forced_tx) &&
+              forced_tx.selectBurstLiftingZ() == 27 &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(forced_tx) == kShortCW &&
+              forced_singletons.size() == 1,
+          "forced cw8 must remain descriptor-less cw8/Z27 despite the env opt-in");
+    forced_tx.cancelFileTransfer();
+
+    Connection cancel_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        cancel_tx, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        cancel_tx, kMod, kRate, kShortCW);
+    cancel_tx.setTransmitCallback([](const Bytes&) {});
+    cancel_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    CHECK(cancel_tx.sendFile(long_file.path) &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(cancel_tx) == 81,
+          "cancel fixture must reach QPSK cw3/Z81 first");
+    cancel_tx.cancelFileTransfer();
+    CHECK(!ConnectionAdaptiveTestAccess::experimentalQPSKR34LongLDPCActive(cancel_tx) &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameCodewords(cancel_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(cancel_tx) == 27,
+          "explicit cancel must restore QPSK cw8/Z27");
+
+    Connection failed_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        failed_tx, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        failed_tx, kMod, kRate, kShortCW);
+    failed_tx.setTransmitCallback([](const Bytes&) {});
+    failed_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    std::vector<bool> failed_results;
+    failed_tx.setFileSentCallback(
+        [&](bool success, const std::string&) { failed_results.push_back(success); });
+    CHECK(failed_tx.sendFile(long_file.path) &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(failed_tx) == 81,
+          "failure fixture must reach QPSK cw3/Z81 first");
+    ConnectionAdaptiveTestAccess::failFileTransfer(failed_tx);
+    CHECK(failed_results.size() == 1 && !failed_results.front() &&
+              !ConnectionAdaptiveTestAccess::experimentalQPSKR34LongLDPCActive(failed_tx) &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameCodewords(failed_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(failed_tx) == 27,
+          "terminal file failure must notify once and restore QPSK cw8/Z27");
+
+    Connection reset_tx;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        reset_tx, kRate, 20.0f, kFading, kMod);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        reset_tx, kMod, kRate, kShortCW);
+    reset_tx.setTransmitCallback([](const Bytes&) {});
+    reset_tx.setTransmitBurstCallback(
+        [](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+    CHECK(reset_tx.sendFile(long_file.path) &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(reset_tx) == 81,
+          "reset fixture must reach QPSK cw3/Z81 first");
+    reset_tx.reset();
+    CHECK(ConnectionAdaptiveTestAccess::arqFixedFrameCodewords(reset_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(reset_tx) == 27,
+          "Connection::reset must strip QPSK transfer-scoped Z81 geometry");
+
+    unsetenv("ULTRA_QPSK_R34_LONG_LDPC");
+}
+
 } // namespace
 
 int main() {
@@ -1207,7 +4459,7 @@ int main() {
     setenv("ULTRA_RETX_TROUGH_PACING", "0", 1);
     setenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS", "0", 1);
     // RX-AUTHORITY is DEFAULT-ON since 2026-07-05 and supersedes the machinery this
-    // binary tests (EMA feedback, RX-RATE-CMD demotes, descriptor escapes on the
+    // binary tests (EMA feedback and RX-RATE-CMD descriptor demotes on the
     // legacy drivers) — pin it OFF so the legacy/fallback paths stay testable.
     setenv("ULTRA_RX_RATE_AUTHORITY", "0", 1);
     // #58 increment 3: pin the connect-SNR-pool knobs to their disabled defaults so
@@ -1226,11 +4478,16 @@ int main() {
     // binary never routes payloads through the parameter-less codec overloads, so the
     // per-test flips below cannot skew the wire span (payload tests use explicit spans).
     setenv("ULTRA_RX_RATE_CMD", "0", 1);
+    // Exercise the derived wide-control deadline and single-ACK default, never
+    // inherited rig A/B pins.
+    unsetenv("ULTRA_MODE_CHANGE_RETRY_MS");
+    unsetenv("ULTRA_MC_ACK_REPEATS");
 
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();
+    test_mode_change_retry_waits_for_clear_channel_without_spending_budget();
     test_remote_mode_change_reconfigures_arq();
-    test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity();
+    test_remote_mode_change_ack_is_single_by_default();
     test_mode_change_retry_holds_while_tx_keyed();
     test_duplicate_mode_change_single_reack_no_reapply();
     test_wide_ofdm_configures_short_tail_sack_delay();
@@ -1242,12 +4499,41 @@ int main() {
     test_zero_progress_round_counter_knob_off_and_g42_protective();
     test_descriptor_switch_knob_off_is_byte_identical();
     test_descriptor_switch_commits_locally_at_clean_boundary();
+    test_silent_escape_never_unilaterally_descriptor_switches();
     test_descriptor_adopt_reconfigures_receiver_without_ack();
+    test_stale_epoch_tone_ack_has_no_connection_side_effects();
+    test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso();
+    test_latent_startup_probe_is_one_group_and_fails_closed();
+    test_forced_connect_ack_conflict_fails_closed();
+    test_startup_probe_sender_guards_and_timeout_rollback();
+    test_authority_climb_prices_the_real_file_tail();
+    test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry();
+    test_arq_control_feedback_does_not_arm_data_ack_monitor();
+    test_data_ack_monitor_arms_before_synchronous_transport_callback();
+    test_variable_cw_single_frame_uses_advertised_physical_geometry();
+    test_narrow_ofdm_keeps_its_waveform_specific_timeout();
+    test_mcdpsk_data_arms_one_waveform_specific_monitor_per_physical_turn();
+    test_synchronous_burst_ack_cannot_overwrite_outer_committed_frames();
+    test_ack_revealed_hole_refill_uses_resend_anchor();
+    test_fragment_tail_hole_repairs_immediately_and_uses_one_frame_rto();
+    test_file_tail_identical_keepalive_sack_retries_hole();
+    test_terminal_tail_failure_aborts_suspended_window_and_rebases_next_payload();
+    test_turn_refill_terminal_failure_discards_open_burst();
+    test_terminal_base_hole_with_sacked_suffix_reports_once_and_reentrant_send_rebases();
+    test_delivered_status_callback_can_send_without_corrupting_tracking();
+    test_terminal_failure_disconnects_when_move_epoch_is_disabled();
+    test_terminal_file_failure_disconnects_to_reset_peer_assembler();
     test_rx_rate_cmd_knob_off_is_byte_identical();
     test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move();
+    test_waiting_rebase_voice_has_per_outcome_event_identity();
     test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
+    test_interactive_bootstrap_yield_stops_after_initiator_starts_data();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
+    test_tone_ack_callback_marks_only_group_boundary_as_physically_complete();
+    test_physical_tail_acks_prior_orphan_payload_cumulatively();
+    test_8psk_long_ldpc_file_geometry_and_tail_safety();
+    test_qpsk_r34_long_ldpc_file_geometry_and_lifecycle();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionAdaptive: " << tests_failed << "/" << tests_run

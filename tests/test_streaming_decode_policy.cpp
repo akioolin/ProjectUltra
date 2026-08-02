@@ -115,6 +115,147 @@ void test_qam16_control_peek_is_subfixed() {
           "two complete CWs should still escalate for a 4-CW fixed frame");
     CHECK(!hasSubFixedFrameSoftBits(FIXED_CW * LDPC_BLOCK, FIXED_CW, LDPC_BLOCK),
           "a full fixed-frame soft-bit buffer should not be treated as a peek");
+
+    // Long-LDPC regression: one Z=81 codeword is 1944 bits.  For the nearest
+    // QPSK R3/4 physical geometry (cw3/Z81), that first codeword must trigger
+    // the same wait/escalation as the short-code peek above.  Passing the old
+    // hardcoded 648-bit block size makes 1944 look exactly like a full cw3
+    // frame and was the mechanism behind the streaming 0/0 decode.
+    constexpr size_t LONG_LDPC_BLOCK = 1944;
+    constexpr int LONG_FIXED_CW = 3;
+    CHECK(hasSubFixedFrameSoftBits(LONG_LDPC_BLOCK,
+                                   LONG_FIXED_CW,
+                                   LONG_LDPC_BLOCK),
+          "one Z81 codeword must remain a sub-frame peek for cw3/Z81");
+    CHECK(!hasSubFixedFrameSoftBits(LONG_LDPC_BLOCK,
+                                    LONG_FIXED_CW,
+                                    LDPC_BLOCK),
+          "regression control: the old Z27 constant misclassifies cw3/Z81 as complete");
+    CHECK(!hasSubFixedFrameSoftBits(LONG_FIXED_CW * LONG_LDPC_BLOCK,
+                                    LONG_FIXED_CW,
+                                    LONG_LDPC_BLOCK),
+          "three Z81 codewords are the complete cw3/Z81 frame");
+}
+
+void test_qpsk_r34_provisional_harq_scope() {
+    auto allowed = [](bool opt_in, bool exact_descriptor, bool interleaved,
+                      bool rto_gap, bool prediction_invalid, bool have_callback,
+                      Modulation mod, CodeRate rate, int index, int group_size) {
+        return allowProvisionalHarq(
+            opt_in, /*burst_transport=*/true, exact_descriptor, interleaved,
+            rto_gap, prediction_invalid, have_callback, mod, rate, index,
+            group_size);
+    };
+
+    CHECK(!allowProvisionalHarq(
+               /*opt_in=*/false, /*burst_transport=*/true,
+               /*exact_descriptor_proven=*/true,
+               /*burst_interleave=*/false, /*rto_gap_context=*/false,
+               /*prediction_invalid=*/false,
+               /*context_callback_available=*/true, Modulation::QPSK,
+               CodeRate::R3_4, /*logical_index=*/0,
+               /*declared_group_size=*/4),
+          "default-off provisional HARQ remains disabled");
+
+    CHECK(!allowProvisionalHarq(
+               /*opt_in=*/true, /*burst_transport=*/false,
+               /*exact_descriptor_proven=*/true,
+               /*burst_interleave=*/false, /*rto_gap_context=*/false,
+               /*prediction_invalid=*/false,
+               /*context_callback_available=*/true, Modulation::QPSK,
+               CodeRate::R3_4, /*logical_index=*/0,
+               /*declared_group_size=*/4),
+          "non-burst decoding must remain outside provisional HARQ");
+
+    CHECK(allowed(true, true, false, false, false, true,
+                  Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "descriptor-proven QPSK R3/4 non-tail member should be eligible");
+    CHECK(allowed(true, true, false, false, false, true,
+                  Modulation::QPSK, CodeRate::R3_4, 2, 4),
+          "last non-tail QPSK R3/4 member should remain eligible");
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 3, 4),
+          "final physical member must be rejected because its tail bit is hidden in CW0");
+
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R2_3, 0, 4),
+          "QPSK at the wrong code rate must remain outside the experiment");
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QAM8, CodeRate::R2_3, 0, 4),
+          "8PSK/QAM8 must remain outside the QPSK-only experiment");
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QAM16, CodeRate::R3_4, 0, 4),
+          "dense modulations must not inherit the old broad provisional gate");
+
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, -1, 4),
+          "decode outside the burst logical loop must be rejected");
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 4, 4),
+          "logical index beyond the declared group must be rejected");
+    CHECK(!allowed(true, true, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 1),
+          "invalid singleton descriptor geometry must be rejected");
+
+    CHECK(!allowed(true, false, false, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "late-join or unproven group provenance must be rejected");
+    CHECK(!allowed(true, true, true, false, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "cross-frame interleaved groups are outside the experiment");
+    CHECK(!allowed(true, true, false, true, false, true,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "post-RTO cadence context must retain the existing rejection gate");
+    CHECK(!allowed(true, true, false, false, true, true,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "invalidated ARQ-mirror prediction must reject the rest of the group");
+    CHECK(!allowed(true, true, false, false, false, false,
+                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+          "missing ARQ context callback must reject provisional keying");
+
+    CHECK(provisionalHarqContextCoversPosition(
+              /*context_valid=*/true, /*logical_index=*/2,
+              /*predicted_seq_count=*/3),
+          "valid ARQ mirror must cover an in-range logical position");
+    CHECK(!provisionalHarqContextCoversPosition(
+               /*context_valid=*/false, /*logical_index=*/0,
+               /*predicted_seq_count=*/4),
+          "late or invalid ARQ context must be rejected");
+    CHECK(!provisionalHarqContextCoversPosition(
+               /*context_valid=*/true, /*logical_index=*/3,
+               /*predicted_seq_count=*/3),
+          "short ARQ prediction vector must fail closed");
+    CHECK(!provisionalHarqContextCoversPosition(
+               /*context_valid=*/true, /*logical_index=*/-1,
+               /*predicted_seq_count=*/4),
+          "negative logical position must fail the context bounds check");
+}
+
+void test_descriptor_current_anchor_controls_warm_handoff() {
+    CHECK(keepDescriptorWarmHandoff(
+              /*phase_is_warm=*/true, /*confidence=*/0.5f,
+              /*current_group_full_anchor=*/false,
+              /*descriptor_mode_switch_enabled=*/true,
+              /*descriptor_mode_hop=*/false),
+          "steady same-mode descriptor should keep its warm light-LTS handoff");
+    CHECK(!keepDescriptorWarmHandoff(
+               /*phase_is_warm=*/true, /*confidence=*/0.5f,
+               /*current_group_full_anchor=*/true,
+               /*descriptor_mode_switch_enabled=*/false,
+               /*descriptor_mode_hop=*/false),
+          "announced full current-group anchor must disable the light prediction");
+    CHECK(!keepDescriptorWarmHandoff(
+               /*phase_is_warm=*/true, /*confidence=*/0.5f,
+               /*current_group_full_anchor=*/false,
+               /*descriptor_mode_switch_enabled=*/true,
+               /*descriptor_mode_hop=*/true),
+          "mode-hop descriptor must still demote warm handoff");
+    CHECK(!keepDescriptorWarmHandoff(
+               /*phase_is_warm=*/false, /*confidence=*/0.5f,
+               /*current_group_full_anchor=*/false,
+               /*descriptor_mode_switch_enabled=*/false,
+               /*descriptor_mode_hop=*/false),
+          "cold descriptor state must require full acquisition");
 }
 
 }  // namespace
@@ -123,6 +264,8 @@ int main() {
     test_robust_ofdm_control_samples();
     test_decode_sample_requirement_selection();
     test_qam16_control_peek_is_subfixed();
+    test_qpsk_r34_provisional_harq_scope();
+    test_descriptor_current_anchor_controls_warm_handoff();
 
     if (tests_failed != 0) {
         std::cout << "StreamingDecodePolicy: " << (tests_run - tests_failed)

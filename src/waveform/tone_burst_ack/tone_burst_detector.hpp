@@ -16,6 +16,7 @@
 #include "tone_burst_payload.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -45,7 +46,23 @@ struct DetectAndDecodeResult {
     // pattern lock. Detection threshold is symbol_ms-dependent.
     float costas_correlation_peak = 0.0f;
     bool sync_acquired = false;
+
+    // A CRC-valid payload is not necessarily meaningful in the current protocol
+    // window (CRC-12 collisions are rare per candidate, but the timing search tries
+    // a family of candidates).  When an acceptance predicate is supplied below, the
+    // detector keeps searching after such a candidate instead of returning it as a
+    // successful physical ACK.  Preserve the strongest rejection for monitor-level
+    // diagnostics without making the predicate itself stateful.
+    size_t semantic_rejections = 0;
+    std::optional<ToneBurstAckPayload> strongest_rejected_payload;
+    size_t strongest_rejected_offset_samples = 0;
+    float strongest_rejected_correlation_peak = 0.0f;
+    float strongest_rejected_min_confidence = 0.0f;
+    int strongest_rejected_hamming_corrected_blocks = 0;
 };
+
+using ToneBurstAckAcceptancePredicate =
+    std::function<bool(const ToneBurstAckPayload&)>;
 
 class ToneBurstDetector {
 public:
@@ -65,7 +82,9 @@ public:
     DetectAndDecodeResult detectAndDecode(SampleSpan samples,
                                           size_t num_samples,
                                           uint32_t symbol_ms = kBaselineSymbolMs,
-                                          uint32_t sweep_step_samples = 8);
+                                          uint32_t sweep_step_samples = 8,
+                                          const ToneBurstAckAcceptancePredicate&
+                                              acceptance_predicate = {});
 
     // ----- helpers exposed for testing -----
 

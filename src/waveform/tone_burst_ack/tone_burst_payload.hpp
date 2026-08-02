@@ -24,7 +24,9 @@ enum class AckType : uint8_t {
 };
 
 struct ToneBurstAckPayload {
-    // group_seq: 6-bit (mod-64) burst-group sequence number being ACK'd.
+    // group_seq: 6-bit (mod-64) cumulative ARQ identity for ordinary ACKs.
+    // For the reserved WAITING-REBASE NACK voice it is instead a dedicated
+    // per-connection voice-event identity used only to dedup cached RF copies.
     uint8_t group_seq = 0;
 
     // frame_mask: 16 bits (widened 6->8 2026-06-17, 8->16 2026-07-02 for the wide

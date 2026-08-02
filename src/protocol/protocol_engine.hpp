@@ -119,21 +119,25 @@ public:
 
     // --- Modem Interface ---
 
-    void onRxData(const Bytes& data);
+    void onRxData(const Bytes& data, bool physical_turn_complete = false);
     void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void onAcceptedOFDMDataSync(float sync_correlation);
     // §14.27: a decoded interleaved burst delivered as a unit (group_seq, ordered
     // DATA frames, all-logical-frames-decoded) for the one-way burst transport.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                               bool all_ok, float quality, uint16_t frame_mask = 0xFFFF,
-                              bool interleaved = true, uint8_t group_size = 0);
+                              bool interleaved = true, uint8_t group_size = 0,
+                              bool geometry_proven = false);
 
     // DESC-SWITCH Phase 1 (ULTRA_DESCRIPTOR_MODE_SWITCH): the receiver's decoder
     // consumed a BURST_HEADER descriptor announcing a different mod/rate — the
     // protocol layer follows it (RX-side applyDataMode; no MODE_CHANGE ACK
     // machinery). Delegates to Connection::onDescriptorModeChange; no-op while
     // the knob is OFF.
-    void onAnchoredBurstNoGroup();
+    void onAnchoredBurstNoGroup(bool payload_seen);
+    // State-only notification: the decoder abandoned a marker-armed candidate
+    // without wire-proven group geometry. No ACK or selector sample is emitted.
+    void onBurstOutcomeUnknown();
     void setBurstCarrierGammas(const std::vector<float>& gammas);
     void onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame);
 
@@ -143,6 +147,8 @@ public:
     // true iff the detection matched an in-flight burst-transport group.
     bool onToneBurstAck(
         const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection);
+    bool isToneBurstAckCandidatePlausible(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;
     void tick(uint32_t elapsed_ms);
 
     // §14.36 Phase 5c live GUI surface: the sender's most recent decode-headroom
@@ -159,6 +165,9 @@ public:
     ConnectionState getState() const;
     std::string getRemoteCallsign() const;
     bool isConnected() const;
+    // True for the station that initiated the current connection. Scripted
+    // scenarios use this to give exactly one endpoint teardown ownership.
+    bool isInitiator() const;
 
     ConnectionStats getStats() const;
     void resetStats();
@@ -266,7 +275,12 @@ public:
     // place as the existing baseline path until the tone-burst route
     // is multi-seed verified.
     using TransmitToneBurstAckCallback = Connection::TransmitToneBurstAckCallback;
+    using LegacyTransmitToneBurstAckCallback =
+        Connection::LegacyTransmitToneBurstAckCallback;
     void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
+        connection_.setTransmitToneBurstAckCallback(std::move(cb));
+    }
+    void setTransmitToneBurstAckCallback(LegacyTransmitToneBurstAckCallback cb) {
         connection_.setTransmitToneBurstAckCallback(std::move(cb));
     }
 
@@ -361,7 +375,7 @@ private:
     std::vector<MessageTxStatusEvent> pending_message_tx_status_;
 
     void handleTxFrame(const Bytes& frame_data, bool expect_full_ofdm_anchor_after_tx);
-    void processRxBuffer();
+    void processRxBuffer(bool input_physical_turn_complete = false);
     PendingCallbackBatch takePendingCallbacksLocked();
     static void emitPendingCallbacks(PendingCallbackBatch callbacks);
 };

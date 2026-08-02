@@ -36,6 +36,11 @@ namespace protocol {
  */
 class SelectiveRepeatARQ : public IARQController {
 public:
+    struct DeferredTimeoutCommitResult {
+        std::vector<Bytes> frames;
+        bool terminal_failure = false;
+    };
+
     explicit SelectiveRepeatARQ(const ARQConfig& config = ARQConfig{});
 
     // --- IARQController Interface ---
@@ -96,6 +101,20 @@ public:
     using TransmitBatchCallback = std::function<void(const std::vector<Bytes>&)>;
     void setTransmitBatchCallback(TransmitBatchCallback cb);
 
+    // Connection's collapse escape needs to inspect a timeout round after tick() has
+    // unwound but before any old-geometry DATA reaches the physical transmitter.  This
+    // opt-in changes only timeout batches: tick publishes exact serialized identities as
+    // intents, and the owner must either commit or cancel them synchronously after tick.
+    // Ordinary SelectiveRepeatARQ users retain the historical callback-is-egress contract.
+    void setDeferredTimeoutCommitEnabled(bool enabled) {
+        deferred_timeout_commit_enabled_ = enabled;
+    }
+    DeferredTimeoutCommitResult commitDeferredTimeoutRetransmits(
+        const std::vector<Bytes>& intents);
+    size_t cancelDeferredTimeoutRetransmits(const std::vector<Bytes>& intents,
+                                            bool suspend_until_mode_resolution);
+    size_t resumeDeferredTimeoutRetransmits(uint32_t timeout_ms = 1);
+
     // TRANSPORT MERGE (step 1): tone-burst ACK on the interactive path. When this
     // callback is installed, sendSack() emits the ack as a fast tone-burst —
     // base_seq + the (low 6 bits of the) RX bitmap — via the callback instead of a
@@ -110,12 +129,29 @@ public:
     void setEmitToneBurstSackCallback(ToneBurstSackCallback cb) {
         on_emit_tone_burst_sack_ = std::move(cb);
     }
+    // A callback can be wired before the host has installed a physical tone
+    // transmitter.  Keep the legacy control-frame plane alive until that transport is
+    // genuinely ready; otherwise a tail gap can suppress its only usable feedback.
+    void setToneBurstSackTransportReady(bool ready) {
+        tone_burst_sack_transport_ready_ = ready;
+    }
     // Sender side: consume an incoming tone-burst ACK. Reconstructs the full 16-bit
     // ack base from the 6-bit group_seq (nearest to tx_base-1) and drives the standard
     // ack path (handleAckFrame), so selective-repeat behaves identically to a SACK.
     // move_epoch is the payload's epoch echo (bits 40-41); ignored while
     // ULTRA_ARQ_MOVE_EPOCH is OFF.
-    void onToneBurstAck(uint8_t group_seq6, uint32_t bitmap, uint8_t move_epoch);
+    // Returns false only when the payload is outside the sent-window/epoch support and
+    // therefore must not drive Connection-level rate, ALC, or refill side effects. A valid
+    // same-epoch duplicate returns true: it may be a fresh physical keepalive after a lost
+    // repair ACK even though it contributes no new ARQ progress.
+    bool onToneBurstAck(uint8_t group_seq6, uint32_t bitmap, uint8_t move_epoch);
+
+    // Side-effect-free counterpart used by the PHY monitor before it commits a
+    // CRC-valid timing candidate. Checks sequence/epoch support and rejects bitmap
+    // claims for frames this sender has not emitted. The stateful onToneBurstAck()
+    // repeats the same gates as defense in depth.
+    bool isToneBurstAckPlausible(uint8_t group_seq6, uint32_t bitmap,
+                                 uint8_t move_epoch) const;
 
     // Receiver side, BURST-AWARE ACK (transport merge): the unified path delivers a
     // whole decoded burst (group) at once. The receiver knows the group boundary, so
@@ -146,7 +182,11 @@ public:
     void resetStats() override { stats_ = ARQStats{}; }
 
     void reset() override;
-    void abortPendingTx();
+    // Drop all pending TX slots and advance to a fresh sequence boundary. A terminal
+    // frame failure has already removed the failed slot before Connection can unwind,
+    // so callers handling that event must force the move-epoch bump even when no other
+    // live slot remains; otherwise the peer can stay pinned behind the abandoned seq.
+    void abortPendingTx(bool force_move_epoch_bump = false);
     void clearPendingAckRepeats();
 
     // Set the code rate for DATA frame total_cw calculation
@@ -176,9 +216,19 @@ public:
     // head-of-burst slot that kept failing). All standard pacing/dedup applies.
     void expireBaseSlotTimerForRebase();
 
-    // Set codewords per fixed OFDM data frame (default 4).
+    // Set the complete fixed-OFDM DATA geometry. Lifting Z is part of the
+    // serializer contract, not only the PHY contract: cw4/Z81 and cw4/Z27 have
+    // different payload capacities even though their frame headers carry the
+    // same total_cw value. Changing either coordinate aborts pending TX so one
+    // ARQ window can never mix serialized geometries.
+    void setFixedFrameGeometry(int cw_count, int lifting_z);
+
+    // Compatibility setters for callers that change one coordinate at a time.
+    // New connection-layer code should prefer setFixedFrameGeometry().
     void setFixedFrameCodewords(int cw_count);
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+    void setFixedFrameLiftingZ(int lifting_z);
+    int getFixedFrameLiftingZ() const { return fixed_frame_lifting_z_; }
 
     // Set window size (1 = stop-and-wait behavior for MC-DPSK)
     void setWindowSize(size_t size) {
@@ -240,6 +290,16 @@ public:
         }
     }
     uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
+
+    // Commit an explicit deadline to the exact DATA frame identities that physically
+    // went on air in one half-duplex round. Padding contributes to the Connection's
+    // timeout calculation but never matches a TX slot. Other live holes are suspended
+    // until a later physical round actually emits them, preventing a near-expiry timer
+    // from launching a second half-duplex burst under the current one. This bypasses
+    // (without mutating) the mode-wide/adaptive estimator and can move a transmitted
+    // slot's timer both up and down.
+    size_t rearmTransmittedDataFrames(const std::vector<Bytes>& frames,
+                                      uint32_t timeout_ms);
 
     // Set delayed SACK coalescing timer
     void setSackDelay(uint32_t ms) { config_.sack_delay_ms = std::max(1u, ms); }
@@ -337,6 +397,8 @@ public:
     }
 
 private:
+    friend struct SelectiveRepeatARQTestAccess;
+
     enum class RetransmitCause : uint8_t {
         TIMEOUT,
         FAST_HOLE,
@@ -352,6 +414,14 @@ private:
         uint16_t seq = 0;           // Sequence number
         int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
         uint32_t timeout_ms = 0;    // Time until retransmit
+        // Unified stop-and-wait may have more live holes than fit in the current
+        // physical group. Only identities in the group on air may run an RTO; later
+        // holes stay suspended until a subsequent group actually transmits them.
+        bool timeout_suspended = false;
+        // A deferred timeout intent was canceled because a synchronized MODE_CHANGE now
+        // owns egress. Kept separate from ordinary physical-round suspension so mode
+        // resolution resumes only the slots it froze, never unrelated later holes.
+        bool timeout_transition_suspended = false;
         uint64_t first_tx_ms = 0;   // ARQ monotonic clock when first sent
         bool rtt_sample_eligible = false; // Karn-safe RTT sampling guard
         int retry_count = 0;        // Number of retransmits
@@ -393,6 +463,7 @@ private:
     ARQConfig config_;
     CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    int fixed_frame_lifting_z_ = 27;
 
     // Callsigns
     std::string local_call_;
@@ -548,7 +619,9 @@ private:
     // Callbacks
     TransmitCallback on_transmit_;
     TransmitBatchCallback on_transmit_batch_;
+    bool deferred_timeout_commit_enabled_ = false;
     ToneBurstSackCallback on_emit_tone_burst_sack_;
+    bool tone_burst_sack_transport_ready_ = true;
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;
@@ -559,6 +632,10 @@ private:
     SackedFrameDiscardedCallback on_sacked_frame_discarded_;
 
     // Internal helpers
+    bool toneBurstSackTransportReady() const {
+        return static_cast<bool>(on_emit_tone_burst_sack_) &&
+               tone_burst_sack_transport_ready_;
+    }
     size_t seqToSlot(uint16_t seq) const;
     bool isInTXWindow(uint16_t seq) const;
     bool isInRXWindow(uint16_t seq) const;
@@ -578,12 +655,16 @@ private:
     void handleDataFrame(const v2::DataFrame& frame);
     void handlePartialFrame(const v2::PartialFrameCodewords& partial);
     void handleDataRepairFrame(const v2::DataRepairFrame& repair);
-    void handleAckFrame(const v2::ControlFrame& frame);
+    bool handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
     void retransmitFrame(size_t slot,
                          RetransmitCause cause,
                          std::vector<Bytes>* deferred_timeout_batch = nullptr);
+    void performRetransmitFrame(size_t slot,
+                                RetransmitCause cause,
+                                std::vector<Bytes>* deferred_timeout_batch = nullptr);
+    std::optional<size_t> matchingLiveTXSlot(const Bytes& frame_data) const;
     bool sendDataRepair(size_t slot, uint32_t missing_bitmap);
     bool suppressFullRetransmitForRepair(size_t slot, RetransmitCause cause);
     uint32_t computeRepairGuardMs(const TXSlot& slot, size_t repair_frame_codewords) const;

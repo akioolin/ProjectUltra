@@ -6,6 +6,7 @@
  * TX output from one station feeds directly into RX of the other.
  */
 
+#include "env_compat.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/file_transfer.hpp"
@@ -18,12 +19,45 @@
 #include <queue>
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <system_error>
 #include <algorithm>
 
 using namespace ultra::protocol;
 using ultra::Bytes;
+using ultra::CodeRate;
+using ultra::Modulation;
+
+namespace {
+
+class ScopedEnvVar {
+public:
+    explicit ScopedEnvVar(const char* name) : name_(name) {
+        if (const char* value = std::getenv(name)) {
+            had_value_ = true;
+            old_value_ = value;
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    void set(const char* value) { setenv(name_.c_str(), value, 1); }
+    void unset() { unsetenv(name_.c_str()); }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool had_value_ = false;
+};
+
+}  // namespace
 
 // Test counters
 static int tests_run = 0;
@@ -211,6 +245,9 @@ public:
             if (shouldDropNextFileCancel(data, true)) {
                 return;
             }
+            if (shouldDropDisconnectAck(data)) {
+                return;
+            }
             if (!drop_a_to_b_) {
                 pending_b_.push(data);
             }
@@ -223,6 +260,9 @@ public:
             tx_count_b_++;
             observeControlFrame(data, false);
             if (shouldDropNextFileCancel(data, false)) {
+                return;
+            }
+            if (shouldDropDisconnectAck(data)) {
                 return;
             }
             if (!drop_b_to_a_) {
@@ -258,6 +298,7 @@ public:
     void setDropBtoA(bool drop) { drop_b_to_a_ = drop; }
     void dropNextFileCancelAtoB() { drop_next_file_cancel_a_to_b_ = true; }
     void dropNextFileCancelBtoA() { drop_next_file_cancel_b_to_a_ = true; }
+    void setDropDisconnectAcks(bool drop) { drop_disconnect_acks_ = drop; }
     void setVerbose(bool v) { verbose_ = v; }
 
     int getTxCountA() const { return tx_count_a_; }
@@ -268,6 +309,13 @@ public:
     int getTurnRequestCountB() const { return turn_request_count_b_; }
     int getFileCancelCountA() const { return file_cancel_count_a_; }
     int getFileCancelCountB() const { return file_cancel_count_b_; }
+    int getDisconnectCountA() const { return disconnect_count_a_; }
+    int getDisconnectCountB() const { return disconnect_count_b_; }
+    int getDisconnectAckCountA() const { return disconnect_ack_count_a_; }
+    int getDisconnectAckCountB() const { return disconnect_ack_count_b_; }
+    bool lastConnectAckForcedFromB() const {
+        return last_connect_ack_forced_from_b_;
+    }
 
 private:
     bool shouldDropNextFileCancel(const Bytes& data, bool from_a) {
@@ -284,7 +332,23 @@ private:
         return true;
     }
 
+    bool shouldDropDisconnectAck(const Bytes& data) const {
+        if (!drop_disconnect_acks_) {
+            return false;
+        }
+        const auto ctrl = v2::ControlFrame::deserialize(data);
+        return ctrl && ctrl->type == v2::FrameType::ACK &&
+               ctrl->seq == v2::DISCONNECT_SEQ;
+    }
+
     void observeControlFrame(const Bytes& data, bool from_a) {
+        // Observe the serialized header directly: this assertion is specifically about
+        // what crossed the wire, independent of the receiver parser exercised next.
+        if (!from_a && data.size() > 3 &&
+            data[2] == static_cast<uint8_t>(v2::FrameType::CONNECT_ACK)) {
+            last_connect_ack_forced_from_b_ =
+                (data[3] & v2::Flags::CONNECT_FORCED_PROFILE) != 0;
+        }
         auto ctrl = v2::ControlFrame::deserialize(data);
         if (!ctrl) {
             return;
@@ -307,6 +371,19 @@ private:
             } else {
                 file_cancel_count_b_++;
             }
+        } else if (ctrl->type == v2::FrameType::DISCONNECT) {
+            if (from_a) {
+                disconnect_count_a_++;
+            } else {
+                disconnect_count_b_++;
+            }
+        } else if (ctrl->type == v2::FrameType::ACK &&
+                   ctrl->seq == v2::DISCONNECT_SEQ) {
+            if (from_a) {
+                disconnect_ack_count_a_++;
+            } else {
+                disconnect_ack_count_b_++;
+            }
         }
     }
 
@@ -320,6 +397,7 @@ private:
     bool drop_b_to_a_ = false;
     bool drop_next_file_cancel_a_to_b_ = false;
     bool drop_next_file_cancel_b_to_a_ = false;
+    bool drop_disconnect_acks_ = false;
     bool verbose_ = false;
 
     int tx_count_a_ = 0;
@@ -330,6 +408,11 @@ private:
     int turn_request_count_b_ = 0;
     int file_cancel_count_a_ = 0;
     int file_cancel_count_b_ = 0;
+    int disconnect_count_a_ = 0;
+    int disconnect_count_b_ = 0;
+    int disconnect_ack_count_a_ = 0;
+    int disconnect_ack_count_b_ = 0;
+    bool last_connect_ack_forced_from_b_ = false;
 };
 
 bool test_connection_establishment() {
@@ -369,6 +452,223 @@ bool test_connection_establishment() {
 
     if (!a_connected) FAIL("Station A did not connect");
     if (!b_connected) FAIL("Station B did not connect");
+
+    PASS();
+    return true;
+}
+
+bool test_environment_force_handshake_precedence() {
+    TEST("Environment-forced data rung survives handshake entry policy");
+
+    ScopedEnvVar force_mod("ULTRA_FORCE_DATA_MOD");
+    ScopedEnvVar force_rate("ULTRA_FORCE_DATA_RATE");
+    ScopedEnvVar lock_rate("ULTRA_LOCK_RATE");
+    ScopedEnvVar max_rate("ULTRA_MAX_OFDM_RATE");
+
+    auto make_config = [](bool auto_accept) {
+        ConnectionConfig config;
+        config.auto_accept = auto_accept;
+        config.mode_capabilities =
+            ModeCapabilities::OFDM_CHIRP | ModeCapabilities::PHY_MASK_V1;
+        config.preferred_mode = WaveformMode::OFDM_CHIRP;
+        return config;
+    };
+
+    auto verify_pair = [&](bool auto_accept, Modulation expected_mod,
+                           CodeRate expected_rate) -> bool {
+        ProtocolEngine stationA(make_config(true));
+        ProtocolEngine stationB(make_config(auto_accept));
+        stationA.setLocalCallsign("W1ABC");
+        stationB.setLocalCallsign("K2DEF");
+        stationB.setChannelQuality(20.0f, 0.50f,
+                                   ultra::SNRSource::MCDPSK_IN_BAND,
+                                   /*data_aided=*/true);
+
+        SimulatedChannel channel(stationA, stationB);
+        if (!stationA.connect("K2DEF")) return false;
+        if (!auto_accept) {
+            channel.run(30, 100);
+            stationB.acceptCall();
+        }
+        channel.run(50, 100);
+
+        return stationA.isConnected() && stationB.isConnected() &&
+               stationA.getDataModulation() == expected_mod &&
+               stationB.getDataModulation() == expected_mod &&
+               stationA.getDataCodeRate() == expected_rate &&
+               stationB.getDataCodeRate() == expected_rate;
+    };
+
+    // This is the exact live diagnostic contract. The valid env request is serialized
+    // into CONNECT, survives the weaker automatic MAX ceiling, and is echoed exactly.
+    force_mod.set("8PSK");
+    force_rate.set("R2_3");
+    lock_rate.unset();
+    max_rate.set("R1_2");
+    if (!verify_pair(/*auto_accept=*/true, Modulation::QAM8, CodeRate::R2_3)) {
+        FAIL("auto-accept MAX cap replaced valid env 8PSK R2/3 force");
+    }
+    if (!verify_pair(/*auto_accept=*/false, Modulation::QAM8, CodeRate::R2_3)) {
+        FAIL("manual-accept MAX cap replaced valid env 8PSK R2/3 force");
+    }
+
+    // Initiator-only environment force: sendFullConnect resolves it into the wire frame.
+    // Remove every live env knob before the responder sees CONNECT; both peers must still
+    // converge on the requested profile and the initiator's QSO pin must not depend on
+    // the variable remaining exported.
+    {
+        ProtocolEngine stationA(make_config(true));
+        ProtocolEngine stationB(make_config(true));
+        stationA.setLocalCallsign("E1ABC");
+        stationB.setLocalCallsign("E2DEF");
+        stationB.setChannelQuality(20.0f, 0.50f,
+                                   ultra::SNRSource::MCDPSK_IN_BAND,
+                                   /*data_aided=*/true);
+        SimulatedChannel channel(stationA, stationB);
+        if (!stationA.connect("E2DEF")) {
+            FAIL("initiator-only env-force CONNECT was not queued");
+        }
+        force_mod.unset();
+        force_rate.unset();
+        max_rate.unset();
+        channel.run(50, 100);
+        if (!stationA.isConnected() || !stationB.isConnected() ||
+            stationA.getDataModulation() != Modulation::QAM8 ||
+            stationB.getDataModulation() != Modulation::QAM8 ||
+            stationA.getDataCodeRate() != CodeRate::R2_3 ||
+            stationB.getDataCodeRate() != CodeRate::R2_3) {
+            FAIL("initiator-only env force was not serialized into CONNECT");
+        }
+    }
+
+    // The same resolved wire profile must survive CONNECT loss. Retries occur after the
+    // environment may have changed, so they must reuse the attempt-scoped outbound force
+    // rather than reconstructing the request from static ConnectionConfig.
+    force_mod.set("8PSK");
+    force_rate.set("R2_3");
+    {
+        ProtocolEngine stationA(make_config(true));
+        ProtocolEngine stationB(make_config(true));
+        stationA.setLocalCallsign("L1ABC");
+        stationB.setLocalCallsign("L2DEF");
+        stationB.setChannelQuality(20.0f, 0.50f,
+                                   ultra::SNRSource::MCDPSK_IN_BAND,
+                                   /*data_aided=*/true);
+        SimulatedChannel channel(stationA, stationB);
+        channel.setDropAtoB(true);
+        if (!stationA.connect("L2DEF")) {
+            FAIL("loss/retry env-force CONNECT was not initiated");
+        }
+        force_mod.unset();
+        force_rate.unset();
+        channel.setDropAtoB(false);
+        // CONNECT retry cadence is derived from four robust MC-DPSK control-frame
+        // airtimes (~34 s with production geometry), so advance past one full interval.
+        channel.run(400, 100);
+        if (!stationA.isConnected() || !stationB.isConnected() ||
+            stationA.getDataModulation() != Modulation::QAM8 ||
+            stationB.getDataModulation() != Modulation::QAM8 ||
+            stationA.getDataCodeRate() != CodeRate::R2_3 ||
+            stationB.getDataCodeRate() != CodeRate::R2_3) {
+            FAIL("CONNECT retry discarded the attempt-scoped environment force");
+        }
+    }
+
+    // Responder-only force: the initial CONNECT is already on the wire with AUTO fields
+    // when the responder's local operator profile appears. The ACK must carry explicit
+    // force provenance so the initiator pins the same QSO instead of adapting away later.
+    force_mod.unset();
+    force_rate.unset();
+    {
+        ProtocolEngine stationA(make_config(true));
+        ProtocolEngine stationB(make_config(true));
+        stationA.setLocalCallsign("P1ABC");
+        stationB.setLocalCallsign("P2DEF");
+        stationB.setChannelQuality(20.0f, 0.50f,
+                                   ultra::SNRSource::MCDPSK_IN_BAND,
+                                   /*data_aided=*/true);
+        SimulatedChannel channel(stationA, stationB);
+        if (!stationA.connect("P2DEF")) {
+            FAIL("responder-only env-force CONNECT was not initiated");
+        }
+        force_mod.set("8PSK");
+        force_rate.set("R2_3");
+        if (!environmentForcesDataProfile()) {
+            FAIL("responder-only env force was not visible before CONNECT delivery");
+        }
+        channel.deliver();  // CONNECT reaches B; ProtocolEngine defers its reentrant ACK.
+        channel.tick(1);    // Flush the serialized ACK onto the simulated wire, but not to A.
+        if (!channel.lastConnectAckForcedFromB()) {
+            FAIL("responder-only force was not marked in CONNECT_ACK");
+        }
+        force_mod.unset();
+        force_rate.unset();
+        channel.run(50, 100);
+        if (!stationA.isConnected() || !stationB.isConnected() ||
+            stationA.getDataModulation() != Modulation::QAM8 ||
+            stationB.getDataModulation() != Modulation::QAM8 ||
+            stationA.getDataCodeRate() != CodeRate::R2_3 ||
+            stationB.getDataCodeRate() != CodeRate::R2_3) {
+            FAIL("responder-only forced profile did not converge at both endpoints");
+        }
+    }
+
+    // A mixed valid+invalid environment profile fails atomically.  The valid half must
+    // not become an accidental partial force; normal automatic entry receives the
+    // conservative QPSK R1/2 first-coherent-group cap.
+    force_mod.set("8PSK");
+    force_rate.set("R2_3_typo");
+    max_rate.unset();
+    if (!verify_pair(/*auto_accept=*/true, Modulation::QPSK, CodeRate::R1_2)) {
+        FAIL("mixed malformed env profile was applied partially");
+    }
+
+    // The serialized force remains the highest-priority interoperability path.  Local
+    // invalid env values must neither mask nor reinterpret explicit CONNECT fields.
+    ConnectionConfig initiator_config = make_config(true);
+    initiator_config.forced_modulation = Modulation::QAM8;
+    initiator_config.forced_code_rate = CodeRate::R2_3;
+    max_rate.set("R1_2");
+    ProtocolEngine stationA(initiator_config);
+    ProtocolEngine stationB(make_config(true));
+    stationA.setLocalCallsign("N1ABC");
+    stationB.setLocalCallsign("N2DEF");
+    stationB.setChannelQuality(20.0f, 0.50f,
+                               ultra::SNRSource::MCDPSK_IN_BAND,
+                               /*data_aided=*/true);
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("N2DEF");
+    channel.run(50, 100);
+    if (!stationA.isConnected() || !stationB.isConnected() ||
+        stationA.getDataModulation() != Modulation::QAM8 ||
+        stationB.getDataModulation() != Modulation::QAM8 ||
+        stationA.getDataCodeRate() != CodeRate::R2_3 ||
+        stationB.getDataCodeRate() != CodeRate::R2_3) {
+        FAIL("explicit CONNECT force lost precedence over local entry policy");
+    }
+
+    // A rate-only serialized request is still a forced profile. It must bypass MAX,
+    // converge at both endpoints, and not be omitted from the responder's forced gate.
+    force_mod.unset();
+    force_rate.unset();
+    ConnectionConfig rate_only_initiator = make_config(true);
+    rate_only_initiator.forced_code_rate = CodeRate::R2_3;
+    ProtocolEngine rateA(rate_only_initiator);
+    ProtocolEngine rateB(make_config(true));
+    rateA.setLocalCallsign("R1ABC");
+    rateB.setLocalCallsign("R2DEF");
+    rateB.setChannelQuality(20.0f, 0.50f,
+                            ultra::SNRSource::MCDPSK_IN_BAND,
+                            /*data_aided=*/true);
+    SimulatedChannel rate_channel(rateA, rateB);
+    rateA.connect("R2DEF");
+    rate_channel.run(50, 100);
+    if (!rateA.isConnected() || !rateB.isConnected() ||
+        rateA.getDataCodeRate() != CodeRate::R2_3 ||
+        rateB.getDataCodeRate() != CodeRate::R2_3 ||
+        rateA.getDataModulation() != rateB.getDataModulation()) {
+        FAIL("rate-only CONNECT force was capped or split between endpoints");
+    }
 
     PASS();
     return true;
@@ -456,6 +756,62 @@ bool test_disconnect() {
 
     if (!a_disconnected && stationA.isConnected()) FAIL("A not disconnected");
     if (!b_disconnected && stationB.isConnected()) FAIL("B not disconnected");
+
+    PASS();
+    return true;
+}
+
+bool test_crossed_disconnect_converges_without_acks() {
+    TEST("Crossed disconnect converges through mutual-close grace");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Stations did not connect");
+    }
+    if (!stationA.isInitiator() || stationB.isInitiator()) {
+        FAIL("Connection teardown ownership role is wrong");
+    }
+
+    // Both operators close before either request arrives. Drop every ACK for the
+    // reserved DISCONNECT sequence: the two decoded close requests must themselves
+    // be sufficient to converge, without phase-locked DISCONNECT retransmissions.
+    channel.setDropDisconnectAcks(true);
+    stationA.disconnect();
+    stationB.disconnect();
+    channel.run(2, 100);
+
+    if (stationA.getState() != ConnectionState::DISCONNECTING ||
+        stationB.getState() != ConnectionState::DISCONNECTING) {
+        FAIL("Crossed close did not enter mutual DISCONNECTING grace");
+    }
+
+    channel.run(60, 100);
+
+    if (stationA.getState() != ConnectionState::DISCONNECTED ||
+        stationB.getState() != ConnectionState::DISCONNECTED) {
+        FAIL("Crossed close did not converge after responder grace");
+    }
+    if (channel.getDisconnectCountA() != 1 || channel.getDisconnectCountB() != 1) {
+        FAIL("Local DISCONNECT retransmitted after peer close intent was decoded");
+    }
+    if (channel.getDisconnectAckCountA() < 2 ||
+        channel.getDisconnectAckCountB() < 2) {
+        FAIL("Mutual-close grace did not keep the peer ACK alive");
+    }
+    if (stationA.getStats().disconnects != 1 || stationB.getStats().disconnects != 1) {
+        FAIL("Crossed close was double-counted in disconnect statistics");
+    }
 
     PASS();
     return true;
@@ -557,6 +913,77 @@ bool test_phy_mask_v1_negotiation() {
 // ============================================================================
 // Binary stream / TNC-facing API Tests
 // ============================================================================
+
+bool test_physical_turn_provenance_stays_on_input_boundary() {
+    TEST("Physical-turn provenance stays on the modem input boundary");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.mode_capabilities = ModeCapabilities::OFDM_CHIRP;
+    config.preferred_mode = WaveformMode::OFDM_CHIRP;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+    stationB.setMeasuredSNR(20.0f, ultra::SNRSource::OFDM_BROADBAND);
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection not established");
+    }
+
+    std::vector<bool> ack_provenance;
+    stationB.setTransmitToneBurstAckCallback(
+        [&](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&,
+            bool physical_complete) {
+            ack_provenance.push_back(physical_complete);
+        });
+
+    auto make_frame = [&](uint16_t seq, uint8_t flags) {
+        auto frame = v2::makeFixedDataFrame(
+            "W1ABC", "K2DEF", seq, Bytes{0x42}, stationB.getDataCodeRate());
+        frame.flags |= flags;
+        return frame.serialize();
+    };
+
+    // A frame split across two onRxData calls inherits proof only from the call
+    // that supplies its physical end boundary.
+    const Bytes split = make_frame(0, v2::Flags::MORE_FRAG);
+    const size_t cut = split.size() / 2;
+    stationB.onRxData(Bytes(split.begin(), split.begin() + cut), false);
+    stationB.onRxData(Bytes(split.begin() + cut, split.end()), true);
+    if (ack_provenance.size() != 1 || !ack_provenance.back()) {
+        FAIL("Split frame did not receive exactly one physical-boundary ACK");
+    }
+
+    // With two complete frames in one callback, only the final parsed frame ends
+    // the physical input. FINAL makes the first frame emit an observable ordinary
+    // ACK; the second is the single physically-complete boundary ACK.
+    const size_t before_concat = ack_provenance.size();
+    Bytes concat = make_frame(1, v2::Flags::FINAL);
+    const Bytes second = make_frame(2, v2::Flags::MORE_FRAG);
+    concat.insert(concat.end(), second.begin(), second.end());
+    stationB.onRxData(concat, true);
+    if (ack_provenance.size() != before_concat + 2 ||
+        ack_provenance[before_concat] || !ack_provenance[before_concat + 1]) {
+        FAIL("Concatenated input leaked physical provenance to a non-final member");
+    }
+
+    // A malformed physical callback must not leave a sticky bit that a later,
+    // unrelated ordinary frame can inherit.
+    stationB.onRxData(Bytes{0x00, 0x01}, true);
+    const size_t before_ordinary = ack_provenance.size();
+    stationB.onRxData(make_frame(3, v2::Flags::FINAL), false);
+    if (ack_provenance.size() != before_ordinary + 1 || ack_provenance.back()) {
+        FAIL("Malformed input leaked physical provenance to a later frame");
+    }
+
+    PASS();
+    return true;
+}
 
 bool test_binary_fragment_reassembly_single_callback() {
     TEST("Binary fragment reassembly emits one data callback");
@@ -870,14 +1297,17 @@ int main() {
 
     std::cout << "\nTwo-Station Simulation:\n";
     test_connection_establishment();
+    test_environment_force_handshake_precedence();
     test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_disconnect();
+    test_crossed_disconnect_converges_without_acks();
     test_manual_accept();
 
     std::cout << "\nCapability Negotiation:\n";
     test_phy_mask_v1_negotiation();
 
     std::cout << "\nBinary Stream / TNC API Tests:\n";
+    test_physical_turn_provenance_stays_on_input_boundary();
     test_binary_fragment_reassembly_single_callback();
     test_send_binary_roundtrip_arbitrary_bytes();
 

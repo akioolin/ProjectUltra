@@ -33,6 +33,42 @@ void test_mean_abs_llr() {
     CHECK_CLOSE(meanAbsLLR(values, 3), 2.0f, 0.0001f, "mean absolute LLR");
 }
 
+void test_future_training_start_is_deferred_not_clamped() {
+    // Exact live IONOS incident (qpsk run, mac.log 41.791): the dual-chirp lock was
+    // valid, but its training span started 1,341 samples after the current write head.
+    // The former production branch replaced 673085 with 671744 and immediately decoded
+    // unwritten samples.  The descriptor then failed despite a valid chirp acquisition.
+    constexpr size_t kSearchStartAbs = 548285;
+    constexpr int kTrainingOffset = 124800;
+    constexpr size_t kFedAtDetection = 671744;
+    constexpr size_t kTrueTrainingAbs = 673085;
+
+    const auto future = classifyDetectedTrainingStart(
+        kSearchStartAbs, kTrainingOffset, kFedAtDetection);
+    CHECK(future.disposition == TrainingStartDisposition::DEFER,
+          "future training must defer instead of decoding at the write head");
+    CHECK(future.detected_abs == kTrueTrainingAbs,
+          "deferral must preserve the detector's exact absolute training position");
+    CHECK(future.samples_missing == 1341,
+          "deferral must wait for exactly the missing training samples");
+    CHECK(future.detected_abs != kFedAtDetection,
+          "the future position must never be clamped to total_fed");
+
+    const auto ready = classifyDetectedTrainingStart(
+        kSearchStartAbs, kTrainingOffset, kTrueTrainingAbs);
+    CHECK(ready.disposition == TrainingStartDisposition::READY,
+          "the same preserved candidate becomes ready when training reaches the ring");
+    CHECK(ready.detected_abs == kTrueTrainingAbs,
+          "ready transition must not move the candidate");
+    CHECK(ready.samples_missing == 0,
+          "ready candidate has no missing samples");
+
+    const auto invalid = classifyDetectedTrainingStart(
+        kSearchStartAbs, -1, kFedAtDetection);
+    CHECK(invalid.disposition == TrainingStartDisposition::INVALID,
+          "a found result with a negative training offset is invalid");
+}
+
 void test_presync_llr_quality() {
     std::vector<float> strong(648, 2.0f);
     auto good = evaluatePreSyncLLR(strong.data(), strong.size(), 648);
@@ -250,6 +286,7 @@ void test_pilot_cfo_update() {
 
 int main() {
     test_mean_abs_llr();
+    test_future_training_start_is_deferred_not_clamped();
     test_presync_llr_quality();
     test_invalid_ofdm_lts_training();
     test_light_sync_thresholds();

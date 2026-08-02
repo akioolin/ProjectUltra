@@ -68,7 +68,9 @@
 // SCOPE. Pure logic, no I/O, no clock, no RNG.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 
@@ -95,16 +97,58 @@ namespace protocol {
 // HONEST CAVEATS carried into the release:
 //   - Significant by the t-test, NOT by the sign test (7/8, p=0.070). Established, not
 //     settled.
-//   - The tie-break probe (kTieBreakMarginFrac / kTieBreakPeriod) raises the mean slightly
-//     and DOUBLES the variance (+16.5% sd 27.3% over 7 pairs, losing significance). It is
-//     compiled in and fires, and its bimodal signature is documented in the CHANGELOG; if a
-//     regression appears, that is the first thing to gate on posterior confidence.
+//   - The tie-break probe (kTieBreakMarginFrac / kTieBreakPeriod) raised the mean slightly
+//     but DOUBLED the variance (+16.5% sd 27.3% over 7 pairs, losing significance). It is
+//     therefore an explicit experiment, disabled by the production caller unless requested.
 inline bool latentRateControllerEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_LATENT_RATE");
         return !(e != nullptr && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON
     }();
     return on;
+}
+
+// Dedicated whole-group probes doubled the paired-run variance and erased the otherwise
+// significant controller result. Keep the mechanism available for controlled experiments,
+// but never spend an on-air group on it by default.
+inline bool latentTieBreakProbeEnabled() {
+    const char* e = std::getenv("ULTRA_LATENT_TIE_PROBE");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+}
+
+// Absolute canonical-rung ceiling promised by ULTRA_MAX_OFDM_RATE.  The legacy
+// within-modulation controller parsed this at its actuator, but the latent controller
+// returns before that path; passing this value into best() keeps its normal argmax, the
+// experimental tie probe, and startup exploration under the same operator ceiling.
+inline uint8_t latentConfiguredRungCeiling() {
+    const char* env = std::getenv("ULTRA_MAX_OFDM_RATE");
+    if (env == nullptr) return kRungIdxNone;
+    if (std::strcmp(env, "R1_2") == 0 || std::strcmp(env, "r1_2") == 0) {
+        return kRungIdxQpskR12;
+    }
+    if (std::strcmp(env, "R2_3") == 0 || std::strcmp(env, "r2_3") == 0) {
+        return kRungIdxQpskR23;
+    }
+    if (std::strcmp(env, "R3_4") == 0 || std::strcmp(env, "r3_4") == 0) {
+        return kRungIdxQpskR34;
+    }
+    return kRungIdxNone;
+}
+
+// Environment-forced profiles are resolved into the outbound CONNECT forced fields so both
+// endpoints share the same rung.  They also form an operator measurement contract: the
+// negotiated rung remains pinned for the whole QSO, including if the process environment is
+// changed after CONNECT. ULTRA_LOCK_RATE is repeated here for the same explicit contract;
+// Connection::rateAdaptationActive() supplies the instance-level and ULTRA_RATE_ADAPT checks
+// at the call site.
+inline bool latentStartupProbeAllowedByOperator() {
+    // Merely exporting an empty or misspelled variable does not force the selector,
+    // so it must not silently freeze the closed-loop controller either.
+    if (environmentForcesDataProfile()) return false;
+    if (const char* lock = std::getenv("ULTRA_LOCK_RATE")) {
+        if (std::atoi(lock) != 0) return false;
+    }
+    return true;
 }
 
 // ── LINK MODEL ───────────────────────────────────────────────────────────────
@@ -205,6 +249,8 @@ public:
         for (int i = 0; i < kBins; ++i) logp_[i] = 0.0f;
         normalise();
         have_prior_ = false;
+        observations_ = 0;
+        decisions_ = 0;
     }
 
     // Seed from the connect-time pick. Minstrel starts from ignorance because at 2000 pkt/s
@@ -275,49 +321,58 @@ public:
 
     // ── DECISION: stateless argmax over predicted delivered goodput ───────────
     //
-    // Overhead goes in the DENOMINATOR (Minstrel's nsecs includes it). Our predecessor's
-    // break-even used the raw-rate ratio eta_below/eta_cur, which OMITS the fixed per-cycle
-    // cost — with sync 1.41 s + turnaround 1.79 s against a 6.19 s payload, the true
-    // break-even for one rung up is 0.835, not 0.750. Getting this wrong makes the
-    // controller tolerate ~14 points more loss than it should.
+    // The caller supplies physical geometry from the same helpers used by the transmitter.
+    // This is deliberately bytes/cycle, not a spectral-efficiency proxy: production varies
+    // codeword count by modulation and normalises most active rungs to approximately the
+    // same frame duration. Multiplying by eta while also shrinking airtime by 1/eta rewards
+    // a dense rung twice and was measured to change the selected rung.
+    struct RungGeometry {
+        float useful_bytes_per_frame = 0.0f;
+        int frames_per_cycle = 0;
+        float cycle_s = 0.0f;
+
+        bool valid() const {
+            return useful_bytes_per_frame > 0.0f &&
+                   frames_per_cycle > 0 && cycle_s > 0.0f;
+        }
+    };
+    using RungGeometryTable = std::array<RungGeometry, kRungIdxCount>;
+
     struct Pick {
         uint8_t rung = kRungIdxNone;
-        float goodput = 0.0f;
+        float goodput = 0.0f;       // predicted useful bytes/s
         float x_used = 0.0f;
         bool tie_break_probe = false;   // this decision took the higher near-tied rung
     };
 
-    Pick best(float payload_s_per_frame, float fixed_s_per_cycle, int frames_per_group,
-              uint8_t ceiling = kRungIdxNone) {
+    Pick best(const RungGeometryTable& geometry,
+              uint8_t ceiling = kRungIdxNone,
+              bool allow_tie_break_probe = false) {
         Pick out;
         float g_by_rung[kRungIdxCount] = {};
         out.x_used = percentile(kDecilePessimism);
-        const int M = std::max(1, frames_per_group);
         for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
             const CoherentPick cp = coherentRungFromIndex(r);
             if (!coherentRungLocallyEnabled(cp.mod, cp.rate)) continue;
             if (ceiling != kRungIdxNone && r > ceiling) continue;
+            const auto& physical = geometry[r];
+            if (!physical.valid()) continue;
             float p = successProb(out.x_used, latentThetaForRung(r));
             if (p < kDeadProb) continue;              // dead, not merely bad
             p = std::min(p, kCapProb);                // never reward a lucky streak
-            const float eta = rungSpectralEfficiency(r);
-            if (!(eta > 0.0f)) continue;
-            // Airtime for one group at this rung scales inversely with spectral efficiency;
-            // the fixed cost does not scale at all. That asymmetry is why a denser rung wins
-            // less than its raw-rate ratio suggests.
-            const float air = static_cast<float>(M) * payload_s_per_frame *
-                              (rungSpectralEfficiency(kRungIdxQpskR34) / eta);
-            const float cycle = air + fixed_s_per_cycle;
-            const float g = (cycle > 0.0f) ? (eta * p / cycle) : 0.0f;
+            const float useful_bytes = physical.useful_bytes_per_frame *
+                                       static_cast<float>(physical.frames_per_cycle);
+            const float g = useful_bytes * p / physical.cycle_s;
             if (g > out.goodput) { out.goodput = g; out.rung = r; }
-            if (r < kRungIdxCount) { g_by_rung[r] = g; }
+            g_by_rung[r] = g;
         }
 
         // TIE-BREAK UPWARD. Walk DOWN from the top so we find the HIGHEST rung that is
         // within the margin, not merely the runner-up: on a flat region several rungs can be
         // near-tied and the informative probe is the highest of them.
         ++decisions_;
-        if (out.rung != kRungIdxNone && out.goodput > 0.0f &&
+        if (allow_tie_break_probe &&
+            out.rung != kRungIdxNone && out.goodput > 0.0f &&
             (decisions_ % kTieBreakPeriod) == 0) {
             for (int r = static_cast<int>(kRungIdxCount) - 1;
                  r > static_cast<int>(out.rung); --r) {

@@ -37,6 +37,9 @@ struct ToneBurstAckDetection {
     ToneBurstAckPayload payload;
     uint64_t detected_stream_offset = 0;
     float correlation_peak = 0.0f;
+    // Strongest/second-strongest tone ratio of the weakest payload symbol.
+    // Kept as telemetry only: no production cliff has been calibrated for it.
+    float min_symbol_confidence = 0.0f;
     int hamming_corrected_blocks = 0;
     uint32_t symbol_ms_used = 0;
 };
@@ -151,6 +154,14 @@ public:
     // Install the callback. May be called once; subsequent calls replace.
     void setCallback(ToneBurstAckCallback cb) { callback_ = std::move(cb); }
 
+    // Install a side-effect-free protocol plausibility gate. The detector applies it
+    // to every CRC-valid timing candidate before declaring success, and continues its
+    // bounded timing search after a rejection. With no predicate, legacy PHY-only
+    // behavior is preserved for standalone detector/monitor users.
+    void setAcceptancePredicate(ToneBurstAckAcceptancePredicate predicate) {
+        acceptance_predicate_ = std::move(predicate);
+    }
+
     // §15 step 4d-late: arm the detector for an expected ACK arrival.
     // While armed, detection runs every detect_interval_samples_armed (the
     // tight production cadence). When the armed window elapses without a
@@ -165,6 +176,12 @@ public:
     // polling configuration; arm() is a no-op there).
     void arm(size_t window_samples);
 
+    // Start a new physical ACK round with exactly this relative window, replacing any
+    // older/larger deadline. Connection uses this after a DATA group is committed: in
+    // stop-and-wait there is only one current ACK expectation, and retaining a prior
+    // full-burst deadline would defeat a one-frame tail timeout.
+    void rearm(size_t window_samples);
+
     // True iff a successful decode has not yet fired AND the armed window
     // has not yet elapsed. Always false when Config.armed_only is false.
     bool isArmed() const { return armed_; }
@@ -177,6 +194,9 @@ public:
     uint64_t totalSamplesFed() const { return total_samples_fed_; }
     uint64_t detectionsEmitted() const { return detections_emitted_; }
     uint64_t suppressedAttempts() const { return suppressed_attempts_; }
+    uint64_t semanticCandidatesRejected() const {
+        return semantic_candidates_rejected_;
+    }
     const Config& config() const { return cfg_; }
 
 private:
@@ -188,6 +208,7 @@ private:
     Config cfg_;
     ToneBurstDetector detector_;
     ToneBurstAckCallback callback_;
+    ToneBurstAckAcceptancePredicate acceptance_predicate_;
 
     // Linear buffer (not strictly circular — we drop the oldest samples
     // when over capacity). Simpler than ring buffer; size cap keeps memory
@@ -205,6 +226,9 @@ private:
 
     uint64_t detections_emitted_ = 0;
     uint64_t suppressed_attempts_ = 0;
+    uint64_t semantic_candidates_rejected_ = 0;
+    uint64_t last_semantic_rejection_stream_offset_ =
+        static_cast<uint64_t>(-1);
 
     // §15 step 4d-late: armed-window state. When armed_, runDetectionPass()
     // runs at cfg_.detect_interval_samples_armed cadence. When unset,

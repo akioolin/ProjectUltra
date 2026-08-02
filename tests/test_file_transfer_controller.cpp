@@ -100,6 +100,83 @@ struct TransferDirs {
     }
 };
 
+void test_failure_callback_can_start_next_file_without_outer_reset_wiping_it() {
+    TransferDirs dirs("ultra_file_transfer_reentrant_failure_test");
+    CHECK(dirs.ready, "create reentrant failure temp directories");
+
+    const std::filesystem::path first_path = dirs.tx_dir / "first.bin";
+    const std::filesystem::path second_path = dirs.tx_dir / "second.bin";
+    CHECK(writeFile(first_path, Bytes{1, 2, 3, 4}), "write first source file");
+    CHECK(writeFile(second_path, Bytes{5, 6, 7, 8, 9}), "write second source file");
+
+    FileTransferController tx;
+    CHECK(tx.startSend(first_path.string()), "start first transfer");
+    bool callback_called = false;
+    bool restarted = false;
+    tx.setSentCallback([&](bool success, const std::string&) {
+        callback_called = true;
+        CHECK(!success, "terminal callback should report failure");
+        restarted = tx.startSend(second_path.string());
+    });
+
+    tx.onSendFailed();
+    CHECK(callback_called && restarted,
+          "failure callback should synchronously start the replacement file");
+    CHECK(tx.getState() == FileTransferState::SENDING,
+          "outer failure cleanup must not wipe the replacement transfer state");
+    CHECK(tx.getProgress().filename == second_path.filename().string(),
+          "replacement file metadata must survive callback return");
+    Bytes metadata = tx.getNextChunk();
+    CHECK(!metadata.empty() &&
+              metadata[0] == static_cast<uint8_t>(PayloadType::FILE_START),
+          "replacement transfer should retain a valid FILE_START chunk");
+
+    tx.setSentCallback({});
+    tx.cancel();
+}
+
+void test_success_callback_can_start_next_file_without_outer_reset_wiping_it() {
+    TransferDirs dirs("ultra_file_transfer_reentrant_success_test");
+    CHECK(dirs.ready, "create reentrant success temp directories");
+
+    const std::filesystem::path first_path = dirs.tx_dir / "first-success.bin";
+    const std::filesystem::path second_path = dirs.tx_dir / "second-success.bin";
+    CHECK(writeFile(first_path, Bytes{1, 2, 3, 4}), "write first success source file");
+    CHECK(writeFile(second_path, Bytes{5, 6, 7, 8, 9}),
+          "write second success source file");
+
+    FileTransferController tx;
+    CHECK(tx.startSend(first_path.string()), "start first successful transfer");
+    const std::vector<TxChunk> first_chunks = collectChunks(tx);
+    CHECK(!first_chunks.empty(), "first transfer should produce chunks to retire");
+
+    bool callback_called = false;
+    bool callback_success = false;
+    bool restarted = false;
+    tx.setSentCallback([&](bool success, const std::string&) {
+        callback_called = true;
+        callback_success = success;
+        restarted = tx.startSend(second_path.string());
+    });
+    for (size_t i = 0; i < first_chunks.size(); ++i) {
+        tx.onChunkAcked();
+    }
+
+    CHECK(callback_called && callback_success && restarted,
+          "success callback should synchronously start the replacement file");
+    CHECK(tx.getState() == FileTransferState::SENDING,
+          "outer success cleanup must not wipe the replacement transfer state");
+    CHECK(tx.getProgress().filename == second_path.filename().string(),
+          "replacement file metadata must survive success callback return");
+    Bytes metadata = tx.getNextChunk();
+    CHECK(!metadata.empty() &&
+              metadata[0] == static_cast<uint8_t>(PayloadType::FILE_START),
+          "replacement transfer should retain a valid FILE_START chunk");
+
+    tx.setSentCallback({});
+    tx.cancel();
+}
+
 void test_compressed_final_chunk_out_of_order_finalizes() {
     TransferDirs dirs("ultra_file_transfer_controller_test");
     CHECK(dirs.ready, "create temp directories");
@@ -489,6 +566,8 @@ void test_prestart_staging_coverage_never_shrinks_on_regrid() {
 }
 
 int main() {
+    test_failure_callback_can_start_next_file_without_outer_reset_wiping_it();
+    test_success_callback_can_start_next_file_without_outer_reset_wiping_it();
     test_receiver_coverage_never_shrinks_on_regrid_out_of_order();
     test_prestart_staging_coverage_never_shrinks_on_regrid();
     test_compressed_final_chunk_out_of_order_finalizes();

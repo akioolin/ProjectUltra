@@ -109,6 +109,103 @@ bool test_ofdm_chirp_full_preamble_loopback() {
     return processFromSync(waveform, audio, sync, "OFDM-CHIRP full");
 }
 
+bool test_ofdm_chirp_prefers_complete_descriptor_before_stronger_future_anchor() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;
+    cfg.modulation = Modulation::QPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 5;
+
+    OFDMChirpWaveform tx(cfg);
+    tx.configure(Modulation::QPSK, CodeRate::R1_4);
+    const Samples preamble = tx.generatePreamble();
+
+    // Exact production geometry from the QPSK-Z81 repro: the descriptor's
+    // complete anchor starts after one 100 ms feed quantum, while the DATA
+    // group's stronger anchor starts 67,680 samples later.  A 120k detector
+    // window contains the later UP chirp and most of its DOWN chirp, but not a
+    // usable training start.  The old strongest-global detector selected that
+    // later UP, reported no complete pair, and the cursor advanced past the
+    // descriptor.
+    constexpr size_t kSearchWindow = 120000;
+    constexpr size_t kDescriptorAnchorStart = 4800;
+    constexpr size_t kDataAnchorStart = 72480;
+    Samples audio(kSearchWindow, 0.0f);
+
+    std::mt19937 rng(0x20260802u);
+    std::normal_distribution<float> noise(0.0f, 0.02f);
+    for (float& sample : audio) sample = noise(rng);
+
+    // Make the complete descriptor deliberately weaker than the later anchor.
+    // Correlation is normalized, so the common noise floor plus this amplitude
+    // ratio is what creates the deterministic peak ordering.
+    for (size_t i = 0; i < preamble.size() && kDescriptorAnchorStart + i < audio.size(); ++i) {
+        audio[kDescriptorAnchorStart + i] += 0.25f * preamble[i];
+    }
+    for (size_t i = 0; i < preamble.size() && kDataAnchorStart + i < audio.size(); ++i) {
+        audio[kDataAnchorStart + i] += preamble[i];
+    }
+
+    OFDMChirpWaveform rx(cfg);
+    rx.configure(Modulation::QPSK, CodeRate::R1_4);
+    SyncResult sync;
+    CHECK(rx.detectSync(SampleSpan(audio), sync, 0.15f),
+          "OFDM-CHIRP chronology: complete descriptor must beat stronger incomplete future anchor");
+    CHECK(std::abs(sync.preamble_start_sample -
+                   static_cast<int>(kDescriptorAnchorStart)) <= 32,
+          "OFDM-CHIRP chronology: detector must select the earlier descriptor anchor");
+    const int expected_training = static_cast<int>(
+        kDescriptorAnchorStart + preamble.size() -
+        2 * static_cast<size_t>(rx.getSamplesPerSymbol()));
+    CHECK(std::abs(sync.start_sample - expected_training) <= 32,
+          "OFDM-CHIRP chronology: selected descriptor training must already be readable");
+    return true;
+}
+
+bool test_ofdm_chirp_keeps_strongest_anchor_when_its_training_is_readable() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;
+    cfg.modulation = Modulation::QPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 5;
+
+    OFDMChirpWaveform tx(cfg);
+    tx.configure(Modulation::QPSK, CodeRate::R1_4);
+    const Samples preamble = tx.generatePreamble();
+
+    constexpr size_t kSearchWindow = 120000;
+    constexpr size_t kMarginalEarlierStart = 1000;
+    constexpr size_t kStrongReadableStart = 60000;
+    Samples audio(kSearchWindow, 0.0f);
+    std::mt19937 rng(0x20260803u);
+    std::normal_distribution<float> noise(0.0f, 0.02f);
+    for (float& sample : audio) sample = noise(rng);
+    for (size_t i = 0; i < preamble.size() && kMarginalEarlierStart + i < audio.size(); ++i) {
+        audio[kMarginalEarlierStart + i] += 0.20f * preamble[i];
+    }
+    for (size_t i = 0; i < preamble.size() && kStrongReadableStart + i < audio.size(); ++i) {
+        audio[kStrongReadableStart + i] += preamble[i];
+    }
+
+    OFDMChirpWaveform rx(cfg);
+    rx.configure(Modulation::QPSK, CodeRate::R1_4);
+    SyncResult sync;
+    CHECK(rx.detectSync(SampleSpan(audio), sync, 0.15f),
+          "OFDM-CHIRP usable peak: strong complete anchor should detect");
+    CHECK(std::abs(sync.preamble_start_sample -
+                   static_cast<int>(kStrongReadableStart)) <= 32,
+          "OFDM-CHIRP usable peak: marginal earlier pair must not outrank a readable strong lock");
+    return true;
+}
+
 bool test_ofdm_chirp_data_preamble_loopback() {
     ModemConfig cfg;
     cfg.sample_rate = 48000;
@@ -239,6 +336,8 @@ bool test_ofdm_chirp_data_preamble_noise_false_sync_rate() {
 
 int main() {
     test_ofdm_chirp_full_preamble_loopback();
+    test_ofdm_chirp_prefers_complete_descriptor_before_stronger_future_anchor();
+    test_ofdm_chirp_keeps_strongest_anchor_when_its_training_is_readable();
     test_ofdm_chirp_data_preamble_loopback();
     test_ofdm_chirp_data_preamble_awgn_warm_sync();
     test_ofdm_chirp_data_preamble_noise_false_sync_rate();

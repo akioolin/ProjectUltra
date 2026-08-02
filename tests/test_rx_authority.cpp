@@ -82,6 +82,30 @@ struct ConnectionAdaptiveTestAccess {
         return c.burstAirtimeBudgetFrames(want);
     }
     static void obey(Connection& c, uint8_t idx) { c.maybeObeyAuthorityCommand(idx); }
+    static void setStartupWireState(Connection& c, bool waiting, uint8_t cmd) {
+        c.latent_startup_probe_waiting_ = waiting;
+        c.latent_startup_probe_spent_ = false;
+        c.latent_startup_probe_failed_ = false;
+        c.rx_authority_cmd_ = cmd;
+    }
+    static void emitToneSack(Connection& c, bool completed_group) {
+        c.tone_ack_group_complete_context_ = completed_group;
+        c.arq_.beginGroupReceive();
+        c.arq_.endGroupReceiveAndAck();
+        c.tone_ack_group_complete_context_ = false;
+    }
+    static bool startupWaiting(const Connection& c) {
+        return c.latent_startup_probe_waiting_;
+    }
+    static bool startupFailed(const Connection& c) {
+        return c.latent_startup_probe_failed_;
+    }
+    static bool acceptAuthorityRevision(Connection& c, uint8_t cmd_word,
+                                        uint8_t group_seq, uint16_t mask,
+                                        uint8_t epoch) {
+        return c.acceptAuthorityCommandRevision(
+            cmd_word, group_seq, mask, epoch);
+    }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
     static Modulation pendingModulation(const Connection& c) { return c.pending_modulation_; }
     static CodeRate pendingCodeRate(const Connection& c) { return c.pending_code_rate_; }
@@ -752,6 +776,79 @@ static bool test_group_size_gate_streak() {
     return true;
 }
 
+static bool test_startup_probe_wire_tail_and_async_safety() {
+    TEST("startup probe wire flag; async and FINAL ACKs fail/hold safely");
+    using ultra::waveform::tone_burst_ack::ToneBurstAckPayload;
+    auto word = [](const ToneBurstAckPayload& ack) {
+        return static_cast<uint8_t>((ack.rate_hint & 0x7) |
+                                    ((ack.rung_cmd & 0x3) << 3));
+    };
+
+    Connection flagged;
+    std::vector<ToneBurstAckPayload> flagged_acks;
+    flagged.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { flagged_acks.push_back(ack); });
+    TA::makeConnectedOFDM(
+        flagged, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TA::setStartupWireState(flagged, true, kRungIdxQpskR23);
+    TA::emitToneSack(flagged, /*completed_group=*/true);
+    if (flagged_acks.empty() ||
+        word(flagged_acks.back()) !=
+            static_cast<uint8_t>(kRungAuthorityStartupProbeFlag |
+                                 kRungIdxQpskR23)) {
+        FAIL("trusted group ACK did not carry sender-visible one-shot flag");
+    }
+
+    Connection async;
+    std::vector<ToneBurstAckPayload> async_acks;
+    async.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { async_acks.push_back(ack); });
+    TA::makeConnectedOFDM(
+        async, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TA::setStartupWireState(async, true, kRungIdxQpskR23);
+    TA::emitToneSack(async, /*completed_group=*/false);
+    if (async_acks.empty() || word(async_acks.back()) != kRungIdxQpskR12 ||
+        TA::startupWaiting(async) || !TA::startupFailed(async)) {
+        FAIL("asynchronous SACK emitted an unprotected UP or failed to spend probe");
+    }
+
+    Connection final_hold;
+    std::vector<ToneBurstAckPayload> final_acks;
+    final_hold.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { final_acks.push_back(ack); });
+    TA::makeConnectedOFDM(
+        final_hold, CodeRate::R1_2, 20.0f, 0.30f, Modulation::QPSK);
+    TA::setStartupWireState(final_hold, false, kRungIdxQam8R23);
+    auto final = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 0, Bytes{0x42}, CodeRate::R1_2);
+    final.flags |= v2::Flags::FINAL;
+    final_hold.onFrameReceived(final.serialize(), /*physical_turn_complete=*/true);
+    if (final_acks.empty() || word(final_acks.back()) != kRungIdxQpskR12 ||
+        TA::rxCmd(final_hold) != kRungIdxQpskR12) {
+        FAIL("logical FINAL ACK advertised a pointless new rung");
+    }
+
+    PASS();
+    return true;
+}
+
+static bool test_identical_ack_authority_revisions_are_downward_only() {
+    TEST("same seq/epoch ACK episode accepts rollback across mask growth and rejects stale UP");
+    Connection c;
+    const uint8_t up = static_cast<uint8_t>(
+        kRungAuthorityStartupProbeFlag | kRungIdxQpskR23);
+    if (!TA::acceptAuthorityRevision(c, up, 7, 0x0000, 0))
+        FAIL("first flagged UP command was rejected");
+    if (!TA::acceptAuthorityRevision(c, kRungIdxQpskR12, 7, 0x0002, 0))
+        FAIL("same-episode safety rollback with a newer SACK mask was rejected");
+    if (TA::acceptAuthorityRevision(c, up, 7, 0x0000, 0))
+        FAIL("delayed old-mask UP reversed an accepted same-episode rollback");
+    if (!TA::acceptAuthorityRevision(c, up, 8, 0x001F, 0))
+        FAIL("a genuinely new ACK identity did not reset the revision floor");
+    PASS();
+    return true;
+}
+
 int main() {
     // MUST precede any Connection construction (env-latched statics).
     setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
@@ -793,6 +890,8 @@ int main() {
     ok &= test_goodput_break_even_is_rate_ratio();
     ok &= test_crater_grading_is_default_on();
     ok &= test_group_size_gate_streak();
+    ok &= test_startup_probe_wire_tail_and_async_safety();
+    ok &= test_identical_ack_authority_revisions_are_downward_only();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }

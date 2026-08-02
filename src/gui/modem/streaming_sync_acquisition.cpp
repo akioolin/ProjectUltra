@@ -363,6 +363,35 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     }
 }
 
+void StreamingDecoder::armProvisionalBurstAirGate(uint64_t anchor_abs,
+                                                  bool proven_full_chirp) {
+    const uint64_t guard_samples =
+        static_cast<uint64_t>(
+            protocol::connection_policy::maxWideOFDMPhysicalTurnAfterAnchorTrainingMs()) *
+        static_cast<uint64_t>(protocol::connection_policy::kOFDMSampleRate) / 1000u;
+    provisional_burst_anchor_abs_.store(anchor_abs, std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(proven_full_chirp,
+                                                std::memory_order_relaxed);
+    burst_air_end_abs_.store(anchor_abs + guard_samples, std::memory_order_relaxed);
+    burst_air_end_provisional_.store(true, std::memory_order_relaxed);
+}
+
+void StreamingDecoder::clearProvisionalBurstAirGate() {
+    if (burst_air_end_provisional_.exchange(false, std::memory_order_relaxed)) {
+        provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+        provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+        burst_air_end_abs_.store(0, std::memory_order_relaxed);
+        // The same accepted full anchor arms the no-group backstop.  Reaching
+        // this helper means a standalone physical transmission was positively
+        // completed (classic frame at that anchor, physical tail, or control),
+        // so a synthetic crater ACK ~14.6 s later would be false and can collide
+        // with the peer's next turn.  Only disarm when the provisional gate was
+        // actually live; later light non-FINAL frames intentionally keep both.
+        anchored_burst_backstop_armed_ = false;
+        anchored_burst_payload_seen_ = false;
+    }
+}
+
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
@@ -417,14 +446,16 @@ void StreamingDecoder::searchForSync() {
         // sender RTO (~air-end + 11.4 s) by ~9 s.
         constexpr size_t kBackstopWindowSamples = 48 * (12000 + 1410 + 1200);
         if (fed_now > anchored_burst_backstop_arm_abs_ + kBackstopWindowSamples) {
+            const bool payload_seen = anchored_burst_payload_seen_;
             anchored_burst_backstop_armed_ = false;
+            anchored_burst_payload_seen_ = false;
             LOG_MODEM(WARN,
                       "[%s] ANCHORED-BURST BACKSTOP: expected anchor framed no "
-                      "group within the window — requesting re-confirm ack + "
-                      "crater verdict",
-                      log_prefix_.c_str());
+                      "group within the window — requesting re-confirm ack "
+                      "(payload_seen=%d)",
+                      log_prefix_.c_str(), payload_seen ? 1 : 0);
             if (anchored_burst_no_group_callback_) {
-                anchored_burst_no_group_callback_();
+                anchored_burst_no_group_callback_(payload_seen);
             }
         }
     }
@@ -461,19 +492,62 @@ void StreamingDecoder::searchForSync() {
 
     const bool disconnected_mc_dpsk =
         !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
-    auto win = sync_controller_.acquireSearchWindow(
-        use_light_search, connected_data_preamble, disconnected_mc_dpsk,
-        min_search, data_symbol_samples,
-        audio_activity_.load(std::memory_order_relaxed),
-        CORRELATION_STEP, CORR_NOISE_THRESHOLD);
-    if (!win.ready) return;
-    std::vector<float> search_buffer = std::move(win.search_buffer);
-    size_t search_start = win.search_start;
-    min_search = win.min_search;
-    bool used_warm_timed_window = win.used_warm_timed_window;
-    bool used_warm_narrow_window = win.used_warm_narrow_window;
-    size_t warm_narrow_end_abs = win.warm_narrow_end_abs;
-    size_t warm_narrow_candidate_span_samples = win.warm_narrow_candidate_span_samples;
+    std::vector<float> search_buffer;
+    size_t search_start = 0;
+    size_t search_start_abs = 0;
+    bool used_warm_timed_window = false;
+    bool used_warm_narrow_window = false;
+    size_t warm_narrow_end_abs = 0;
+    size_t warm_narrow_candidate_span_samples = 0;
+    bool replaying_deferred_future_sync = false;
+
+    // A previous detector pass may have proved the chirps while announcing a
+    // training start just beyond live audio. Do not advance/search elsewhere in
+    // the meantime. Once that exact absolute position arrives, replay the exact
+    // immutable detector window; the candidate is re-found without reading any
+    // unwritten ring memory or relying on a modular cursor reconstruction.
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        if (deferred_future_sync_.valid) {
+            if (deferred_future_sync_.generation != gen_at_start) {
+                deferred_future_sync_ = {};
+            } else if (sync_controller_.ring_.total_fed_ <
+                       deferred_future_sync_.wait_until_abs) {
+                return;
+            } else {
+                search_buffer = std::move(deferred_future_sync_.search_buffer);
+                search_start_abs = deferred_future_sync_.search_start_abs;
+                search_start = sync_controller_.ring_.absoluteToRingLocked(search_start_abs);
+                min_search = search_buffer.size();
+                used_warm_timed_window =
+                    deferred_future_sync_.used_warm_timed_window;
+                used_warm_narrow_window =
+                    deferred_future_sync_.used_warm_narrow_window;
+                warm_narrow_end_abs = deferred_future_sync_.warm_narrow_end_abs;
+                warm_narrow_candidate_span_samples =
+                    deferred_future_sync_.warm_narrow_candidate_span_samples;
+                deferred_future_sync_ = {};
+                replaying_deferred_future_sync = true;
+            }
+        }
+    }
+
+    if (!replaying_deferred_future_sync) {
+        auto win = sync_controller_.acquireSearchWindow(
+            use_light_search, connected_data_preamble, disconnected_mc_dpsk,
+            min_search, data_symbol_samples,
+            audio_activity_.load(std::memory_order_relaxed),
+            CORRELATION_STEP, CORR_NOISE_THRESHOLD);
+        if (!win.ready) return;
+        search_buffer = std::move(win.search_buffer);
+        search_start = win.search_start;
+        search_start_abs = win.search_start_abs;
+        min_search = win.min_search;
+        used_warm_timed_window = win.used_warm_timed_window;
+        used_warm_narrow_window = win.used_warm_narrow_window;
+        warm_narrow_end_abs = win.warm_narrow_end_abs;
+        warm_narrow_candidate_span_samples = win.warm_narrow_candidate_span_samples;
+    }
 
     // DEBUG: Dump the search buffer on first few searches
     static int search_dump_count = 0;
@@ -510,6 +584,7 @@ void StreamingDecoder::searchForSync() {
     waveform_->reset();
     SyncResult sync_result;
     bool found = false;
+    bool narrow_sync_found = false;
 
     // When connected, use light sync (LTS training symbols, no chirp) after the
     // first connected OFDM frame has established an OFDM-specific chirp+LTS anchor.
@@ -542,9 +617,6 @@ void StreamingDecoder::searchForSync() {
             waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
             is_coherent, connected_, mode_, light_sync_thresholds, CORR_DETECT_THRESHOLD,
             cfo_tracker_.tracked(), sync_result);
-        if (found && data_sync_accepted_callback_) {
-            data_sync_accepted_callback_(sync_result.correlation);
-        }
         // Short re-anchor fallback is enabled only by negotiated fading class;
         // otherwise the connected path remains LTS-only.
     } else {
@@ -552,27 +624,6 @@ void StreamingDecoder::searchForSync() {
         found = waveform_->detectSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, CORR_DETECT_THRESHOLD);
-
-        if (found && use_full_ofdm_anchor_search) {
-            LOG_MODEM(INFO, "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
-                      log_prefix_.c_str(), sync_result.correlation);
-            // F147: mark this lock as an EXPECTED connected full anchor — the
-            // false-lock LLR gate must not bounce it back to re-search (a
-            // strong chirp match at an armed resend boundary is near-certain
-            // genuine; mush LLRs there mean a faded/cold-CFO group, and the
-            // group/erasure machinery — not re-search — owns that failure).
-            last_sync_expected_full_anchor_ = true;
-            // F165: arm the anchored-burst ack backstop — if this anchor's
-            // burst frames nothing, the Connection still acks after the window.
-            anchored_burst_backstop_armed_ = true;
-            {
-                std::lock_guard<std::mutex> abl(sync_controller_.ring_.buffer_mutex_);
-                anchored_burst_backstop_arm_abs_ = sync_controller_.ring_.total_fed_;
-            }
-            if (data_sync_accepted_callback_) {
-                data_sync_accepted_callback_(sync_result.correlation);
-            }
-        }
 
         if (!found && use_full_ofdm_anchor_search) {
             // §7 C3 Phase 3b: the full-anchor light-LTS fallback (the §16 phase-5 trace +
@@ -586,9 +637,6 @@ void StreamingDecoder::searchForSync() {
             if (fb.found) {
                 found = true;
                 used_full_anchor_fallback = fb.used_full_anchor_fallback;
-                if (data_sync_accepted_callback_) {
-                    data_sync_accepted_callback_(sync_result.correlation);
-                }
             }
         }
 
@@ -612,19 +660,10 @@ void StreamingDecoder::searchForSync() {
 
                 if (narrow_found) {
                     found = true;
+                    narrow_sync_found = true;
                     sync_result = narrow_result;
-                    detected_bandwidth_ = BandwidthMode::NARROW;
-                    // Switch main waveform to narrowband MC-DPSK so CONNECT frames decode correctly
-                    waveform_ = WaveformFactory::createNarrowbandMCDPSK();
-                    LOG_MODEM(INFO, "[%s] Dual-listen: NARROWBAND chirp detected! corr=%.3f, CFO=%.1f Hz, switched to narrowband MC-DPSK",
-                              log_prefix_.c_str(), narrow_result.correlation, narrow_result.cfo_hz);
                 }
             }
-        }
-
-        // If wideband found something, mark as wide
-        if (found && detected_bandwidth_ != BandwidthMode::NARROW) {
-            detected_bandwidth_ = BandwidthMode::WIDE;
         }
     }
 
@@ -634,6 +673,95 @@ void StreamingDecoder::searchForSync() {
     // Check if reset() was called during our search - if so, discard results
     if (reset_generation_.load() != gen_at_start) {
         LOG_MODEM(INFO, "[%s] searchForSync: ABORTED - reset() called during search", log_prefix_.c_str());
+        return;
+    }
+
+    signal_policy::TrainingStartDecision training_start;
+    if (found) {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        training_start = signal_policy::classifyDetectedTrainingStart(
+            search_start_abs, sync_result.start_sample,
+            sync_controller_.ring_.total_fed_);
+        if (training_start.disposition ==
+            signal_policy::TrainingStartDisposition::INVALID) {
+            LOG_MODEM(ERROR,
+                      "[%s] searchForSync: detector returned invalid training offset=%d "
+                      "for search_start_abs=%zu; rejecting candidate",
+                      log_prefix_.c_str(), sync_result.start_sample, search_start_abs);
+            found = false;
+        } else if (training_start.disposition ==
+                   signal_policy::TrainingStartDisposition::DEFER) {
+            // Preserve the detector's immutable input instead of preserving a
+            // modular cursor. The latter can wrap or be load-shed while we wait;
+            // the former deterministically re-finds the exact chirp candidate.
+            deferred_future_sync_ = {};
+            deferred_future_sync_.valid = true;
+            deferred_future_sync_.generation = gen_at_start;
+            deferred_future_sync_.wait_until_abs = training_start.detected_abs;
+            deferred_future_sync_.search_start_abs = search_start_abs;
+            deferred_future_sync_.search_buffer = std::move(search_buffer);
+            deferred_future_sync_.used_warm_timed_window = used_warm_timed_window;
+            deferred_future_sync_.used_warm_narrow_window = used_warm_narrow_window;
+            deferred_future_sync_.warm_narrow_end_abs = warm_narrow_end_abs;
+            deferred_future_sync_.warm_narrow_candidate_span_samples =
+                warm_narrow_candidate_span_samples;
+            LOG_MODEM(INFO,
+                      "[%s] searchForSync: detector training starts after live audio "
+                      "(abs=%zu total_fed=%zu missing=%zu); deferring exact-window "
+                      "replay",
+                      log_prefix_.c_str(), training_start.detected_abs,
+                      sync_controller_.ring_.total_fed_,
+                      training_start.samples_missing);
+            return;
+        }
+    }
+
+    if (found) {
+        if (narrow_sync_found) {
+            detected_bandwidth_ = BandwidthMode::NARROW;
+            // Switch only after the training position is live. A deferred lock
+            // must not mutate the active decoder before it is accepted.
+            waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+            LOG_MODEM(INFO,
+                      "[%s] Dual-listen: NARROWBAND chirp detected! corr=%.3f, "
+                      "CFO=%.1f Hz, switched to narrowband MC-DPSK",
+                      log_prefix_.c_str(), sync_result.correlation,
+                      sync_result.cfo_hz);
+        } else if (detected_bandwidth_ != BandwidthMode::NARROW) {
+            detected_bandwidth_ = BandwidthMode::WIDE;
+        }
+
+        const bool expected_full_anchor_found =
+            use_full_ofdm_anchor_search && !used_full_anchor_fallback;
+        if (expected_full_anchor_found) {
+            LOG_MODEM(INFO,
+                      "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
+                      log_prefix_.c_str(), sync_result.correlation);
+            // Only an accepted, live training position may arm group/backstop
+            // side effects. The former clamp fired these early for a candidate
+            // whose training did not exist in the ring yet.
+            last_sync_expected_full_anchor_ = true;
+            anchored_burst_backstop_armed_ = true;
+            anchored_burst_payload_seen_ = false;
+            {
+                std::lock_guard<std::mutex> lock(
+                    sync_controller_.ring_.buffer_mutex_);
+                anchored_burst_backstop_arm_abs_ =
+                    sync_controller_.ring_.total_fed_;
+            }
+        }
+        if (connected_data_preamble && data_sync_accepted_callback_) {
+            data_sync_accepted_callback_(sync_result.correlation);
+        }
+    }
+
+    // The acceptance callback is allowed to trigger a lifecycle transition.
+    // It used to run before the generation check above; keep the same safety
+    // contract after delaying the callback until the training position is live.
+    if (reset_generation_.load() != gen_at_start) {
+        LOG_MODEM(INFO,
+                  "[%s] searchForSync: ABORTED - reset() called by sync acceptance",
+                  log_prefix_.c_str());
         return;
     }
 
@@ -776,48 +904,11 @@ void StreamingDecoder::searchForSync() {
 
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
-        // BUG-SYNC-CURSOR-AHEAD (2026-07-30): CLAMP THE DETECTOR TO LIVE AUDIO.
-        //
-        // sync_result.start_sample is a TRAINING-START offset, i.e. the detected preamble
-        // position PLUS the rest of the preamble structure. For MC-DPSK that is
-        // down_chirp_start + chirp_samples + gap_samples (mc_dpsk_waveform.cpp:136-141), and
-        // the down-chirp peak is only bounded by window_len - chirp_len
-        // (chirp_sync.hpp:642-643). On a 120000-sample window that yields a maximum
-        // start_sample of 124800 — GREATER THAN THE WINDOW ITSELF. So a detection near the
-        // end of the window legitimately points PAST the last audio the receiver has.
-        //
-        // Normally the SEARCH_BACKTRACK cushion absorbs the overshoot, but on a COLD ring
-        // (every pre-TX reset() rewinds and zero-fills, streaming_decoder.cpp:1343-1393) the
-        // first search runs with search_start = 0 and no cushion at all. The result on the
-        // Pi 5: sync_position_ landed 1920 samples past write_pos_, the readiness gate below
-        // (which uses the same unvalidated modular distance) saw a near-full buffer and let
-        // the decoder slice ZERO-FILLED memory, and every cursor derived from
-        // sync_position_ + frame_len inherited the overshoot.
-        //
-        // Clamping here fixes the whole family at the source: 15+ downstream writers of
-        // correlation_pos_ are all of the form sync_position_ + <len>, so a sync_position_
-        // that can never exceed live audio cannot produce a cursor in the future. This
-        // mirrors setSearchFloorLocked (sync_ring_buffer.cpp:68-73), which has always been
-        // clamped — the two are written from the same expression two lines apart in
-        // streaming_ofdm_decode.cpp:915-916 and only one of them was guarded.
-        {
-            const size_t detected_abs = search_start + sync_result.start_sample;
-            if (detected_abs > sync_controller_.ring_.total_fed_) {
-                static int clamp_count = 0;
-                if (++clamp_count % 20 == 1) {
-                    LOG_MODEM(WARN,
-                              "[%s] searchForSync: detector start_sample points PAST live "
-                              "audio (abs=%zu > total_fed=%zu, overshoot=%zu); clamping to "
-                              "the write head (x%d)",
-                              log_prefix_.c_str(), detected_abs,
-                              sync_controller_.ring_.total_fed_,
-                              detected_abs - sync_controller_.ring_.total_fed_, clamp_count);
-                }
-                sync_position_ = sync_controller_.ring_.write_pos_;
-            } else {
-                sync_position_ = sync_controller_.ring_.wrapRingIndexLocked(detected_abs);
-            }
-        }
+        // training_start was classified against total_fed_ before any accept
+        // side effect. READY is therefore a proof that this exact absolute
+        // sample is live; no clamp or modular-distance guess is involved.
+        sync_position_ = sync_controller_.ring_.absoluteToRingLocked(
+            training_start.detected_abs);
 
         const bool timing_cfo_genie =
             qam16GenieTimingCfoEnabled() &&
@@ -857,9 +948,26 @@ void StreamingDecoder::searchForSync() {
         }
 
         // Provide absolute training position to waveform so initial CFO phase is aligned.
+        const size_t abs_training_pos =
+            sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_);
         if (waveform_) {
-            const size_t abs_training_pos = sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_);
             waveform_->setAbsoluteTrainingPosition(abs_training_pos);
+        }
+        const bool provisional_already_active =
+            burst_air_end_provisional_.load(std::memory_order_relaxed);
+        if (use_full_ofdm_anchor_search &&
+            (last_sync_expected_full_anchor_ || !provisional_already_active)) {
+            // The descriptor and the marked group head can both be lost while later
+            // duplicate DATA frames still decode through the classic per-frame path.
+            // Publish a conservative physical-air gate as soon as the expected full
+            // anchor is accepted; exact group geometry will replace it if framing
+            // succeeds. A later full-search LTS fallback must NOT move an already-live
+            // gate to that duplicate — its deadline stays anchored to the original
+            // physical turn. A genuine new chirp lock (`last_sync_expected...`) may
+            // replace it. Thus one early decode cannot key an ACK mid-burst.
+            armProvisionalBurstAirGate(
+                static_cast<uint64_t>(abs_training_pos),
+                /*proven_full_chirp=*/last_sync_expected_full_anchor_);
         }
 
         // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted

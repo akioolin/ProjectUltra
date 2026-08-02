@@ -40,32 +40,7 @@ float qam16MinAbsLLRNoClip(Complex sym, float noise_var) {
 }
 
 float psk8MinAbsLLRNoClip(Complex sym, float noise_var) {
-    const float scale = 2.0f / std::max(noise_var, MIN_CARRIER_NOISE_VAR);
-    static constexpr int gray_bits[8] = {0, 1, 3, 2, 6, 7, 5, 4};
-    static const float pi = 3.14159265358979f;
-    float dist_sq[8];
-    for (int i = 0; i < 8; ++i) {
-        const float angle = i * (pi / 4.0f) + pi / 8.0f;
-        const Complex ref(std::cos(angle), std::sin(angle));
-        const Complex diff = sym - ref;
-        dist_sq[i] = std::norm(diff);
-    }
-
-    float min_abs = 1.0e30f;
-    for (int bit = 0; bit < 3; ++bit) {
-        const int mask = 1 << (2 - bit);
-        float min_d0 = 1.0e30f;
-        float min_d1 = 1.0e30f;
-        for (int i = 0; i < 8; ++i) {
-            if (gray_bits[i] & mask) {
-                min_d1 = std::min(min_d1, dist_sq[i]);
-            } else {
-                min_d0 = std::min(min_d0, dist_sq[i]);
-            }
-        }
-        min_abs = std::min(min_abs, std::abs(scale * (min_d1 - min_d0)));
-    }
-    return min_abs;
+    return soft_demap::psk8MinAbsLLRNoClip(sym, noise_var);
 }
 
 bool failureAttributionEligible(Modulation mod) {

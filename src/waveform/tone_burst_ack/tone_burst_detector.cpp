@@ -129,7 +129,9 @@ DecodeAlignedResult ToneBurstDetector::decodeAligned(SampleSpan samples,
 DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
                                                           size_t num_samples,
                                                           uint32_t symbol_ms,
-                                                          uint32_t sweep_step_samples) {
+                                                          uint32_t sweep_step_samples,
+                                                          const ToneBurstAckAcceptancePredicate&
+                                                              acceptance_predicate) {
     DetectAndDecodeResult result;
     const uint32_t samples_per_symbol = (kSampleRate * symbol_ms) / 1000u;
     const size_t total_needed =
@@ -164,16 +166,23 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     std::sort(candidates.begin(), candidates.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
-    // Try the top-K candidates. K=8 covers the worst case where the global
-    // peak is a payload alias and the real burst is somewhere lower in the
-    // sorted list.
-    const size_t kTryCandidates = 8;
+    // Try the top-K distinct timing candidates. K=8 covers the ordinary case where
+    // the global peak is a payload alias and the real burst is somewhere lower in the
+    // sorted list. If a candidate passes the wire CRC but is rejected by the protocol
+    // predicate, widen the bounded search: otherwise one strong, impossible CRC
+    // collision can hide a weaker valid ACK later in the same receive window.
+    constexpr size_t kNormalCandidateBudget = 8;
+    constexpr size_t kAfterSemanticRejectBudget = 128;
+    size_t candidate_budget = kNormalCandidateBudget;
+    size_t distinct_candidates_tried = 0;
+    std::vector<size_t> refined_offsets_tried;
+    refined_offsets_tried.reserve(kAfterSemanticRejectBudget);
     float global_peak = 0.0f;
     size_t global_offset = 0;
     DecodeAlignedResult best_decode;  // empty by default
     size_t best_decode_offset = 0;
 
-    for (size_t k = 0; k < std::min(kTryCandidates, candidates.size()); ++k) {
+    for (size_t k = 0; k < candidates.size(); ++k) {
         size_t offset = candidates[k].first;
         const float corr_coarse = candidates[k].second;
         if (corr_coarse < candidate_threshold && k > 0) break;
@@ -196,13 +205,55 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
             }
         }
 
-        // Try to decode at the refined offset. First CRC pass wins.
+        // Adjacent coarse sweep points commonly refine onto the same Costas lobe.
+        // Do not let those aliases consume the bounded candidate budget (especially
+        // after a semantic rejection, where they would repeatedly present the same
+        // impossible payload and starve a later valid burst).
+        // Keep this guard deliberately narrow. A false CRC can be a wrong timing
+        // hypothesis *inside the real ACK itself*; suppressing the whole burst (or
+        // even a large fraction of a symbol) would also suppress the correct timing
+        // candidate we are trying to recover.
+        const size_t duplicate_guard =
+            std::max<size_t>(1u, static_cast<size_t>(sweep_step_samples) / 2u);
+        const bool already_tried = std::any_of(
+            refined_offsets_tried.begin(), refined_offsets_tried.end(),
+            [best_offset, duplicate_guard](size_t prior) {
+                const size_t delta = (best_offset > prior)
+                    ? best_offset - prior : prior - best_offset;
+                return delta <= duplicate_guard;
+            });
+        if (already_tried) continue;
+        if (distinct_candidates_tried >= candidate_budget) break;
+        refined_offsets_tried.push_back(best_offset);
+        ++distinct_candidates_tried;
+
+        // Try to decode at the refined offset. First CRC + protocol-plausibility
+        // pass wins. A CRC-valid but impossible payload is treated like a failed
+        // timing hypothesis and the search continues.
         const size_t remaining = num_samples - best_offset;
         auto decode = decodeAligned(samples + best_offset, remaining, symbol_ms);
         if (decode.stats.crc_ok) {
+            if (acceptance_predicate && decode.payload.has_value() &&
+                !acceptance_predicate(*decode.payload)) {
+                ++result.semantic_rejections;
+                if (!result.strongest_rejected_payload.has_value() ||
+                    best_corr > result.strongest_rejected_correlation_peak) {
+                    result.strongest_rejected_payload = *decode.payload;
+                    result.strongest_rejected_offset_samples = best_offset;
+                    result.strongest_rejected_correlation_peak = best_corr;
+                    result.strongest_rejected_min_confidence = decode.min_confidence;
+                    result.strongest_rejected_hamming_corrected_blocks =
+                        decode.stats.hamming_corrected_blocks;
+                }
+                candidate_budget = kAfterSemanticRejectBudget;
+                continue;
+            }
             best_decode = std::move(decode);
             best_decode_offset = best_offset;
-            global_peak = std::max(global_peak, best_corr);
+            // Report the accepted candidate's own peak. A stronger rejected
+            // candidate is diagnostic evidence, not signal energy belonging to this
+            // ACK and must not inflate the monitor's peak gate/readout.
+            global_peak = best_corr;
             global_offset = best_offset;
             break;
         }

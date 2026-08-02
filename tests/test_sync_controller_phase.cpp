@@ -94,12 +94,55 @@ void test_reset_returns_cold() {
     expectPhase(sc, Phase::COLD, "after-reset2");
 }
 
+void test_clean_group_honors_announced_light_anchor() {
+    SyncController sc;
+    sc.reset(protocol::WaveformMode::OFDM_CHIRP, nullptr, true);
+    sc.resetFrameArrivalTracking();
+    sc.seedArrivalAfterDelay(48000, 4800, 0.8f);
+    sc.noteFrameArrivalSyncMiss();
+    sc.setNextGroupLightAnchor(true);
+
+    sc.noteGroupDelivered(/*group_seq=*/7, /*retransmission_required=*/false);
+
+    expectPhase(sc, Phase::WARM, "clean-group-light-anchor");
+    CHECK(sc.consecutiveSyncMisses() == 0,
+          "clean delivered group must refresh the warm miss counter");
+    CHECK(sc.frameArrivalConfidence() >= 0.5f,
+          "clean delivered group must preserve warm confidence");
+    CHECK(!sc.expect_full_ofdm_anchor_,
+          "clean group must honor its descriptor's NEXT_LIGHT announcement");
+}
+
+void test_failed_group_forces_full_anchor_without_cooling_sync() {
+    SyncController sc;
+    sc.reset(protocol::WaveformMode::OFDM_CHIRP, nullptr, true);
+    sc.resetFrameArrivalTracking();
+    sc.seedArrivalAfterDelay(48000, 4800, 0.8f);
+    sc.noteFrameArrivalSyncMiss();
+    sc.setNextGroupLightAnchor(true);  // stale announcement from the failed group
+
+    sc.noteGroupDelivered(/*group_seq=*/8, /*retransmission_required=*/true);
+
+    expectPhase(sc, Phase::WARM, "failed-group-full-anchor");
+    CHECK(sc.consecutiveSyncMisses() == 0,
+          "acquired failed group must still refresh the warm miss counter");
+    CHECK(sc.frameArrivalConfidence() >= 0.5f,
+          "acquired failed group must preserve warm confidence");
+    CHECK(sc.expect_full_ofdm_anchor_,
+          "group requiring retransmission must override stale NEXT_LIGHT and search full");
+}
+
 }  // namespace
 
 int main() {
+    // noteGroupDelivered's anchor policy is meaningful only with periodic light
+    // descriptors enabled. Set before its function-local policy value is first read.
+    setenv("ULTRA_ANCHOR_SKIP_K", "2", 1);
     test_phase_march();
     test_recovery_back_to_warm();
     test_reset_returns_cold();
+    test_clean_group_honors_announced_light_anchor();
+    test_failed_group_forces_full_anchor_without_cooling_sync();
 
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": " << (tests_run - tests_failed)
               << "/" << tests_run << " sync-controller phase checks\n";

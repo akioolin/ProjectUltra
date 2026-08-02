@@ -37,6 +37,38 @@ bool checkCoherent8PskLlrSigns() {
     return true;
 }
 
+bool checkCoherent8PskLlrMagnitudes() {
+    constexpr float noise_var_per_real = 0.4f;
+    constexpr float coeff = 0.5f;
+    const ultra::Complex probe(0.31f, -0.47f);  // Deliberately off-constellation.
+
+    const auto deltas = ultra::soft_demap::psk8MaxLogDistanceDeltas(probe);
+    const auto raw = ultra::soft_demap::demap8PSKUnclipped(
+        probe, noise_var_per_real, coeff);
+    for (size_t bit = 0; bit < raw.size(); ++bit) {
+        const float expected = deltas[bit] / (2.0f * noise_var_per_real);
+        if (std::abs(raw[bit] - expected) > 1.0e-6f) {
+            std::cout << "  8PSK LLR magnitude failed for bit=" << bit
+                      << " got=" << raw[bit] << " expected=" << expected << "\n";
+            return false;
+        }
+    }
+
+    const float helper_min = ultra::soft_demap::psk8MinAbsLLRNoClip(
+        probe, noise_var_per_real);
+    const auto production_raw = ultra::soft_demap::demap8PSKUnclipped(
+        probe, noise_var_per_real);
+    const float expected_min = std::min(
+        std::abs(production_raw[0]),
+        std::min(std::abs(production_raw[1]), std::abs(production_raw[2])));
+    if (std::abs(helper_min - expected_min) > 1.0e-6f) {
+        std::cout << "  8PSK DD/demapper helper mismatch: got=" << helper_min
+                  << " expected=" << expected_min << "\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -46,7 +78,10 @@ int main() {
     if (!checkCoherent8PskLlrSigns()) {
         return 1;
     }
-    std::cout << "  8PSK LLR signs OK\n";
+    if (!checkCoherent8PskLlrMagnitudes()) {
+        return 1;
+    }
+    std::cout << "  8PSK LLR signs and max-log magnitudes OK\n";
 
     ultra::ModemConfig config;
     config.sample_rate = 48000;

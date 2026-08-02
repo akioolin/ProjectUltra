@@ -24,6 +24,37 @@
 using namespace ultra;
 using namespace ultra::protocol;
 
+namespace ultra {
+namespace protocol {
+
+struct SelectiveRepeatARQTestAccess {
+    static std::optional<size_t> slotFor(const SelectiveRepeatARQ& arq,
+                                         const Bytes& frame) {
+        return arq.matchingLiveTXSlot(frame);
+    }
+
+    static int retryCount(const SelectiveRepeatARQ& arq, const Bytes& frame) {
+        const auto slot = slotFor(arq, frame);
+        return slot ? arq.tx_window_[*slot].retry_count : -1;
+    }
+
+    static bool rttSampleEligible(const SelectiveRepeatARQ& arq,
+                                  const Bytes& frame) {
+        const auto slot = slotFor(arq, frame);
+        return slot && arq.tx_window_[*slot].rtt_sample_eligible;
+    }
+
+    static bool transitionSuspended(const SelectiveRepeatARQ& arq,
+                                    const Bytes& frame) {
+        const auto slot = slotFor(arq, frame);
+        return slot && arq.tx_window_[*slot].timeout_suspended &&
+               arq.tx_window_[*slot].timeout_transition_suspended;
+    }
+};
+
+} // namespace protocol
+} // namespace ultra
+
 // Test counters
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -354,6 +385,8 @@ bool test_stale_ack_older_than_base_minus_one_is_ignored() {
     if (stats.stale_acks_ignored != 1)
         FAIL("Expected stale_acks_ignored=1, got " +
              std::to_string(stats.stale_acks_ignored));
+    if (stats.sacks_received != 1)
+        FAIL("Rejected stale ACK must not inflate the one accepted setup SACK");
 
     PASS();
     return true;
@@ -395,6 +428,8 @@ bool test_future_ack_too_far_ahead_is_ignored() {
     if (stats.future_acks_ignored != 1)
         FAIL("Expected future_acks_ignored=1, got " +
              std::to_string(stats.future_acks_ignored));
+    if (stats.sacks_received != 0)
+        FAIL("Rejected future ACK must not count as an accepted SACK");
     if (stats.acks_received != 0)
         FAIL("Future ACK should not count as a received cumulative ACK");
 
@@ -924,16 +959,26 @@ bool test_move_epoch_stale_ack_ignored() {
 
     // Stale-era ACK (epoch bits 0) cumulatively acking seqs 0..2 — the exact W16
     // out-of-window SACK. Must NOT retire anything.
-    tx.onFrameReceived(makeSackAck(2, 0).serialize());
+    if (tx.onToneBurstAck(/*group_seq6=*/2, /*bitmap=*/0, /*move_epoch=*/0))
+        FAIL("Stale-epoch tone ACK must report rejected to its Connection caller");
     if (tx.getAvailableSlots() != 1)
         FAIL("Stale-epoch ACK must not retire in-flight frames");
     if (tx.getStats().stale_epoch_acks_ignored != 1)
         FAIL("stale_epoch_acks_ignored counter should be 1");
 
-    // Fresh-era ACK (epoch bits = 1 at bitmap bits 16-17) retires normally.
-    tx.onFrameReceived(makeSackAck(2, 1u << 16).serialize());
+    // Fresh-era tone ACK is accepted and retires normally.
+    if (!tx.onToneBurstAck(/*group_seq6=*/2, /*bitmap=*/0, /*move_epoch=*/1))
+        FAIL("Fresh-epoch tone ACK must report accepted to its Connection caller");
     if (tx.getAvailableSlots() != 4)
         FAIL("Fresh-epoch ACK should retire all three frames");
+
+    // The same valid physical ACK can be heard again after the frames retire. It is
+    // an accepted no-progress duplicate (so Connection may treat it as a legitimate
+    // keepalive), not a fabricated/stale payload.
+    if (!tx.onToneBurstAck(/*group_seq6=*/2, /*bitmap=*/0, /*move_epoch=*/1))
+        FAIL("Valid same-epoch duplicate tone ACK must remain accepted");
+    if (tx.getAvailableSlots() != 4)
+        FAIL("Valid duplicate tone ACK must not disturb the empty TX window");
 
     PASS();
     return true;
@@ -1389,6 +1434,130 @@ bool test_timeout_window_retransmits_as_one_batch_when_callback_present() {
     return true;
 }
 
+bool test_deferred_timeout_cancel_preserves_retry_and_karn_state() {
+    TEST("Deferred timeout cancel preserves retry and Karn state");
+
+    ARQConfig config;
+    config.window_size = 1;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 3;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> initial;
+    std::vector<Bytes> intents;
+    tx.setTransmitCallback([&](const Bytes& frame) { initial.push_back(frame); });
+    tx.setTransmitBatchCallback(
+        [&](const std::vector<Bytes>& frames) { intents = frames; });
+    tx.setDeferredTimeoutCommitEnabled(true);
+
+    if (!tx.sendData(Bytes{0x51}) || initial.size() != 1)
+        FAIL("failed to seed one live DATA identity");
+    const Bytes identity = initial.front();
+    if (SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 0 ||
+        !SelectiveRepeatARQTestAccess::rttSampleEligible(tx, identity))
+        FAIL("fresh DATA must start at retry zero and remain RTT-sample eligible");
+
+    tx.tick(100);
+    auto after_intent = tx.getStats();
+    if (intents.size() != 1 || after_intent.timeouts != 1 ||
+        after_intent.retransmissions != 0 || after_intent.failed != 0)
+        FAIL("timeout intent must count expiry but not retransmission/failure");
+    if (SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 0 ||
+        !SelectiveRepeatARQTestAccess::rttSampleEligible(tx, identity))
+        FAIL("publishing an intent must not consume retry or Karn eligibility");
+
+    if (tx.cancelDeferredTimeoutRetransmits(intents, true) != 1 ||
+        !SelectiveRepeatARQTestAccess::transitionSuspended(tx, identity))
+        FAIL("cancel should suspend the exact live timeout identity");
+    intents.clear();
+    tx.tick(1000);
+    const auto while_suspended = tx.getStats();
+    if (!intents.empty() || while_suspended.timeouts != 1 ||
+        while_suspended.retransmissions != 0 || while_suspended.failed != 0)
+        FAIL("a transition-suspended intent must stay inert across later ticks");
+    if (SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 0 ||
+        !SelectiveRepeatARQTestAccess::rttSampleEligible(tx, identity))
+        FAIL("suspension must remain retry/Karn neutral");
+
+    if (tx.resumeDeferredTimeoutRetransmits(25) != 1)
+        FAIL("mode-resolution resume did not release the canceled identity");
+    tx.tick(24);
+    if (!intents.empty())
+        FAIL("resumed identity fired before its explicit deadline");
+    tx.tick(1);
+    if (intents.size() != 1)
+        FAIL("resumed identity did not publish a fresh timeout intent");
+    auto committed = tx.commitDeferredTimeoutRetransmits(intents);
+    if (committed.terminal_failure || committed.frames.size() != 1)
+        FAIL("nonterminal commit should yield exactly one physical frame");
+    const auto after_commit = tx.getStats();
+    if (after_commit.retransmissions != 1 ||
+        after_commit.retransmissions_timeout != 1 ||
+        SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 1 ||
+        SelectiveRepeatARQTestAccess::rttSampleEligible(tx, identity))
+        FAIL("only commit may consume retry, timeout-retx stats, and Karn state");
+
+    PASS();
+    return true;
+}
+
+bool test_deferred_timeout_cancel_cannot_terminal_fail_without_commit() {
+    TEST("Deferred timeout cancel cannot terminal-fail without commit");
+
+    ARQConfig config;
+    config.window_size = 1;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 2;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> initial;
+    std::vector<Bytes> intents;
+    bool failed = false;
+    tx.setTransmitCallback([&](const Bytes& frame) { initial.push_back(frame); });
+    tx.setTransmitBatchCallback(
+        [&](const std::vector<Bytes>& frames) { intents = frames; });
+    tx.setDeferredTimeoutCommitEnabled(true);
+    tx.setSendCompleteCallback([&](bool success) {
+        if (!success) failed = true;
+    });
+
+    if (!tx.sendData(Bytes{0x61}) || initial.size() != 1)
+        FAIL("failed to seed terminal-boundary fixture");
+    const Bytes identity = initial.front();
+
+    tx.tick(100);
+    auto first_commit = tx.commitDeferredTimeoutRetransmits(intents);
+    if (first_commit.terminal_failure || first_commit.frames.size() != 1 ||
+        SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 1)
+        FAIL("first timeout should commit the one allowed retransmission");
+
+    intents.clear();
+    tx.tick(100);
+    if (intents.size() != 1 || failed || tx.getStats().failed != 0 ||
+        SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 1)
+        FAIL("max-boundary expiry must remain a reversible intent before commit");
+    if (tx.cancelDeferredTimeoutRetransmits(intents, true) != 1)
+        FAIL("failed to cancel max-boundary timeout intent");
+    intents.clear();
+    tx.tick(1000);
+    if (!intents.empty() || failed || tx.getStats().failed != 0 ||
+        SelectiveRepeatARQTestAccess::retryCount(tx, identity) != 1)
+        FAIL("discarded max-boundary intent terminal-failed without egress commit");
+
+    if (tx.resumeDeferredTimeoutRetransmits(1) != 1)
+        FAIL("failed to resume max-boundary identity after mode resolution");
+    tx.tick(1);
+    auto terminal_commit = tx.commitDeferredTimeoutRetransmits(intents);
+    if (!terminal_commit.terminal_failure || !terminal_commit.frames.empty() ||
+        !failed || tx.getStats().failed != 1)
+        FAIL("terminal failure must occur exactly at a committed timeout boundary");
+
+    PASS();
+    return true;
+}
+
 // §RETX-PACING (docs/RETX_PACING_DESIGN_2026_07_03.md §1.1): lastAckProgressFrames() is the
 // zero-progress ROUND detector's ground truth — (frames retired by base advance) + (newly
 // set SACK bits) for the most recent FRESH ack; −1 after consumption; dedup-suppressed
@@ -1649,8 +1818,8 @@ bool test_ack_batch_out_of_order_safety_valve() {
     return true;
 }
 
-bool test_final_out_of_order_frame_sends_explicit_frame_nack() {
-    TEST("FINAL out-of-order frame sends explicit frame NACK plus SACK");
+bool test_legacy_final_out_of_order_frame_sends_explicit_frame_nack() {
+    TEST("legacy FINAL out-of-order frame sends explicit frame NACK plus SACK");
 
     ARQConfig config;
     config.window_size = 4;
@@ -1681,6 +1850,396 @@ bool test_final_out_of_order_frame_sends_explicit_frame_nack() {
         FAIL("Second control should be SACK at base-1 for the same hole");
     if (v2::NackPayload::decode(sack->payload).cw_bitmap != 0x2)
         FAIL("SACK bitmap should confirm seq=1 while seq=0 is missing");
+
+    PASS();
+    return true;
+}
+
+bool test_tone_sack_final_gap_uses_one_feedback_plane() {
+    TEST("tone-SACK FINAL gap emits one tone response and no legacy frame NACK");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    // Any bytes reaching this callback become a classic OFDM control frame in the
+    // production modem.  It must stay empty while the tone-SACK plane owns ACKs.
+    ByteChannel legacy_control;
+    rx.setTransmitCallback([&](const Bytes& data) { legacy_control.send(data); });
+
+    struct ToneAck {
+        uint16_t base = 0;
+        uint32_t bitmap = 0;
+        bool has_final = false;
+        uint8_t move_epoch = 0;
+    };
+    std::vector<ToneAck> tone_acks;
+    rx.setEmitToneBurstSackCallback(
+        [&](uint16_t base, uint32_t bitmap, bool has_final, uint8_t move_epoch) {
+            tone_acks.push_back({base, bitmap, has_final, move_epoch});
+        });
+
+    // Reproduce the file-tail shape from the rig at a minimal sequence number:
+    // seq=0 is missing and the out-of-order FINAL seq=1 survives.  The group bracket
+    // suppresses per-frame feedback until its physical end, exactly like
+    // Connection::onBurstGroupReceived().
+    rx.beginGroupReceive();
+    auto final = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    final.flags |= v2::Flags::FINAL;
+    rx.onFrameReceived(final.serialize());
+
+    if (legacy_control.size() != 0)
+        FAIL("tone-SACK path queued a legacy frame NACK inside the receive group");
+    if (!tone_acks.empty())
+        FAIL("group bracket emitted the tone SACK before the physical group ended");
+
+    rx.endGroupReceiveAndAck();
+
+    if (legacy_control.size() != 0)
+        FAIL("tone-SACK tail gap must never queue a legacy OFDM control frame");
+    if (tone_acks.size() != 1)
+        FAIL("expected exactly one tone SACK at group end, got " +
+             std::to_string(tone_acks.size()));
+    if (tone_acks[0].base != 0xFFFF || tone_acks[0].bitmap != 0x2)
+        FAIL("tone SACK did not report base-1 plus the surviving FINAL frame");
+    if (tone_acks[0].has_final)
+        FAIL("out-of-order FINAL must not claim final delivery before the hole closes");
+
+    PASS();
+    return true;
+}
+
+bool test_unready_tone_sack_transport_falls_back_to_legacy() {
+    TEST("unready tone-SACK transport retains legacy tail-gap feedback");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    ByteChannel legacy_control;
+    rx.setTransmitCallback([&](const Bytes& data) { legacy_control.send(data); });
+
+    size_t tone_ack_count = 0;
+    rx.setEmitToneBurstSackCallback(
+        [&](uint16_t, uint32_t, bool, uint8_t) { ++tone_ack_count; });
+    // The protocol callback exists, but the host has not supplied a physical tone
+    // transmitter. This is Connection's construction-time state.
+    rx.setToneBurstSackTransportReady(false);
+
+    auto final = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    final.flags |= v2::Flags::FINAL;
+    rx.onFrameReceived(final.serialize());
+
+    if (tone_ack_count != 0)
+        FAIL("unready tone transport must not consume/drop the feedback event");
+    if (legacy_control.size() != 2)
+        FAIL("expected legacy explicit NACK plus cumulative SACK fallback");
+
+    auto explicit_nack = v2::ControlFrame::deserialize(legacy_control.receive());
+    auto cumulative_sack = v2::ControlFrame::deserialize(legacy_control.receive());
+    if (!explicit_nack || explicit_nack->type != v2::FrameType::NACK ||
+        explicit_nack->seq != 0)
+        FAIL("fallback explicit NACK did not identify missing base seq0");
+    if (!cumulative_sack || cumulative_sack->type != v2::FrameType::ACK ||
+        cumulative_sack->seq != 0xFFFF)
+        FAIL("fallback cumulative SACK did not retain the base-1 identity");
+
+    PASS();
+    return true;
+}
+
+bool test_single_fixed_tail_retry_preserves_12cw_geometry() {
+    TEST("single fixed tail retry preserves negotiated 12-CW frame geometry");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setCodeRate(CodeRate::R2_3);
+    tx.setFixedFrameCodewords(12);
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    const size_t capacity = v2::getFixedFramePayloadCapacity(CodeRate::R2_3, 12);
+    if (capacity != 629)
+        FAIL("test precondition: R2/3 12-CW payload capacity should be 629 bytes");
+    Bytes payload(capacity, 0x5A);
+    if (!tx.sendFixedDataWithFlags(payload, v2::Flags::FINAL))
+        FAIL("failed to send the fixed 12-CW tail frame");
+
+    if (transmitted.size() != 1)
+        FAIL("expected one initial fixed DATA frame");
+    auto initial = v2::DataFrame::deserialize(transmitted[0]);
+    if (!initial || initial->total_cw != 12 || initial->payload != payload)
+        FAIL("initial tail frame did not preserve 12-CW geometry and full payload");
+
+    tx.tick(101);
+    if (transmitted.size() != 2)
+        FAIL("single tail frame did not retransmit after its ACK timeout");
+    auto retry = v2::DataFrame::deserialize(transmitted[1]);
+    if (!retry || retry->seq != initial->seq || retry->total_cw != 12 ||
+        retry->payload != payload)
+        FAIL("tail retry changed sequence, payload, or negotiated 12-CW geometry");
+
+    PASS();
+    return true;
+}
+
+bool test_long_lifting_fixed_frame_preserves_full_payload() {
+    TEST("fixed ARQ serializer preserves cw4/Z81 payload capacity and retry bytes");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setCodeRate(CodeRate::R2_3);
+    tx.setFixedFrameGeometry(/*cw_count=*/4, /*lifting_z=*/81);
+
+    const size_t capacity =
+        v2::getFixedFramePayloadCapacityZ(CodeRate::R2_3, 4, 81);
+    if (capacity != 629)
+        FAIL("test precondition: R2/3 cw4/Z81 capacity should be 629 bytes");
+
+    Bytes payload(capacity, 0xA5);
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+    if (!tx.sendFixedDataWithFlags(payload, v2::Flags::FINAL))
+        FAIL("failed to send fixed cw4/Z81 DATA frame");
+
+    if (transmitted.size() != 1)
+        FAIL("expected one initial cw4/Z81 frame");
+    auto initial = v2::DataFrame::deserialize(transmitted.front());
+    if (!initial || initial->total_cw != 4 || initial->payload.size() != capacity ||
+        initial->payload != payload)
+        FAIL("ARQ serializer truncated or changed the cw4/Z81 payload");
+    if (tx.getFixedFrameCodewords() != 4 || tx.getFixedFrameLiftingZ() != 81)
+        FAIL("ARQ did not retain the complete fixed-frame geometry");
+
+    tx.tick(101);
+    if (transmitted.size() != 2 || transmitted[1] != transmitted[0])
+        FAIL("cw4/Z81 retry did not preserve the exact serialized frame");
+
+    PASS();
+    return true;
+}
+
+bool test_lifting_only_geometry_change_aborts_old_window() {
+    TEST("lifting-only fixed geometry change aborts the old ARQ window");
+
+    ARQConfig config;
+    config.window_size = 2;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 4;
+
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    SelectiveRepeatARQ tx(config);
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    tx.setCallsigns("TX1", "RX1");
+    tx.setCodeRate(CodeRate::R2_3);
+    tx.setFixedFrameGeometry(/*cw_count=*/4, /*lifting_z=*/27);
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+    if (!tx.sendFixedDataWithFlags(Bytes(100, 0x27), v2::Flags::NONE))
+        FAIL("failed to seed the short-Z ARQ window");
+
+    tx.setFixedFrameGeometry(/*cw_count=*/4, /*lifting_z=*/81);
+    if (tx.getFixedFrameCodewords() != 4 || tx.getFixedFrameLiftingZ() != 81)
+        FAIL("lifting-only regrid did not adopt cw4/Z81 atomically");
+    if (tx.txMoveEpoch() != 1)
+        FAIL("lifting-only regrid dropping live payload must bump move epoch");
+
+    tx.tick(1000);
+    if (transmitted.size() != 1)
+        FAIL("old Z=27 identity retransmitted after the lifting-only regrid");
+    if (!tx.sendFixedDataWithFlags(Bytes(629, 0x81), v2::Flags::FINAL))
+        FAIL("failed to send a fresh long-Z identity after regrid");
+    auto fresh = v2::DataFrame::deserialize(transmitted.back());
+    if (!fresh || fresh->payload.size() != 629 || fresh->total_cw != 4)
+        FAIL("post-regrid identity did not serialize at cw4/Z81");
+
+    PASS();
+    return true;
+}
+
+bool test_transmit_round_timeout_shrinks_live_tail_after_rtt_sample() {
+    TEST("actual one-frame round timeout overrides adaptive/full-burst state");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    // Establish RTT-estimator state first. setAckTimeout() intentionally preserves
+    // that estimator, so this proves the per-round override is a distinct mechanism
+    // and still wins after a real sample exists.
+    if (!tx.sendData(Bytes{0x11}))
+        FAIL("failed to send RTT-training frame");
+    tx.tick(200);
+    auto first_ack = v2::ControlFrame::makeAck("RX1", "TX1", 0);
+    tx.onFrameReceived(first_ack.serialize());
+
+    if (!tx.sendData(Bytes{0x22}))
+        FAIL("failed to send tail frame");
+    if (transmitted.size() != 2)
+        FAIL("test setup should have exactly two first transmissions");
+
+    const size_t rearmed =
+        tx.rearmTransmittedDataFrames({transmitted.back()}, 100);
+    if (rearmed != 1)
+        FAIL("exact transmitted-frame identity did not match the live tail slot");
+    if (tx.getAckTimeout() != 1000)
+        FAIL("per-round timeout must not overwrite the mode-wide timeout");
+
+    tx.tick(99);
+    if (transmitted.size() != 2)
+        FAIL("tail retransmitted before its exact one-frame deadline");
+    tx.tick(1);
+    if (transmitted.size() != 3)
+        FAIL("tail did not retransmit at its exact one-frame deadline");
+
+    auto retry = v2::DataFrame::deserialize(transmitted.back());
+    if (!retry || retry->seq != 1 || retry->payload != Bytes{0x22})
+        FAIL("round-timeout retry changed the live tail frame");
+
+    PASS();
+    return true;
+}
+
+bool test_transmitted_frame_timeout_does_not_rearm_unsent_hole() {
+    TEST("physical-round timeout suspends unsent holes and ignores padding aliases");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    if (!tx.sendData(Bytes{0x10}) || !tx.sendData(Bytes{0x20}))
+        FAIL("failed to seed two live slots");
+
+    // Put both original timers near expiry, then commit only seq0 to the new physical
+    // round. A valid DATA-shaped pad/stale alias deliberately reuses seq1 but not its
+    // complete serialized identity, so it must affect geometry only and never match.
+    tx.tick(900);
+    auto pad_alias =
+        v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{0xEE}).serialize();
+    if (tx.rearmTransmittedDataFrames({transmitted[0], pad_alias}, 100) != 1)
+        FAIL("failed to rearm the one physically selected frame");
+
+    tx.tick(100);
+    if (transmitted.size() != 3)
+        FAIL("near-expiry unsent hole launched a colliding second retry");
+    auto retry = v2::DataFrame::deserialize(transmitted.back());
+    if (!retry || retry->seq != 0)
+        FAIL("unselected live slot was incorrectly rearmed/retried");
+
+    // Once seq1 is selected for a later physical round, it becomes eligible and its
+    // exact one-frame timer runs normally.
+    if (tx.rearmTransmittedDataFrames({transmitted[1]}, 50) != 1)
+        FAIL("later physical round did not unsuspend the remaining hole");
+    tx.tick(49);
+    if (transmitted.size() != 3)
+        FAIL("remaining hole retried before its later-round deadline");
+    tx.tick(1);
+    if (transmitted.size() != 4)
+        FAIL("remaining hole did not retry after becoming physically eligible");
+    retry = v2::DataFrame::deserialize(transmitted.back());
+    if (!retry || retry->seq != 1)
+        FAIL("later physical round retried the wrong identity");
+
+    PASS();
+    return true;
+}
+
+bool test_transmitted_round_suspends_wrapped_window_slots() {
+    TEST("physical-round suspension covers nonzero and wrapped TX-slot indices");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    // Advance the logical base to 14. seqToSlot uses the fixed 16-entry ring, so the
+    // next live window occupies physical indices 14,15,0,1 rather than [0,4).
+    for (uint16_t seq = 0; seq < 14; ++seq) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(seq)}))
+            FAIL("failed to advance the TX base for wrapped-slot setup");
+        auto ack = v2::ControlFrame::makeAck("RX1", "TX1", seq);
+        tx.onFrameReceived(ack.serialize());
+    }
+    if (!tx.sendData(Bytes{0xA0}) || !tx.sendData(Bytes{0xB0}))
+        FAIL("failed to seed wrapped live slots seq14/15");
+    const Bytes seq14_frame = transmitted[14];
+
+    tx.tick(900);
+    if (tx.rearmTransmittedDataFrames({seq14_frame}, 100) != 1)
+        FAIL("failed to commit wrapped seq14 physical round");
+    tx.tick(100);
+
+    if (transmitted.size() != 17)
+        FAIL("wrapped unsent seq15 escaped suspension and collided with seq14 retry");
+    auto retry = v2::DataFrame::deserialize(transmitted.back());
+    if (!retry || retry->seq != 14)
+        FAIL("wrapped-slot round retried the wrong physical identity");
+
+    PASS();
+    return true;
+}
+
+bool test_waiting_rebase_unsuspends_near_expiry_base() {
+    TEST("WAITING-REBASE voice unsuspends a near-expiry physical base slot");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+    if (!tx.sendData(Bytes{0x10}) || !tx.sendData(Bytes{0x20}))
+        FAIL("failed to seed rebase suspension setup");
+
+    tx.tick(900);  // base seq0 has only 100 ms left
+    if (tx.rearmTransmittedDataFrames({transmitted[1]}, 500) != 1)
+        FAIL("failed to suspend base behind the seq1 physical round");
+    tx.expireBaseSlotTimerForRebase();
+    tx.tick(1);
+
+    if (transmitted.size() != 3)
+        FAIL("WAITING-REBASE voice left the near-expiry base suspended");
+    auto retry = v2::DataFrame::deserialize(transmitted.back());
+    if (!retry || retry->seq != 0)
+        FAIL("WAITING-REBASE voice did not force the era-base identity");
 
     PASS();
     return true;
@@ -2558,7 +3117,16 @@ int main() {
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();
     test_ack_batch_out_of_order_safety_valve();
-    test_final_out_of_order_frame_sends_explicit_frame_nack();
+    test_legacy_final_out_of_order_frame_sends_explicit_frame_nack();
+    test_tone_sack_final_gap_uses_one_feedback_plane();
+    test_unready_tone_sack_transport_falls_back_to_legacy();
+    test_single_fixed_tail_retry_preserves_12cw_geometry();
+    test_long_lifting_fixed_frame_preserves_full_payload();
+    test_lifting_only_geometry_change_aborts_old_window();
+    test_transmit_round_timeout_shrinks_live_tail_after_rtt_sample();
+    test_transmitted_frame_timeout_does_not_rearm_unsent_hole();
+    test_transmitted_round_suspends_wrapped_window_slots();
+    test_waiting_rebase_unsuspends_near_expiry_base();
     test_more_frag_out_of_order_uses_sack_without_explicit_frame_nack();
     test_explicit_frame_nack_retransmits_before_long_rto();
     test_ack_batch_setter_clamping();
@@ -2590,6 +3158,8 @@ int main() {
     test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack();
     test_timeout_repair_retransmits_only_missing_slot_and_resets_timer();
     test_timeout_window_retransmits_as_one_batch_when_callback_present();
+    test_deferred_timeout_cancel_preserves_retry_and_karn_state();
+    test_deferred_timeout_cancel_cannot_terminal_fail_without_commit();
     test_ack_progress_accessor_counts_and_dedups();
     test_defer_pending_retransmits_gates_slot_rto();
 

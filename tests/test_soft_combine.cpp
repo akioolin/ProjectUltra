@@ -529,8 +529,10 @@ void test_makeKey_basic_field_propagation() {
     in.rate = CodeRate::R2_3;
     in.cw_count = 4;
     in.cw_index = 3;
+    in.lifting_z = 81;
     in.modulation = ultra::Modulation::QPSK;
     in.channel_interleave = true;
+    in.physical_burst_end = true;
     in.waveform_mode = 0x05;       // OFDM_CHIRP
     in.ofdm_data_carriers = 30;
     auto k = SoftCombineBuffer::makeKey(in);
@@ -539,8 +541,10 @@ void test_makeKey_basic_field_propagation() {
     CHECK(k.rate == CodeRate::R2_3, "rate");
     CHECK(k.cw_count == 4, "cw_count");
     CHECK(k.cw_index == 3, "cw_index");
+    CHECK(k.lifting_z == 81, "lifting_z");
     CHECK(k.modulation == ultra::Modulation::QPSK, "modulation");
     CHECK(k.channel_interleave == 1, "channel_interleave true → 1");
+    CHECK(k.physical_burst_end == 1, "physical_burst_end true → 1");
     CHECK(k.carrier_count_hash != 0, "carrier_count_hash nonzero");
     pass("makeKey populates all fields and channel_interleave bool→byte");
 }
@@ -608,6 +612,69 @@ void test_makeKey_channel_interleave_false_is_zero() {
     pass("channel_interleave false maps to 0");
 }
 
+void test_makeKey_physical_tail_variant_separates_llr_history() {
+    SoftCombineBuffer::HarqKeyInputs in;
+    in.sender_hash = 0x010203;
+    in.seq = 77;
+    in.rate = CodeRate::R2_3;
+    in.cw_count = 4;
+    in.cw_index = 0;
+    in.modulation = ultra::Modulation::QPSK;
+    in.waveform_mode = 0x05;
+    in.ofdm_data_carriers = 59;
+
+    const auto non_tail = SoftCombineBuffer::makeKey(in);
+    in.physical_burst_end = true;
+    const auto tail = SoftCombineBuffer::makeKey(in);
+    CHECK(!(non_tail == tail),
+          "same ARQ seq must use distinct HARQ keys when physical tail status changes");
+
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    buffer.retain(non_tail, std::vector<float>{1.0f, -1.0f});
+    std::vector<float> combined;
+    const int attempts = buffer.combine(
+        tail, std::vector<float>{2.0f, -2.0f}, combined);
+    CHECK(attempts == 1,
+          "tail retry must not combine with retained non-tail LLRs for the same seq");
+    CHECK(combined == std::vector<float>({2.0f, -2.0f}),
+          "tail retry must retain its fresh-only LLR vector");
+    pass("physical tail status partitions HARQ LLR history");
+}
+
+void test_makeKey_lifting_variant_separates_llr_history() {
+    SoftCombineBuffer::HarqKeyInputs in;
+    in.sender_hash = 0x010203;
+    in.seq = 88;
+    in.rate = CodeRate::R2_3;
+    in.cw_count = 4;
+    in.cw_index = 0;
+    in.modulation = ultra::Modulation::QAM8;
+    in.waveform_mode = 0x05;
+    in.ofdm_data_carriers = 51;
+    in.lifting_z = 27;
+
+    const auto z27 = SoftCombineBuffer::makeKey(in);
+    in.lifting_z = 81;
+    const auto z81 = SoftCombineBuffer::makeKey(in);
+    CHECK(z27.lifting_z == 27, "legacy HARQ key keeps Z27");
+    CHECK(z81.lifting_z == 81, "long-code HARQ key keeps Z81");
+    CHECK(!(z27 == z81),
+          "different lifting geometries must use distinct HARQ keys");
+
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    buffer.retain(z27, std::vector<float>{1.0f, -1.0f});
+    std::vector<float> combined;
+    const int attempts = buffer.combine(
+        z81, std::vector<float>{2.0f, -2.0f}, combined);
+    CHECK(attempts == 1,
+          "Z81 retry must not combine with retained Z27 LLRs");
+    CHECK(combined == std::vector<float>({2.0f, -2.0f}),
+          "lifting mismatch must keep the fresh-only LLR vector");
+    pass("lifting geometry partitions HARQ LLR history");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
@@ -634,6 +701,8 @@ int main() {
     test_makeKey_carrier_hash_stable_for_same_inputs();
     test_makeKey_zero_sender_hash_preserved();
     test_makeKey_channel_interleave_false_is_zero();
+    test_makeKey_physical_tail_variant_separates_llr_history();
+    test_makeKey_lifting_variant_separates_llr_history();
 
     std::cout << "\nSoftCombineBuffer tests: " << tests_passed << " passed, "
               << tests_failed << " failed\n";

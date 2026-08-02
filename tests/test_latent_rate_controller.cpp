@@ -8,11 +8,14 @@
 //   2. COMMON-MODE calibration error cancels exactly. This is the property that lets the
 //      rate path stop consuming kOfdmLegacyAnchorScaleOffsetDb (+8.70 dB) — and the +8.70
 //      is itself only a compatibility shim for an estimator bug that was already fixed.
-//   3. Overhead sits in the DENOMINATOR, so the break-even for one rung up is the airtime
-//      ratio (0.835 with our measured cycle), not the raw-rate ratio (0.750).
+//   3. Value is useful file bytes per physical cycle from production geometry. Spectral
+//      efficiency is not multiplied a second time.
 //   4. Ranking on the MEASURED waterfall reproduces the measured ordering.
 
 #include "env_compat.hpp"
+#include "protocol/connection_policy.hpp"
+#include "protocol/file_transfer.hpp"
+#include "protocol/frame_v2.hpp"
 #include "protocol/latent_rate_controller.hpp"
 #include "protocol/waveform_selection.hpp"
 
@@ -33,14 +36,33 @@ int tests_failed = 0;
         if (!(cond)) { ++tests_failed; std::cout << "FAIL: " << msg << "\n"; } \
     } while (0)
 
-// Measured scheduling geometry, docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md §1:
-// payload 6.19 s over 5 frames, sync 1.41 s + turnaround 1.79 s fixed per cycle.
-constexpr float kPayloadPerFrameS = 6.19f / 5.0f;
-constexpr float kFixedPerCycleS = 1.41f + 1.79f;
 constexpr int kFramesPerGroup = 5;
+constexpr uint32_t kNonDataCycleMs = 1790;
 
-LatentRateController::Pick pick(LatentRateController& c) {
-    return c.best(kPayloadPerFrameS, kFixedPerCycleS, kFramesPerGroup);
+LatentRateController::RungGeometryTable productionGeometry(int frames) {
+    LatentRateController::RungGeometryTable table{};
+    for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+        const auto candidate = coherentRungFromIndex(r);
+        if (!coherentRungLocallyEnabled(candidate.mod, candidate.rate)) continue;
+        const int cw = connection_policy::recommendCWCount(
+            candidate.mod, candidate.rate, WaveformMode::OFDM_CHIRP);
+        const size_t capacity = v2::getFixedFramePayloadCapacityZ(
+            candidate.rate, cw, 27);
+        if (capacity <= FileTransferController::FILE_DATA_OVERHEAD) continue;
+        const uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
+            candidate.mod, candidate.rate, static_cast<size_t>(frames), cw, 0, 27);
+        table[r] = {
+            static_cast<float>(capacity - FileTransferController::FILE_DATA_OVERHEAD),
+            frames,
+            static_cast<float>(burst_ms + kNonDataCycleMs) / 1000.0f,
+        };
+    }
+    return table;
+}
+
+LatentRateController::Pick pick(LatentRateController& c, int frames = kFramesPerGroup,
+                                bool allow_probe = false) {
+    return c.best(productionGeometry(frames), kRungIdxNone, allow_probe);
 }
 
 // ── 1. Evidence updates every rung and survives a rung change ─────────────────
@@ -115,25 +137,47 @@ void test_common_mode_calibration_error_cancels() {
           "and therefore reach the same decision — no SNR calibration can move it");
 }
 
-// ── 3. Overhead belongs in the denominator ────────────────────────────────────
-void test_overhead_in_denominator_moves_the_break_even() {
-    // With the measured cycle, one rung up (QPSK R3/4 -> 8PSK R2/3, eta 1.5 -> 2.001) is
-    // worth LESS than its raw-rate ratio because the fixed 3.20 s does not shrink.
-    const float eta_lo = rungSpectralEfficiency(kRungIdxQpskR34);
-    const float eta_hi = rungSpectralEfficiency(kRungIdxQam8R23);
-    const float air_lo = kFramesPerGroup * kPayloadPerFrameS;
-    const float air_hi = air_lo * (eta_lo / eta_hi);
-    const float raw_ratio = eta_hi / eta_lo;
-    const float cycle_ratio = (air_lo + kFixedPerCycleS) / (air_hi + kFixedPerCycleS);
-    CHECK(cycle_ratio < raw_ratio,
-          "the fixed per-cycle cost dilutes the gain (" << cycle_ratio << " < " << raw_ratio << ")");
-    // Break-even delivered fraction is the inverse of the realisable speedup, not of the
-    // raw-rate ratio. Measured: 0.835 vs the 0.750 the predecessor used.
-    const float be_true = 1.0f / cycle_ratio;
-    const float be_raw = 1.0f / raw_ratio;
-    CHECK(be_true > be_raw + 0.05f,
-          "true break-even is materially stricter than the raw-rate one ("
-              << be_true << " vs " << be_raw << ")");
+// ── 3. Exact useful-byte / physical-cycle objective ───────────────────────────
+void test_exact_production_geometry_and_no_eta_double_count() {
+    const auto g5 = productionGeometry(5);
+    const auto g8 = productionGeometry(8);
+    CHECK(std::lround(g5[kRungIdxQpskR34].useful_bytes_per_frame) == 456,
+          "QPSK R3/4 geometry carries 456 useful file bytes/frame");
+    CHECK(std::lround(g5[kRungIdxQam8R23].useful_bytes_per_frame) == 624,
+          "8PSK R2/3 geometry carries 624 useful file bytes/frame");
+    CHECK(std::lround(g5[kRungIdxQam16R23].useful_bytes_per_frame) == 840,
+          "16QAM R2/3 geometry carries 840 useful file bytes/frame");
+    CHECK(g5[kRungIdxQpskR34].cycle_s > 0.0f &&
+              g5[kRungIdxQpskR34].frames_per_cycle == 5,
+          "five-frame geometry has a physical cycle");
+    CHECK(g8[kRungIdxQpskR34].frames_per_cycle == 8 &&
+              g8[kRungIdxQpskR34].cycle_s > g5[kRungIdxQpskR34].cycle_s,
+          "eight-frame geometry uses its real longer burst cycle");
+
+    // If two rows have identical useful bytes and cycle duration, their values differ
+    // only by predicted reliability. No hidden eta term may make the denser row win.
+    LatentRateController::RungGeometryTable equal{};
+    equal[kRungIdxQpskR34] = {100.0f, 1, 1.0f};
+    equal[kRungIdxQam8R23] = {100.0f, 1, 1.0f};
+    LatentRateController high;
+    high.seedPrior(25.0f, 0.1f);  // both probabilities clamp to the same 0.90 cap
+    const auto same = high.best(equal);
+    CHECK(same.rung == kRungIdxQpskR34,
+          "equal physical value does not reward the denser rung a second time");
+
+    LatentRateController only5, only8;
+    only5.seedPrior(18.0f, 0.5f);
+    only8.seedPrior(18.0f, 0.5f);
+    auto q5 = g5;
+    auto q8 = g8;
+    for (uint8_t r = 0; r < kRungIdxCount; ++r) {
+        if (r != kRungIdxQpskR23) {
+            q5[r] = {};
+            q8[r] = {};
+        }
+    }
+    CHECK(only8.best(q8).goodput > only5.best(q5).goodput,
+          "eight frames amortize the one anchor/turnaround better than five");
 }
 
 // ── 4. Ranking reproduces the measured waterfall ordering ─────────────────────
@@ -154,6 +198,16 @@ void test_ranking_matches_measured_ordering() {
     hi.seedPrior(24.0f, 1.0f);
     CHECK(pick(lo).rung < kRungIdxQam8R23, "a weak link drops below 8PSK R2/3");
     CHECK(pick(hi).rung >= kRungIdxQam8R23, "a strong link does not sit below it");
+
+    // These are the two points where the retired eta-squared proxy disagreed with exact
+    // production bytes/timing in the audit. Pin them so the algebra cannot regress.
+    LatentRateController x16, x22;
+    x16.seedPrior(16.2f, 0.2f);  // p25 ~= 16 dB
+    x22.seedPrior(22.2f, 0.2f);  // p25 ~= 22 dB
+    CHECK(pick(x16).rung == kRungIdxQpskR23,
+          "exact geometry at x~16 stays on reliable QPSK R2/3");
+    CHECK(pick(x22).rung == kRungIdxQam8R23,
+          "exact geometry at x~22 prefers 8PSK R2/3 over fragile 16QAM R2/3");
 }
 
 // ── 5. Minstrel's two clamps, and why ─────────────────────────────────────────
@@ -215,25 +269,25 @@ void test_correlated_frames_are_tempered() {
 // left unclaimed. The likelihood also SATURATES (a rung that always succeeds stops carrying
 // information), so no amount of further evidence lifts x past the plateau on its own.
 void test_tie_break_probes_upward() {
-    // Park x_p25 exactly where the rig plateaued (15.0). Seed slightly above with a tight
-    // prior: the 25th percentile sits ~0.674 sigma below the mean, so seeding 15.0 directly
-    // would put p25 at 14.5 and the near-tie would not yet hold.
-    LatentRateController c;
-    c.seedPrior(15.2f, 0.3f);
-
+    // Find the near-tie bands on the code-faithful geometry rather than baking in the old
+    // eta-squared crossover. On the fourth decision an explicitly enabled experiment may
+    // choose a higher near-tied rung; the default caller never enables it.
     int probes = 0, higher_than_argmax = 0;
-    uint8_t argmax_rung = kRungIdxNone;
-    for (int i = 0; i < 40; ++i) {
-        const auto p = pick(c);
-        if (i == 0) argmax_rung = p.rung;   // first decision is never a probe (counter != 0)
+    for (float x = -4.0f; x <= 25.0f; x += 0.25f) {
+        LatentRateController baseline, experimental;
+        baseline.seedPrior(x, 0.2f);
+        experimental.seedPrior(x, 0.2f);
+        const uint8_t argmax_rung = pick(baseline).rung;
+        LatentRateController::Pick p;
+        for (int i = 0; i < LatentRateController::kTieBreakPeriod; ++i) {
+            p = pick(experimental, kFramesPerGroup, /*allow_probe=*/true);
+        }
         if (p.tie_break_probe) {
             ++probes;
             if (p.rung > argmax_rung) ++higher_than_argmax;
         }
     }
     CHECK(probes > 0, "the tie-break fires when rungs are near-tied (got " << probes << ")");
-    CHECK(probes <= 40 / LatentRateController::kTieBreakPeriod + 1,
-          "and no more often than once per kTieBreakPeriod decisions");
     CHECK(higher_than_argmax == probes,
           "every probe selects a rung ABOVE the argmax — probing downward would be pointless");
 
@@ -248,9 +302,74 @@ void test_tie_break_probes_upward() {
     LatentRateController far;
     far.seedPrior(4.0f, 0.5f);        // deep in QPSK territory, dense rungs nowhere near
     int far_probes = 0;
-    for (int i = 0; i < 40; ++i) if (pick(far).tie_break_probe) ++far_probes;
+    for (int i = 0; i < 40; ++i) {
+        if (pick(far, kFramesPerGroup, /*allow_probe=*/true).tie_break_probe) ++far_probes;
+    }
     CHECK(far_probes == 0,
           "no probe when the higher rungs are not within the margin (got " << far_probes << ")");
+
+    LatentRateController production;
+    production.seedPrior(15.2f, 0.3f);
+    int default_probes = 0;
+    for (int i = 0; i < 40; ++i) {
+        if (pick(production).tie_break_probe) ++default_probes;
+    }
+    CHECK(default_probes == 0,
+          "whole-group tie probes are disabled unless the caller explicitly opts in");
+}
+
+void test_reset_clears_qso_state_and_probe_phase() {
+    LatentRateController c;
+    c.seedPrior(18.0f, 2.0f);
+    c.observe(kRungIdxQam8R23, 6, 8);
+    (void)pick(c, 8, true);
+    CHECK(c.havePrior() && c.observations() == 1 && c.decisions() == 1,
+          "precondition: controller accumulated one QSO's state");
+    c.reset();
+    CHECK(!c.havePrior(), "reset clears prior/posterior ownership");
+    CHECK(c.observations() == 0, "reset clears observation count");
+    CHECK(c.decisions() == 0, "reset clears decision/probe phase");
+}
+
+void test_operator_constraints_cover_latent_early_return() {
+    LatentRateController strong_r12;
+    strong_r12.seedPrior(24.0f, 0.5f);
+    setenv("ULTRA_MAX_OFDM_RATE", "R1_2", 1);
+    const uint8_t ceiling_r12 = latentConfiguredRungCeiling();
+    const auto pick_r12 = strong_r12.best(productionGeometry(5), ceiling_r12);
+    unsetenv("ULTRA_MAX_OFDM_RATE");
+    CHECK(ceiling_r12 == kRungIdxQpskR12 && pick_r12.rung <= kRungIdxQpskR12,
+          "ULTRA_MAX_OFDM_RATE=R1_2 is an absolute latent argmax ceiling");
+
+    LatentRateController strong_r23;
+    strong_r23.seedPrior(24.0f, 0.5f);
+    setenv("ULTRA_MAX_OFDM_RATE", "r2_3", 1);
+    const uint8_t ceiling_r23 = latentConfiguredRungCeiling();
+    const auto pick_r23 = strong_r23.best(productionGeometry(5), ceiling_r23);
+    unsetenv("ULTRA_MAX_OFDM_RATE");
+    CHECK(ceiling_r23 == kRungIdxQpskR23 && pick_r23.rung <= kRungIdxQpskR23,
+          "ULTRA_MAX_OFDM_RATE=R2_3 is an absolute latent argmax ceiling");
+
+    setenv("ULTRA_FORCE_DATA_MOD", "QPSK", 1);
+    CHECK(!latentStartupProbeAllowedByOperator(),
+          "ULTRA_FORCE_DATA_MOD suppresses automatic startup exploration");
+    unsetenv("ULTRA_FORCE_DATA_MOD");
+    setenv("ULTRA_FORCE_DATA_RATE", "R1_2", 1);
+    CHECK(!latentStartupProbeAllowedByOperator(),
+          "ULTRA_FORCE_DATA_RATE suppresses automatic startup exploration");
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+    setenv("ULTRA_FORCE_DATA_MOD", "", 1);
+    setenv("ULTRA_FORCE_DATA_RATE", "not_a_rate", 1);
+    CHECK(latentStartupProbeAllowedByOperator(),
+          "empty/invalid force variables must not freeze automatic selection");
+    unsetenv("ULTRA_FORCE_DATA_MOD");
+    unsetenv("ULTRA_FORCE_DATA_RATE");
+    setenv("ULTRA_LOCK_RATE", "1", 1);
+    CHECK(!latentStartupProbeAllowedByOperator(),
+          "ULTRA_LOCK_RATE suppresses automatic startup exploration");
+    unsetenv("ULTRA_LOCK_RATE");
+    CHECK(latentStartupProbeAllowedByOperator(),
+          "automatic startup exploration is available when no operator pin exists");
 }
 
 }  // namespace
@@ -259,12 +378,14 @@ int main() {
     std::cout << "=== Latent Rate Controller Tests ===\n";
     test_evidence_survives_rung_change();
     test_common_mode_calibration_error_cancels();
-    test_overhead_in_denominator_moves_the_break_even();
+    test_exact_production_geometry_and_no_eta_double_count();
     test_ranking_matches_measured_ordering();
     test_dead_and_capped_probabilities();
     test_relax_widens_and_is_the_only_forgetting();
     test_correlated_frames_are_tempered();
     test_tie_break_probes_upward();
+    test_reset_clears_qso_state_and_probe_phase();
+    test_operator_constraints_cover_latent_early_return();
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": "
               << (tests_run - tests_failed) << "/" << tests_run << " checks\n";
     return tests_failed == 0 ? 0 : 1;

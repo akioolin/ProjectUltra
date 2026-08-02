@@ -236,6 +236,8 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.frame_data.clear();
         slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.timeout_ms = 0;
+        slot.timeout_suspended = false;
+        slot.timeout_transition_suspended = false;
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
         slot.retry_count = 0;
@@ -320,15 +322,27 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
     }
 }
 
-void SelectiveRepeatARQ::setFixedFrameCodewords(int cw_count) {
+void SelectiveRepeatARQ::setFixedFrameGeometry(int cw_count, int lifting_z) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
-    if (cw_count == fixed_frame_codewords_) {
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    if (cw_count == fixed_frame_codewords_ &&
+        lifting_z == fixed_frame_lifting_z_) {
         return;
     }
 
     fixed_frame_codewords_ = cw_count;
+    fixed_frame_lifting_z_ = lifting_z;
     abortPendingTx();
-    LOG_MODEM(INFO, "SR-ARQ: Fixed frame CW count set to %d", fixed_frame_codewords_);
+    LOG_MODEM(INFO, "SR-ARQ: Fixed frame geometry set to cw=%d z=%d",
+              fixed_frame_codewords_, fixed_frame_lifting_z_);
+}
+
+void SelectiveRepeatARQ::setFixedFrameCodewords(int cw_count) {
+    setFixedFrameGeometry(cw_count, fixed_frame_lifting_z_);
+}
+
+void SelectiveRepeatARQ::setFixedFrameLiftingZ(int lifting_z) {
+    setFixedFrameGeometry(fixed_frame_codewords_, lifting_z);
 }
 
 bool SelectiveRepeatARQ::sendData(const Bytes& data) {
@@ -371,6 +385,8 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
+    tx_window_[slot].timeout_suspended = false;
+    tx_window_[slot].timeout_transition_suspended = false;
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -442,7 +458,8 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data,
-                                        code_rate_, fixed_frame_codewords_);
+                                        code_rate_, fixed_frame_codewords_,
+                                        fixed_frame_lifting_z_);
     frame.type = frame_type;
     frame.flags = stampMoveEpochFlags(dataFrameFlags(flags), seq);
 
@@ -452,6 +469,8 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
+    tx_window_[slot].timeout_suspended = false;
+    tx_window_[slot].timeout_transition_suspended = false;
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -472,8 +491,9 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_in_flight_++;
     rearmOutstandingTimeouts();
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed %s seq=%d slot=%zu cw=%d, window=[%d,%d)",
+    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed %s seq=%d slot=%zu cw=%d z=%d, window=[%d,%d)",
               v2::frameTypeToString(frame_type), seq, slot, fixed_frame_codewords_,
+              fixed_frame_lifting_z_,
               tx_base_seq_, tx_next_seq_);
     if (ultra::phyDiagnosticsEnabled()) {
         std::ostringstream oss;
@@ -487,6 +507,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
             << " payload_bytes=" << data.size()
             << " frame_bytes=" << tx_window_[slot].frame_data.size()
             << " cw=" << fixed_frame_codewords_
+            << " z=" << fixed_frame_lifting_z_
             << " in_flight=" << tx_in_flight_
             << " window=" << config_.window_size
             << " timeout_ms=" << tx_window_[slot].timeout_ms;
@@ -523,6 +544,8 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
         v2::splitIntoCodewords(tx_window_[slot].frame_data, code_rate_);
     tx_window_[slot].seq = seq;
     tx_window_[slot].timeout_ms = ackTimeoutForFrames(tx_in_flight_ + 1);
+    tx_window_[slot].timeout_suspended = false;
+    tx_window_[slot].timeout_transition_suspended = false;
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
@@ -773,9 +796,29 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             config_.ack_batch_size, config_.window_size);
         const bool batch_threshold_reached = frames_since_ack_ >= batch_threshold;
         const bool batch_ack_allowed = !frame_more_frag || ack_batch_through_more_frag_;
-        if (arq_policy::shouldSendImmediateFrameNackForGap(
-                out_of_order, frame_more_frag, frame_final)) {
-            sendFrameNack(expected_seq);
+        const bool final_gap_needs_fast_feedback =
+            arq_policy::shouldSendImmediateFrameNackForGap(
+                out_of_order, frame_more_frag, frame_final);
+        if (final_gap_needs_fast_feedback) {
+            // The explicit frame NACK predates the unified tone-SACK transport.  On
+            // the legacy control-frame path it is still the fast tail-gap repair: the
+            // sender receives the NACK and retransmits before the long RTO.
+            //
+            // On the tone-SACK path the cumulative base + bitmap already identifies
+            // this exact hole and the Connection refills the next stop-and-wait turn
+            // with [holes]+[new].  Emitting the legacy NACK as well queues a second,
+            // long OFDM control transmission behind the tone ACK.  The sender hears
+            // the short tone first and starts its repair while this receiver is still
+            // keyed on the OFDM NACK, destroying the repair preamble.  One receive
+            // event must therefore select exactly one feedback plane.
+            if (toneBurstSackTransportReady()) {
+                LOG_MODEM(INFO,
+                          "SR-ARQ: Tail gap seq=%d carried by tone SACK only "
+                          "(legacy frame NACK suppressed)",
+                          expected_seq);
+            } else {
+                sendFrameNack(expected_seq);
+            }
         }
 
         const bool out_of_order_sack_allowed =
@@ -794,7 +837,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         // mid-burst between the widely-spaced physical frames.
         bool immediate_ack;
         bool arm_delayed_timer;
-        if (on_emit_tone_burst_sack_) {
+        if (toneBurstSackTransportReady()) {
             // One tone-burst per received WINDOW/turn: the message tail, an in-order
             // frame that fills a hole, OR a full window-worth of frames since the last
             // ack — so a MULTI-WINDOW transfer (a file) acks each window instead of
@@ -841,7 +884,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (arm_delayed_timer) {
             sack_pending_ = true;
-            if (on_emit_tone_burst_sack_) {
+            if (toneBurstSackTransportReady()) {
                 // Tone-burst partial-burst SACK: SLIDING delay (re-armed on each
                 // out-of-order frame, so it fires ~this long after the LAST hole frame —
                 // coalescing the burst's holes into ONE tone-burst). Kept well under the
@@ -1051,7 +1094,7 @@ void SelectiveRepeatARQ::handleDataRepairFrame(const v2::DataRepairFrame& repair
     handlePartialFrame(partial);
 }
 
-void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
+bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     uint16_t seq = frame.seq;
     uint32_t bitmap = arq_policy::decodeSackBitmap(frame.payload);
 
@@ -1078,8 +1121,6 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             << " in_flight=" << tx_in_flight_;
         ultra::phyDiagLine(oss.str());
     }
-    stats_.sacks_received++;
-
     // MOVE-EPOCH gate (before the seq-space guards: seq comparisons are meaningless
     // across eras). An epoch-mismatched ACK was formed against a pre-abort seq grid —
     // crediting it against the re-gridded frames is exactly the W16 phantom-retire
@@ -1104,7 +1145,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 << " bitmap=0x" << std::hex << bitmap << std::dec;
             ultra::phyDiagLine(oss.str());
         }
-        return;
+        return false;
     }
 
     // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
@@ -1126,7 +1167,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 << " bitmap=0x" << std::hex << bitmap << std::dec;
             ultra::phyDiagLine(oss.str());
         }
-        return;
+        return false;
     }
 
     // Far-future guard: reject ACKs implausibly ahead (> window_size + 1 past base)
@@ -1143,7 +1184,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 << " bitmap=0x" << std::hex << bitmap << std::dec;
             ultra::phyDiagLine(oss.str());
         }
-        return;
+        return false;
     }
 
     // NEVER-SENT guard (BUG-TONEACK-FABRICATION defense-in-depth): the window-based
@@ -1164,9 +1205,15 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                       "dropped as fabricated",
                       seq, static_cast<unsigned>((tx_next_seq_ - 1) & 0xFFFF),
                       tx_base_seq_);
-            return;
+            return false;
         }
     }
+
+    // Count protocol-valid SACKs only. Rejected stale/future/epoch/fabricated ACKs
+    // already have an exclusive reason counter above and must not inflate the accepted
+    // SACK total. A support-valid duplicate still counts as received; the dedup counter
+    // below records that its protocol effects were suppressed.
+    stats_.sacks_received++;
 
     // ACK-repeat dedup guard: suppress clustered duplicate ACKs carrying
     // identical cumulative+bitmap information.
@@ -1185,7 +1232,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 << " bitmap=0x" << std::hex << bitmap << std::dec;
             ultra::phyDiagLine(oss.str());
         }
-        return;
+        return true;
     }
     last_ack_signature_valid_ = true;
     last_ack_seq_ = seq;
@@ -1265,7 +1312,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // Trigger: ACK aligned to base (seq == tx_base-1), bit0=0, any higher bit set.
     // This means the receiver is missing the base frame but has later frames.
     //
-    // DISABLED on the tone-burst / stop-and-wait burst path (on_emit_tone_burst_sack_).
+    // DISABLED on the ready tone-burst / stop-and-wait burst path.
     // Fast-retx + hole-probe are PIPELINING mechanisms: they resend a lost frame
     // mid-stream while later frames are still flowing, before a timeout. Half-duplex
     // burst is stop-and-wait — you key down a whole group, turn around, and get ONE
@@ -1274,7 +1321,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // spurious duplicate resends to an inherently one-turn loop. Resends here are
     // timeout-only (the single burst-level ack timeout), driven by forming the next
     // coalesced burst on the one ack/timeout per turn.
-    if (!on_emit_tone_burst_sack_ &&
+    if (!toneBurstSackTransportReady() &&
         arq_policy::isAlignedBaseHoleAck(seq, tx_base_seq_, bitmap)) {
         size_t base_slot = seqToSlot(tx_base_seq_);
         TXSlot& s = tx_window_[base_slot];
@@ -1352,6 +1399,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             tx_window_[slot].hole_probe_count = 0;
         }
     }
+    return true;
 }
 
 void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
@@ -1450,7 +1498,7 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                 }
             }
 
-            if (s.hole_probe_armed) {
+            if (!s.timeout_suspended && s.hole_probe_armed) {
                 if (elapsed_ms >= s.hole_probe_timer_ms) {
                     if (s.repair_in_flight && s.repair_guard_ms > 0) {
                         LOG_MODEM(INFO,
@@ -1465,7 +1513,14 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                                   "SR-ARQ: Hole-probe retransmit seq=%d (%d/%d)",
                                   s.seq, s.hole_probe_count,
                                   arq_policy::kMaxHoleProbeRetransmits);
+                        const int failures_before = stats_.failed;
                         retransmitFrame(slot, RetransmitCause::HOLE_PROBE);
+                        if (stats_.failed != failures_before) {
+                            // The slot is inactive and the callback requested a
+                            // transfer-level unwind. Stop before touching the stale
+                            // reference again or failing another slot in this scan.
+                            break;
+                        }
                     } else {
                         s.hole_probe_armed = false;
                         s.hole_probe_timer_ms = 0;
@@ -1475,6 +1530,12 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                 }
             }
 
+            if (s.timeout_suspended) {
+                // A different subset is the current half-duplex physical round. This
+                // slot has not gone on air in that round, so it cannot legitimately
+                // time out and start a colliding second burst.
+                continue;
+            }
             if (elapsed_ms >= s.timeout_ms) {
                 if (s.repair_in_flight && s.repair_guard_ms > 0) {
                     LOG_MODEM(INFO,
@@ -1495,8 +1556,15 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                         ultra::phyDiagLine(oss.str());
                     }
                     stats_.timeouts++;
+                    const int failures_before = stats_.failed;
                     retransmitFrame(slot, RetransmitCause::TIMEOUT,
                                     timeout_retx_batch_ptr);
+                    if (stats_.failed != failures_before) {
+                        // One terminal event owns this tick. Connection suppresses
+                        // any earlier deferred batch and atomically aborts the rest
+                        // of the logical window after tick() unwinds.
+                        break;
+                    }
                 }
             } else {
                 s.timeout_ms -= elapsed_ms;
@@ -1591,6 +1659,25 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot,
         return;
     }
 
+    if (cause == RetransmitCause::TIMEOUT && deferred_timeout_batch != nullptr &&
+        deferred_timeout_commit_enabled_) {
+        // Two-phase Connection path: this is an egress INTENT, not a retransmission
+        // yet. In particular, do not consume retry budget, Karn eligibility, repair/
+        // hole state, retransmission counters, or the terminal-failure callback. The
+        // exact serialized identity lets the post-tick owner reject an obsolete rung
+        // without ever mutating its live slot.
+        deferred_timeout_batch->push_back(s.frame_data);
+        return;
+    }
+
+    performRetransmitFrame(slot, cause, deferred_timeout_batch);
+}
+
+void SelectiveRepeatARQ::performRetransmitFrame(
+    size_t slot, RetransmitCause cause,
+    std::vector<Bytes>* deferred_timeout_batch) {
+    TXSlot& s = tx_window_[slot];
+
     s.repair_in_flight = false;
     s.repair_guard_ms = 0;
     s.last_repair_bitmap = 0;
@@ -1674,6 +1761,8 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot,
         case RetransmitCause::NACK: stats_.retransmissions_nack++; break;
     }
     s.timeout_ms = currentAckTimeoutMs();
+    s.timeout_suspended = false;
+    s.timeout_transition_suspended = false;
     if (cause == RetransmitCause::TIMEOUT && deferred_timeout_batch != nullptr) {
         deferred_timeout_batch->push_back(s.frame_data);
     } else {
@@ -1749,6 +1838,8 @@ bool SelectiveRepeatARQ::sendDataRepair(size_t slot, uint32_t missing_bitmap) {
 
     const uint32_t repair_guard_ms = computeRepairGuardMs(s, repair_codewords.size() + 1);
     s.timeout_ms = repair_guard_ms;
+    s.timeout_suspended = false;
+    s.timeout_transition_suspended = false;
     s.last_repair_bitmap = repair_bitmap;
     s.repair_cooldown_ms = repair_guard_ms;
     s.repair_in_flight = true;
@@ -1920,7 +2011,30 @@ void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bit
     slot.cw_nack_cooldown_ms = std::max<uint32_t>(config_.sack_delay_ms, 1000u);
 }
 
-void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
+bool SelectiveRepeatARQ::isToneBurstAckPlausible(uint8_t group_seq6,
+                                                 uint32_t bitmap,
+                                                 uint8_t move_epoch) const {
+    if (tx_in_flight_ == 0) return false;
+    if (move_epoch_enabled_ && (move_epoch & 0x3u) != tx_epoch_) return false;
+
+    const uint16_t ref = static_cast<uint16_t>((tx_base_seq_ - 1) & 0xFFFF);
+    const uint16_t span =
+        static_cast<uint16_t>((tx_next_seq_ - tx_base_seq_) & 0xFFFF);
+    const uint16_t delta =
+        static_cast<uint16_t>((group_seq6 - (ref & 0x3F)) & 0x3F);
+    if (delta > span) return false;
+
+    // After cumulative progress `delta`, bitmap bit i describes
+    // tx_base+delta+i. A receiver cannot positively SACK a sequence at/after
+    // tx_next_seq_, so any set bit beyond the remaining sent span is impossible.
+    const uint16_t remaining = static_cast<uint16_t>(span - delta);
+    const uint32_t allowed_bitmap =
+        remaining >= 32 ? 0xFFFFFFFFu
+                        : (remaining == 0 ? 0u : ((1u << remaining) - 1u));
+    return (bitmap & ~allowed_bitmap) == 0;
+}
+
+bool SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
                                         uint8_t move_epoch) {
     // SUPPORT-CONSTRAINED decode (BUG-TONEACK-FABRICATION, F116 2026-07-05): a
     // cumulative ack can only reference the receiver's in-order base, which lives in
@@ -1946,7 +2060,30 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
                   "SR-ARQ: TONE-BURST ack group_seq6=%u decodes OUTSIDE the sent window "
                   "(base-1=%u, span=%u, delta=%u) — dropped as corrupt/aliased/foreign",
                   group_seq6, ref, span, delta);
-        return;
+        return false;
+    }
+
+    if (move_epoch_enabled_ && (move_epoch & 0x3u) != tx_epoch_) {
+        stats_.stale_epoch_acks_ignored++;
+        LOG_MODEM(WARN,
+                  "SR-ARQ: TONE-BURST ack epoch=%u does not match tx_epoch=%u "
+                  "— dropped before synthetic SACK",
+                  static_cast<unsigned>(move_epoch & 0x3u),
+                  static_cast<unsigned>(tx_epoch_));
+        return false;
+    }
+    const uint16_t remaining = static_cast<uint16_t>(span - delta);
+    const uint32_t allowed_bitmap =
+        remaining >= 32 ? 0xFFFFFFFFu
+                        : (remaining == 0 ? 0u : ((1u << remaining) - 1u));
+    if ((bitmap & ~allowed_bitmap) != 0) {
+        stats_.fabricated_acks_dropped++;
+        LOG_MODEM(WARN,
+                  "SR-ARQ: TONE-BURST ack bitmap=0x%08X claims unsent frames "
+                  "(group_seq6=%u remaining_sent=%u allowed=0x%08X) — dropped",
+                  bitmap, static_cast<unsigned>(group_seq6),
+                  static_cast<unsigned>(remaining), allowed_bitmap);
+        return false;
     }
     const uint16_t base = static_cast<uint16_t>((ref + delta) & 0xFFFF);
 
@@ -1965,7 +2102,7 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
     LOG_MODEM(INFO,
               "SR-ARQ: TONE-BURST ack RX group_seq6=%u -> base=%d (retires thru %d) bitmap=0x%08X",
               group_seq6, base, base, bitmap);
-    handleAckFrame(ack);
+    return handleAckFrame(ack);
 }
 
 void SelectiveRepeatARQ::endGroupReceiveAndAck() {
@@ -2036,7 +2173,15 @@ size_t SelectiveRepeatARQ::retransmitInFlightUnacked(size_t max_frames) {
             // NACK cause: this is a turn-driven (ack-revealed) hole resend, not a blind
             // timeout. retransmitFrame resets the slot's timeout and routes the frame
             // through transmitData → the connection buffers it into the open burst group.
+            const int failures_before = stats_.failed;
             retransmitFrame(slot, RetransmitCause::NACK);
+            if (stats_.failed != failures_before) {
+                // A terminal failure is a logical-transfer boundary for Connection.
+                // Stop this turn-driven batch immediately so later snapshotted holes
+                // do not consume retries or enter the open physical burst after the
+                // failure callback has requested an unwind.
+                break;
+            }
             if (tx_window_[slot].active) {  // still active => actually resent (not failed out)
                 ++resent;
             }
@@ -2092,7 +2237,7 @@ void SelectiveRepeatARQ::sendSack() {
     // bits) + the low bits of the RX bitmap up to the wire mask width (16 as of the
     // 2026-07-02 widen; the Connection truncates to kPayloadFrameMaskBits) — enough to
     // selectively ack the full capped in-flight window (kToneBurstAckWindowCapFrames).
-    if (on_emit_tone_burst_sack_) {
+    if (toneBurstSackTransportReady()) {
         stats_.sacks_sent++;
         stats_.acks_sent++;
         rx_final_delivered_since_sack_ = false;
@@ -2263,6 +2408,158 @@ uint32_t SelectiveRepeatARQ::currentAckTimeoutMs() const {
     return config_.ack_timeout_ms;
 }
 
+std::optional<size_t> SelectiveRepeatARQ::matchingLiveTXSlot(
+    const Bytes& frame_data) const {
+    const auto header = v2::parseHeader(frame_data);
+    if (!header.valid || header.is_control) {
+        return std::nullopt;
+    }
+    const size_t slot_index = seqToSlot(header.seq);
+    const auto& slot = tx_window_[slot_index];
+    // Full serialized identity protects against a wrapped/reused seq and against
+    // interleave padding that happens to carry an addressable sequence number.
+    if (!slot.active || slot.acked || slot.seq != header.seq ||
+        slot.frame_data != frame_data) {
+        return std::nullopt;
+    }
+    return slot_index;
+}
+
+SelectiveRepeatARQ::DeferredTimeoutCommitResult
+SelectiveRepeatARQ::commitDeferredTimeoutRetransmits(
+    const std::vector<Bytes>& intents) {
+    DeferredTimeoutCommitResult result;
+    std::vector<size_t> slots;
+    slots.reserve(intents.size());
+    std::array<bool, MAX_WINDOW> seen{};
+    for (const auto& frame_data : intents) {
+        const auto slot_index = matchingLiveTXSlot(frame_data);
+        if (!slot_index || seen[*slot_index]) {
+            continue;
+        }
+        seen[*slot_index] = true;
+        slots.push_back(*slot_index);
+    }
+
+    // Preflight the WHOLE physical batch before mutating any member. The old path
+    // could consume retries on early slots, discover a terminal slot later in the
+    // scan, then suppress the whole batch. More importantly, terminal callbacks are
+    // irreversible and cannot be rolled back if a same-tick mode transition wins.
+    for (size_t slot_index : slots) {
+        const auto& slot = tx_window_[slot_index];
+        if (slot.retry_count + 1 >= config_.max_retries) {
+            const int failures_before = stats_.failed;
+            performRetransmitFrame(slot_index, RetransmitCause::TIMEOUT, nullptr);
+            result.terminal_failure = stats_.failed != failures_before;
+            return result;
+        }
+    }
+
+    result.frames.reserve(slots.size());
+    for (size_t slot_index : slots) {
+        performRetransmitFrame(slot_index, RetransmitCause::TIMEOUT,
+                               &result.frames);
+    }
+    return result;
+}
+
+size_t SelectiveRepeatARQ::cancelDeferredTimeoutRetransmits(
+    const std::vector<Bytes>& intents, bool suspend_until_mode_resolution) {
+    size_t canceled = 0;
+    std::array<bool, MAX_WINDOW> seen{};
+    for (const auto& frame_data : intents) {
+        const auto slot_index = matchingLiveTXSlot(frame_data);
+        if (!slot_index || seen[*slot_index]) {
+            continue;
+        }
+        seen[*slot_index] = true;
+        auto& slot = tx_window_[*slot_index];
+        if (suspend_until_mode_resolution) {
+            slot.timeout_suspended = true;
+            slot.timeout_transition_suspended = true;
+        } else {
+            slot.timeout_ms = std::max<uint32_t>(currentAckTimeoutMs(), 1u);
+            slot.timeout_suspended = false;
+            slot.timeout_transition_suspended = false;
+        }
+        ++canceled;
+    }
+    return canceled;
+}
+
+size_t SelectiveRepeatARQ::resumeDeferredTimeoutRetransmits(uint32_t timeout_ms) {
+    const uint32_t resume_ms = std::max<uint32_t>(timeout_ms, 1u);
+    size_t resumed = 0;
+    for (auto& slot : tx_window_) {
+        if (!slot.active || slot.acked || !slot.timeout_transition_suspended) {
+            continue;
+        }
+        slot.timeout_ms = resume_ms;
+        slot.timeout_suspended = false;
+        slot.timeout_transition_suspended = false;
+        ++resumed;
+    }
+    if (resumed > 0) {
+        LOG_MODEM(INFO,
+                  "SR-ARQ: Resumed %zu mode-transition timeout intent(s) at %ums",
+                  resumed, resume_ms);
+    }
+    return resumed;
+}
+
+size_t SelectiveRepeatARQ::rearmTransmittedDataFrames(
+    const std::vector<Bytes>& frames, uint32_t timeout_ms) {
+    const uint32_t explicit_timeout_ms = std::max<uint32_t>(timeout_ms, 1u);
+    size_t rearmed = 0;
+    std::array<bool, MAX_WINDOW> transmitted_slots{};
+    for (const auto& frame_data : frames) {
+        const auto header = v2::parseHeader(frame_data);
+        if (!header.valid || header.is_control) {
+            continue;
+        }
+
+        const size_t slot_index = seqToSlot(header.seq);
+        auto& slot = tx_window_[slot_index];
+        // Match the complete serialized identity as well as seq. This prevents an
+        // interleave pad or a wrapped/stale seq alias from extending a different slot.
+        if (slot.active && !slot.acked && slot.seq == header.seq &&
+            slot.frame_data == frame_data) {
+            slot.timeout_ms = explicit_timeout_ms;
+            slot.timeout_suspended = false;
+            slot.timeout_transition_suspended = false;
+            transmitted_slots[slot_index] = true;
+            ++rearmed;
+        }
+    }
+
+    // A unified physical round is stop-and-wait. If a changed group cap leaves other
+    // live holes outside this transmission, freeze their old near-expiry timers: they
+    // have not been retransmitted yet and must not launch a second burst underneath the
+    // current round. The next [holes]+[new] refill unsuspends each identity as it is
+    // actually emitted. Do nothing when no identity matched (defensive: padding or a
+    // non-slot repair must not accidentally suspend the whole sender).
+    size_t suspended = 0;
+    if (rearmed > 0) {
+        // Scan physical storage, not [0, configured_window): seqToSlot uses the
+        // fixed MAX_WINDOW ring, so a nonzero/wrapped base (or a recent window shrink)
+        // can leave valid live slots at any physical index.
+        for (size_t i = 0; i < MAX_WINDOW; ++i) {
+            auto& slot = tx_window_[i];
+            if (!slot.active || slot.acked || transmitted_slots[i]) {
+                continue;
+            }
+            slot.timeout_suspended = true;
+            ++suspended;
+        }
+    }
+
+    LOG_MODEM(DEBUG,
+              "SR-ARQ: committed transmitted-frame timeout=%ums to %zu/%zu frame(s); "
+              "suspended=%zu later hole(s)",
+              explicit_timeout_ms, rearmed, frames.size(), suspended);
+    return rearmed;
+}
+
 // ULTRA_INFLIGHT_RTO: the timeout for the burst CURRENTLY outstanding. See
 // selective_repeat_arq_policy.hpp::inflightRtoEnabled for why a scalar is wrong at the
 // tail of a transfer. Falls through to the scalar when the knob is off, when no table has
@@ -2409,7 +2706,10 @@ void SelectiveRepeatARQ::transmitDataBatch(const std::vector<Bytes>& frames) {
     if (frames.empty()) {
         return;
     }
-    if (frames.size() > 1 && on_transmit_batch_) {
+    // This function is the timeout-round commit boundary. Let Connection stage even a
+    // singleton so a same-tick collapse escape cannot queue one obsolete full-anchor
+    // resend before switching geometry.
+    if (on_transmit_batch_) {
         on_transmit_batch_(frames);
         return;
     }
@@ -2445,16 +2745,18 @@ void SelectiveRepeatARQ::expireBaseSlotTimerForRebase() {
     // each group event re-voices — without this floor every copy would re-fire
     // a resend. 2 s ≈ the shortest control turnaround; an already-due timer
     // means the machinery is about to act anyway.
-    if (slot.timeout_ms > 2000) {
+    if (slot.timeout_suspended || slot.timeout_ms > 2000) {
         LOG_MODEM(WARN,
                   "SR-ARQ: WAITING-REBASE voice — expiring base slot seq=%u timer "
                   "(was %u ms) for a standalone era-base resend",
                   slot.seq, slot.timeout_ms);
         slot.timeout_ms = 1;
+        slot.timeout_suspended = false;
+        slot.timeout_transition_suspended = false;
     }
 }
 
-void SelectiveRepeatARQ::abortPendingTx() {
+void SelectiveRepeatARQ::abortPendingTx(bool force_move_epoch_bump) {
     // MOVE-EPOCH (2026-07-04 fix, Phase-2 review finding): detect whether this abort
     // actually drops live payload BEFORE clearing the slots. The 2026-07-03 design
     // assumed forward abandonment (tx_base_seq_ = tx_next_seq_ below) needs no epoch
@@ -2466,7 +2768,7 @@ void SelectiveRepeatARQ::abortPendingTx() {
     // door. Any abort that drops live payload is a seq↔payload remap and must enter
     // a new era; the first post-abort frame (at the advanced base) then carries the
     // bumped epoch + EPOCH_REBASE and the receiver re-anchors.
-    bool dropped_payload = tx_in_flight_ > 0;
+    bool dropped_payload = force_move_epoch_bump || tx_in_flight_ > 0;
     for (const auto& slot : tx_window_) {
         if (slot.active && !slot.acked) {
             dropped_payload = true;
@@ -2484,6 +2786,8 @@ void SelectiveRepeatARQ::abortPendingTx() {
         slot.frame_data.clear();
         slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.timeout_ms = 0;
+        slot.timeout_suspended = false;
+        slot.timeout_transition_suspended = false;
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
         slot.retry_count = 0;
@@ -2501,8 +2805,8 @@ void SelectiveRepeatARQ::abortPendingTx() {
 
     if (move_epoch_enabled_ && dropped_payload) {
         tx_epoch_ = static_cast<uint8_t>((tx_epoch_ + 1) & 0x3);
-        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH bumped to %u on pending-TX abort (regrid)",
-                  tx_epoch_);
+        LOG_MODEM(WARN, "SR-ARQ: MOVE-EPOCH bumped to %u on pending-TX abort%s",
+                  tx_epoch_, force_move_epoch_bump ? " (terminal failure)" : " (regrid)");
     }
 
     // Cancel pending control TX from ARQ side as well.
@@ -2529,6 +2833,8 @@ void SelectiveRepeatARQ::reset() {
         slot.frame_data.clear();
         slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.first_tx_ms = 0;
+        slot.timeout_suspended = false;
+        slot.timeout_transition_suspended = false;
         slot.rtt_sample_eligible = false;
         slot.hole_ack_count = 0;
         slot.fast_retx_count = 0;

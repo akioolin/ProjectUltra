@@ -540,7 +540,14 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
     // Full dual detector FIRST — correct for cold acquisition and session-first/resend full
     // anchors. It cleanly FAILS on a short single chirp (no down-chirp/gap to match) rather than
     // mislocating one, so trying it first is safe for both anchor types.
-    auto chirp_result = chirp_sync_->detectDualChirp(samples, threshold);
+    // A streaming search window can contain a weaker, complete BURST_HEADER
+    // anchor followed by the stronger full anchor of its DATA group.  The
+    // descriptor is the authority for modulation/rate/LDPC-Z, so skipping it
+    // makes the marked DATA LTS get decoded as the hardened control profile.
+    // Consume the earliest complete pair; light-LTS acquisition is a separate
+    // path and is unaffected.
+    auto chirp_result =
+        chirp_sync_->detectDualChirpWithEarlierRecovery(samples, threshold);
     bool short_anchor = false;
     sync::ChirpSync* cs = chirp_sync_.get();
     // Phase 2a: on a full-detector MISS, the descriptor may be the SHORT single up-chirp warm
@@ -559,7 +566,8 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
             const char* e = std::getenv("ULTRA_SHORT_CHIRP_DETECT_SCALE");
             return (e && *e) ? std::clamp(static_cast<float>(std::atof(e)), 0.3f, 1.0f) : 1.0f;
         }();
-        auto short_result = short_anchor_chirp_sync_->detectDualChirp(samples, threshold * kShortDetectScale);
+        auto short_result = short_anchor_chirp_sync_->detectDualChirpWithEarlierRecovery(
+            samples, threshold * kShortDetectScale);
         if (short_result.success) {
             chirp_result = short_result;
             cs = short_anchor_chirp_sync_.get();

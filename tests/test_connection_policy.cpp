@@ -164,8 +164,9 @@ void test_wide_ofdm_timing_and_timeout() {
 
     CHECK(kWideOFDMFullAnchorExtraMs == 1200,
           "wide OFDM full chirp anchor should add 1.2 s to multi-frame bursts");
-    CHECK(wideOFDMBurstAirtimeMs(Modulation::DQPSK, CodeRate::R1_2, 1) == dqpsk.data_ms,
-          "single wide OFDM light frame should not include a burst chirp anchor");
+    CHECK(wideOFDMBurstAirtimeMs(Modulation::DQPSK, CodeRate::R1_2, 1) ==
+              dqpsk.data_ms + kWideOFDMFullAnchorExtraMs,
+          "single wide OFDM turn should include its full chirp timing anchor");
 
     const uint32_t w8_burst_ms = wideOFDMBurstAirtimeMs(
         Modulation::DQPSK, CodeRate::R1_2, 8);
@@ -627,6 +628,67 @@ void test_recommend_cw_count() {
     CHECK(recommendCWCountForChannel(Modulation::DQPSK, CodeRate::R2_3,
                                      WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 8,
           "differential OFDM keeps deterministic CW policy");
+    CHECK(recommendCWCountForFading(Modulation::QPSK, CodeRate::R2_3,
+                                    WaveformMode::OFDM_CHIRP, 0.50f) == 8,
+          "SNR-free Good-channel CW refinement matches production geometry");
+    CHECK(recommendCWCountForFading(Modulation::QPSK, CodeRate::R2_3,
+                                    WaveformMode::OFDM_CHIRP, 0.90f) == 5,
+          "SNR-free Moderate-channel CW refinement keeps the coherence cap");
+}
+
+void test_candidate_specific_burst_geometry() {
+    constexpr uint32_t kBaseCeilingMs = 8600;
+    const int qpsk_r14_cw = recommendCWCount(
+        Modulation::QPSK, CodeRate::R1_4, WaveformMode::OFDM_CHIRP);
+    const int qpsk_r12_cw = recommendCWCount(
+        Modulation::QPSK, CodeRate::R1_2, WaveformMode::OFDM_CHIRP);
+    const int qam8_r23_cw = recommendCWCount(
+        Modulation::QAM8, CodeRate::R2_3, WaveformMode::OFDM_CHIRP);
+
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QPSK, CodeRate::R1_4,
+                                   qpsk_r14_cw, 8, kBaseCeilingMs) == 8,
+          "QPSK R1/4 candidate fits eight short frames at the base ceiling");
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QPSK, CodeRate::R1_2,
+                                   qpsk_r12_cw, 8, kBaseCeilingMs) == 5,
+          "QPSK R1/2 candidate fits five normalized frames at the base ceiling");
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QAM8, CodeRate::R2_3,
+                                   qam8_r23_cw, 16, kBaseCeilingMs) == 5,
+          "8PSK R2/3 candidate fits five normalized frames at the base ceiling");
+
+    CHECK(burstAirtimeCeilingMs(Modulation::QPSK, CodeRate::R1_2, 2) ==
+              kBaseCeilingMs,
+          "clean QPSK delivery does not bypass the default dense-rung escalation gate");
+    const uint32_t dense_ceiling = burstAirtimeCeilingMs(
+        Modulation::QAM8, CodeRate::R2_3, 2);
+    CHECK(dense_ceiling == 11500,
+          "two clean groups earn the production dense-rung ceiling");
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QAM8, CodeRate::R2_3,
+                                   qam8_r23_cw, 16, dense_ceiling) == 8,
+          "the escalated 8PSK candidate fits eight frames, not observed-M frames");
+
+    // Receiver-local fading is not part of a tone-ACK rate command.  In the fixed04
+    // hardware transfer the Mac classified its side Moderate and used CW=5 to price
+    // QPSK R2/3, while the Pi's next descriptor truthfully announced CW=8.  That made
+    // the selector log candidate_N=9 for a physical sender that could fit only N=5.
+    const int receiver_local_moderate_cw = recommendCWCountForFading(
+        Modulation::QPSK, CodeRate::R2_3, WaveformMode::OFDM_CHIRP, 0.90f);
+    const int wire_default_candidate_cw = receiverRateCommandCandidateCWCount(
+        Modulation::QPSK, CodeRate::R2_3, WaveformMode::OFDM_CHIRP);
+    CHECK(receiver_local_moderate_cw == 5,
+          "Moderate receiver-local fading still refines its own sender geometry to CW=5");
+    CHECK(wire_default_candidate_cw == 8,
+          "receiver-issued rate command prices the peer-independent CW=8 baseline");
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QPSK, CodeRate::R2_3,
+                                   receiver_local_moderate_cw, 16,
+                                   kBaseCeilingMs) == 9,
+          "fixed04 regression control reproduces the impossible local CW=5/N=9 quote");
+    CHECK(wideOFDMBurstFrameBudget(Modulation::QPSK, CodeRate::R2_3,
+                                   wire_default_candidate_cw, 16,
+                                   kBaseCeilingMs) == 5,
+          "rate-command counterfactual matches the sender's fixed04 CW=8/N=5 geometry");
+    CHECK(receiverRateCommandCandidateCWCount(
+              Modulation::QPSK, CodeRate::R2_3, WaveformMode::OFDM_CHIRP, 5) == 5,
+          "explicit forced-CW override remains authoritative in candidate geometry");
 }
 
 void test_variable_frame_payload_capacity() {
@@ -1378,6 +1440,75 @@ void test_inflight_ack_timeout_scales_with_frames() {
     }
 }
 
+void test_silent_ack_repeat_broad_signal_hold_is_waveform_independent() {
+    constexpr int64_t now_ms = 20000;
+    constexpr int64_t fresh_signal_ms = 10000;
+
+    CHECK(shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::MC_DPSK, now_ms, fresh_signal_ms),
+          "MC-DPSK must retain the broad-signal in-progress hold");
+    CHECK(shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::OFDM_CHIRP, now_ms, fresh_signal_ms),
+          "wide OFDM RX evidence must hold an opt-in silent ACK repeat");
+    CHECK(shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::OFDM_NARROW, now_ms, fresh_signal_ms),
+          "narrow OFDM RX evidence must hold an opt-in silent ACK repeat");
+    CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::MC_DPSK, now_ms, 6000),
+          "an MC-DPSK signal stamp outside the hold window must expire");
+    CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::MC_DPSK, now_ms, now_ms + 1),
+          "a future signal timestamp must not hold the repeat");
+}
+
+void test_tone_ack_defer_uses_independent_rx_evidence() {
+    CHECK(!shouldDeferToneBurstAck(true, false, 0, false, false),
+          "a genuinely quiet receiver should transmit its ACK immediately");
+    CHECK(shouldDeferToneBurstAck(true, true, 0, false, false),
+          "energy CCA busy must defer the ACK");
+    CHECK(shouldDeferToneBurstAck(true, false, 1, false, false),
+          "declared burst airtime must defer the ACK even when CCA fades idle");
+    CHECK(shouldDeferToneBurstAck(true, false, 0, true, false),
+          "decoder RX evidence must cover asynchronous descriptor-loss ACKs");
+    CHECK(!shouldDeferToneBurstAck(true, false, 0, true, true),
+          "fresh evidence must not defer the causally-safe group-boundary ACK");
+    CHECK(shouldDeferToneBurstAck(false, true, 0, false, false) == false,
+          "CCA opt-out should disable energy-only deferral");
+    CHECK(shouldDeferToneBurstAck(false, true, 0, true, false),
+          "CCA opt-out must not disable the decoder-evidence safety gate");
+    CHECK(deferredToneAckRxHoldMs(false) == kDescriptorLostReverseTxHoldMs,
+          "a pending asynchronous ACK must retain the full descriptor-loss guard");
+    CHECK(deferredToneAckRxHoldMs(true) == 0,
+          "a physically-complete group ACK must not inherit its own fresh RX stamp");
+}
+
+void test_silent_ack_repeat_is_explicit_opt_in() {
+    CHECK(silentAckRepeatDelayMs(nullptr) == 0,
+          "unset silent-repeat knob must be safety-default OFF");
+    CHECK(silentAckRepeatDelayMs("") == 0,
+          "empty silent-repeat knob must stay OFF");
+    CHECK(silentAckRepeatDelayMs("0") == 0,
+          "zero must remain an explicit opt-out");
+    CHECK(silentAckRepeatDelayMs("300") == 300,
+          "minimum supported explicit delay should enable the repeat");
+    CHECK(silentAckRepeatDelayMs("4000") == 4000,
+          "an explicit legacy 4 s delay should remain available for A/B");
+    CHECK(silentAckRepeatDelayMs("5000") == 5000,
+          "maximum supported explicit delay should enable the repeat");
+    CHECK(silentAckRepeatDelayMs("299") == 0 &&
+              silentAckRepeatDelayMs("5001") == 0,
+          "out-of-range repeat delays must fail closed");
+    CHECK(silentAckRepeatDelayMs("4000oops") == 0,
+          "malformed repeat delays must fail closed");
+}
+
+void test_anchored_backstop_payload_evidence_forbids_fake_crater() {
+    CHECK(shouldGradeAnchoredBackstopAsCrater(/*payload_seen=*/false),
+          "an anchored timeout with no decoded payload may retain zero-progress recovery");
+    CHECK(!shouldGradeAnchoredBackstopAsCrater(/*payload_seen=*/true),
+          "decoded fallback payload must never be reported to the selector as k=0/M=5");
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
@@ -1400,6 +1531,9 @@ int main() {
     // the pure 4-arg connectSelectionSnrDb/dialEquivalentSnrDb overloads directly;
     // the pinned-OFF env lets the wrapper-identity check be deterministic.
     setenv("ULTRA_CONNECT_AFFINE_BASIS", "0", 1);
+    setenv("ULTRA_MAX_BURST_AIRTIME_MS", "8600", 1);
+    setenv("ULTRA_BURST_ESCALATION", "1", 1);
+    unsetenv("ULTRA_BURST_ESC_STREAK");
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
@@ -1410,6 +1544,7 @@ int main() {
     test_negotiated_mode_selection();
     test_auto_data_mode_boundaries();
     test_recommend_cw_count();
+    test_candidate_specific_burst_geometry();
     test_variable_frame_payload_capacity();
     test_warm_short_anchor_descriptor_gate();
     test_unified_burst_ack_timeout();
@@ -1427,6 +1562,10 @@ int main() {
     test_anchor_offset_override();
     test_linear_ring_couples_offset_compensation();
     test_inflight_ack_timeout_scales_with_frames();
+    test_silent_ack_repeat_broad_signal_hold_is_waveform_independent();
+    test_tone_ack_defer_uses_independent_rx_evidence();
+    test_silent_ack_repeat_is_explicit_opt_in();
+    test_anchored_backstop_payload_evidence_forbids_fake_crater();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

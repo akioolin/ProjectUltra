@@ -66,17 +66,36 @@ void Connection::sendFullConnect() {
         on_state_changed_(ConnectionState::CONNECTING, remote_call_);
     }
 
+    const EnvironmentForcedDataProfile environment_force =
+        forcedDataProfileFromEnvironment();
+    if (environment_force.malformed) {
+        LOG_MODEM(ERROR,
+                  "Connection: malformed ULTRA_FORCE_DATA_MOD/RATE profile; "
+                  "ignoring the environment override as one unit");
+    }
+    outbound_forced_modulation_ = config_.forced_modulation;
+    outbound_forced_code_rate_ = config_.forced_code_rate;
+    if (environment_force.forced()) {
+        if (environment_force.modulation != Modulation::AUTO) {
+            outbound_forced_modulation_ = environment_force.modulation;
+        }
+        if (environment_force.code_rate != CodeRate::AUTO) {
+            outbound_forced_code_rate_ = environment_force.code_rate;
+        }
+    }
+
     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                         config_.mode_capabilities,
                                                         static_cast<uint8_t>(config_.preferred_mode),
-                                                        static_cast<uint8_t>(config_.forced_modulation),
-                                                        static_cast<uint8_t>(config_.forced_code_rate),
+                                                        static_cast<uint8_t>(outbound_forced_modulation_),
+                                                        static_cast<uint8_t>(outbound_forced_code_rate_),
                                                         config_.forced_cw_count);
     Bytes connect_data = connect_frame.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes, forced_mod=%d, forced_rate=%d, forced_cw=%d)",
               waveformModeToString(connect_waveform_), connect_data.size(),
-              static_cast<int>(config_.forced_modulation), static_cast<int>(config_.forced_code_rate),
+              static_cast<int>(outbound_forced_modulation_),
+              static_cast<int>(outbound_forced_code_rate_),
               static_cast<int>(config_.forced_cw_count));
     transmitFrame(connect_data);
 }
@@ -242,8 +261,19 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
+        const EnvironmentForcedDataProfile environment_force =
+            forcedDataProfileFromEnvironment();
+        if (environment_force.malformed) {
+            LOG_MODEM(ERROR,
+                      "Connection: malformed ULTRA_FORCE_DATA_MOD/RATE profile on "
+                      "responder; ignoring the environment override as one unit");
+        }
+        const Modulation environment_forced_mod = environment_force.modulation;
+        const CodeRate environment_forced_rate = environment_force.code_rate;
+        const bool environment_forced_rung = environment_force.forced();
         const bool forced_profile =
-            forced_mod != Modulation::AUTO || frame.data_frame_cw_count != 0;
+            forced_mod != Modulation::AUTO || forced_rate != CodeRate::AUTO ||
+            frame.data_frame_cw_count != 0 || environment_forced_rung;
         const bool forced_waveform =
             remote_pref != WaveformMode::AUTO ||
             config_.preferred_mode != WaveformMode::AUTO ||
@@ -425,26 +455,36 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
-        // RX-AUTHORITY ROBUST ENTRY (2026-07-05): under receiver authority, cap the
-        // ENTRY at QPSK R3/4 whatever the connect snapshot says. The connect-time
-        // SNR is a single fade snapshot (±3 dB) and group 0 always rides a full
-        // anchor — entering dense puts the most fragile group of the transfer on
-        // the least-proven CFO at the most-overconfident rung (group 0 partially
-        // failed in 4/4 gate runs). QPSK R3/4 survives the opening groups, the
-        // verdict measures the real channel, and the authority's multi-rung climb
-        // reaches the right rung within ~2 acks (the standard robust-entry /
-        // fast-start shape). Costs ~2 groups of modest rate; removes the
-        // entry-crater + penalty-poisoning failure mode.
-        if (rxRateAuthorityEnabled()) {
-            const uint8_t entry_idx = coherentRungIndexFor(rec_mod, rec_rate);
-            if (entry_idx > kRungIdxQpskR34) {
-                LOG_MODEM(INFO,
-                          "Connection: RX-AUTHORITY robust entry %s %s -> QPSK R3/4 "
-                          "(authority climbs from measurements)",
-                          modulationToString(rec_mod), codeRateToString(rec_rate));
-                rec_mod = Modulation::QPSK;
-                rec_rate = CodeRate::R3_4;
-            }
+        // Exact environment forces have the same final precedence as the serialized
+        // CONNECT fields below.  ULTRA_MAX_OFDM_RATE and the entry safety policies are
+        // automatic caps; they cannot rewrite an explicit measurement rung.
+        if (environment_forced_mod != Modulation::AUTO) {
+            rec_mod = environment_forced_mod;
+        }
+        if (environment_forced_rate != CodeRate::AUTO) {
+            rec_rate = environment_forced_rate;
+        }
+
+        // Keep the automatic connect verdict as the latent controller's prior;
+        // the conservative first-group rung below is only what goes on air.
+        const uint8_t automatic_latent_seed_rung =
+            (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+                ? coherentRungIndexFor(rec_mod, rec_rate)
+                : kRungIdxNone;
+
+        // Five real MPG@20 transfers disproved the former R3/4 cap: every first
+        // group was incomplete (11/25 frames total) despite healthy acquisition,
+        // while QPSK R1/2 subsequently ran 24/24 groups clean.  The connect sample
+        // is MC-DPSK-domain evidence, not a coherent-OFDM payload measurement.
+        const auto authority_entry = capRxAuthorityInitialRung(
+            rec_mod, rec_rate, rxRateAuthorityEnabled(), environment_forced_rung);
+        if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
+            LOG_MODEM(INFO,
+                      "Connection: RX-AUTHORITY measured-entry probe %s %s -> QPSK R1/2 "
+                      "(first coherent group owns the next decision)",
+                      modulationToString(rec_mod), codeRateToString(rec_rate));
+            rec_mod = authority_entry.mod;
+            rec_rate = authority_entry.rate;
         }
 
         // Override with forced values if specified
@@ -459,6 +499,16 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
                       codeRateToString(rec_rate));
         }
+
+        const bool forced_rung =
+            environment_forced_rung ||
+            forced_mod != Modulation::AUTO || forced_rate != CodeRate::AUTO;
+        latent_bootstrap_rung_ =
+            (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+                ? (forced_rung
+                       ? coherentRungIndexFor(rec_mod, rec_rate)
+                       : automatic_latent_seed_rung)
+                : kRungIdxNone;
 
         LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB (%s), forced_mod=%d, forced_rate=%d)",
                   modulationToString(rec_mod), codeRateToString(rec_rate), snr_db,
@@ -518,6 +568,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                                                         data_modulation_, data_code_rate_,
                                                         snr_db, entry_fading,
                                                         cw_byte, rung_id);
+            if (forced_rung) {
+                ack.flags |= v2::Flags::CONNECT_FORCED_PROFILE;
+            }
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
             }
@@ -528,6 +581,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                                                                data_modulation_, data_code_rate_,
                                                                snr_db, entry_fading,
                                                                cw_byte, rung_id);
+            if (forced_rung) {
+                ack.flags |= v2::Flags::CONNECT_FORCED_PROFILE;
+            }
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
             }
@@ -554,7 +610,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                   "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining, carrier-sense gated)",
                   connect_ack_retransmit_ms_ / 1000.0f, connect_ack_retx_remaining_);
 
-        enterConnected();
+        // Preserve an operator-forced modulation/rate exactly. Establish the gate
+        // before on_connected can synchronously start payload transmission.
+        enterConnected(/*automatic_rate_allowed=*/!forced_rung);
         responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 
@@ -600,23 +658,27 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     float snr_db = v2::decodeSNR(frame.measured_snr);
     float peer_fading = v2::decodeFadingIndex(frame.mode_capabilities);
 
-    // 2026-05-28: ULTRA_MAX_OFDM_RATE initiator cap. Apply locally even if the
-    // responder's CONNECT_ACK proposed a higher rate. Ensures alpha and bravo
-    // both clamp consistently when the env is set on both ends.
-    if (isOFDMMode(negotiated_mode_)) {
-        if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
-            const std::string s(env);
-            const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
-                               : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
-                               : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
-                               : CodeRate::AUTO;  // anything else = no cap (AUTO sentinel)
-            if (cap != CodeRate::AUTO && init_rate > cap) {
-                LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE initiator cap %s -> %s",
-                          codeRateToString(init_rate), codeRateToString(cap));
-                init_rate = cap;
-            }
-        }
+    const bool forced_mod_conflict =
+        outbound_forced_modulation_ != Modulation::AUTO &&
+        init_mod != outbound_forced_modulation_;
+    const bool forced_rate_conflict =
+        outbound_forced_code_rate_ != CodeRate::AUTO &&
+        init_rate != outbound_forced_code_rate_;
+    if (forced_mod_conflict || forced_rate_conflict) {
+        LOG_MODEM(ERROR,
+                  "Connection: CONNECT_ACK conflicts with explicit outbound profile "
+                  "(requested=%s %s, acknowledged=%s %s); aborting to prevent PHY split",
+                  modulationToString(outbound_forced_modulation_),
+                  codeRateToString(outbound_forced_code_rate_),
+                  modulationToString(init_mod), codeRateToString(init_rate));
+        enterDisconnected("CONNECT_ACK forced-profile conflict");
+        return;
     }
+
+    // CONNECT_ACK is the responder/rate-authority's committed physical profile.  Never
+    // rewrite it locally: the responder already applied its automatic MAX cap before
+    // serializing the ACK, while a unilateral initiator cap creates an immediate PHY
+    // split (especially when explicit CONNECT force fields intentionally outrank MAX).
 
     // Negotiated CW count from responder. Falls back to recommendCWCount(rate)
     // if responder advertised 0 (interoperability with un-upgraded peer that
@@ -651,7 +713,18 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     handshake_confirmed_ = true;  // Handshake complete for initiator
     responder_handshake_wait_ms_ = 0;
 
-    enterConnected();
+    const bool outbound_forced_rung =
+        outbound_forced_modulation_ != Modulation::AUTO ||
+        outbound_forced_code_rate_ != CodeRate::AUTO;
+    const bool responder_forced_rung =
+        (frame.flags & v2::Flags::CONNECT_FORCED_PROFILE) != 0;
+    if (responder_forced_rung && !outbound_forced_rung) {
+        LOG_MODEM(INFO,
+                  "Connection: responder marked CONNECT_ACK profile operator-forced; "
+                  "pinning automatic rate movement for this QSO");
+    }
+    enterConnected(
+        /*automatic_rate_allowed=*/!(outbound_forced_rung || responder_forced_rung));
 
     // Initiator can switch to negotiated waveform immediately
     if (on_handshake_confirmed_) {
@@ -682,6 +755,8 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
         return;
     }
 
+    const bool crossed_close = state_ == ConnectionState::DISCONNECTING;
+
     LOG_MODEM(INFO, "Connection: Disconnect from %s", remote_call_.c_str());
 
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
@@ -697,10 +772,20 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     }
 
     // Enter grace period: stay connected so we can re-send ACK if initiator retransmits
-    stats_.disconnects++;
+    // A local disconnect() already counted this session.  Receiving the peer's
+    // matching close intent while DISCONNECTING is one mutual close, not a second
+    // disconnect event.
+    if (!crossed_close) {
+        stats_.disconnects++;
+    }
     disconnect_pending_ = true;
     disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
     disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    if (crossed_close) {
+        LOG_MODEM(INFO,
+                  "Connection: Crossed DISCONNECT received; suppressing local retries "
+                  "during mutual-close grace");
+    }
     LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
               DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
 }
@@ -709,6 +794,8 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
     if (state_ == ConnectionState::DISCONNECTED) {
         return;
     }
+
+    const bool crossed_close = state_ == ConnectionState::DISCONNECTING;
 
     LOG_MODEM(INFO, "Connection: Disconnect from %s", src_call.c_str());
 
@@ -726,10 +813,17 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
     }
 
     // Enter grace period: stay connected so we can re-send ACK if initiator retransmits
-    stats_.disconnects++;
+    if (!crossed_close) {
+        stats_.disconnects++;
+    }
     disconnect_pending_ = true;
     disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
     disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    if (crossed_close) {
+        LOG_MODEM(INFO,
+                  "Connection: Crossed DISCONNECT received; suppressing local retries "
+                  "during mutual-close grace");
+    }
     LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
               DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
 }
@@ -780,6 +874,12 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
         case v2::ModeChangeReason::CHANNEL_DEGRADED: reason_str = "channel degraded"; break;
         case v2::ModeChangeReason::USER_REQUEST:     reason_str = "user request"; break;
         case v2::ModeChangeReason::INITIAL_SETUP:    reason_str = "initial setup"; break;
+        case v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT:
+            reason_str = "startup probe timeout";
+            break;
+        case v2::ModeChangeReason::STARTUP_PROBE_BEGIN:
+            reason_str = "startup probe begin";
+            break;
     }
 
     LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB (wire_peer), fading=%.2f, reason=%s)",
@@ -789,6 +889,30 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
               info.snr_db,
               info.fading_index,
               reason_str);
+
+    if (info.reason == v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT) {
+        // The sender got no ACK for the one-shot target group.  It is synchronizing
+        // back before any retransmission; consume the receiver's standing probe so a
+        // later clean base group cannot re-arm the same QSO experiment.
+        if (latent_startup_probe_waiting_) {
+            failClosedLatentStartupProbeUnknown("peer reported startup-probe timeout");
+        } else {
+            // The target may have decoded and our success ACK may be what was lost.
+            // The sender's timeout verdict still wins: both ends must converge on the
+            // base and the same QSO must not recreate the one-shot probe.
+            latent_startup_probe_spent_ = true;
+            latent_startup_probe_clean_groups_ = 0;
+            latent_startup_probe_pending_base_groups_ = 0;
+            latent_startup_probe_rollback_pending_ = true;
+            latent_startup_probe_failed_ = true;
+            const uint8_t current = coherentRungIndexFor(
+                data_modulation_, data_code_rate_);
+            rx_authority_cmd_ =
+                (current != kRungIdxNone && current < kRungIdxQpskR12)
+                    ? current
+                    : kRungIdxQpskR12;
+        }
+    }
 
     // Update local state and refresh the ARQ profile for the new fixed-frame
     // capacity/window/timing. The requester waits for this ACK before sending

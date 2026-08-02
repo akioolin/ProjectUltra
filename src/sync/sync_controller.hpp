@@ -83,6 +83,10 @@ struct SearchWindowResult {
     bool   ready = false;
     std::vector<float> search_buffer;
     size_t search_start = 0;
+    // Absolute identity of search_buffer[0], captured under the same ring lock as
+    // the copy.  Consumers must not reconstruct this later from the modular index:
+    // the audio writer may wrap the ring between the copy and detector completion.
+    size_t search_start_abs = 0;
     size_t min_search = 0;
     bool   used_warm_timed_window = false;
     bool   used_warm_narrow_window = false;
@@ -126,12 +130,14 @@ public:
     // A new burst group started (fresh descriptor anchor expected); seeds the WARM cadence.
     void noteGroupBoundary(size_t descriptor_end_abs, size_t expected_frame_gap_samples);
 
-    // A burst group was DELIVERED as a unit (descriptor chirp acquired + all frames demodulated —
-    // i.e. warm sync WORKED — even if LDPC then failed the DATA and ARQ resends). Refreshes warm-sync
-    // to HEALTHY (force WARM: misses=0 + active, confidence ≥0.5) and re-arms the full-chirp anchor for
-    // the NEXT group's BURST_HEADER. The owner of these four warm-sync-prediction fields (§7 C4: moved
-    // verbatim from streaming_burst_interleave.cpp so the decoder stops writing them directly).
-    void noteGroupDelivered(uint32_t group_seq);
+    // A burst group was DELIVERED as a unit (descriptor acquired + all frames demodulated — i.e.
+    // warm sync WORKED — even if LDPC then failed the DATA and ARQ resends). Refreshes warm-sync to
+    // HEALTHY (force WARM: misses=0 + active, confidence >=0.5). A clean group may honor its decoded
+    // descriptor's NEXT_LIGHT announcement; a group requiring retransmission must instead arm a full
+    // descriptor search because reactive resends are always full and the old announcement is stale.
+    // The owner of these four warm-sync-prediction fields (§7 C4: moved verbatim from
+    // streaming_burst_interleave.cpp so the decoder stops writing them directly).
+    void noteGroupDelivered(uint32_t group_seq, bool retransmission_required);
 
     // --- arrival-tracking transition logic (§7.4 A2; moved verbatim from StreamingDecoder) ---
     // These own the warm-sync phase machine + cadence prediction + confidence. They fold into

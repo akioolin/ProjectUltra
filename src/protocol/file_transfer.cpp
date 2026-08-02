@@ -311,13 +311,14 @@ void FileTransferController::maybeCompleteSend() {
         }
         return;
     }
-    state_ = FileTransferState::COMPLETE;
-
-    if (on_sent_) {
-        on_sent_(true, "");
-    }
-
+    const auto sent_callback = on_sent_;
+    // Retire the completed transfer before entering application code. A success
+    // callback may synchronously start the next file; resetting afterward would
+    // wipe that replacement's path, bytes and chunk ledger.
     resetTxState();
+    if (sent_callback) {
+        sent_callback(true, "");
+    }
 }
 
 void FileTransferController::onSendFailed() {
@@ -326,12 +327,14 @@ void FileTransferController::onSendFailed() {
     }
 
     state_ = FileTransferState::ERROR;
-
-    if (on_sent_) {
-        on_sent_(false, "Transfer failed: max retries exceeded");
-    }
-
+    const auto sent_callback = on_sent_;
+    // Clear the failed transfer before entering application code. A failure callback
+    // is allowed to start another transfer; resetting after that callback would wipe
+    // the newly loaded file and leave its state/ledger inconsistent.
     resetTxState();
+    if (sent_callback) {
+        sent_callback(false, "Transfer failed: max retries exceeded");
+    }
 }
 
 bool FileTransferController::processPayload(const Bytes& payload, bool more_data) {

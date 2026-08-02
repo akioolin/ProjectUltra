@@ -90,11 +90,13 @@ void logHarqVector(const char* event, const SoftCombineBuffer::Key& key,
         return;
     }
     LOG_MODEM(WARN,
-              "HARQ_DEBUG %s key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u} "
+              "HARQ_DEBUG %s key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
               "attempts=%d len=%zu mean_abs=%.3f first16=%s",
               event, key.sender_hash, key.seq, static_cast<int>(key.rate),
-              key.cw_index, key.cw_count, key.modulation, key.channel_interleave,
-              key.carrier_count_hash, attempts, llrs.size(), meanAbsLlr(llrs),
+              key.cw_index, key.cw_count, key.lifting_z, key.modulation,
+              key.channel_interleave,
+              key.physical_burst_end, key.carrier_count_hash, attempts, llrs.size(),
+              meanAbsLlr(llrs),
               firstLlrs(llrs).c_str());
 }
 
@@ -106,11 +108,12 @@ void logHarqCombineHit(const SoftCombineBuffer::Key& key, int attempts,
         return;
     }
     LOG_MODEM(WARN,
-              "HARQ_DEBUG combine_hit key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u} "
+              "HARQ_DEBUG combine_hit key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
               "attempts=%d len=%zu sign_disagree=%zu mean_abs_retained=%.3f mean_abs_new=%.3f "
               "mean_abs_sum=%.3f retained16=%s new16=%s sum16=%s",
               key.sender_hash, key.seq, static_cast<int>(key.rate), key.cw_index,
-              key.cw_count, key.modulation, key.channel_interleave, key.carrier_count_hash,
+              key.cw_count, key.lifting_z, key.modulation, key.channel_interleave,
+              key.physical_burst_end, key.carrier_count_hash,
               attempts, incoming.size(), signDisagreements(retained, incoming),
               meanAbsLlr(retained), meanAbsLlr(incoming), meanAbsLlr(combined),
               firstLlrs(retained).c_str(), firstLlrs(incoming).c_str(),
@@ -126,8 +129,10 @@ SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
     k.rate = in.rate;
     k.cw_count = in.cw_count;
     k.cw_index = in.cw_index;
+    k.lifting_z = static_cast<uint8_t>(in.lifting_z == 81 ? 81 : 27);
     k.modulation = in.modulation;
     k.channel_interleave = static_cast<uint8_t>(in.channel_interleave ? 1 : 0);
+    k.physical_burst_end = static_cast<uint8_t>(in.physical_burst_end ? 1 : 0);
     // Hash OFDM geometry into 16 bits. Two attempts with the same
     // (sender, seq, rate, modulation, interleave) but different
     // waveform modes (CHIRP vs COX vs NARROW) or different data-
@@ -144,9 +149,11 @@ size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     h ^= static_cast<size_t>(key.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_count) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_index) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.lifting_z) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.rate) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.modulation) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.channel_interleave) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.physical_burst_end) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.carrier_count_hash) + 0x9e3779b9u + (h << 6) + (h >> 2);
     return h;
 }
@@ -255,10 +262,11 @@ void SoftCombineBuffer::drop(const Key& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (harqDebugKeySelected(key)) {
         LOG_MODEM(WARN,
-                  "HARQ_DEBUG drop key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u}",
+                  "HARQ_DEBUG drop key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u}",
                   key.sender_hash, key.seq, static_cast<int>(key.rate),
-                  key.cw_index, key.cw_count, key.modulation, key.channel_interleave,
-                  key.carrier_count_hash);
+                  key.cw_index, key.cw_count, key.lifting_z, key.modulation,
+                  key.channel_interleave,
+                  key.physical_burst_end, key.carrier_count_hash);
     }
     eraseLocked(key);
 }

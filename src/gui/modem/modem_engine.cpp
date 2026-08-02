@@ -116,7 +116,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
                           snrSourceToString(result.snr_source));
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "phy", "frame.rx", fields);
-            deliverFrame(result.frame_data);
+            deliverFrame(result.frame_data, result.physical_turn_complete);
             notifyFrameParsed(result.frame_data, result.frame_type);
         } else if (!result.success && result.codewords_failed > 0) {
             char fields[192];
@@ -140,11 +140,12 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // enabled on the decoder.
     streaming_decoder_->setBurstGroupCallback(
         [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality, uint16_t frame_mask, bool interleaved, uint8_t group_size) {
+               float quality, uint16_t frame_mask, bool interleaved, uint8_t group_size,
+               bool geometry_proven) {
             updateStats([&](LoopbackStats& s) { s.synced = all_ok; });
             if (burst_group_callback_) {
                 burst_group_callback_(group_seq, frames, all_ok, quality, frame_mask,
-                                      interleaved, group_size);
+                                      interleaved, group_size, geometry_proven);
             }
             last_rx_complete_time_ = std::chrono::steady_clock::now();
         });
@@ -516,8 +517,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 // PING/PONG PROBE (minimal presence check)
 // ============================================================================
 
-std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_data_list,
-                                              uint16_t group_seq) {
+std::vector<float> ModemEngine::transmitBurst(
+    const std::vector<Bytes>& frame_data_list,
+    uint16_t group_seq,
+    BurstAnchorOptions anchor_options) {
     if (frame_data_list.empty()) return {};
     // §14.27: stamp the group sequence into the burst descriptor so the RX can
     // whole-burst-ACK the right group. 0 for legacy/single-shot callers.
@@ -591,36 +594,56 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         streaming_encoder_->setBurstDescriptorEnabled(false);
     }
 
-    // 2026-05-28 Phase 4: per-burst LDPC lifting Z selection. The OFDM data
-    // path opts in to long LDPC (Z=81, n=1944) for ~3 dB more FEC margin;
-    // MC-DPSK and OFDM control frames stay at the legacy short Z=27 (n=648)
-    // for fast handshake / ACK turnaround. Today's opt-in is the env knob
-    // ULTRA_LDPC_Z=81 (off by default = pre-flip behavior preserved). When
-    // a connection-layer policy gates this, it can be replaced with a
-    // member flag set from the connection state.
+    // Per-burst LDPC lifting selection. Scoped connection-layer profiles may
+    // opt DATA into long LDPC (Z=81, n=1944); MC-DPSK and OFDM control stay at
+    // short Z=27 (n=648). A raw environment override is not accepted here:
+    // serializer, timing, descriptor and PHY must move as one policy tuple.
     //
-    // ARCHITECTURAL COUPLING: z=81 implies cw_per_frame=2. Each frame carries
-    // two 1944-bit codewords (vs the legacy 8 of 648 bits). At QPSK R3/4 on
-    // 58 carriers this gives frame airtime ~75% of legacy (3888 vs 5184 coded
-    // bits/frame) and a 16-frame burst spans ~1.8x coherence time at 0.1 Hz
-    // Doppler — strong fade diversity. Earlier choice of cw=1 produced a
-    // burst that fit inside one coherence interval (worse diversity) and
-    // amortized the per-group overhead badly; cw=2 is the actual sweet
-    // spot per the rung math the user derived empirically.
+    // CW and Z are independent descriptor fields. In particular, the
+    // ULTRA_8PSK_LONG_LDPC experiment substitutes cw4/Z81 for cw12/Z27:
+    // identical payload capacity and 7776 coded bits, but four longer LDPC
+    // blocks. Derive CW from the serialized DATA header instead of imposing a
+    // historical z81=>cw2 rule that would contradict both frame and descriptor.
     if (protocol::isOFDMMode(waveform_mode_)) {
         // Per-burst Z is decided by the connection-layer traffic-class policy
         // (Connection::selectBurstLiftingZ) and pushed here via setBurstLiftingZ
         // — no env read. The encoder writes it into the BURST_HEADER descriptor
-        // so the RX matches. z=81 ⟹ cw_per_frame=2 (the coupling lives here).
-        streaming_encoder_->setLDPCLiftingZ(burst_lifting_z_);
-        if (burst_lifting_z_ == 81) {
-            streaming_encoder_->setFixedFrameCodewords(2);
-            // 2026-05-28: reverted adaptive short-re-anchor — broke frame-stride
-            // timing on group members. Pure light LTS at group-start until the
-            // turnaround sync hand-off is hardened properly.
+        // so the RX matches.
+        int declared_cw = 0;
+        for (const auto& frame : frame_data_list) {
+            const auto header = protocol::v2::parseHeader(frame);
+            if (!header.valid || header.is_control ||
+                header.total_cw < protocol::v2::kMinFixedFrameCodewords ||
+                header.total_cw > protocol::v2::kMaxFixedFrameCodewords) {
+                continue;
+            }
+            if (declared_cw != 0 && declared_cw != header.total_cw) {
+                LOG_MODEM(ERROR,
+                          "[%s] TX Burst: mixed fixed-CW headers in OFDM group "
+                          "(%d then %u) — refusing an ambiguous descriptor",
+                          log_prefix_.c_str(), declared_cw,
+                          static_cast<unsigned>(header.total_cw));
+                return {};
+            }
+            declared_cw = header.total_cw;
         }
-        // At z=27, leave fixed_frame_codewords_ at whatever the connection
-        // layer / data-mode policy set (typically 4 or 8) — legacy behavior.
+        if (burst_lifting_z_ == 81 && !emit_descriptor_this_burst) {
+            LOG_MODEM(ERROR,
+                      "[%s] TX Burst: Z=81 requires a BURST_HEADER on this "
+                      "physical group — refusing unannounced long LDPC",
+                      log_prefix_.c_str());
+            return {};
+        }
+        streaming_encoder_->setLDPCLiftingZ(burst_lifting_z_);
+        if (declared_cw != 0) {
+            streaming_encoder_->setFixedFrameCodewords(declared_cw);
+        } else if (burst_lifting_z_ == 81) {
+            LOG_MODEM(ERROR,
+                      "[%s] TX Burst: Z=81 group has no fixed DATA geometry "
+                      "to announce — refusing descriptor-less long LDPC",
+                      log_prefix_.c_str());
+            return {};
+        }
     } else {
         streaming_encoder_->setLDPCLiftingZ(27);  // MC-DPSK always short
     }
@@ -634,7 +657,8 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // <message>" so the actual failure point is visible.
     std::vector<float> samples;
     try {
-        samples = streaming_encoder_->encodeBurstLight(frame_data_list);
+        samples = streaming_encoder_->encodeBurstLight(frame_data_list,
+                                                        anchor_options);
     } catch (const std::exception& e) {
         LOG_MODEM(ERROR, "[%s] TX Burst: encodeBurstLight THREW '%s' (frames=%zu, z=%u, cw=%d, mod=%s, rate=%s) — TX aborted, no samples",
                   log_prefix_.c_str(), e.what(), frame_data_list.size(),
@@ -725,8 +749,10 @@ std::vector<float> ModemEngine::transmitToneBurstAck(
     // kRungIdxNone (no command), and out-of-range.
     if (streaming_decoder_ && protocol::rxRateAuthorityEnabled() &&
         payload.rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdReserved) {
-        const uint8_t rung_idx = static_cast<uint8_t>(
+        const uint8_t authority_word = static_cast<uint8_t>(
             (payload.rate_hint & 0x7) | ((payload.rung_cmd & 0x3) << 3));
+        const uint8_t rung_idx = static_cast<uint8_t>(
+            authority_word & protocol::kRungAuthorityIndexMask);
         if (rung_idx != protocol::kRungIdxNone && rung_idx < protocol::kRungIdxCount) {
             streaming_decoder_->setCommandedRungIndex(rung_idx);
         }

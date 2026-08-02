@@ -72,26 +72,10 @@ public:
 
     // Transmit multiple frames as a single waveform burst.
     // Used for connected OFDM and MC-DPSK DATA windows.
-    std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list,
-                                     uint16_t group_seq = 0);
-
-    // §16.4 escalation: latch a full chirp+LTS group-start anchor for the next
-    // burst (consumed once by the encoder). Called on RESENDS so a fade-hit
-    // group re-acquires deterministically even under warm-sync. No-op if the
-    // encoder is absent.
-    void forceNextBurstFullPreamble() {
-        // Use the group-start-only latch so the BURST_HEADER descriptor's
-        // encodeFrame does not consume it before the group-start loop reads it.
-        if (streaming_encoder_) streaming_encoder_->forceNextBurstGroupStartFullPreamble();
-    }
-
-    // Same, but the anchor is owed to a descriptor mode/rate SWITCH (a configuration
-    // event) rather than a resend, so the #69 anchor-skip clean streak — which is
-    // DELIVERY evidence — is preserved instead of recooled.
-    void forceNextBurstFullPreambleKeepSkipStreak() {
-        if (streaming_encoder_)
-            streaming_encoder_->forceNextBurstGroupStartFullPreambleKeepStreak();
-    }
+    std::vector<float> transmitBurst(
+        const std::vector<Bytes>& frame_data_list,
+        uint16_t group_seq = 0,
+        BurstAnchorOptions anchor_options = {});
 
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
     // Returns: preamble + raw DPSK "ULTR" bytes (no LDPC encoding)
@@ -193,15 +177,27 @@ public:
     using DataCallback = std::function<void(const std::string&)>;
     void setDataCallback(DataCallback callback) { data_callback_ = callback; }
 
-    using RawDataCallback = std::function<void(const Bytes&)>;
-    void setRawDataCallback(RawDataCallback callback) { raw_data_callback_ = callback; }
+    // The second argument is decoder-owned physical-turn provenance.  Keep a
+    // one-argument overload for tools/tests that only consume decoded bytes;
+    // those clients cannot accidentally manufacture completion evidence.
+    using RawDataCallback = std::function<void(const Bytes&, bool physical_turn_complete)>;
+    using LegacyRawDataCallback = std::function<void(const Bytes&)>;
+    void setRawDataCallback(RawDataCallback callback) {
+        raw_data_callback_ = std::move(callback);
+    }
+    void setRawDataCallback(LegacyRawDataCallback callback) {
+        raw_data_callback_ =
+            [callback = std::move(callback)](const Bytes& data, bool) {
+                if (callback) callback(data);
+            };
+    }
 
     // §14.27 one-way burst transport: a decoded interleaved burst delivered as a
     // unit (group_seq, ordered DATA frames, all-logical-frames-decoded flag).
     using BurstGroupCallback =
         std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
                            float quality, uint16_t frame_mask, bool interleaved,
-                           uint8_t group_size)>;
+                           uint8_t group_size, bool geometry_proven)>;
     void setBurstGroupCallback(BurstGroupCallback callback) {
         burst_group_callback_ = std::move(callback);
     }
@@ -217,9 +213,15 @@ public:
         return streaming_decoder_ ? streaming_decoder_->getLastGroupCarrierGammas()
                                   : kEmpty;
     }
-    void setAnchoredBurstNoGroupCallback(std::function<void()> callback) {
+    void setAnchoredBurstNoGroupCallback(
+        std::function<void(bool payload_seen)> callback) {
         if (streaming_decoder_) {
             streaming_decoder_->setAnchoredBurstNoGroupCallback(std::move(callback));
+        }
+    }
+    void setBurstOutcomeUnknownCallback(std::function<void()> callback) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setBurstOutcomeUnknownCallback(std::move(callback));
         }
     }
     void setDescriptorModeChangeCallback(DescriptorModeChangeCallback callback) {
@@ -253,9 +255,18 @@ public:
     // for Connection's ACK-arrived handler.
     using ToneBurstAckCallback =
         ultra::waveform::tone_burst_ack::ToneBurstAckCallback;
+    using ToneBurstAckAcceptancePredicate =
+        ultra::waveform::tone_burst_ack::ToneBurstAckAcceptancePredicate;
     void setToneBurstAckCallback(ToneBurstAckCallback callback) {
         if (streaming_decoder_) {
             streaming_decoder_->setToneBurstAckCallback(std::move(callback));
+        }
+    }
+    void setToneBurstAckAcceptancePredicate(
+        ToneBurstAckAcceptancePredicate predicate) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setToneBurstAckAcceptancePredicate(
+                std::move(predicate));
         }
     }
 
@@ -266,6 +277,12 @@ public:
     void armToneBurstAckMonitor(uint32_t window_ms) {
         if (streaming_decoder_) {
             streaming_decoder_->armToneBurstMonitor(window_ms);
+        }
+    }
+
+    void rearmToneBurstAckMonitor(uint32_t window_ms) {
+        if (streaming_decoder_) {
+            streaming_decoder_->rearmToneBurstMonitor(window_ms);
         }
     }
 
@@ -517,7 +534,7 @@ private:
     void stopRxDecodeThread();
 
     // RX decode helpers (implemented in modem_rx_decode.cpp)
-    void deliverFrame(const Bytes& frame_data);
+    void deliverFrame(const Bytes& frame_data, bool physical_turn_complete = false);
     void notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type);
     void updateStats(std::function<void(LoopbackStats&)> updater);
 

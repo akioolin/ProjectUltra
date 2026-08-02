@@ -423,6 +423,24 @@ if(TARGET measure_ack_fer)
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test_chest_nmse_provenance.sh
                      $<TARGET_FILE:measure_ack_fer>)
     set_tests_properties(ChestNmseProvenance PROPERTIES TIMEOUT 900)
+
+    # A fresh burst harness must establish its RX cursor during idle audio before
+    # the BURST_HEADER chirp starts. Otherwise the first 4800-sample process call
+    # skips the descriptor at abs=0 and falsely reports 0/5 even in clean AWGN.
+    add_test(NAME MeasureAckFerBurstDescriptorZ81
+             COMMAND ${CMAKE_COMMAND} -E env
+                     ULTRA_MEASURE_BURST_FULL_ANCHOR=1
+                     ULTRA_LOG_LEVEL=ERROR
+                     $<TARGET_FILE:measure_ack_fer>
+                     --snr 60 --config burst_chunk --seed 7 --n 1
+                     --channel awgn --mod qpsk --rate r3_4
+                     --carrier-interleave 1 --group 5 --frame-cw 3
+                     --burst-interleave 1 --burst-descriptor 1
+                     --ldpc-z 81 --cp medium)
+    set_tests_properties(MeasureAckFerBurstDescriptorZ81 PROPERTIES
+                         PASS_REGULAR_EXPRESSION
+                         "60,burst_chunk,awgn,qpsk,r3_4,1,5,7,1,5,5,1,0"
+                         TIMEOUT 60)
 endif()
 
 # Phase 5: link-abstraction primitives. Tests the MATH and the API contracts

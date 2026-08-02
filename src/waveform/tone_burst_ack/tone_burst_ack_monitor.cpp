@@ -29,6 +29,7 @@ void ToneBurstAckMonitor::reset() {
     buffer_start_stream_offset_ = total_samples_fed_;
     last_detect_pos_in_buffer_ = 0;
     last_detection_stream_offset_ = static_cast<uint64_t>(-1);
+    last_semantic_rejection_stream_offset_ = static_cast<uint64_t>(-1);
     armed_ = false;
     arm_deadline_stream_offset_ = 0;
 }
@@ -63,6 +64,13 @@ void ToneBurstAckMonitor::arm(size_t window_samples) {
         (total_samples_fed_ >= buffer_start_stream_offset_)
             ? static_cast<size_t>(total_samples_fed_ - buffer_start_stream_offset_)
             : 0;
+}
+
+void ToneBurstAckMonitor::rearm(size_t window_samples) {
+    if (!cfg_.armed_only) return;
+    armed_ = false;
+    arm_deadline_stream_offset_ = 0;
+    arm(window_samples);
 }
 
 void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
@@ -204,8 +212,48 @@ void ToneBurstAckMonitor::runDetectionPass() {
             window = std::min(buffer_.size(), std::max(window, gapless_window));
         }
         const size_t tail_base = buffer_.size() - window;
-        const auto r = detector_.detectAndDecode(buffer_.data() + tail_base, window,
-                                                  symbol_ms, cfg_.sweep_step_samples);
+        const auto r = detector_.detectAndDecode(
+            buffer_.data() + tail_base, window, symbol_ms,
+            cfg_.sweep_step_samples, acceptance_predicate_);
+        if (r.semantic_rejections > 0) {
+            semantic_candidates_rejected_ += r.semantic_rejections;
+            if (r.strongest_rejected_payload.has_value()) {
+                const uint64_t rejected_stream_offset =
+                    buffer_start_stream_offset_ + static_cast<uint64_t>(tail_base) +
+                    static_cast<uint64_t>(r.strongest_rejected_offset_samples);
+                // A rejected burst remains buffered and may be revisited on the next
+                // cadence pass. Log it once per stream location, while keeping the
+                // cumulative counter exact for forensic summaries/tests.
+                if (rejected_stream_offset !=
+                    last_semantic_rejection_stream_offset_) {
+                    last_semantic_rejection_stream_offset_ =
+                        rejected_stream_offset;
+                    const auto& p = *r.strongest_rejected_payload;
+                    const float ideal = idealCostasPeak(symbol_ms);
+                    const float normalized_peak =
+                        ideal > 0.0f
+                            ? r.strongest_rejected_correlation_peak / ideal
+                            : 0.0f;
+                    LOG_MODEM(
+                        WARN,
+                        "ToneBurstAckMonitor: CRC-valid candidate rejected before "
+                        "commit group_seq=%u type=%s mask=0x%04X epoch=%u "
+                        "peak=%.1f normalized_peak=%.3f min_conf=%.3f "
+                        "hamming_corrected=%d symbol_ms=%u stream_offset=%llu "
+                        "rejected_in_search=%zu — monitor remains armed",
+                        static_cast<unsigned>(p.group_seq),
+                        p.type == AckType::Nack ? "NACK" : "ACK",
+                        static_cast<unsigned>(p.frame_mask),
+                        static_cast<unsigned>(p.move_epoch),
+                        r.strongest_rejected_correlation_peak, normalized_peak,
+                        r.strongest_rejected_min_confidence,
+                        r.strongest_rejected_hamming_corrected_blocks,
+                        static_cast<unsigned>(symbol_ms),
+                        static_cast<unsigned long long>(rejected_stream_offset),
+                        r.semantic_rejections);
+                }
+            }
+        }
         if (!r.decode.payload.has_value()) continue;
         if (!r.decode.stats.crc_ok) continue;
         // Peak-magnitude gate: rejects rare cases where Costas+Hamming+CRC
@@ -261,6 +309,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
             d.payload = *r.decode.payload;
             d.detected_stream_offset = detected_stream_offset;
             d.correlation_peak = r.costas_correlation_peak;
+            d.min_symbol_confidence = r.decode.min_confidence;
             d.hamming_corrected_blocks = r.decode.stats.hamming_corrected_blocks;
             d.symbol_ms_used = symbol_ms;
             callback_(d);

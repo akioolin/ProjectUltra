@@ -140,6 +140,49 @@ void test_sync_recovery_gate() {
           "sync recovery should allow strong correlation");
 }
 
+void test_reactive_anchor_announcement_threshold_crossing() {
+    // Exact live IONOS failure: ordinal 12 is a FULL slot for K=2.  Crediting the
+    // fourth clean delivery opens the reactive gate, so its descriptor must announce
+    // that ordinal 13 will be LIGHT.  The old pre-credit calculation announced FULL.
+    CHECK(shouldAnnounceNextLightAnchor(/*anchor_ordinal=*/12, /*anchor_skip_k=*/2,
+                                        /*clean_streak_after_credit=*/4,
+                                        /*clean_streak_threshold=*/4),
+          "threshold-crossing descriptor must announce the next LIGHT anchor");
+    CHECK(!shouldAnnounceNextLightAnchor(/*anchor_ordinal=*/12, /*anchor_skip_k=*/2,
+                                         /*clean_streak_after_credit=*/3,
+                                         /*clean_streak_threshold=*/4),
+          "descriptor below the reactive threshold must continue announcing FULL");
+    CHECK(!shouldAnnounceNextLightAnchor(/*anchor_ordinal=*/13, /*anchor_skip_k=*/2,
+                                         /*clean_streak_after_credit=*/5,
+                                         /*clean_streak_threshold=*/4),
+          "LIGHT slot must announce that the next periodic slot is FULL");
+    CHECK(!shouldAnnounceNextLightAnchor(/*anchor_ordinal=*/12, /*anchor_skip_k=*/1,
+                                         /*clean_streak_after_credit=*/100,
+                                         /*clean_streak_threshold=*/4),
+          "K=1 opt-out must never announce a LIGHT anchor");
+}
+
+void test_burst_descriptor_anchor_flags_match_current_group() {
+    namespace v2 = ultra::protocol::v2;
+
+    const uint8_t light = burstDescriptorFlags(
+        /*burst_interleave=*/false, /*carrier_ldpc=*/true,
+        /*next_light_anchor=*/false, /*current_group_full_anchor=*/false);
+    CHECK((light & v2::ControlFrame::BURST_FLAG_CARRIER_LDPC) != 0,
+          "carrier-LDPC descriptor bit should remain independent");
+    CHECK((light & v2::ControlFrame::BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR) == 0,
+          "steady warm group must announce a light current DATA anchor");
+
+    const uint8_t repair = burstDescriptorFlags(
+        /*burst_interleave=*/true, /*carrier_ldpc=*/false,
+        /*next_light_anchor=*/true, /*current_group_full_anchor=*/true);
+    CHECK((repair & v2::ControlFrame::BURST_FLAG_INTERLEAVE) != 0 &&
+              (repair & v2::ControlFrame::BURST_FLAG_NEXT_LIGHT_ANCHOR) != 0,
+          "existing descriptor flag meanings must be preserved");
+    CHECK((repair & v2::ControlFrame::BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR) != 0,
+          "timeout repair must announce its full current DATA anchor");
+}
+
 void test_non_data_frame_detection() {
     std::vector<uint8_t> too_short = {0x55, 0x4c};
     CHECK(!isNonDataFrame(true, too_short.data(), too_short.size()),
@@ -174,6 +217,89 @@ void test_consumed_samples_policy() {
           "data frame should keep copied frame length");
     CHECK(consumedSamplesForDecodedFrame(false, true, true, 1, 12000, 4000) == 12000,
           "failed decode should keep copied frame length");
+}
+
+void test_provisional_burst_air_gate_policy() {
+    constexpr uint64_t kAnchor = 48000;
+    constexpr uint64_t kLaterLightFrame = kAnchor + 59360;
+
+    CHECK(shouldClearProvisionalBurstAirGate(
+              true, false, true, true, kAnchor, kAnchor),
+          "non-FINAL singleton decoded at the accepted full anchor should clear");
+    CHECK(!shouldClearProvisionalBurstAirGate(
+               true, false, true, true, kAnchor, kLaterLightFrame),
+          "later light DATA after a lost anchored head must retain the air gate");
+    CHECK(!shouldClearProvisionalBurstAirGate(
+               true, false, true, true, kAnchor, kLaterLightFrame),
+          "logical FINAL on a later group member must retain the physical air gate");
+    CHECK(!shouldClearProvisionalBurstAirGate(
+               true, false, true, false, kAnchor, kAnchor),
+          "DATA-sync fallback at its own provisional anchor is not singleton proof");
+    CHECK(shouldClearProvisionalBurstAirGate(
+              true, true, true, false, kAnchor, kLaterLightFrame),
+          "standalone control should clear even on a later sync");
+    CHECK(!shouldClearProvisionalBurstAirGate(
+               false, false, true, true, kAnchor, kAnchor),
+          "failed decode cannot prove a standalone tail");
+    CHECK(!shouldClearProvisionalBurstAirGate(
+               true, false, false, true, kAnchor, kAnchor),
+          "an exact group gate must not be cleared by provisional policy");
+}
+
+void test_physical_burst_end_wire_policy() {
+    namespace v2 = ultra::protocol::v2;
+
+    CHECK(shouldStampPhysicalBurstEnd(
+              2, ultra::protocol::WaveformMode::OFDM_CHIRP,
+              /*supports_data_preamble=*/true, /*burst_interleave=*/false),
+          "multi-frame non-interleaved OFDM should stamp a physical tail");
+    CHECK(!shouldStampPhysicalBurstEnd(
+               1, ultra::protocol::WaveformMode::OFDM_CHIRP, true, false),
+          "singleton keeps its existing full-anchor physical proof");
+    CHECK(!shouldStampPhysicalBurstEnd(
+               2, ultra::protocol::WaveformMode::OFDM_CHIRP, true, true),
+          "cross-frame interleave must keep the descriptor/group callback boundary");
+    CHECK(!shouldStampPhysicalBurstEnd(
+               2, ultra::protocol::WaveformMode::MC_DPSK, true, false),
+          "MC-DPSK is outside the Phase-1 marker scope");
+
+    auto first = v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 10, ultra::Bytes{0x10}, ultra::CodeRate::R1_2, 4);
+    auto last = v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 11, ultra::Bytes{0x11}, ultra::CodeRate::R1_2, 4);
+    // Simulate a stale upstream bit: encoder sanitation must own physical status.
+    first.flags |= v2::Flags::PHYSICAL_BURST_END;
+    const std::vector<ultra::Bytes> logical{first.serialize(), last.serialize()};
+    const auto wire = preparePhysicalBurstFrames(logical, /*stamp_physical_end=*/true);
+
+    CHECK(logical[0] == first.serialize(),
+          "wire stamping must not mutate the ARQ-owned logical frame");
+    auto wire_first = v2::DataFrame::deserialize(wire[0]);
+    auto wire_last = v2::DataFrame::deserialize(wire[1]);
+    CHECK(wire_first && wire_last, "stamped wire frames must retain valid CRCs");
+    CHECK((wire_first->flags & v2::Flags::PHYSICAL_BURST_END) == 0,
+          "stale marker must be cleared from every non-tail frame");
+    CHECK((wire_last->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+          "only the exact final wire frame carries physical-end proof");
+    CHECK(hasPhysicalBurstEndMarker(
+              true, true, true, true, wire[1]),
+          "a valid connected OFDM burst tail should be recognized");
+    CHECK(!hasPhysicalBurstEndMarker(
+               true, true, true, true, wire[0]),
+          "an earlier member must not be recognized as a tail");
+    CHECK(!hasPhysicalBurstEndMarker(
+               true, false, true, true, wire[1]),
+          "disconnected traffic cannot authorize burst-tail reverse egress");
+
+    const auto sanitized =
+        preparePhysicalBurstFrames(logical, /*stamp_physical_end=*/false);
+    auto sanitized_first = v2::DataFrame::deserialize(sanitized[0]);
+    auto sanitized_last = v2::DataFrame::deserialize(sanitized[1]);
+    CHECK(sanitized_first && sanitized_last,
+          "non-marker sanitation must retain valid DATA frames");
+    CHECK(((sanitized_first->flags | sanitized_last->flags) &
+           v2::Flags::PHYSICAL_BURST_END) == 0,
+          "non-eligible transports must clear all stale physical markers");
 }
 
 }  // namespace
@@ -245,8 +371,12 @@ int main() {
     test_false_lock_advance();
     test_control_first_peek_policy();
     test_sync_recovery_gate();
+    test_reactive_anchor_announcement_threshold_crossing();
+    test_burst_descriptor_anchor_flags_match_current_group();
     test_non_data_frame_detection();
     test_consumed_samples_policy();
+    test_provisional_burst_air_gate_policy();
+    test_physical_burst_end_wire_policy();
     test_unwritten_slice_is_not_a_ping();
 
     if (tests_failed != 0) {

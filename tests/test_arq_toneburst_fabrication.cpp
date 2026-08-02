@@ -100,7 +100,9 @@ static bool test_f116_phantom_dropped() {
     const int completes_before = h.completes_ok;
 
     if (!h.sendFrames(6)) FAIL("setup: could not queue 6 frames");
-    h.arq.onToneBurstAck(/*group_seq6=*/5, /*bitmap=*/0x7E02, /*move_epoch=*/0);
+    if (h.arq.onToneBurstAck(/*group_seq6=*/5, /*bitmap=*/0x7E02,
+                             /*move_epoch=*/0))
+        FAIL("outside-support tone ack must report rejected to its caller");
 
     if (h.completes_ok != completes_before)
         FAIL("fabricated ack fired on_send_complete(true) for undelivered frames");
@@ -159,6 +161,32 @@ static bool test_control_sack_beyond_sent_dropped() {
     return true;
 }
 
+static bool test_precommit_plausibility_matches_sent_support() {
+    TEST("pre-commit plausibility rejects impossible seq and bitmap claims");
+
+    Harness h;
+    if (!h.sendFrames(6)) FAIL("setup: could not queue 6 frames");  // 0..5
+
+    // Current support is cumulative base-1=65535 through highest-sent=5.
+    if (!h.arq.isToneBurstAckPlausible(63, 0x003Fu, 0))
+        FAIL("base-aligned bitmap for six sent frames should be plausible");
+    if (!h.arq.isToneBurstAckPlausible(2, 0x0007u, 0))
+        FAIL("partial cumulative ACK plus three remaining SACK bits should be plausible");
+    if (h.arq.isToneBurstAckPlausible(10, 0, 0))
+        FAIL("out-of-support group_seq passed the pre-commit gate");
+    if (h.arq.isToneBurstAckPlausible(2, 0x0008u, 0))
+        FAIL("bitmap claim beyond highest sent frame passed the pre-commit gate");
+
+    // Defense in depth: the stateful path must reject the same support-valid seq
+    // with an impossible bitmap and leave all payload outstanding.
+    if (h.arq.onToneBurstAck(2, 0x0008u, 0))
+        FAIL("stateful path accepted bitmap claim for an unsent frame");
+    if (h.completes_ok != 0 || h.arq.getTxBaseSeq() != 0)
+        FAIL("impossible bitmap changed ARQ delivery state");
+    PASS();
+    return true;
+}
+
 // Safety-preserving: legitimate tone acks still retire normally.
 static bool test_legit_tone_acks_still_work() {
     TEST("legitimate tone acks retire exactly the delivered frames");
@@ -166,21 +194,24 @@ static bool test_legit_tone_acks_still_work() {
     Harness h;
     if (!h.sendFrames(6)) FAIL("setup: could not queue 6 frames");  // seqs 0..5
     // Receiver delivered everything: base-1 = 5 -> group_seq6 = 5.
-    h.arq.onToneBurstAck(5, 0, 0);
+    if (!h.arq.onToneBurstAck(5, 0, 0))
+        FAIL("legitimate full-window tone ack must report accepted");
     if (h.completes_ok != 6) FAIL("full-window tone ack failed to retire 6");
     if (h.arq.getTxBaseSeq() != 6) FAIL("base did not advance to 6");
 
     // No-progress ack (base-1 = 5 again) after the advance: decodes to delta 0
     // = valid no-op, never a fabrication drop.
     const int dropped_before = h.arq.getStats().fabricated_acks_dropped;
-    h.arq.onToneBurstAck(5, 0, 0);
+    if (!h.arq.onToneBurstAck(5, 0, 0))
+        FAIL("valid no-progress duplicate tone ack must remain accepted");
     if (h.arq.getStats().fabricated_acks_dropped != dropped_before)
         FAIL("no-progress tone ack wrongly dropped as fabricated");
     if (h.arq.getTxBaseSeq() != 6) FAIL("no-progress ack moved base");
 
     // Partial progress: send 4 more (6..9), receiver confirms through 7.
     if (!h.sendFrames(4)) FAIL("setup: could not queue 4 frames");
-    h.arq.onToneBurstAck(7 & 0x3F, 0, 0);
+    if (!h.arq.onToneBurstAck(7 & 0x3F, 0, 0))
+        FAIL("legitimate partial-progress tone ack must report accepted");
     if (h.completes_ok != 8) FAIL("partial tone ack retired wrong count");
     if (h.arq.getTxBaseSeq() != 8) FAIL("partial tone ack wrong base");
     PASS();
@@ -193,6 +224,7 @@ int main() {
     ok &= test_f116_phantom_dropped();
     ok &= test_fabrication_property_sweep();
     ok &= test_control_sack_beyond_sent_dropped();
+    ok &= test_precommit_plausibility_matches_sent_support();
     ok &= test_legit_tone_acks_still_work();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;

@@ -35,17 +35,60 @@ int codeRateCacheIndex(CodeRate rate) {
     }
 }
 
-LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate) {
+LDPCEncoder& fixedFrameEncoderForRate(CodeRate rate, int lifting_z) {
+    struct EncoderCacheEntry {
+        CodeRate rate = CodeRate::AUTO;
+        int lifting_z = 0;
+        std::unique_ptr<LDPCEncoder> encoder;
+    };
+
+    // Expanding the QC-LDPC matrix is substantially more expensive at Z=81.
+    // A long-code burst previously paid that setup cost once per logical frame,
+    // delaying five frames by roughly half a second on the live Pi path.  Keep
+    // one encoder per rate/lifting geometry and reuse it on this worker thread.
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    constexpr size_t kLiftingVariants = 2;
+    thread_local std::array<EncoderCacheEntry, 7 * kLiftingVariants> cache;
+    const size_t cache_index =
+        static_cast<size_t>(codeRateCacheIndex(rate)) * kLiftingVariants +
+        static_cast<size_t>(lifting_z == 81 ? 1 : 0);
+    EncoderCacheEntry& entry = cache[cache_index];
+    if (!entry.encoder || entry.rate != rate || entry.lifting_z != lifting_z) {
+        entry.encoder = std::make_unique<LDPCEncoder>(rate, lifting_z);
+        entry.rate = rate;
+        entry.lifting_z = lifting_z;
+    }
+
+    LDPCEncoder& encoder = *entry.encoder;
+    encoder.setRate(rate);
+    return encoder;
+}
+
+LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate, int lifting_z) {
     struct DecoderCacheEntry {
         CodeRate rate = CodeRate::AUTO;
+        int lifting_z = 0;
         std::unique_ptr<LDPCDecoder> decoder;
     };
 
-    thread_local std::array<DecoderCacheEntry, 7> cache;
-    DecoderCacheEntry& entry = cache[codeRateCacheIndex(rate)];
-    if (!entry.decoder || entry.rate != rate) {
-        entry.decoder = std::make_unique<LDPCDecoder>(rate);
+    // Matrix expansion is expensive (tens of milliseconds on the Pi).  The
+    // legacy Z=27 path has always reused a per-thread decoder, but the first
+    // Z=81 implementation rebuilt its 3x-larger graph for every logical frame.
+    // On the live IONOS path that pushed the receive worker behind real time and
+    // caused sync load-shedding.  Cache both supported lifting geometries with
+    // the rate as part of the identity; retry code may mutate only runtime
+    // knobs, which are reset below on every checkout.
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    constexpr size_t kLiftingVariants = 2;
+    thread_local std::array<DecoderCacheEntry, 7 * kLiftingVariants> cache;
+    const size_t cache_index =
+        static_cast<size_t>(codeRateCacheIndex(rate)) * kLiftingVariants +
+        static_cast<size_t>(lifting_z == 81 ? 1 : 0);
+    DecoderCacheEntry& entry = cache[cache_index];
+    if (!entry.decoder || entry.rate != rate || entry.lifting_z != lifting_z) {
+        entry.decoder = std::make_unique<LDPCDecoder>(rate, lifting_z);
         entry.rate = rate;
+        entry.lifting_z = lifting_z;
     }
 
     LDPCDecoder& decoder = *entry.decoder;
@@ -1892,6 +1935,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
     using namespace fec;
 
     cw_count = sanitizeFixedFrameCodewords(cw_count);
+    lifting_z = (lifting_z == 81) ? 81 : 27;
     const int codeword_bits = kLdpcBlockCols * lifting_z;  // 648 or 1944
     size_t bytes_per_cw = (lifting_z == 27) ? getBytesPerCodeword(rate)
                                             : infoBytesPerCodewordZ(rate, lifting_z);
@@ -1922,7 +1966,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
     }
 
     // Split into fixed-size info chunks and LDPC encode each
-    LDPCEncoder encoder(rate, lifting_z);
+    LDPCEncoder& encoder = fixedFrameEncoderForRate(rate, lifting_z);
     std::vector<std::vector<uint8_t>> coded_codewords;
     coded_codewords.reserve(static_cast<size_t>(cw_count));
 
@@ -2033,18 +2077,10 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
     // Decode each codeword
     // Use min-sum factor 0.9375 (closer to BP) as default — empirically best
-    // for DQPSK differential LLRs on fading channels. The default Z=27 path uses
-    // the cached per-rate decoder; the file-class long code (Z=81) uses a local
-    // decoder so the cache + every existing caller stay untouched.
-    std::unique_ptr<LDPCDecoder> long_decoder;
-    LDPCDecoder* decoder_ptr;
-    if (lifting_z == 27) {
-        decoder_ptr = &fixedFrameDecoderForRate(rate);
-    } else {
-        long_decoder = std::make_unique<LDPCDecoder>(rate, lifting_z);
-        decoder_ptr = long_decoder.get();
-    }
-    LDPCDecoder& decoder = *decoder_ptr;
+    // for DQPSK differential LLRs on fading channels. Both supported lifting
+    // geometries use the same rate/Z-keyed thread-local cache; rebuilding the
+    // Z=81 matrix per frame is too expensive for the live audio deadline.
+    LDPCDecoder& decoder = fixedFrameDecoderForRate(rate, lifting_z);
     size_t bytes_per_cw = (lifting_z == 27) ? getBytesPerCodeword(rate)
                                             : infoBytesPerCodewordZ(rate, lifting_z);
 

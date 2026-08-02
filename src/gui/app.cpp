@@ -624,22 +624,19 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
                                               uint16_t group_seq,
                                               uint8_t anchor_reason) {
-        // §16.4 escalation: latch the full chirp+LTS group-start anchor BEFORE the
-        // defer check so it survives a carrier-sense defer and is consumed by the
-        // next actual encode (the encoder flag is a one-shot latch).
-        // The reason is forwarded because it decides whether the #69 anchor-skip
-        // clean streak (DELIVERY evidence) recools: a resend must recool it, a
-        // descriptor mode/rate switch is a configuration event and must not.
-        if (anchor_reason == protocol::Connection::kAnchorReasonModeSwitch) {
-            modem_.forceNextBurstFullPreambleKeepSkipStreak();
-        } else if (anchor_reason != protocol::Connection::kAnchorReasonNone) {
-            modem_.forceNextBurstFullPreamble();
-        }
+        // Bind the resend/mode-switch anchor to this exact physical request.
+        // A shared encoder latch cannot be armed before CCA deferral: an older
+        // queued burst could consume a newer repair's latch, or a purged request
+        // could leak it into an unrelated future burst.
+        const BurstAnchorOptions anchor_options{
+            anchor_reason != protocol::Connection::kAnchorReasonNone,
+            anchor_reason == protocol::Connection::kAnchorReasonModeSwitch};
         const bool in_qso_data = std::any_of(
             frames.begin(), frames.end(),
             [](const Bytes& frame) { return isInQsoDataFrame(frame); });
         if (in_qso_data && shouldDeferInQsoDataForTx()) {
-            deferTxBurst(frames, "TX burst audio", group_seq);
+            deferTxBurst(frames, "TX burst audio", group_seq,
+                         anchor_options);
             return;
         }
 
@@ -647,7 +644,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // (long LDPC for file/bulk bursts) so the encoder Z == the chunker Z and the
         // BURST_HEADER descriptor it writes. Same thread as the encode below.
         modem_.setBurstLiftingZ(static_cast<uint8_t>(protocol_.selectBurstLiftingZ()));
-        auto samples = modem_.transmitBurst(frames, group_seq);
+        auto samples = modem_.transmitBurst(frames, group_seq,
+                                            anchor_options);
         if (!samples.empty()) {
             queueRealTxSamples(samples, "TX burst audio", in_qso_data);
         }
@@ -660,7 +658,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // verification, a later commit drops the OFDM ACK emit to capture
     // the actual goodput delta.
     protocol_.setTransmitToneBurstAckCallback(
-        [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
+        [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba,
+               bool inbound_group_complete) {
             // §15.5 staircase: scale the ACK symbol duration to the latest in-band
             // SNR — a shorter ACK at high SNR cuts the per-turnaround airtime
             // (850 ms -> 408 ms at >=18 dB); a longer ACK at low SNR adds
@@ -673,6 +672,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             // conservative (longer) choice is always decodable.
             uint32_t symbol_ms = ultra::waveform::tone_burst_ack::kBaselineSymbolMs;
             const SNRSource src = cached_inband_snr_source_.load(std::memory_order_relaxed);
+            const float current_snr =
+                cached_inband_snr_db_.load(std::memory_order_relaxed);
+            float staircase_snr = current_snr;
+            bool fading_present = false;
             if (src == SNRSource::IDLE_IN_BAND || src == SNRSource::OFDM_BROADBAND) {
                 // Fade-aware fast edge (BUG-ACK-STAIRCASE-FADE-BIN): the cached
                 // in-band SNR is fade-effective on a fading channel, so the fast
@@ -684,7 +687,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     const char* e = std::getenv("ULTRA_ACK_FADE_EDGE");
                     return !(e && *e == '0');
                 }();
-                const bool fading_present =
+                fading_present =
                     kFadeEdgeEnabled &&
                     cached_fading_index_.load(std::memory_order_relaxed) >=
                         ultra::protocol::kFadingAwgnMax;
@@ -697,8 +700,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     const char* e = std::getenv("ULTRA_ACK_SNR_MEDIAN");
                     return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05 (campaign flip)
                 }();
-                float staircase_snr =
-                    cached_inband_snr_db_.load(std::memory_order_relaxed);
                 if (kAckSnrMedian) {
                     std::array<float, 5> v;
                     for (size_t i = 0; i < v.size(); ++i) {
@@ -721,19 +722,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
             // inputs behind every ACK duration — greppable on sim and rig.
             LOG_MODEM(INFO,
-                      "ToneBurstAck staircase: symbol_ms=%u snr=%.1f src=%s fading=%.2f",
-                      symbol_ms, cached_inband_snr_db_.load(std::memory_order_relaxed),
-                      snrSourceToString(src),
-                      cached_fading_index_.load(std::memory_order_relaxed));
+                      "ToneBurstAck staircase: symbol_ms=%u snr_used=%.1f "
+                      "snr_current=%.1f src=%s fading_index=%.2f "
+                      "fading_present=%d",
+                      symbol_ms, staircase_snr, current_snr, snrSourceToString(src),
+                      cached_fading_index_.load(std::memory_order_relaxed),
+                      fading_present ? 1 : 0);
             auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
                 // LISTEN-BEFORE-ACK (2026-07-05, F124: 4 ACKs keyed over the
                 // sender's incoming audio — the primary ACK path had NO channel
                 // sense; keying blanks our own RX of the incoming group head and
-                // manufactures craters). If CCA reads busy, DEFER to the GUI tick:
-                // send on first quiet, or at the hard deadline regardless (the
-                // sender's ack-listen window is ~18 s — a bounded defer never
-                // strands it, and the deadline breaks any mutual-defer cycle).
+                // manufactures craters). If any independent inbound sensor says
+                // unsafe, DEFER to the GUI tick. Confirmed quiet sends; at the
+                // deadline, decoder/geometry evidence drops the stale ACK while
+                // energy-only busy sends (the adaptive CCA floor can false-alarm).
                 // ULTRA_ACK_CCA_DEFER_MS=0 opts out (old immediate-key behavior).
                 static const uint32_t kAckCcaDeferMs = [] {
                     if (const char* e = std::getenv("ULTRA_ACK_CCA_DEFER_MS")) {
@@ -751,8 +754,20 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 // deadline covers the remaining airtime + margin, so the gate
                 // is bounded by the wire's own geometry, never open-ended.
                 const uint64_t air_rem = modem_.burstAirSamplesRemaining();
-                if ((kAckCcaDeferMs > 0 && modem_.channelBusyForTx()) ||
-                    air_rem > 0) {
+                // The descriptor/header can be lost while a later classic DATA
+                // member still decodes and arms the delayed SACK timer.  In that
+                // state there is no declared air-end, and MPG@20 showed CCA reading
+                // the live faded burst as idle.  The decoder's recent sync/decode
+                // stamp is therefore an independent third listen-before-talk gate,
+                // but ONLY for asynchronous timer/standalone ACKs. A synchronous
+                // group-boundary ACK has equally fresh decoder evidence and is
+                // causally safe: the decoder just declared that physical turn done.
+                const bool rx_evidence = modem_.rxSignalActive(
+                    protocol::connection_policy::kDescriptorLostReverseTxHoldMs);
+                const bool channel_busy = modem_.channelBusyForTx();
+                if (protocol::connection_policy::shouldDeferToneBurstAck(
+                        kAckCcaDeferMs > 0, channel_busy, air_rem, rx_evidence,
+                        inbound_group_complete)) {
                     const uint32_t air_rem_ms =
                         static_cast<uint32_t>(air_rem / 48);  // 48 kHz
                     const uint32_t defer_ms = std::min<uint32_t>(
@@ -761,7 +776,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                               "ToneBurstAck: deferring up to %u ms (%s%s%u ms of "
                               "burst still arriving)",
                               defer_ms,
-                              modem_.channelBusyForTx() ? "channel busy; " : "",
+                              channel_busy ? "channel busy; " :
+                              (rx_evidence ? "decoder RX evidence; " : ""),
                               air_rem > 0 ? "" : "no ",
                               air_rem_ms);
                     std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
@@ -769,8 +785,25 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     ack_defer_deadline_ =
                         std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(defer_ms);
+                    // A newer cumulative ACK replaces the pending one.  Its
+                    // quiet-confirmation window must start over as well: carrying
+                    // two quiet ticks from the superseded ACK could transmit the
+                    // replacement after a single tick, inside the same peer burst
+                    // whose later frame generated it.
+                    ack_defer_quiet_ticks_ = 0;
+                    ack_defer_inbound_group_complete_ = inbound_group_complete;
                     ack_defer_pending_ = true;
                 } else {
+                    // A newer, causally-safe group-boundary ACK supersedes any
+                    // older deferred timer ACK. Leaving the old copy pending would
+                    // key stale cumulative state after this immediate transmission.
+                    {
+                        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+                        ack_defer_pending_ = false;
+                        ack_defer_samples_.clear();
+                        ack_defer_quiet_ticks_ = 0;
+                        ack_defer_inbound_group_complete_ = false;
+                    }
                     submitToneAckSamples(samples);
                 }
             }
@@ -783,7 +816,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // waterfall jitter.
     protocol_.setArmToneBurstAckMonitorCallback(
         [this](uint32_t window_ms) {
-            modem_.armToneBurstAckMonitor(window_ms);
+            // A Connection callback represents a newly committed stop-and-wait DATA
+            // round, so replace (rather than only extend) the prior round's deadline.
+            modem_.rearmToneBurstAckMonitor(window_ms);
         });
 
     // Software-ALC sender side (BUG-QAM16-RIG-LEVEL-BUDGET): the peer's per-burst
@@ -1260,15 +1295,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
                                              const std::string& error) {
-        // --disconnect-on-file-done: REQUEST the disconnect via an atomic; do NOT call
-        // protocol_ here. This callback runs under ProtocolEngineMutex, so re-entering the
-        // protocol engine self-deadlocks — the app freezes and the only visible symptom is
-        // an endless "AudioEngine: RX buffer overrun" spam, which reads like a thermal or
-        // CPU problem. That is a KNOWN trap in this codebase and it bit again on 2026-07-26.
-        // tickScenario() consumes the flag outside the lock.
-        if (options_.disconnect_on_file_done && scenario_active_) {
-            file_done_disconnect_pending_.store(true, std::memory_order_relaxed);
-        }
+        // Receive completion means the final ACK has only been queued; it does not prove
+        // the sender consumed that ACK. Completion-driven scenario teardown is therefore
+        // armed only by the caller's successful FileSent callback below.
         last_progress_milestone_ = 0;  // Reset for next transfer
         rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
@@ -1319,8 +1348,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
-        // Same rule as the receive path: request only, never call protocol_ from here.
-        if (options_.disconnect_on_file_done && scenario_active_) {
+        // Request only, never call protocol_ from here. This callback runs under
+        // ProtocolEngineMutex, and successful sender completion proves the final file ACK
+        // was consumed before the scripted caller tears down the QSO.
+        if (success && options_.disconnect_on_file_done && scenario_active_) {
             file_done_disconnect_pending_.store(true, std::memory_order_relaxed);
         }
         last_progress_milestone_ = 0;  // Reset for next transfer
@@ -2870,7 +2901,8 @@ void App::maybeFireAckRepeatIfSilent() {
             const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const int64_t sig_ms = modem_.lastRxSignalMs();
-            if (sig_ms > 0 && now_ms - sig_ms < 5000) {
+            if (protocol::connection_policy::shouldHoldSilentAckRepeatForBroadSignal(
+                    modem_.getWaveformMode(), now_ms, sig_ms)) {
                 return;
             }
         }
@@ -2898,24 +2930,25 @@ void App::maybeFireAckRepeatIfSilent() {
         copy.swap(ack_repeat_samples_);
     }
     guiLog("ACK-REPEAT-SILENT: firing (unbroken quiet window — copy 1 likely lost)");
-    queueRealTxSamples(copy, "TX tone-burst ACK repeat (silent-gated)",
-                       /*in_qso_data=*/false);
+    if (queueRealTxSamples(copy, "TX tone-burst ACK repeat (silent-gated)",
+                           /*in_qso_data=*/false)) {
+        LOG_MODEM(INFO,
+                  "TX-AUDIO-COMMIT: tone-ack source=silent-repeat samples=%zu",
+                  copy.size());
+    }
 }
 
 // LISTEN-BEFORE-ACK submission tail: stash the repeat-if-silent copy (timed from
 // the ACTUAL send, not the protocol event) and queue the audio. Factored so the
 // immediate path and the CCA-deferred path share it exactly.
 void App::submitToneAckSamples(const std::vector<float>& samples) {
-    // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default 0 = off;
+    // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default OFF;
     // BUG-TONE-FADE residual, handoff §7.6): stash a decorrelated copy; the GUI
     // tick fires it only after an UNBROKEN quiet window (see
     // maybeFireAckRepeatIfSilent).
     static const uint32_t kAckRepeatSilentMs = [] {
-        if (const char* e = std::getenv("ULTRA_ACK_REPEAT_SILENT_MS")) {
-            const long v = std::atol(e);
-            if (v >= 300 && v <= 5000) return static_cast<uint32_t>(v);
-        }
-        return 4000u;  // DEFAULT-ON 2026-07-05 (campaign-validated; 0 opts out)
+        return protocol::connection_policy::silentAckRepeatDelayMs(
+            std::getenv("ULTRA_ACK_REPEAT_SILENT_MS"));
     }();
     if (kAckRepeatSilentMs > 0) {
         const auto airtime_ms = static_cast<int64_t>(samples.size()) * 1000 / 48000;
@@ -2936,12 +2969,21 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
         ack_repeat_pending_ = true;
         }
     }
-    queueRealTxSamples(samples, "TX tone-burst ACK audio", /*in_qso_data=*/false);
+    if (queueRealTxSamples(samples, "TX tone-burst ACK audio",
+                           /*in_qso_data=*/false)) {
+        // transmitToneBurstAck() logs when audio is rendered.  This marker is
+        // later and authoritative: listen-before-ACK may defer, supersede, or
+        // drop a rendered candidate before it reaches the physical TX queue.
+        LOG_MODEM(INFO, "TX-AUDIO-COMMIT: tone-ack source=primary samples=%zu",
+                  samples.size());
+    }
 }
 
-// LISTEN-BEFORE-ACK tick poll (F124): a deferred ACK sends on the FIRST quiet
-// reading, or at the hard deadline regardless (never strands the sender — its
-// ack-listen window is ~18 s; the deadline also breaks mutual-defer cycles).
+// LISTEN-BEFORE-ACK tick poll (F124): a deferred ACK sends after confirmed quiet.
+// At the deadline, energy-only busy is allowed through (protecting against a
+// mislearned CCA floor), but decoder/geometry evidence drops the stale ACK rather
+// than violating half duplex.  Descriptor-loss asynchronous ACKs retain a full
+// maximum-burst guard; physically-complete group ACKs bypass that RX stamp.
 void App::maybeFireDeferredAck() {
     std::vector<float> copy;
     std::vector<float> deadline_send;
@@ -2951,9 +2993,15 @@ void App::maybeFireDeferredAck() {
         if (conn_state_cached_.load(std::memory_order_relaxed) !=
             protocol::ConnectionState::CONNECTED) {
             ack_defer_pending_ = false;  // session ended — moot
+            ack_defer_samples_.clear();
+            ack_defer_inbound_group_complete_ = false;
             return;
         }
-        const bool rx_evidence = modem_.rxSignalActive(1600);
+        const int64_t rx_hold_ms =
+            protocol::connection_policy::deferredToneAckRxHoldMs(
+                ack_defer_inbound_group_complete_);
+        const bool rx_evidence =
+            rx_hold_ms > 0 && modem_.rxSignalActive(rx_hold_ms);
         const bool air_arriving = modem_.burstAirSamplesRemaining() > 0;  // F176
         if (modem_.channelBusyForTx() || rx_evidence || air_arriving) {
             ack_defer_quiet_ticks_ = 0;
@@ -2973,6 +3021,7 @@ void App::maybeFireDeferredAck() {
                 // floor) — SEND in that case; dropping cost two full RTO cycles
                 // (~19 s each).
                 ack_defer_pending_ = false;
+                ack_defer_inbound_group_complete_ = false;
                 if (rx_evidence || air_arriving) {
                     ack_defer_samples_.clear();
                     guiLog("LISTEN-BEFORE-ACK: inbound signal (decoder evidence/"
@@ -2990,6 +3039,7 @@ void App::maybeFireDeferredAck() {
         if (++ack_defer_quiet_ticks_ < 3) return;
         ack_defer_pending_ = false;
         ack_defer_quiet_ticks_ = 0;
+        ack_defer_inbound_group_complete_ = false;
         copy.swap(ack_defer_samples_);
     }
     guiLog("LISTEN-BEFORE-ACK: channel clear (confirmed) — sending deferred ACK");
@@ -3013,12 +3063,22 @@ void App::tickScenario() {
         scenario_started_ = true;
     }
     // --disconnect-on-file-done: consume the request HERE, outside ProtocolEngineMutex. The
-    // file-complete callbacks only set the flag; calling protocol_ from inside them
+    // successful FileSent callback only sets the flag; calling protocol_ from inside it
     // self-deadlocks (freeze whose only symptom is endless RX-buffer-overrun spam).
     if (file_done_disconnect_pending_.exchange(false, std::memory_order_relaxed)) {
-        if (!scenario_disconnect_issued_) {
+        // Both scripted endpoints may carry the option for defense in depth, but only
+        // the QSO caller owns teardown. This also prevents crossed closes in a future
+        // bidirectional script where both endpoints complete outbound files together.
+        if (!protocol_.isInitiator()) {
+            guiLog("[scenario] file transfer finished; caller owns disconnect, waiting");
+        } else if (!scenario_disconnect_issued_ &&
+                   protocol_.getState() == protocol::ConnectionState::CONNECTED) {
             guiLog("[scenario] file transfer finished; disconnecting now "
                    "(--disconnect-on-file-done)");
+            // Publish ownership/timing before disconnect() so synchronous state
+            // callbacks and duplicate completion callbacks observe an issued close.
+            scenario_disconnect_issued_ = true;
+            scenario_disconnect_at_ = now;
             protocol_.disconnect();
         }
     }
@@ -3220,9 +3280,9 @@ void App::tickScenario() {
         if (file_drained && hold_elapsed) {
             guiLog("[scenario] auto-disconnect (payload drained, %ds grace)",
                    options_.auto_disconnect_after_sec);
-            protocol_.disconnect();
             scenario_disconnect_issued_ = true;
             scenario_disconnect_at_ = now;
+            protocol_.disconnect();
         }
     }
 }
@@ -3427,7 +3487,8 @@ void App::deferTxFrame(const Bytes& frame, const char* context,
 }
 
 void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context,
-                       uint16_t group_seq) {
+                       uint16_t group_seq,
+                       BurstAnchorOptions anchor_options) {
     const auto now = std::chrono::steady_clock::now();
     const uint32_t backoff_ms = nextInQsoDataBackoffMs();
     if (deferred_tx_.empty()) {
@@ -3445,7 +3506,9 @@ void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context,
                    true,
                    false,
                    now + std::chrono::milliseconds(backoff_ms),
-                   group_seq});
+                   group_seq,
+                   0,
+                   anchor_options});
     // Fix 4: pre-encode burst defer — same staleness contract as deferTxFrame.
     deferred_tx_.back().data_mode_gen =
         data_mode_generation_.load(std::memory_order_acquire);
@@ -3581,7 +3644,8 @@ void App::flushDeferredTxIfReady() {
             // Keep the encoder Z aligned to the connection policy (see the live
             // transmitBurst path) for deferred bursts too.
             modem_.setBurstLiftingZ(static_cast<uint8_t>(protocol_.selectBurstLiftingZ()));
-            samples = modem_.transmitBurst(front.frames, front.group_seq);
+            samples = modem_.transmitBurst(front.frames, front.group_seq,
+                                            front.burst_anchor_options);
             break;
     }
     if (samples.empty()) {

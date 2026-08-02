@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 
 namespace ultra {
 namespace sync {
@@ -35,6 +36,45 @@ inline constexpr float kKnownCFOEpsilonHz = 0.01f;
 // MOVE the tracked CFO. Separates measured phantoms (corr ~0.73-0.79) from clean locks (~0.92-0.95).
 // PROTOTYPE value; principled form derives it from a peak-position-variance significance test.
 inline constexpr float kChirpTrustCorr = 0.85f;
+
+// A waveform sync detector reports the start of its TRAINING span, not necessarily a
+// sample already present in the window it searched.  A dual-chirp detector can legally
+// lock the down-chirp at the end of the copied window and announce training after the
+// following gap.  Treat that as a short wait, never as permission to clamp the training
+// cursor backward to the current write head.
+enum class TrainingStartDisposition : uint8_t {
+    INVALID,
+    READY,
+    DEFER,
+};
+
+struct TrainingStartDecision {
+    TrainingStartDisposition disposition = TrainingStartDisposition::INVALID;
+    size_t detected_abs = 0;
+    size_t samples_missing = 0;
+};
+
+inline TrainingStartDecision classifyDetectedTrainingStart(
+    size_t search_start_abs, int training_start_offset, size_t total_fed_samples) {
+    TrainingStartDecision decision;
+    if (training_start_offset < 0) {
+        return decision;
+    }
+
+    const size_t offset = static_cast<size_t>(training_start_offset);
+    if (offset > std::numeric_limits<size_t>::max() - search_start_abs) {
+        return decision;
+    }
+
+    decision.detected_abs = search_start_abs + offset;
+    if (decision.detected_abs > total_fed_samples) {
+        decision.disposition = TrainingStartDisposition::DEFER;
+        decision.samples_missing = decision.detected_abs - total_fed_samples;
+    } else {
+        decision.disposition = TrainingStartDisposition::READY;
+    }
+    return decision;
+}
 
 inline float meanAbsLLR(const float* bits, size_t count) {
     if (!bits || count == 0) {

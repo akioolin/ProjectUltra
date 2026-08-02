@@ -52,6 +52,12 @@ bool payloadsEqual(const ToneBurstAckPayload& a, const ToneBurstAckPayload& b) {
            a.rate_hint == b.rate_hint && a.type == b.type;
 }
 
+void appendScaled(std::vector<float>& out, const std::vector<float>& in,
+                  float scale) {
+    out.reserve(out.size() + in.size());
+    for (float sample : in) out.push_back(sample * scale);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -246,6 +252,85 @@ void test_monitor_handles_chunk_boundary_inside_burst() {
     if (events.size() >= 1) EXPECT(payloadsEqual(events[0].payload, orig));
 }
 
+void test_rearm_replaces_longer_prior_deadline() {
+    std::printf("[test] rearm_replaces_longer_prior_deadline\n");
+    ToneBurstAckMonitor::Config cfg;
+    cfg.armed_only = true;
+    cfg.detect_interval_samples_armed = 1000;
+    ToneBurstAckMonitor mon(cfg);
+
+    mon.arm(1000);
+    EXPECT(mon.isArmed());
+    mon.rearm(100);
+
+    std::vector<float> silence(101, 0.0f);
+    mon.feedAudio(silence);
+    EXPECT(!mon.isArmed());
+}
+
+void test_protocol_gate_rejects_stronger_forgery_then_finds_valid_ack() {
+    std::printf("[test] protocol_gate_rejects_stronger_forgery_then_finds_valid_ack\n");
+
+    ToneBurstEncoder enc;
+    ToneBurstAckPayload forged = payloadV(2);
+    forged.group_seq = 10;  // outside the synthetic sender support below
+    ToneBurstAckPayload valid = payloadV(2);
+    valid.group_seq = 60;
+    const auto forged_burst = enc.encode(forged, kBaselineSymbolMs);
+    enc.resetPhase();
+    const auto valid_burst = enc.encode(valid, kBaselineSymbolMs);
+
+    // Put both wire-valid bursts inside ONE detector window. The impossible one is
+    // deliberately stronger and earlier; the valid one is 0.9 dB down. Before the
+    // pre-commit predicate, first-CRC-pass-wins would disarm on group_seq=10 and the
+    // real group_seq=60 ACK would never reach the protocol.
+    std::vector<float> stream((kSampleRate * 250u) / 1000u, 0.0f);
+    appendScaled(stream, forged_burst, 1.0f);
+    stream.insert(stream.end(), (kSampleRate * 80u) / 1000u, 0.0f);
+    appendScaled(stream, valid_burst, 0.90f);
+    stream.insert(stream.end(), (kSampleRate * 250u) / 1000u, 0.0f);
+
+    ToneBurstAckMonitor::Config cfg;
+    cfg.armed_only = true;
+    cfg.symbol_durations_ms = {kBaselineSymbolMs};
+    cfg.sweep_step_samples = 32;
+    // A single pass sees the complete forged-before-valid window, making this a
+    // regression of candidate continuation rather than a later cadence retry.
+    cfg.detect_interval_samples_armed = stream.size();
+    cfg.buffer_capacity_samples = stream.size() + 1024;
+    ToneBurstAckMonitor mon(cfg);
+
+    int predicate_calls = 0;
+    int forged_rejections = 0;
+    mon.setAcceptancePredicate([&](const ToneBurstAckPayload& candidate) {
+        ++predicate_calls;
+        // Acceptance runs before any monitor commit/disarm side effects.
+        EXPECT(mon.isArmed());
+        EXPECT_EQ(mon.detectionsEmitted(), static_cast<uint64_t>(0));
+        if (candidate.group_seq == forged.group_seq) {
+            ++forged_rejections;
+            return false;
+        }
+        return candidate.group_seq == valid.group_seq;
+    });
+
+    std::vector<ToneBurstAckDetection> events;
+    mon.setCallback([&](const ToneBurstAckDetection& d) { events.push_back(d); });
+    mon.arm(stream.size() + 1);
+    mon.feedAudio(stream);
+
+    EXPECT(predicate_calls >= 2);
+    EXPECT(forged_rejections >= 1);
+    EXPECT(mon.semanticCandidatesRejected() >= 1);
+    EXPECT_EQ(events.size(), static_cast<size_t>(1));
+    EXPECT_EQ(mon.detectionsEmitted(), static_cast<uint64_t>(1));
+    EXPECT(!mon.isArmed());
+    if (!events.empty()) {
+        EXPECT(payloadsEqual(events.front().payload, valid));
+        EXPECT(events.front().min_symbol_confidence > 1.0f);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -256,6 +341,8 @@ int main() {
     test_monitor_no_false_positive_on_white_noise();
     test_monitor_reset_clears_state();
     test_monitor_handles_chunk_boundary_inside_burst();
+    test_rearm_replaces_longer_prior_deadline();
+    test_protocol_gate_rejects_stronger_forgery_then_finds_valid_ack();
 
     if (g_failures > 0) {
         std::fprintf(stderr, "\n%d test assertion(s) failed\n", g_failures);

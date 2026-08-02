@@ -246,7 +246,7 @@ static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool conne
 static std::pair<bool, Bytes> robustDecodeSingleCW(
     const float* cw_data, size_t cw_size, CodeRate rate, const char* log_prefix = nullptr,
     ultra::timing::SingleCWCallSite call_site = ultra::timing::SingleCWCallSite::Default,
-    int max_retries = 4)
+    int max_retries = 4, int lifting_z = 27)
 {
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().single_cw_decode_total);
@@ -263,11 +263,14 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
     struct CachedDecoder {
         std::unique_ptr<LDPCDecoder> decoder;
         CodeRate rate = static_cast<CodeRate>(-1);
+        int lifting_z = 0;
     };
     static thread_local CachedDecoder cache;
-    if (!cache.decoder || cache.rate != rate) {
-        cache.decoder = std::make_unique<LDPCDecoder>(rate);
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    if (!cache.decoder || cache.rate != rate || cache.lifting_z != lifting_z) {
+        cache.decoder = std::make_unique<LDPCDecoder>(rate, lifting_z);
         cache.rate = rate;
+        cache.lifting_z = lifting_z;
     }
     LDPCDecoder& decoder = *cache.decoder;
     decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
@@ -370,6 +373,33 @@ uint64_t StreamingDecoder::absoluteForSyncPosition() {
 void StreamingDecoder::seedRungGeometryForTesting(Modulation mod, CodeRate rate,
                                                  int cw, int lifting_z) {
     learnRungGeometry(mod, rate, cw, lifting_z);
+}
+
+void StreamingDecoder::setLDPCLiftingZForTesting(int lifting_z) {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    testing_lifting_z_override_ = (lifting_z == 81) ? 81 : 27;
+
+    // The waveform owns the stream processor's "one complete LDPC block" gate
+    // and its frame-airtime geometry. Merely making decodeFixedFrame() Z-aware
+    // would still return after 648 LLRs and size the receive window too short.
+    if (waveform_) {
+        waveform_->setActiveLDPCLiftingZ(
+            static_cast<uint8_t>(testing_lifting_z_override_));
+    }
+
+    // Keep the legacy per-CW helper consistent as well. The fixed-frame path
+    // builds its own Z-aware interleaver, but a test hook should not leave a
+    // contradictory block size behind for diagnostic/probe paths.
+    const int carriers = protocol::isOFDMMode(mode_)
+        ? ofdm_data_carriers_
+        : mc_dpsk_carriers_;
+    const size_t bps = static_cast<size_t>(carriers) *
+                       getBitsPerSymbol(current_modulation_);
+    const size_t codeword_bits =
+        testing_lifting_z_override_ == 81 ? size_t{1944}
+                                          : v2::LDPC_CODEWORD_BITS;
+    frame_decoder_.interleaver_ =
+        std::make_unique<ChannelInterleaver>(bps, codeword_bits);
 }
 
 void StreamingDecoder::learnRungGeometry(Modulation mod, CodeRate rate, int cw,
@@ -650,10 +680,18 @@ void StreamingDecoder::decodeCurrentFrame() {
     // group start, PendingCodewords = descriptor-declared group start). Peek/control
     // sizing is untouched. In steady state the requirement does not move between the
     // two calls, so this guard is a strict no-op.
+    // A held episode is complete as soon as the same frame reaches its full
+    // requirement. Clear the ring-position key before decoding it; otherwise a
+    // later circular-buffer wrap at the same index can inherit the old episode
+    // and falsely take the "audio stopped" fallthrough on its first attempt.
+    if (!frame_truncated && truncation_hold_sync_pos_ != 0) {
+        truncation_hold_sync_pos_ = 0;
+        truncation_hold_frame_len_ = 0;
+    }
+
     if (frame_truncated && is_ofdm && connected_ && burst_regime_active &&
         (requirement.mode == decode_policy::DecodeSampleMode::ConnectedOFDMBurst ||
-         requirement.mode == decode_policy::DecodeSampleMode::PendingCodewords) &&
-        decode_policy::commandedGeometryEnabled()) {
+         requirement.mode == decode_policy::DecodeSampleMode::PendingCodewords)) {
         const bool same_episode = (truncation_hold_sync_pos_ == sync_position_ + 1);
         const bool progressing = !same_episode || frame_len > truncation_hold_frame_len_;
         if (progressing) {
@@ -1066,11 +1104,14 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // (b) the decoder→protocol notification, fired after all
                             // decoder-local locks are released.
                             bool descriptor_mode_hop = false;
+                            bool descriptor_current_group_full_anchor = false;
                             Modulation descriptor_hop_mod = current_modulation_;
                             CodeRate descriptor_hop_rate = code_rate_;
                             int descriptor_hop_cw = 0;
                             if (auto cf = v2::ControlFrame::deserialize(data_r14)) {
                                 const auto bi = cf->getBurstHeaderInfo();
+                                descriptor_current_group_full_anchor =
+                                    bi.current_group_full_anchor;
                                 if (bi.group_size >= 2) {
                                     setBurstGroupSizeFromDescriptor(bi.group_size);
                                 }
@@ -1181,10 +1222,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // (BUG-BURST-STALE-GEOMETRY) so the two cannot
                                     // drift: streaming_decode_policy.hpp.
                                     burst_group_full_anchor_ =
-                                        last_descriptor_abs_sample_ != 0 &&
-                                        frame_sync_abs > last_descriptor_abs_sample_ &&
-                                        (frame_sync_abs - last_descriptor_abs_sample_) >
-                                            decode_policy::kBurstCadenceRtoGapSamples;
+                                        descriptor_current_group_full_anchor ||
+                                        (last_descriptor_abs_sample_ != 0 &&
+                                         frame_sync_abs > last_descriptor_abs_sample_ &&
+                                         (frame_sync_abs - last_descriptor_abs_sample_) >
+                                             decode_policy::kBurstCadenceRtoGapSamples);
                                     last_descriptor_abs_sample_ = frame_sync_abs;
                                 }
                                 last_burst_src_hash_ = hdr.src_hash;
@@ -1192,10 +1234,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 burst_harq_ctx_pulled_ = false;
                                 burst_harq_prediction_invalid_ = false;
                                 LOG_MODEM(INFO,
-                                    "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d",
+                                    "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d current_anchor=%s",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
                                     static_cast<unsigned>(bi.lifting_z),
-                                    bi.burst_interleave ? 1 : 0, bi.carrier_ldpc ? 1 : 0);
+                                    bi.burst_interleave ? 1 : 0, bi.carrier_ldpc ? 1 : 0,
+                                    bi.current_group_full_anchor ? "FULL" : "LIGHT");
                             }
                             {
                                 std::lock_guard<std::mutex> slock(stats_mutex_);
@@ -1239,6 +1282,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             stampRxSubstantive();
                             // F165: the standard group/ack path owns this burst now.
                             anchored_burst_backstop_armed_ = false;
+                            anchored_burst_payload_seen_ = false;
                             // §16.8 step 1: BURST_HEADER-consume snapshot (instrumentation).
                             // Logs the warm-sync state we held when the next group's
                             // BURST_HEADER arrived (just before we throw it away with
@@ -1298,10 +1342,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // craters, 20-minute timeout. Same-mode headers (no hop)
                             // still ride the warm path.
                             const bool warm_handoff_eligible =
-                                sync_controller_.derivePhase() ==
-                                    arrival_policy::WarmSyncPhase::WARM &&
-                                sync_controller_.frameArrivalConfidence() > 0.0f &&
-                                !(descriptor_mode_switch_enabled_ && descriptor_mode_hop);
+                                decode_policy::keepDescriptorWarmHandoff(
+                                    sync_controller_.derivePhase() ==
+                                        arrival_policy::WarmSyncPhase::WARM,
+                                    sync_controller_.frameArrivalConfidence(),
+                                    descriptor_current_group_full_anchor,
+                                    descriptor_mode_switch_enabled_, descriptor_mode_hop);
                             {
                                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                                 if (warm_handoff_eligible) {
@@ -1334,6 +1380,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                                     sync_controller_.frameArrivalConfidence(),
                                     cfo_tracker_.tracked());
+                            } else if (descriptor_current_group_full_anchor) {
+                                LOG_MODEM(INFO,
+                                    "[%s] BURST_HEADER announces full chirp+LTS for "
+                                    "current DATA group; arming full-anchor search",
+                                    log_prefix_.c_str());
                             }
                             // §16.8 step 1: post-reset snapshot. What did we throw
                             // away?
@@ -1374,6 +1425,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                         populateDecodeMetrics(control_result, is_ofdm,
                                               waveform_ ? waveform_->estimatedCFO() : sync_cfo_);
 
+                        // A control frame can arrive while the receiver is waiting
+                        // for the peer's full-anchored DATA burst. It is a complete
+                        // standalone transmission, so do not expose the conservative
+                        // DATA-burst gate to its synchronous protocol callback.
+                        clearProvisionalBurstAirGate();
+                        control_result.physical_turn_complete = true;
                         {
                             std::lock_guard<std::mutex> qlock(queue_mutex_);
                             frame_queue_.push(control_result);
@@ -1515,11 +1572,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                               "synthesizing empty finalize (backstop NACK)",
                               log_prefix_.c_str(), declared);
                     headnull_resync_drop_count_ = 0;
-                    sync_controller_.have_burst_descriptor_ = false;
+                    clearActiveBurstDescriptorGeometry();
                     burst_group_callback_(/*group_seq=*/0, {}, /*all_ok=*/false,
                                           /*quality=*/0.0f, /*frame_mask=*/0,
                                           use_burst_interleave_,
-                                          static_cast<uint8_t>(declared));
+                                          static_cast<uint8_t>(declared),
+                                          /*geometry_proven=*/true);
                 }
             }
             {
@@ -1814,6 +1872,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_predecoded_.clear();
         descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
         burst_metric_templates_.clear();
+        const bool descriptor_provenance = sync_controller_.have_burst_descriptor_;
+        burst_arm_provenance_ = cg.armed
+            ? BurstArmProvenance::COMMANDED_GEOMETRY
+            : (descriptor_provenance
+                   ? BurstArmProvenance::DESCRIPTOR
+                   : BurstArmProvenance::UNPROVEN_MARKER);
+        burst_substantive_members_ = cg.armed ? 0u : 1u;
+        burst_unproven_start_abs_ =
+            burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER
+                ? static_cast<uint64_t>(frame_sync_abs)
+                : 0u;
         if (cg.armed) {
             // ================================================================
             // BUG-BURST-STALE-GEOMETRY defect (B): this group's BURST_HEADER was
@@ -1899,6 +1968,13 @@ void StreamingDecoder::decodeCurrentFrame() {
             burst_min_block_ = static_cast<size_t>(
                 waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
         }
+        // Keep the early-decode cache positionally identical to the physical
+        // soft-buffer from the instant accumulation arms. Continuation members
+        // append their decoded results in tryDemodulateNextBurstFrame(); without
+        // this frame-1 placeholder the cache is always N-1 entries, so finalize
+        // rejects the whole cache and LDPC-decodes every continuation a second
+        // time at the turnaround boundary.
+        burst_predecoded_.emplace_back();
         burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
         // F176/F221: data frames begin just past this header; the air-end is
         // published by refreshBurstAirEnd() once the group's ACTUAL per-frame
@@ -1906,6 +1982,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         // it declared a 30 s R1/4 burst as 1.7 s and gutted the gate).
         burst_data_start_abs_ =
             static_cast<uint64_t>(frame_sync_abs) + static_cast<uint64_t>(frame_len);
+        burst_air_end_provisional_.store(false, std::memory_order_relaxed);
+        provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+        provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
         burst_air_end_abs_.store(0, std::memory_order_relaxed);
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
@@ -1953,7 +2032,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         // guard. Stamped on EVERY group start (armed or not) — a run of missed
         // descriptors must not inflate the gap and mis-classify a steady-state group
         // as a post-RTO resend, which is why this is not last_descriptor_abs_sample_.
-        last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
+        // A sign-only marker with no descriptor/command provenance is not a group yet:
+        // defer its stamp until a second substantive member proves physical cadence.
+        if (burst_arm_provenance_ != BurstArmProvenance::UNPROVEN_MARKER) {
+            last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
+        }
 
         state_ = DecoderState::BURST_ACCUMULATING;
         // DELIBERATELY NO descriptor_mode_change_callback_ HERE (2026-07-28 review
@@ -2097,11 +2180,20 @@ void StreamingDecoder::decodeCurrentFrame() {
     // 10368-sample peek, so the old "< 2 CW" guard skipped escalation and the
     // fixed-frame decoder returned cw_ok=0/cw_fail=0 with insufficient bits.
     // ========================================================================
+    // The connected DATA profile may use the descriptor-announced long LDPC
+    // geometry (Z=81, N=1944).  This gate used the legacy 648-bit constant,
+    // which makes one long CW look like a complete 3-CW/Z27 frame.  The
+    // cw3/Z81 path then falls through to decodeFixedFrame() with only 1944 of
+    // the required 5832 LLRs and returns 0/0 instead of waiting for the rest.
+    const int peek_lifting_z = activeBurstLiftingZ();
+    const size_t peek_ldpc_block =
+        peek_lifting_z == 81 ? size_t{1944} : LDPC_BLOCK;
     const bool legacy_single_cw_peek =
-        soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK;
+        soft_bits.size() >= peek_ldpc_block &&
+        soft_bits.size() < 2 * peek_ldpc_block;
     const bool ofdm_subfixed_peek =
         decode_policy::hasSubFixedFrameSoftBits(
-            soft_bits.size(), fixed_frame_codewords_, LDPC_BLOCK);
+            soft_bits.size(), fixed_frame_codewords_, peek_ldpc_block);
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && (legacy_single_cw_peek || ofdm_subfixed_peek)) {
 
@@ -2112,9 +2204,21 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             ultra::timing::ScopedTimer _profile_(
                 ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
-            auto [peek_ok, peek_data] = frame_decoder_.codec_->decode(
-                std::vector<float>(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK));
-            const size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
+            std::pair<bool, Bytes> peek;
+            if (peek_lifting_z == 81) {
+                peek = robustDecodeSingleCW(
+                    soft_bits.data(), peek_ldpc_block, rate,
+                    log_prefix_.c_str(),
+                    ultra::timing::SingleCWCallSite::Cw0Peek,
+                    /*max_retries=*/4, peek_lifting_z);
+            } else {
+                peek = frame_decoder_.codec_->decode(
+                    std::vector<float>(soft_bits.begin(),
+                                       soft_bits.begin() + peek_ldpc_block));
+            }
+            auto [peek_ok, peek_data] = std::move(peek);
+            const size_t bytes_per_cw =
+                v2::getBytesPerCodewordZ(rate, peek_lifting_z);
             if (peek_ok && peek_data.size() >= bytes_per_cw) {
                 if (peek_data.size() > bytes_per_cw) {
                     peek_data.resize(bytes_per_cw);
@@ -2147,7 +2251,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // so this gate stays permissive and lets LDPC be the final arbiter.
         // Escalating on garbage wastes seconds on failed LDPC attempts,
         // blocking the decoder from processing real frames arriving in the buffer.
-        const size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
+        const size_t llr_count = std::min(soft_bits.size(), peek_ldpc_block);
         const float llr_abs_avg = signal_policy::meanAbsLLR(soft_bits.data(), llr_count);
         if (llr_abs_avg < signal_policy::kMinLLRForEscalation) {
             // F165: EXPECTED-ANCHOR IMMUNITY covers this gate too — the F147
@@ -2575,6 +2679,36 @@ void StreamingDecoder::decodeCurrentFrame() {
         // F147: decoded codewords are SUBSTANTIVE peer-TX evidence (noise
         // candidates never survive LDPC) — feeds the ack-repeat cancel gate.
         stampRxSubstantive();
+        const bool physical_burst_end =
+            frame_policy::hasPhysicalBurstEndMarker(
+                result.success, connected_, is_ofdm, burst_transport_rx_,
+                result.frame_data);
+        if (result.success && anchored_burst_backstop_armed_ &&
+            v2::isDataFrame(result.frame_type) &&
+            result.frame_type != v2::FrameType::DATA_REPAIR) {
+            // Descriptor/group framing can fail while independently-decodable
+            // Good-channel DATA survives. Preserve that positive evidence for
+            // the timer fallback: it may still owe an async cumulative SACK if
+            // the marked tail dies, but it must never report a fabricated 0/N.
+            anchored_burst_payload_seen_ = true;
+        }
+        result.physical_turn_complete =
+            physical_burst_end ||
+            frame_policy::shouldClearProvisionalBurstAirGate(
+                result.success, is_non_data_frame,
+                burst_air_end_provisional_.load(std::memory_order_relaxed),
+                provisional_burst_anchor_full_chirp_.load(std::memory_order_relaxed),
+                provisional_burst_anchor_abs_.load(std::memory_order_relaxed),
+                static_cast<uint64_t>(frame_sync_abs));
+        if (result.physical_turn_complete) {
+            // A successful classic decode at the accepted anchor is a standalone
+            // frame. A CRC-protected physical-end marker likewise proves that a
+            // later fallback DATA member is the actual wire tail. By contrast, an
+            // unmarked later member keeps the conservative ceiling. A protocol
+            // FINAL remains only a logical boundary. Clear before the callback so
+            // its cumulative ACK carries safe reverse-egress provenance.
+            clearProvisionalBurstAirGate();
+        }
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
@@ -3578,6 +3712,9 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 ? probed_fixed_cw_count
             : fixed_frame_codewords_;
         size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
+        const int active_lifting_z = activeBurstLiftingZ();
+        const int active_codeword_bits =
+            active_lifting_z == 81 ? 1944 : v2::LDPC_CODEWORD_BITS;
 
         auto discoverFixedFrameCwCount = [&](int preferred_cw) -> int {
             std::vector<int> candidates;
@@ -3598,18 +3735,22 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 addCandidate(cw);
             }
 
-            const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
+            const size_t bytes_per_fixed_cw =
+                v2::getBytesPerCodewordZ(rate, active_lifting_z);
             for (int candidate_cw : candidates) {
                 const size_t frame_bits =
-                    static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(candidate_cw));
+                    static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(
+                        candidate_cw, active_codeword_bits));
                 if (soft_bits.size() < frame_bits) {
                     continue;
                 }
 
                 std::vector<float> cw0_bits;
                 try {
-                    auto cw_soft = fec::FrameInterleaver::deinterleave(soft_bits, candidate_cw);
-                    if (cw_soft.empty() || cw_soft[0].size() < LDPC_BLOCK) {
+                    auto cw_soft = fec::FrameInterleaver::deinterleave(
+                        soft_bits, candidate_cw, active_codeword_bits);
+                    if (cw_soft.empty() ||
+                        cw_soft[0].size() < static_cast<size_t>(active_codeword_bits)) {
                         continue;
                     }
                     cw0_bits = std::move(cw_soft[0]);
@@ -3622,16 +3763,15 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     // descriptor (single RX source of truth — activeBurstLiftingZ()).
                     // Was env-only: a latent mismatch if a Z=81 descriptor arrived
                     // without ULTRA_LDPC_Z set.
-                    const size_t ldpc_codeword_bits_cw0 =
-                        (activeBurstLiftingZ() == 81) ? size_t{1944}
-                                                      : v2::LDPC_CODEWORD_BITS;
-                    ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0);
+                    ChannelInterleaver channel_deinterleaver(
+                        bps, static_cast<size_t>(active_codeword_bits));
                     cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
                 }
 
                 auto [peek_ok, peek_data] = robustDecodeSingleCW(
                     cw0_bits.data(), cw0_bits.size(), rate, log_prefix_.c_str(),
-                    ultra::timing::SingleCWCallSite::Cw0Peek);
+                    ultra::timing::SingleCWCallSite::Cw0Peek,
+                    /*max_retries=*/4, active_lifting_z);
                 if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
                     continue;
                 }
@@ -3669,7 +3809,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         }
 
         size_t frame_interleave_bits =
-            static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(decode_cw_count));
+            static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(
+                decode_cw_count, active_codeword_bits));
         if (soft_bits.size() < frame_interleave_bits) {
             return result;
         }
@@ -3687,24 +3828,30 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
             cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
             const size_t frame_bits =
-                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(cw_count));
+                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(
+                    cw_count, active_codeword_bits));
             if (soft_bits.size() < frame_bits) {
                 return false;
             }
 
-            auto cw_soft = fec::FrameInterleaver::deinterleave(soft_bits, cw_count);
-            if (cw_soft.empty() || cw_soft[0].size() < LDPC_BLOCK) {
+            auto cw_soft = fec::FrameInterleaver::deinterleave(
+                soft_bits, cw_count, active_codeword_bits);
+            if (cw_soft.empty() ||
+                cw_soft[0].size() < static_cast<size_t>(active_codeword_bits)) {
                 return false;
             }
 
-            auto fillKey = [&](uint32_t sender_hash, uint16_t seq, int total_cw) -> bool {
+            auto fillKey = [&](uint32_t sender_hash, uint16_t seq, int total_cw,
+                               bool physical_burst_end) -> bool {
                 fec::SoftCombineBuffer::HarqKeyInputs ki;
                 ki.sender_hash = sender_hash;
                 ki.seq = seq;
                 ki.rate = rate;
                 ki.cw_count = static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(total_cw));
+                ki.lifting_z = active_lifting_z;
                 ki.modulation = current_modulation_;
                 ki.channel_interleave = apply_channel_deinterleave;
+                ki.physical_burst_end = physical_burst_end;
                 ki.waveform_mode = static_cast<int>(mode_);
                 ki.ofdm_data_carriers = ofdm_data_carriers_;
                 out_key = fec::SoftCombineBuffer::makeKey(ki);
@@ -3715,17 +3862,17 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             if (apply_channel_deinterleave) {
                 // Z-aware interleaver block size from the active BURST_HEADER
                 // descriptor (single RX source of truth — activeBurstLiftingZ()).
-                const size_t ldpc_codeword_bits_cw0b =
-                    (activeBurstLiftingZ() == 81) ? size_t{1944}
-                                                  : v2::LDPC_CODEWORD_BITS;
-                ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0b);
+                ChannelInterleaver channel_deinterleaver(
+                    bps, static_cast<size_t>(active_codeword_bits));
                 cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
             }
 
             auto [peek_ok, peek_data] = robustDecodeSingleCW(
                 cw0_bits.data(), cw0_bits.size(), rate, log_prefix_.c_str(),
-                ultra::timing::SingleCWCallSite::Cw0Peek);
-            const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
+                ultra::timing::SingleCWCallSite::Cw0Peek,
+                /*max_retries=*/4, active_lifting_z);
+            const size_t bytes_per_fixed_cw =
+                v2::getBytesPerCodewordZ(rate, active_lifting_z);
             if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
                 // CW0 undecodable -> no header-verified key. RESTRICTED provisional
                 // fallback (2026-07-01, design-review verdict — fable_analysis/09
@@ -3734,11 +3881,12 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 // receive-order guesses stay rejected (the original objection
                 // stands); the mirror is exact whenever the sender acted on our
                 // last SACK, and the gates + the finalize seq-match guard bound
-                // every divergence case. Gates: burst finalize loop only, dense
-                // coherent mods (>=4 bits/sym — where the measured loss lives and
-                // ULPAD pads are impossible), warm-anchored groups only (escalated
-                // timeout batches have a different fill rule), prediction not yet
-                // invalidated (prefix consistency), descriptor src == session peer.
+                // every divergence case. The current experiment is deliberately
+                // QPSK R3/4 only, descriptor-proven, non-interleaved, and excludes
+                // the final physical member (whose hidden PHYSICAL_BURST_END bit
+                // changes the protected DATA bytes). Warm cadence excludes escalated
+                // timeout batches, prediction mismatch disables the rest of the
+                // group, and the callback supplies the session peer identity.
                 // DEFAULT-OFF (2026-07-01 rig verdict, flipped the same evening it
                 // shipped): on live IONOS MPG@20 the provisional path POISON-LOOPED —
                 // the stuck group re-failed 0/8 with 285 combines feeding it, while
@@ -3756,20 +3904,33 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     const char* e = std::getenv("ULTRA_HARQ_PROVISIONAL");
                     return e && *e == '1';  // opt-IN
                 }();
+                // Exact DESCRIPTOR provenance only. A late-join group has a known
+                // declared size but not an independently proven absolute head
+                // position, so it is intentionally outside this experiment.
+                const bool exact_descriptor_proven =
+                    burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR;
                 // Gate trace ([HARQKEY]): three gate designs in a row measured
                 // provisional=0 — never debug this blind again.
                 LOG_MODEM(DEBUG,
                           "[%s] [HARQKEY] cw0-peek FAIL pos=%d gates: en=%d gap_block=%d "
-                          "invalid=%d bps=%d cb=%d",
+                          "invalid=%d burst=%d exact_desc=%d interleave=%d mod=%d "
+                          "rate=%d group=%d cb=%d",
                           log_prefix_.c_str(), burst_logical_index_,
                           kProvisionalEnabled ? 1 : 0, burst_group_full_anchor_ ? 1 : 0,
                           burst_harq_prediction_invalid_ ? 1 : 0,
-                          getBitsPerSymbol(current_modulation_),
+                          burst_transport_rx_ ? 1 : 0,
+                          exact_descriptor_proven ? 1 : 0,
+                          use_burst_interleave_ ? 1 : 0,
+                          static_cast<int>(current_modulation_),
+                          static_cast<int>(rate), burst_group_size_,
                           harq_context_callback_ ? 1 : 0);
-                if (kProvisionalEnabled && burst_logical_index_ >= 0 &&
-                    !burst_group_full_anchor_ && !burst_harq_prediction_invalid_ &&
-                    getBitsPerSymbol(current_modulation_) >= 4 &&
-                    harq_context_callback_) {
+                if (streaming_decode_policy::allowProvisionalHarq(
+                        kProvisionalEnabled, burst_transport_rx_,
+                        exact_descriptor_proven, use_burst_interleave_,
+                        burst_group_full_anchor_, burst_harq_prediction_invalid_,
+                        static_cast<bool>(harq_context_callback_),
+                        current_modulation_, rate, burst_logical_index_,
+                        burst_group_size_)) {
                     if (!burst_harq_ctx_pulled_) {
                         burst_harq_ctx_ = harq_context_callback_();
                         burst_harq_ctx_pulled_ = true;
@@ -3789,14 +3950,18 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     // ControlFrame whose bytes parse differently from a data
                     // header, so the captured value never matched (measured
                     // desc_src=0x001505 vs session 0x536C71 -> vetoed every key).
-                    if (burst_harq_ctx_ && burst_harq_ctx_->valid() &&
-                        static_cast<size_t>(burst_logical_index_) <
-                            burst_harq_ctx_->predicted_seqs.size()) {
+                    if (streaming_decode_policy::
+                            provisionalHarqContextCoversPosition(
+                                burst_harq_ctx_ && burst_harq_ctx_->valid(),
+                                burst_logical_index_,
+                                burst_harq_ctx_
+                                    ? burst_harq_ctx_->predicted_seqs.size()
+                                    : size_t{0})) {
                         const uint16_t predicted_seq =
                             burst_harq_ctx_->predicted_seqs
                                 [static_cast<size_t>(burst_logical_index_)];
                         if (fillKey(burst_harq_ctx_->sender_hash, predicted_seq,
-                                    cw_count)) {
+                                    cw_count, /*physical_burst_end=*/false)) {
                             built_key_provisional = true;
                             ultra::timing::globalDecoderProfile()
                                 .harq_key_build_provisional.fetch_add(
@@ -3850,7 +4015,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                           hdr.seq);
             }
 
-            return fillKey(hdr.src_hash, hdr.seq, hdr.total_cw);
+            const bool physical_burst_end =
+                (peek_data[3] & v2::Flags::PHYSICAL_BURST_END) != 0;
+            return fillKey(hdr.src_hash, hdr.seq, hdr.total_cw,
+                           physical_burst_end);
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
         auto decodeFixed = [&](int cw_count) {
@@ -3884,7 +4052,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             // sync_controller_.last_burst_descriptor_.lifting_z). When the sender announced Z=81,
             // the data group's codewords are N=1944 and the decoder must match;
             // falls back to Z=27 outside a burst. Single RX source of truth.
-            const int ldpc_z = activeBurstLiftingZ();
+            const int ldpc_z = active_lifting_z;
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
                                         apply_channel_deinterleave, bps,
                                         harq_buffer, harq_key_ptr, ldpc_z,
@@ -3908,7 +4076,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         const int header_cw_count = headerCwCount(cw_status);
         if (header_cw_count > 0 && header_cw_count != decode_cw_count) {
             const size_t header_frame_bits =
-                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(header_cw_count));
+                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(
+                    header_cw_count, active_codeword_bits));
             if (soft_bits.size() >= header_frame_bits) {
                 LOG_MODEM(INFO, "[%s] Fixed-frame header says %d CWs; retrying decode (was %d)",
                           log_prefix_.c_str(), header_cw_count, decode_cw_count);

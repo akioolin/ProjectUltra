@@ -34,6 +34,25 @@ constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // floor: monitor arm wi
 bool kInteractiveToneAckEnabled() { return true; }
 bool kUnifiedSeqEnabled() { return true; }
 
+// Experimental long-code profile for the coherent 8PSK R2/3 file rung.  Keep
+// this read fresh so a test (or a new transfer in the same process) can compare
+// the two wire geometries without restarting the application.  The profile is
+// deliberately exact-"1" and default-off.
+bool psk8LongLdpcExperimentEnabled() {
+    const char* e = std::getenv("ULTRA_8PSK_LONG_LDPC");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
+// Experimental long-code profile for the production QPSK R3/4 file rung.
+// The normal logical geometry remains cw8/Z27; an eligible file transfer is
+// represented physically as cw3/Z81 and announced by BURST_HEADER. Unlike the
+// 8PSK profile this is not an equal-airtime substitution (5832 versus 5184 coded
+// bits), so it is a measurement-only, exact-"1", default-off experiment.
+bool qpskR34LongLdpcExperimentEnabled() {
+    const char* e = std::getenv("ULTRA_QPSK_R34_LONG_LDPC");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 // ULTRA_RX_EMA_HOLD (default-OFF; =1 opts in): lever #1 of the throughput-ceiling audit.
 // REVERTED to default-off 2026-07-23 — the honest all-levers-ON vs baseline reckoning
 // (F580-591, MPG@20) showed the four throughput levers as an AGGREGATE WASH (delivered
@@ -151,8 +170,11 @@ uint32_t ackRepeatDelayForControlAirtimeMs(uint32_t control_airtime_ms) {
            connection_policy::kCarrierSenseSackCoalesceMs;
 }
 
-Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index) {
-    const size_t capacity = v2::getFixedFramePayloadCapacity(rate, cw_count);
+Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index,
+                              int lifting_z = 27) {
+    const size_t capacity = (lifting_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(rate, cw_count, 81)
+        : v2::getFixedFramePayloadCapacity(rate, cw_count);
     Bytes payload(capacity);
     if (payload.empty()) {
         return payload;
@@ -274,7 +296,7 @@ Connection::Connection(const ConnectionConfig& config)
 {
     data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(config_.fixed_frame_codewords);
     config_.fixed_frame_codewords = data_frame_cw_count_;
-    arq_.setFixedFrameCodewords(data_frame_cw_count_);
+    arq_.setFixedFrameGeometry(data_frame_cw_count_, /*lifting_z=*/27);
 
     // §14.27: burst transport is THE OFDM-wideband file path — UNCONDITIONAL, no env
     // gate (2026-06-02; the ULTRA_BURST_TRANSPORT opt-out was removed — burst is the
@@ -314,16 +336,39 @@ Connection::Connection(const ConnectionConfig& config)
 
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
+        const auto header = v2::parseHeader(data);
+        const bool expects_data_ack = header.valid && !header.is_control;
+        if (deferred_arq_failure_abort_ && expects_data_ack) {
+            LOG_MODEM(WARN,
+                      "Connection: Dropping DATA egress requested after terminal ARQ failure");
+            return;
+        }
+        // A buffered physical group is committed and armed once at flush.  This covers
+        // wide/narrow OFDM and MC-DPSK; restricting it to OFDM made MC arm once per
+        // logical frame and then again for the same key-down at flush.
+        const bool unified_group_is_buffering =
+            burst_mode_active_ && static_cast<bool>(on_transmit_burst_) &&
+            kUnifiedSeqEnabled();
+        uint32_t explicit_timeout_ms = 0;
+        const bool is_slot_data =
+            expects_data_ack && header.type != v2::FrameType::DATA_REPAIR;
+        if (!unified_group_is_buffering && is_slot_data) {
+            const uint32_t queue_delay_ms = noteDataBurstKeydown({data});
+            explicit_timeout_ms =
+                finalizeUnifiedBurstWindow({data}, queue_delay_ms);
+        }
+
+        // Arm before handing the frame to the host: transport callbacks are allowed to
+        // synchronously loop an ACK back into the protocol. The modeled timeout already
+        // includes the small encode/queue latency.
+        if (!unified_group_is_buffering && expects_data_ack) {
+            armToneBurstAckListenWindow(explicit_timeout_ms);
+        }
         transmitFrame(data);
-        // A TIMEOUT-RETRANSMIT of a single in-flight DATA frame goes out right here but
-        // does NOT hit setTxFrameSubmittedCallback (that fires only on NEW submits), so
-        // without this it never (re)arms the tone-burst ack monitor → we can't hear the
-        // peer's ack for the resend → we time out and resend AGAIN (observed: a faded
-        // message fragment resent 3× while BRAVO acked each time). Arm here too so every
-        // transmitted DATA frame — new or retransmit — listens for its tone-burst ack.
-        // (Redundant for new burst frames, which also arm via setTxFrameSubmittedCallback;
-        // re-arming only extends the window and the monitor auto-disarms on decode.)
-        armToneBurstAckListenWindow();
+        // A buffered group is finalized once, after its exact frame+padding count is
+        // known. A standalone new send/NACK repair/RTO resend is finalized above and
+        // armed once at the transport handoff boundary. DATA_REPAIR keeps its existing
+        // repair-guard/scalar timer but still arms; control frames expect no DATA ACK.
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
@@ -335,21 +380,8 @@ Connection::Connection(const ConnectionConfig& config)
     });
     arq_.setTxFrameSubmittedCallback([this](uint16_t seq) {
         handleArqFrameSubmitted(seq);
-        // TRANSPORT MERGE (step 1): after submitting interactive DATA, arm the
-        // tone-burst monitor so we hear the peer's tone-burst ACK (it will emit one
-        // instead of a SACK frame). Re-arming on each frame just extends the window;
-        // the monitor auto-disarms on a successful decode.
-        //
-        // The window must cover the FULL round-trip from TX-start, and the ack does NOT
-        // arrive until the peer has fully RECEIVED the burst (real-time airtime) AND
-        // LDPC-decoded it — for a multi-frame OFDM burst that is many seconds, far past
-        // the fixed 8 s floor (which only ever fit a 1-2 frame interactive message). The
-        // exact, already-derived bound is the ARQ retransmit timeout: listen for the ack
-        // for as long as we'd wait before resending. It is burst-aware (burst airtime +
-        // decode-jitter margin + ack tail), so the monitor can never expire mid-round-
-        // trip; it auto-disarms the instant the ack decodes. Floor at the interactive
-        // value so short MC-DPSK/interactive sends are unchanged.
-        armToneBurstAckListenWindow();
+        // ACK-monitor arming belongs to the physical egress callbacks above/below, not
+        // logical submission: only egress knows the exact group size and queue edge.
     });
     arq_.setTxBaseAdvancedCallback([this](uint16_t base_seq) {
         handleArqTxBaseAdvanced(base_seq);
@@ -366,6 +398,17 @@ Connection::Connection(const ConnectionConfig& config)
     // F218 COMPLETION GATE: the ARQ is the completion ground truth.
     file_transfer_.setCompletionGate(
         [this]() { return arq_.getTxInFlightBytes() == 0; });
+    // Keep the transfer-scoped PHY re-grid internal and unconditional. The
+    // application callback is optional, but the next message/file must always
+    // return to the negotiated logical/Z27 geometry after an experiment ends.
+    file_transfer_.setSentCallback(
+        [this](bool success, const std::string& error) {
+            ladderTelemetryFinish(success);
+            setExperimentalLongLDPCTransferProfilesActive(false, false);
+            if (on_file_sent_) {
+                on_file_sent_(success, error);
+            }
+        });
     arq_.setSackedFrameDiscardedCallback([this](const Bytes& frame_data) {
         // F181 (BUG-SACK-DURABILITY-RESIDUAL): the skip trusts slot.acked, and
         // F181 proved a SACK mark can be era-corrupted — the sender skipped
@@ -406,10 +449,20 @@ Connection::Connection(const ConnectionConfig& config)
     // SACK-frame path is unchanged.
     if (kInteractiveToneAckEnabled()) {
         arq_.setEmitToneBurstSackCallback(
-            [this](uint16_t base_seq, uint32_t bitmap, bool /*has_final*/,
+            [this](uint16_t base_seq, uint32_t bitmap, bool has_final,
                    uint8_t move_epoch) {
                 if (!on_transmit_tone_burst_ack_) {
                     return;
+                }
+                // The startup UP command is valid only on the synchronous ACK of a
+                // wire-proven completed group.  Any delayed/keepalive/timer SACK has no
+                // outcome provenance and must fail closed before its bits are serialized.
+                // This single stamp-site invariant also covers marker abandonment paths
+                // that intentionally produce no immediate group callback.
+                if (latent_startup_probe_waiting_ &&
+                    !tone_ack_group_complete_context_) {
+                    failClosedLatentStartupProbeUnknown(
+                        "asynchronous tone-SACK without completed-group provenance");
                 }
                 ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
                 // frame_mask width tracks the wire layout (16 bits as of 2026-07-02) so the
@@ -443,8 +496,40 @@ Connection::Connection(const ConnectionConfig& config)
                 // relative command is superseded by the absolute one. The WAITING-
                 // REBASE voice is untouched (type=NACK path, emitted elsewhere).
                 if (rxRateAuthorityEnabled()) {
-                    tba.rate_hint = static_cast<uint8_t>(rx_authority_cmd_ & 0x7);
-                    tba.rung_cmd = static_cast<uint8_t>((rx_authority_cmd_ >> 3) & 0x3);
+                    // A logical FINAL retires the peer's transfer.  Advertising a NEW
+                    // rung in this ACK cannot accelerate any remaining payload, but it
+                    // can make the sender pay a standalone MODE_CHANGE after its file
+                    // has already drained.  Preserve the proven current rung; a future
+                    // transfer will produce fresh evidence before changing it.
+                    if (has_final) {
+                        const uint8_t current = coherentRungIndexFor(
+                            data_modulation_, data_code_rate_);
+                        if (current != kRungIdxNone && rx_authority_cmd_ != current) {
+                            LOG_MODEM(INFO,
+                                      "Connection: RX-AUTHORITY FINAL hold idx %u "
+                                      "(discarding tail-only idx %u command)",
+                                      current, rx_authority_cmd_);
+                            rx_authority_cmd_ = current;
+                        }
+                        if (latent_startup_probe_waiting_) {
+                            latent_startup_probe_waiting_ = false;
+                            latent_startup_probe_spent_ = true;
+                            latent_startup_probe_clean_groups_ = 0;
+                            latent_startup_probe_pending_base_groups_ = 0;
+                            latent_startup_probe_rollback_pending_ = false;
+                            LOG_MODEM(INFO,
+                                      "Connection: LATENT startup probe suppressed at "
+                                      "logical FINAL (no next physical group)");
+                        }
+                    }
+                    uint8_t wire_authority_cmd = rx_authority_cmd_;
+                    if (!has_final && tone_ack_group_complete_context_ &&
+                        latent_startup_probe_waiting_ &&
+                        rx_authority_cmd_ == kRungIdxQpskR23) {
+                        wire_authority_cmd |= kRungAuthorityStartupProbeFlag;
+                    }
+                    tba.rate_hint = static_cast<uint8_t>(wire_authority_cmd & 0x7);
+                    tba.rung_cmd = static_cast<uint8_t>((wire_authority_cmd >> 3) & 0x3);
                 }
                 // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): stamp the drive advisory
                 // from the per-burst RX level verdict fed via setRxLevelVerdict just
@@ -474,11 +559,27 @@ Connection::Connection(const ConnectionConfig& config)
                             ultra::waveform::tone_burst_ack::kDriveAdvisoryUp;
                     }
                 }
-                on_transmit_tone_burst_ack_(tba);
+                on_transmit_tone_burst_ack_(
+                    tba, tone_ack_group_complete_context_);
             });
+        // The protocol callback is installed during construction, before the GUI/TNC
+        // supplies its physical tone transmitter. Until then, retain the legacy ACK/NACK
+        // plane instead of silently suppressing feedback into an unwired callback.
+        arq_.setToneBurstSackTransportReady(false);
     }
 
     arq_.setSendCompleteCallback([this](bool success) {
+        if (deferred_arq_failure_abort_) {
+            // A terminal slot failure owns the whole logical transfer. ARQ may now
+            // advance across a contiguous SACKed suffix, which normally emits one
+            // success completion per retired slot. Suppress every completion until
+            // the post-unwind drain publishes exactly one terminal failure.
+            LOG_MODEM(DEBUG,
+                      "Connection: Suppressed ARQ completion success=%d during "
+                      "terminal-failure unwind",
+                      success ? 1 : 0);
+            return;
+        }
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
                 file_transfer_.onChunkAcked();
@@ -539,6 +640,18 @@ Connection::Connection(const ConnectionConfig& config)
     });
 }
 
+Connection::~Connection() {
+    // FileTransferController::~FileTransferController() calls cancel(). Its
+    // controller-owned callbacks capture this Connection, but callback members
+    // declared after file_transfer_ are destroyed before file_transfer_ during
+    // implicit member teardown. Clear those callbacks while every Connection
+    // member is still alive, then retire transfer state silently; otherwise a
+    // Connection destroyed mid-transfer can call through already-destroyed state.
+    file_transfer_.setSentCallback({});
+    file_transfer_.setReceivedCallback({});
+    file_transfer_.cancel("Connection destroyed");
+}
+
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
@@ -568,6 +681,9 @@ bool Connection::connect(const std::string& remote_call) {
         LOG_MODEM(ERROR, "Connection: Invalid remote callsign: %s", remote_call.c_str());
         return false;
     }
+
+    outbound_forced_modulation_ = Modulation::AUTO;
+    outbound_forced_code_rate_ = CodeRate::AUTO;
 
     LOG_MODEM(INFO, "Connection: Connecting to %s (starting with PING probe)", remote_call_.c_str());
 
@@ -670,6 +786,17 @@ void Connection::acceptCall() {
         rec_rate = CodeRate::R2_3;
     }
 
+    const EnvironmentForcedDataProfile environment_force =
+        forcedDataProfileFromEnvironment();
+    if (environment_force.malformed) {
+        LOG_MODEM(ERROR,
+                  "Connection: malformed ULTRA_FORCE_DATA_MOD/RATE profile on "
+                  "manual accept; ignoring the environment override as one unit");
+    }
+    const Modulation environment_forced_mod = environment_force.modulation;
+    const CodeRate environment_forced_rate = environment_force.code_rate;
+    const bool environment_forced_rung = environment_force.forced();
+
     // 2026-05-28 experiment (env-gated): the industry leader's tactical ladder
     // picks QPSK R2/3 (~3230 bps net) as its 3000 bps speed slot, not R3/4
     // or R5/6. Stronger FEC -> fewer drop-on-timeout cascades -> higher
@@ -689,6 +816,38 @@ void Connection::acceptCall() {
         }
     }
 
+    // ULTRA_FORCE_DATA_* is an exact operator profile, while MAX is only an
+    // automatic-selector ceiling.  The exact profile has the same final precedence as
+    // serialized CONNECT force fields below.  Re-apply only the valid forced halves so
+    // a partial force retains the automatically resolved complementary field.
+    if (environment_forced_mod != Modulation::AUTO) {
+        rec_mod = environment_forced_mod;
+    }
+    if (environment_forced_rate != CodeRate::AUTO) {
+        rec_rate = environment_forced_rate;
+    }
+
+    // Preserve the automatic selector's belief separately from the conservative
+    // physical first-group cap.  A forced operator rung below replaces this seed.
+    const uint8_t automatic_latent_seed_rung =
+        (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+            ? coherentRungIndexFor(rec_mod, rec_rate)
+            : kRungIdxNone;
+
+    // Keep manual-accept and auto-accept bootstrap behavior identical.  This is
+    // intentionally before the forced-mode overrides below: an operator probing
+    // an exact rung still gets the requested modulation/rate unchanged.
+    const auto authority_entry = capRxAuthorityInitialRung(
+        rec_mod, rec_rate, rxRateAuthorityEnabled(), environment_forced_rung);
+    if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
+        LOG_MODEM(INFO,
+                  "Connection: RX-AUTHORITY measured-entry probe %s %s -> QPSK R1/2 "
+                  "(first coherent group owns the next decision)",
+                  modulationToString(rec_mod), codeRateToString(rec_rate));
+        rec_mod = authority_entry.mod;
+        rec_rate = authority_entry.rate;
+    }
+
     if (pending_forced_modulation_ != Modulation::AUTO) {
         // Initiator forced a specific modulation - honor it
         rec_mod = pending_forced_modulation_;
@@ -702,6 +861,17 @@ void Connection::acceptCall() {
         LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
                   codeRateToString(rec_rate));
     }
+
+    const bool forced_rung =
+        environment_forced_rung ||
+        pending_forced_modulation_ != Modulation::AUTO ||
+        pending_forced_code_rate_ != CodeRate::AUTO;
+    latent_bootstrap_rung_ =
+        (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+            ? (forced_rung
+                   ? coherentRungIndexFor(rec_mod, rec_rate)
+                   : automatic_latent_seed_rung)
+            : kRungIdxNone;
 
     // Pick negotiated CW count (honor initiator's forced value, else auto).
     // Computed BEFORE building CONNECT_ACK so the embedded byte and the
@@ -757,6 +927,9 @@ void Connection::acceptCall() {
                                                  snr_db, entry_fading,
                                                  static_cast<uint8_t>(data_frame_cw_count_),
                                                  rung_id);
+    if (forced_rung) {
+        ack.flags |= v2::Flags::CONNECT_FORCED_PROFILE;
+    }
     Bytes ack_data = ack.serialize();
     connect_ack_frame_ = ack_data;
     connect_ack_retransmit_ms_ = connectAckRetransmitMs();
@@ -779,7 +952,10 @@ void Connection::acceptCall() {
     handshake_confirmed_ = false;  // Responder waits for first frame to confirm
     responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
 
-    enterConnected();
+    // A manual modulation/rate request is an operator experiment, not permission for
+    // the automatic controller to move away from it.  Pass the gate through connected
+    // entry so it is established before the application's on_connected callback.
+    enterConnected(/*automatic_rate_allowed=*/!forced_rung);
 
     // Notify application of initial data mode (LOCAL reading — responder pick;
     // entry_fading = the pooled value that drove the pick, raw scalar knob-off)
@@ -848,6 +1024,10 @@ void Connection::abortTxNow() {
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
+    deferred_arq_failure_abort_ = false;
+    deferred_arq_failure_seq_valid_ = false;
+    staged_timeout_batch_.clear();
+    arq_tick_in_progress_ = false;
 
     // Cancel file TX if active. Keep RX file state untouched.
     queued_file_path_.reset();
@@ -894,6 +1074,7 @@ void Connection::abortTxNow() {
 
 void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+    const uint8_t previous_forced_cw = config_.forced_cw_count;
     if (forced) {
         // Operator override: initiator embeds in CONNECT.data_frame_cw_count
         // so responder honors and echoes via CONNECT_ACK. One-sided
@@ -905,17 +1086,24 @@ void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     // or every connect would advertise the default as a forced override
     // and bypass auto-pick on the responder.
 
-    if (cw_count == data_frame_cw_count_) {
+    const bool logical_cw_changed = cw_count != data_frame_cw_count_;
+    const bool force_policy_changed =
+        forced && config_.forced_cw_count != previous_forced_cw;
+    if (!logical_cw_changed && !force_policy_changed) {
         return;
     }
 
-    data_frame_cw_count_ = cw_count;
-    config_.fixed_frame_codewords = cw_count;
-    arq_.setFixedFrameCodewords(cw_count);
+    if (logical_cw_changed) {
+        data_frame_cw_count_ = cw_count;
+        config_.fixed_frame_codewords = cw_count;
+    }
 
     const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
     if (isOFDMMode(negotiated_mode_) || bounded_variable_mc_dpsk) {
-        file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
+        // Re-evaluate the complete physical tuple even when the logical CW is
+        // unchanged. A newly forced logical count disables either experimental
+        // Z81 substitution; returning early here could leave ARQ on the old long
+        // tuple while the PHY reverts to the descriptor's logical/Z27 policy.
         configureArqForCurrentDataMode();
     }
 
@@ -994,7 +1182,7 @@ bool Connection::sendArqPayloadFrame(const Bytes& chunk,
     return sent;
 }
 
-void Connection::emitMessageTxStatus(OutboundMessageTxRecord& record,
+void Connection::emitMessageTxStatus(const OutboundMessageTxRecord& record,
                                      MessageTxStatus status) {
     if (!on_message_tx_status_) {
         return;
@@ -1021,6 +1209,7 @@ void Connection::handleArqFrameSubmitted(uint16_t seq) {
         return;
     }
 
+    std::optional<OutboundMessageTxRecord> submitted_record;
     for (auto& record : outbound_message_tx_records_) {
         if (record.token != token || record.terminal_reported) {
             continue;
@@ -1034,7 +1223,7 @@ void Connection::handleArqFrameSubmitted(uint16_t seq) {
         record.assigned_fragments++;
         if (!record.submitted_reported) {
             record.submitted_reported = true;
-            emitMessageTxStatus(record, MessageTxStatus::SUBMITTED);
+            submitted_record = record;
         }
         if (record.expected_fragments != 0 &&
             record.assigned_fragments >= record.expected_fragments) {
@@ -1047,61 +1236,58 @@ void Connection::handleArqFrameSubmitted(uint16_t seq) {
                       record.assigned_fragments == 1 ? "" : "s",
                       record.text.size());
         }
-        return;
+        break;
+    }
+    // Never enter application code with an iterator/reference into the live deque.
+    // A status callback may synchronously send, reset, or disconnect.
+    if (submitted_record) {
+        emitMessageTxStatus(*submitted_record, MessageTxStatus::SUBMITTED);
     }
 }
 
 void Connection::handleArqTxBaseAdvanced(uint16_t base_seq) {
+    if (deferred_arq_failure_abort_) {
+        // advanceTXWindow() may cross SACKed suffix slots after the base frame has
+        // terminal-failed. They are not a successful logical completion; the deferred
+        // drain will fail the active record(s) after the ARQ call stack unwinds.
+        return;
+    }
     // F218: every retiring ack re-checks the deferred completion — the gate
     // (ARQ idle) opens exactly when the last outstanding frame retires.
     file_transfer_.maybeCompleteSend();
-    for (auto& record : outbound_message_tx_records_) {
-        if (record.terminal_reported ||
-            !record.first_seq_valid ||
-            record.assigned_fragments < record.expected_fragments) {
+    std::vector<OutboundMessageTxRecord> delivered_records;
+    for (auto it = outbound_message_tx_records_.begin();
+         it != outbound_message_tx_records_.end();) {
+        const bool delivered =
+            !it->terminal_reported && it->first_seq_valid &&
+            it->assigned_fragments >= it->expected_fragments &&
+            seqBefore(it->last_seq, base_seq);
+        if (!delivered) {
+            ++it;
             continue;
         }
-        if (seqBefore(record.last_seq, base_seq)) {
-            record.terminal_reported = true;
-            emitMessageTxStatus(record, MessageTxStatus::DELIVERED);
-        }
+        it->terminal_reported = true;
+        delivered_records.push_back(*it);
+        it = outbound_message_tx_records_.erase(it);
     }
 
-    outbound_message_tx_records_.erase(
-        std::remove_if(outbound_message_tx_records_.begin(),
-                       outbound_message_tx_records_.end(),
-                       [](const OutboundMessageTxRecord& record) {
-                           return record.terminal_reported;
-                       }),
-        outbound_message_tx_records_.end());
+    // Publish only after every delivered record has been detached. Reentrant sends
+    // append fresh records without invalidating an outer iterator or being erased as
+    // part of the just-completed batch.
+    for (const auto& record : delivered_records) {
+        emitMessageTxStatus(record, MessageTxStatus::DELIVERED);
+    }
 }
 
 void Connection::handleArqFrameFailed(uint16_t seq) {
-    for (auto& record : outbound_message_tx_records_) {
-        if (record.terminal_reported ||
-            !record.first_seq_valid ||
-            record.assigned_fragments == 0) {
-            continue;
-        }
-        const bool in_record =
-            seq == record.first_seq ||
-            seq == record.last_seq ||
-            (seqBefore(record.first_seq, seq) && seqBefore(seq, record.last_seq));
-        if (!in_record) {
-            continue;
-        }
-        record.terminal_reported = true;
-        emitMessageTxStatus(record, MessageTxStatus::FAILED);
-        break;
+    // The callback runs inside SelectiveRepeatARQ::retransmitFrame(), before that
+    // method retires the failed slot and decrements its counters. Never mutate the
+    // ARQ window here; request one post-unwind logical-transfer abort instead.
+    if (!deferred_arq_failure_abort_) {
+        deferred_arq_failure_seq_ = seq;
+        deferred_arq_failure_seq_valid_ = true;
     }
-
-    outbound_message_tx_records_.erase(
-        std::remove_if(outbound_message_tx_records_.begin(),
-                       outbound_message_tx_records_.end(),
-                       [](const OutboundMessageTxRecord& record) {
-                           return record.terminal_reported;
-                       }),
-        outbound_message_tx_records_.end());
+    deferred_arq_failure_abort_ = true;
 }
 
 bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
@@ -1139,7 +1325,8 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
 }
 
 bool Connection::hasLocalOutboundDataTurn() const {
-    return file_transfer_.getState() == FileTransferState::SENDING ||
+    return deferred_arq_failure_abort_ ||
+           file_transfer_.getState() == FileTransferState::SENDING ||
            mode_change_pending_ ||
            !pending_tx_fragments_.empty() ||
            arq_.getTxInFlightBytes() > 0;
@@ -1246,6 +1433,17 @@ void Connection::resetDataTurnFairness() {
 void Connection::noteDataTurnPayloadStarted(size_t payload_bytes) {
     if (local_data_turn_) {
         data_turn_payload_bytes_sent_ += payload_bytes;
+    }
+
+    // The one-shot interactive TURNOVER is only bootstrap choreography for an
+    // initiator that has sent no DATA (the B2F responder speaks first).  Once the
+    // initiator has actually started DATA, firing that bootstrap rule at the next
+    // momentary empty-window boundary can split one continuous host stream: the TNC
+    // may still have the next accumulated block outside Connection's queue.  Leave
+    // the turn with the active sender; a responder with real outbound data retains
+    // the normal TURN_REQUEST/fair-budget path.
+    if (half_duplex_interactive_ && is_initiator_) {
+        interactive_initiator_yield_done_ = true;
     }
 }
 
@@ -1685,6 +1883,17 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
         return false;
     }
 
+    // Arm BEFORE capacity selection/startSend. FileTransferController is still
+    // IDLE here, so deriving this policy from getState()==SENDING would size the
+    // chunks at Z27 and only switch the encoder afterward. The transfer arms
+    // survive rung moves; the exact mod/rate/logical-CW predicates decide whether
+    // a given burst uses a physical Z81 profile.
+    setExperimentalLongLDPCTransferProfilesActive(
+        psk8LongLdpcExperimentEnabled() &&
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP,
+        qpskR34LongLdpcExperimentEnabled() &&
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP);
+
     // Set chunk size to match frame capacity for bounded frame geometries.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
@@ -1694,6 +1903,7 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
             LOG_MODEM(ERROR,
                       "Connection: File chunk payload capacity %zu is too small for FILE_DATA overhead",
                       capacity);
+            setExperimentalLongLDPCTransferProfilesActive(false, false);
             return false;
         }
         file_transfer_.setMaxChunkPayload(capacity);
@@ -1701,13 +1911,15 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
                   capacity,
                   is_ofdm ? "OFDM fixed-frame" : "MC-DPSK variable-frame",
                   codeRateToString(data_code_rate_),
-                  data_frame_cw_count_);
+                  is_ofdm ? physicalDataFrameCodewords()
+                          : data_frame_cw_count_);
     }
 
     LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
 
     if (!file_transfer_.startSend(filepath)) {
         LOG_MODEM(ERROR, "Connection: Failed to start file transfer");
+        setExperimentalLongLDPCTransferProfilesActive(false, false);
         return false;
     }
 
@@ -1720,7 +1932,9 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
     // #58 increment 3: selection-flavored consumer — the pool aggregate (knob-gated)
     // replaces the single-snapshot scalar so one trough reading can't flip the block
     // strategy for the whole transfer. Knob-off: exactly measured_snr_db_.
-    if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, rateSelectionSnrDb(), data_code_rate_)) {
+    if (is_ofdm && !usesExperimentalLongLDPC() &&
+        shouldUseSingleOFDMFileBlock(
+            fading_index_, rateSelectionSnrDb(), data_code_rate_)) {
         Bytes block = file_transfer_.getSingleBlockPayload(kOFDMFileBlockPayloadLimit);
         if (!block.empty()) {
             LOG_MODEM(INFO, "Connection: Sending file as single OFDM block (%zu bytes payload)",
@@ -1846,8 +2060,17 @@ void Connection::sendNextFileChunk() {
     // were SACKed, so the holes are few — they ride the next group instead of going out
     // as a lonely 1-frame resend, and the rest of the key-down carries new data. (Unified
     // OFDM only; the resend buffers into the open burst via transmitFrame.)
+    size_t retransmitted_frames = 0;
     if (is_ofdm && kUnifiedSeqEnabled() && burst_mode_active_) {
-        arq_.retransmitInFlightUnacked(burst_frame_cap);
+        retransmitted_frames = arq_.retransmitInFlightUnacked(burst_frame_cap);
+        if (deferred_arq_failure_abort_) {
+            // retransmitInFlightUnacked can reach max_retries synchronously. Do not
+            // top up or flush a physical group after the logical transfer has failed;
+            // runDeferredArqRefill drains the ARQ window once this call unwinds.
+            burst_mode_active_ = false;
+            burst_tx_buffer_.clear();
+            return;
+        }
     }
 
     // Fill the remainder of the budget with new chunks. The budget counts the whole
@@ -1881,7 +2104,7 @@ void Connection::sendNextFileChunk() {
     // Flush burst buffer
     if ((is_ofdm || is_mc_dpsk) && on_transmit_burst_) {
         burst_mode_active_ = false;
-        flushBurstBuffer();
+        flushBurstBuffer(retransmitted_frames > 0);
     }
 }
 
@@ -1899,6 +2122,30 @@ void Connection::sendNextFileChunk() {
 // group_seq is 6 bits on the wire (mod 64). For files with <= 64 groups (~1 MB
 // at QPSK R3/4) this matches the in-flight group exactly. Beyond that, the
 // caller must extend the wire format; not gated for v1.
+bool Connection::isToneBurstAckCandidatePlausible(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const {
+    if (state_ != ConnectionState::CONNECTED) return false;
+
+    // The reserved WAITING-REBASE voice is intentionally outside the sender's
+    // ordinary SACK support. It is the one legitimate NACK-typed tone accepted by
+    // onToneBurstAck(), and must remain audible while the ARQ grid is unanchored.
+    if (rx_rate_cmd_enabled_ &&
+        payload.type == ultra::waveform::tone_burst_ack::AckType::Nack &&
+        payload.rung_cmd ==
+            ultra::waveform::tone_burst_ack::kRungCmdReserved &&
+        payload.frame_mask == 0 && payload.rate_hint == 0 &&
+        payload.drive_advisory ==
+            ultra::waveform::tone_burst_ack::kDriveAdvisoryHold) {
+        return true;
+    }
+    if (payload.type != ultra::waveform::tone_burst_ack::AckType::Ack) {
+        return false;
+    }
+    if (!kInteractiveToneAckEnabled()) return false;
+    return arq_.isToneBurstAckPlausible(
+        payload.group_seq, payload.frame_mask, payload.move_epoch);
+}
+
 bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
     // TXLAT (ULTRA_TXLAT_DIAG): timestamp the two boundaries that bracket a half-duplex
@@ -1923,8 +2170,14 @@ bool Connection::onToneBurstAck(
     // controller a 0 (the voice is proof the forward link WORKS — treating it as
     // demote evidence would re-manufacture the exact collapse it exists to prevent).
     if (rx_rate_cmd_enabled_ &&
+        detection.payload.type ==
+            ultra::waveform::tone_burst_ack::AckType::Nack &&
         detection.payload.rung_cmd ==
-            ultra::waveform::tone_burst_ack::kRungCmdReserved) {
+            ultra::waveform::tone_burst_ack::kRungCmdReserved &&
+        detection.payload.frame_mask == 0 &&
+        detection.payload.rate_hint == 0 &&
+        detection.payload.drive_advisory ==
+            ultra::waveform::tone_burst_ack::kDriveAdvisoryHold) {
         const int seen = static_cast<int>(detection.payload.group_seq);
         // Reset the collapse evidence every voice copy: silence-while-unanchored is
         // by design, not a forward crater (the E1/D1/D3 manufactured demotes).
@@ -1959,6 +2212,26 @@ bool Connection::onToneBurstAck(
         return true;
     }
 
+    // The flagged ACK which LAUNCHED a startup probe may be re-detected while the
+    // resulting target group is already on air/waiting for its own verdict.  It is
+    // ARQ-support-valid as a base-1/no-progress copy, so letting it reach the generic
+    // tone-SACK path can schedule another file refill and put a second R2/3 group on
+    // air before the first probe reaches RTO.  Once the one physical probe is airborne,
+    // every flagged command is necessarily launch-ACK diversity, not a target outcome
+    // (target success/rollback ACKs are deliberately unflagged). Consume it whole.
+    if (tx_latent_startup_probe_active_ &&
+        tx_latent_startup_probe_airborne_) {
+        const uint8_t authority_word = static_cast<uint8_t>(
+            (detection.payload.rate_hint & 0x7) |
+            ((detection.payload.rung_cmd & 0x3) << 3));
+        if ((authority_word & kRungAuthorityStartupProbeFlag) != 0) {
+            LOG_MODEM(INFO,
+                      "Connection: duplicate LATENT startup launch ACK consumed while "
+                      "one-shot target group awaits verdict");
+            return true;
+        }
+    }
+
     // TRANSPORT MERGE (step 1): when interactive tone-burst acks are enabled and we have
     // interactive SR-ARQ frames in flight (no active burst owns this ack), route it to
     // the ARQ window. The ARQ reconstructs the seq and drives its normal ack path.
@@ -1978,8 +2251,17 @@ bool Connection::onToneBurstAck(
         arq_.consumeAckProgress();
         // MOVE-EPOCH: hand the payload's era echo (bits 40-41) to the ARQ, which
         // folds it into the synthetic SACK and gates retirement on it (no-op OFF).
-        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask,
-                            detection.payload.move_epoch);
+        const bool accepted = arq_.onToneBurstAck(
+            detection.payload.group_seq, detection.payload.frame_mask,
+            detection.payload.move_epoch);
+        if (!accepted) {
+            // ARQ rejected an impossible/stale-era payload. Treat it exactly like ACK
+            // loss: it must not steer the rate, ALC, retry pacing, or file refill. A
+            // same-era identical keepalive is accepted by ARQ and still reaches the
+            // file-tail pre-RTO escape below.
+            if (outermost) arq_callback_defer_refill_ = false;
+            return false;
+        }
         // §14.43: feed the RateController the RECEIVER's GRADED decode headroom carried in
         // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
         // unification cut. A NACK (group lost) still feeds 0. (Replaces the legacy GROUP_ACK
@@ -1999,10 +2281,22 @@ bool Connection::onToneBurstAck(
         // escape, RTO machinery) stay live — no command crosses a blackout.
         const bool rx_authority = rxRateAuthorityEnabled();
         if (rx_authority) {
-            const uint8_t cmd_idx = static_cast<uint8_t>(
+            const uint8_t cmd_word = static_cast<uint8_t>(
                 (detection.payload.rate_hint & 0x7) |
                 ((detection.payload.rung_cmd & 0x3) << 3));
-            maybeObeyAuthorityCommand(cmd_idx);
+            if (acceptAuthorityCommandRevision(
+                    cmd_word, detection.payload.group_seq,
+                    detection.payload.frame_mask, detection.payload.move_epoch)) {
+                // The receiver updates its clean-group streak before pricing this
+                // command.  Sender round accounting runs later in this callback so
+                // refill remains coalesced, but target-burst economics must include
+                // the same just-accepted clean round.  Otherwise the selector can
+                // price the escalated N=8 geometry while this guard sees stale N=5.
+                const bool accepted_clean_round =
+                    arq_.lastAckProgressFrames() > 0 &&
+                    arq_.getTxInFlightBytes() == 0;
+                maybeObeyAuthorityCommand(cmd_word, accepted_clean_round);
+            }
         } else {
             const float fed_quality =
                 detection.payload.type ==
@@ -2062,8 +2356,25 @@ bool Connection::onToneBurstAck(
             // base (e.g. "I have 4,5, missing 3") doesn't fire on_send_complete_, but it's
             // still our turn to re-send the hole. sendNextFileChunk() coalesces
             // [holes]+[new] into one budget burst; an empty turn (nothing to send) no-ops.
+            // FILE is deliberately different from fragmented messages here.  A receiver
+            // keepalive re-emits the same cumulative SACK after a repair/ACK was lost, so
+            // ARQ correctly reports -1 even though the waveform is a fresh physical turn.
+            // Refill files on *any* detected tone ACK to preserve that pre-RTO stall
+            // escape.  The physical tone monitor consumes at most one detection per arm;
+            // the wire format has no round nonce with which Connection could distinguish
+            // a fresh identical keepalive from a delayed copy by payload alone.
             if (file_transfer_.getState() == FileTransferState::SENDING) {
                 deferred_file_refill_ = true;
+            }
+            // Fragmented messages use the same stop-and-wait tone-SACK turns as files.
+            // A FINAL message frame can expose a base hole after every original
+            // fragment has already been submitted; no completion callback fires for
+            // that hole, so explicitly schedule the [holes]+[new] refill here. A
+            // duplicate/stale ACK reports -1 and must not launch the same repair twice.
+            if (round_progress >= 0 && isOFDMMode(negotiated_mode_) &&
+                !pending_tx_fragments_.empty() &&
+                arq_.getTxInFlightBytes() > 0) {
+                deferred_fragment_refill_ = true;
             }
             runDeferredArqRefill();
         }
@@ -2207,6 +2518,12 @@ void Connection::noteQam16Demoted(int weight) {
 
 bool Connection::rateAdaptationActive() const {
     if (!adaptive_rate_enabled_) return false;
+    // enterConnected(false) is the QSO-scoped operator-profile pin established by
+    // either serialized CONNECT fields or a valid environment force.  It must gate
+    // every actuator (receiver authority, escapes and the legacy controller), not just
+    // the latent startup probe.  Keep the live env check too so a force applied while
+    // connected fails closed; an invalid value is AUTO and does not freeze anything.
+    if (!latent_startup_probe_allowed_ || environmentForcesDataProfile()) return false;
     const char* l = std::getenv("ULTRA_LOCK_RATE");
     if (l != nullptr && std::atoi(l) != 0) return false;  // operator pin always wins
     const char* e = std::getenv("ULTRA_RATE_ADAPT");
@@ -2290,35 +2607,20 @@ void Connection::executeEscapeDrop(const char* trigger) {
             return;
         }
         if (!midrung_exit && esc_is_qam16) noteQam16Demoted(2);
-        // PHASE-3 (2026-07-04): the FIRST escape of a silent stretch commits via the
-        // descriptor (mid-window era-safe under move-epoch; the wire self-describes,
-        // so a briefly-deaf peer re-syncs on the first descriptor it decodes, and the
-        // waiting-rebase voice covers by-design unanchored silence). A SECOND escape
-        // with still-zero ACK progress falls back to the legacy synchronized
-        // exchange — the deaf-peer escalation ladder stays reachable. F1 measured
-        // 20-30 s per legacy escape exchange in troughs; the descriptor commit is
-        // ~free airtime.
-        const bool desc_escape_ok = descriptor_mode_switch_enabled_ &&
-                                    arq_.moveEpochEnabled() &&
-                                    consecutive_escape_drops_ == 0;
+        // Silence is negative evidence: unlike a receiver-carried rung command,
+        // it does not prove the peer can hear a descriptor.  A unilateral regrid
+        // here left the receiver slicing R1/2 as stale R2/3 for 96 s in the live
+        // IONOS transfer.  Always use the synchronized MODE_CHANGE exchange; the
+        // peer keeps the old geometry until it decodes and ACKs the request.
         ++consecutive_escape_drops_;
-        bool desc_committed = false;
-        if (desc_escape_ok) {
-            desc_committed = tryDescriptorModeSwitch(
-                esc_mod, esc_rate, wireSnrDb(),
-                v2::ModeChangeReason::CHANNEL_DEGRADED);
-        }
-        LOG_MODEM(WARN, "Connection: ESCAPE-drop %s %s -> %s %s (%s) via %s",
+        LOG_MODEM(WARN, "Connection: ESCAPE-drop %s %s -> %s %s (%s) via MODE_CHANGE",
                   modulationToString(esc_from_mod),
                   codeRateToString(esc_from_rate), modulationToString(esc_mod),
-                  codeRateToString(esc_rate), trigger,
-                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
-        if (!desc_committed) {
-            // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
-            // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
-            requestModeChange(esc_mod, esc_rate, wireSnrDb(),
-                              v2::ModeChangeReason::CHANNEL_DEGRADED);
-        }
+                  codeRateToString(esc_rate), trigger);
+        // Wire SNR embed: freshness-gated pool aggregate under ULTRA_WIRE_SNR_FRESH
+        // (stale sentinel -10 when nothing < 3*Tc), else the raw scalar (unchanged).
+        requestModeChange(esc_mod, esc_rate, wireSnrDb(),
+                          v2::ModeChangeReason::CHANNEL_DEGRADED);
         return;
     }
 
@@ -2334,25 +2636,13 @@ void Connection::executeEscapeDrop(const char* trigger) {
     const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
     if (robust == data_code_rate_) return;
     rate_controller_.noteRungFailed(data_code_rate_);
-    // PHASE-3 (2026-07-04): same first-escape-via-descriptor policy as the QAM16
-    // branch above (see that comment); second consecutive silent escape -> legacy.
-    const bool desc_escape_ok = descriptor_mode_switch_enabled_ &&
-                                arq_.moveEpochEnabled() &&
-                                consecutive_escape_drops_ == 0;
+    const Modulation esc_from_mod = data_modulation_;
+    const CodeRate esc_from_rate = data_code_rate_;
     ++consecutive_escape_drops_;
-    bool desc_committed = false;
-    if (desc_escape_ok) {
-        desc_committed = tryDescriptorModeSwitch(
-            data_modulation_, robust, wireSnrDb(),
-            v2::ModeChangeReason::CHANNEL_DEGRADED);
-    }
-    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s) via %s",
-              codeRateToString(data_code_rate_), codeRateToString(robust), trigger,
-              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
-    if (!desc_committed) {
-        requestModeChange(data_modulation_, robust, wireSnrDb(),
-                          v2::ModeChangeReason::CHANNEL_DEGRADED);
-    }
+    LOG_MODEM(WARN, "Connection: ESCAPE-drop %s -> %s (%s) via MODE_CHANGE",
+              codeRateToString(esc_from_rate), codeRateToString(robust), trigger);
+    requestModeChange(esc_from_mod, robust, wireSnrDb(),
+                      v2::ModeChangeReason::CHANNEL_DEGRADED);
 }
 
 // ═══════ RX-RATE-CMD Phase 2 — receiver rung command in the tone-burst ACK ═══════
@@ -2446,6 +2736,27 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
             : kRungCmdDownHard;
 }
 
+void Connection::failClosedLatentStartupProbeUnknown(const char* origin) {
+    if (!latent_startup_probe_waiting_) return;
+
+    latent_startup_probe_waiting_ = false;
+    latent_startup_probe_spent_ = true;
+    latent_startup_probe_clean_groups_ = 0;
+    latent_startup_probe_pending_base_groups_ = 0;
+    latent_startup_probe_rollback_pending_ = true;
+    latent_startup_probe_failed_ = true;
+
+    const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
+    rx_authority_cmd_ =
+        (cur != kRungIdxNone && cur < kRungIdxQpskR12)
+            ? cur
+            : kRungIdxQpskR12;
+    LOG_MODEM(WARN,
+              "Connection: LATENT startup probe fail-closed (%s) — command idx %u; "
+              "hold through one trusted clean base group",
+              origin ? origin : "unknown physical outcome", rx_authority_cmd_);
+}
+
 // ═══════════ RX-AUTHORITY receiver verdict (ULTRA_RX_RATE_AUTHORITY) ═══════════
 // Called per delivered/failed burst group, BEFORE the group's ACK emits. Maps the
 // receiver's FRESH channel observation (broadband SNR EMA + coherence-adjusted
@@ -2461,7 +2772,10 @@ void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) 
 //   - CLEAN group: never command BELOW the current rung (the rung is proven
 //     working THIS group; a stale-low SNR reading must not thrash it downward).
 void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater,
-                                          float delivered_fraction) {
+                                          float delivered_fraction,
+                                          uint8_t delivered_frames,
+                                          uint8_t group_size,
+                                          bool geometry_proven) {
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
         rx_authority_cmd_ = kRungIdxNone;
@@ -2576,6 +2890,13 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
 
+    // QSO-scoped clean-delivery evidence is shared by the legacy authority gates,
+    // burst-ceiling prediction, and the latent selector.  Update it before the
+    // selector's early return; otherwise the default latent path permanently sees
+    // zero clean groups even while the transmitter has already earned escalation.
+    if (all_ok) ++rx_auth_clean_streak_;
+    else rx_auth_clean_streak_ = 0;
+
     // ── LATENT-STATE PATH (ULTRA_LATENT_RATE, DEFAULT-ON; =0 restores the legacy ladder)
     //
     // Consumes NO SNR ESTIMATE. It fits a latent operating point from OUTCOMES (frames
@@ -2606,20 +2927,48 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
 
         if (!latent_ctl_.havePrior()) {
             // Seed from the connect-time pick expressed as a LADDER POSITION, not as an SNR:
-            // use the theta of the rung we entered on. That keeps even the prior free of the
-            // calibration chain.
-            latent_ctl_.seedPrior(latentThetaForRung(cur), 3.0f);
+            // use the theta of the automatic pick BEFORE the conservative first-group
+            // cap.  The cap is an acquisition-safety probe, not evidence that the link
+            // lives at R1/2.  Forced modes replace this bootstrap at the handshake sites.
+            // This keeps even the prior free of the calibration chain while avoiding an
+            // artificial multi-group slow-start after a clean probe.
+            const uint8_t seed_rung =
+                latent_bootstrap_rung_ != kRungIdxNone
+                    ? latent_bootstrap_rung_
+                    : cur;
+            latent_ctl_.seedPrior(latentThetaForRung(seed_rung), 3.0f);
+            latent_bootstrap_rung_ = kRungIdxNone;
         }
 
-        // Group size. The burst path runs 5-frame groups on this bench ("Burst group
-        // complete (5 frames)" in every rig log). M scales only the evidence weight and the
-        // airtime term, and the correlation tempering dominates the former, so +-1 shifts
-        // nothing material. Plumb the true value if group sizing becomes adaptive.
-        constexpr int M = 5;
-        const int k = (delivered_fraction >= 0.0f)
-                          ? static_cast<int>(std::lround(delivered_fraction * M))
-                          : (all_ok ? M : 0);
-        latent_ctl_.observe(cur, k, M);
+        // Consume the descriptor's REAL group geometry. Production dynamically switches
+        // between five- and eight-frame turns (and emits shorter file tails); reducing 6/8
+        // to round(0.75*5)=4/5 changes both the posterior and the predicted cycle economics.
+        // Anchored-no-descriptor backstops have no group_size and retain the conservative
+        // five-frame fallback.
+        const int M = group_size > 0 ? static_cast<int>(group_size) : 5;
+        const int k = group_size > 0
+                          ? std::clamp(static_cast<int>(delivered_frames), 0, M)
+                          : ((delivered_fraction >= 0.0f)
+                                 ? static_cast<int>(std::lround(delivered_fraction * M))
+                                 : (all_ok ? M : 0));
+        constexpr int kStartupMinTrustedGroupFrames = 4;
+        const bool geometry_known = geometry_proven && group_size > 0;
+        const bool trusted_group =
+            geometry_known && group_size >= kStartupMinTrustedGroupFrames;
+        const bool exact_clean_group = trusted_group && all_ok && k == M;
+        const bool fail_unknown_probe = latent_startup_probe_waiting_ && !trusted_group;
+        if (fail_unknown_probe) {
+            // Do this BEFORE any posterior update or ACK emission.  A descriptorless
+            // callback may carry a plausible stale k/M; it is neither success nor failure
+            // evidence for the one-shot probe and must not leave the standing UP command.
+            failClosedLatentStartupProbeUnknown("group geometry not wire-proven");
+        }
+        // Never fabricate a denominator from stale fallback geometry.  Proven short
+        // physical tails remain valid general posterior evidence, but cannot qualify
+        // the startup probe's two full-group gate.
+        if (geometry_known) {
+            latent_ctl_.observe(cur, k, M);
+        }
         // Forget at the rate the ionosphere actually moves. THE ONE FREE PARAMETER; see the
         // header. Too small freezes the controller and looks perfect on OTASim (stationary
         // Watterson, no ITV) while failing on the rig.
@@ -2630,23 +2979,209 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             }
             return 0.35f;
         }();
-        latent_ctl_.relax(kRelaxDb);
+        if (geometry_known) {
+            latent_ctl_.relax(kRelaxDb);
+        }
 
-        // Measured scheduling geometry (same source as the link model).
-        constexpr float kPayloadPerFrameS = 6.19f / 5.0f;
-        const float fixed_s = 1.41f + 1.79f;
-        const auto best = latent_ctl_.best(kPayloadPerFrameS, fixed_s, M);
+        // Code-faithful bulk-transfer geometry. The old objective both compressed airtime
+        // by 1/eta AND multiplied value by eta, rewarding dense rungs twice. It also ignored
+        // modulation-aware CW normalisation (QPSK=8, 8PSK=12, 16QAM=16), which makes the
+        // active rungs nearly equal-duration frames. Build useful file bytes and burst
+        // airtime from the same production helpers used by TX, then add the rig-measured
+        // median non-data turnaround.  IMPORTANT: M above belongs only to the OBSERVATION.
+        // Every candidate gets its own CW/window/duty-ceiling-derived frame count; reusing
+        // observed M here overvalues whichever rungs happen to fit fewer frames per turn.
+        // The full 1.2 s anchor is already in burst airtime.
+        constexpr uint32_t kMedianNonDataCycleMs = 1790;
+        LatentRateController::RungGeometryTable geometry{};
+        std::array<int, kRungIdxCount> candidate_cw{};
+        for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+            const CoherentPick candidate = coherentRungFromIndex(r);
+            if (!coherentRungLocallyEnabled(candidate.mod, candidate.rate)) continue;
+            // The receiver commands only a rung.  Its local fading estimate is not
+            // transmitted and therefore cannot determine the sender's next CW shape;
+            // the following descriptor will announce the sender's actual choice.  Price
+            // this pre-command counterfactual with peer-independent baseline geometry.
+            const int cw = connection_policy::receiverRateCommandCandidateCWCount(
+                candidate.mod, candidate.rate, WaveformMode::OFDM_CHIRP,
+                config_.forced_cw_count);
+            candidate_cw[r] = cw;
+            const size_t arq_payload = v2::getFixedFramePayloadCapacityZ(
+                candidate.rate, cw, /*lifting_z=*/27);
+            if (arq_payload <= FileTransferController::FILE_DATA_OVERHEAD) continue;
+            const size_t candidate_window = connection_policy::ofdmWindowSize(
+                candidate.mod, candidate.rate, /*near_awgn_ofdm=*/false);
+            const uint32_t candidate_ceiling = connection_policy::burstAirtimeCeilingMs(
+                candidate.mod, candidate.rate, rx_auth_clean_streak_);
+            const size_t candidate_frames = connection_policy::wideOFDMBurstFrameBudget(
+                candidate.mod, candidate.rate, cw, candidate_window,
+                candidate_ceiling, /*continuation_reanchor_ms=*/0,
+                /*data_lifting_z=*/27);
+            const uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
+                candidate.mod, candidate.rate, candidate_frames, cw,
+                /*continuation_reanchor_ms=*/0, /*data_lifting_z=*/27);
+            geometry[r] = {
+                static_cast<float>(arq_payload - FileTransferController::FILE_DATA_OVERHEAD),
+                static_cast<int>(candidate_frames),
+                static_cast<float>(burst_ms + kMedianNonDataCycleMs) / 1000.0f,
+            };
+        }
+        const uint8_t latent_ceiling = latentConfiguredRungCeiling();
+        const auto best = latent_ctl_.best(
+            geometry, latent_ceiling, latentTieBreakProbeEnabled());
         uint8_t lat_cmd = (best.rung != kRungIdxNone) ? best.rung : cur;
         if (lat_cmd != cur) {
             const uint8_t snapped = snapRungIndexDownToEnabled(lat_cmd);
             lat_cmd = (snapped != kRungIdxNone) ? snapped : cur;
         }
+        if (latent_startup_probe_failed_ && lat_cmd > kRungIdxQpskR12) {
+            // A failed/unknown one-shot establishes a QSO-scoped safety ceiling.  The
+            // posterior may recover after clean base groups, but it may not silently
+            // recreate the exploration that was promised to happen only once.
+            lat_cmd = kRungIdxQpskR12;
+        }
+
+        // BOUNDED STARTUP EXPLORATION.  R1/2 successes saturate the likelihood, so the
+        // estimator cannot learn whether R2/3 works by observing R1/2 forever (fixed04:
+        // clean physical N=5 groups until the natural climb at observation 16).  Spend at
+        // most ONE higher-rung group per unforced QSO, and only after two consecutive
+        // descriptor/tail-proven clean groups.  This is deliberately separate from the
+        // periodic tie-probe experiment, which remains default-off after doubling rig-run
+        // variance.  Unknown geometry is not positive evidence and a lossy probe rolls
+        // back in the ACK for that very group.
+        constexpr int kStartupCleanGroupsRequired = 2;
+        constexpr int kStartupArmObservationLimit = 4;
+        constexpr int kStartupMaxPendingBaseGroups = 2;
+        const uint8_t startup_base = kRungIdxQpskR12;
+        const uint8_t startup_target = kRungIdxQpskR23;
+        const bool target_enabled =
+            snapRungIndexDownToEnabled(startup_target) == startup_target &&
+            (latent_ceiling == kRungIdxNone || startup_target <= latent_ceiling);
+        const float target_p_at_decision = LatentRateController::successProb(
+            best.x_used, latentThetaForRung(startup_target));
+        const char* startup_note = "";
+
+        const bool automatic_rate_allowed =
+            latent_startup_probe_allowed_ && rateAdaptationActive() &&
+            latentStartupProbeAllowedByOperator();
+        if (!automatic_rate_allowed) {
+            // Config-forced CONNECT profiles and live force/lock knobs freeze the WHOLE
+            // latent actuator.  Merely suppressing the special probe still let the normal
+            // argmax escape an operator's fixed-rung measurement on a later verdict.
+            lat_cmd = cur;
+            latent_startup_probe_spent_ = true;
+            latent_startup_probe_waiting_ = false;
+            latent_startup_probe_clean_groups_ = 0;
+            latent_startup_probe_pending_base_groups_ = 0;
+            latent_startup_probe_rollback_pending_ = false;
+            latent_startup_probe_failed_ = false;
+            startup_note = " operator-rate-pin";
+        } else if (latent_startup_probe_rollback_pending_) {
+            // Re-carry the rollback until the sender's descriptor proves it adopted a
+            // base-or-lower rung, then keep that rung for one trusted clean group.  This
+            // prevents the posterior update from the failed probe undoing the rollback on
+            // the very next ACK.
+            const uint8_t rollback =
+                (cur != kRungIdxNone && cur < startup_base) ? cur : startup_base;
+            lat_cmd = rollback;
+            if (cur <= startup_base && exact_clean_group) {
+                latent_startup_probe_rollback_pending_ = false;
+                startup_note = " startup-probe-rollback-settled";
+            } else {
+                startup_note = " startup-probe-rollback-pending";
+            }
+        } else if (!geometry_known) {
+            // No fresh selector evidence: hold the physical rung.  The rollback branch
+            // above deliberately has priority so an unknown result cannot erase a safety
+            // landing that is already in progress.
+            lat_cmd = cur;
+            latent_startup_probe_clean_groups_ = 0;
+            startup_note = " geometry-unproven-hold";
+        } else if (latent_startup_probe_waiting_) {
+            if (cur == startup_target) {
+                // This is the one physical probe group.  A clean result is direct
+                // evidence that R2/3 works, so retain it for the next group while the
+                // posterior catches up.  Anything else reverts immediately to R1/2.
+                if (exact_clean_group) {
+                    latent_startup_probe_waiting_ = false;
+                    latent_startup_probe_spent_ = true;
+                    latent_startup_probe_pending_base_groups_ = 0;
+                    lat_cmd = startup_target;
+                    startup_note = " startup-probe-pass";
+                } else {
+                    failClosedLatentStartupProbeUnknown(
+                        trusted_group ? "probe group imperfect" : "probe result unknown");
+                    lat_cmd = startup_base;
+                    startup_note = " startup-probe-rollback";
+                }
+            } else if (cur == startup_base && exact_clean_group) {
+                // The absolute command may need ACK diversity before the sender adopts it.
+                // Clean intervening base-rung groups are not extra probes: keep requesting
+                // the same target until its descriptor arrives.
+                ++latent_startup_probe_pending_base_groups_;
+                if (latent_startup_probe_pending_base_groups_ <=
+                        kStartupMaxPendingBaseGroups) {
+                    lat_cmd = startup_target;
+                    startup_note = " startup-probe-pending";
+                } else {
+                    failClosedLatentStartupProbeUnknown("target descriptor not adopted");
+                    lat_cmd = startup_base;
+                    startup_note = " startup-probe-expired";
+                }
+            } else {
+                // Adoption did not occur and the intervening evidence is imperfect or has
+                // no trusted geometry.  Cancel without ever risking the higher rung.
+                failClosedLatentStartupProbeUnknown(
+                    trusted_group ? "unexpected rung before adoption"
+                                  : "pre-adoption result unknown");
+                lat_cmd = (cur != kRungIdxNone && cur < startup_base)
+                    ? cur
+                    : startup_base;
+                startup_note = " startup-probe-rollback";
+            }
+        } else if (!latent_startup_probe_spent_) {
+            if (cur != startup_base ||
+                latent_ctl_.observations() > kStartupArmObservationLimit) {
+                // This is a startup-only escape from R1/2 identifiability, not a general
+                // periodic probe.  Once the normal selector moves, or four verdicts pass,
+                // it is permanently out of the decision path for this QSO.
+                latent_startup_probe_spent_ = true;
+                latent_startup_probe_clean_groups_ = 0;
+            } else {
+                latent_startup_probe_clean_groups_ = exact_clean_group
+                    ? latent_startup_probe_clean_groups_ + 1
+                    : 0;
+                if (latent_startup_probe_clean_groups_ >=
+                        kStartupCleanGroupsRequired) {
+                    // Never override a natural upward argmax, and never probe a target the
+                    // model itself declares dead.  The clean-pair is the exploration
+                    // evidence; these gates prevent blind forcing.
+                    if (lat_cmd != startup_base) {
+                        latent_startup_probe_spent_ = true;
+                    } else if (target_enabled &&
+                               target_p_at_decision >=
+                                   LatentRateController::kDeadProb) {
+                        latent_startup_probe_waiting_ = true;
+                        latent_startup_probe_pending_base_groups_ = 0;
+                        lat_cmd = startup_target;
+                        startup_note = " startup-probe-start";
+                    } else {
+                        latent_startup_probe_spent_ = true;
+                    }
+                }
+            }
+        }
         rx_authority_cmd_ = lat_cmd;
         LOG_MODEM(INFO,
                   "Connection: LATENT-RATE idx %u -> %u  x_p25=%.1f mean=%.1f sd=%.1f "
-                  "obs=%d  k=%d/%d  group=%.1fs  (NO SNR CONSUMED)",
+                  "obs=%d  k=%d/%d  group=%.1fs  candidate_CW=%d candidate_N=%d  "
+                  "predicted=%.0fB/s%s%s  "
+                  "(NO SNR CONSUMED)",
                   cur, lat_cmd, best.x_used, latent_ctl_.posteriorMean(),
-                  latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s);
+                  latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s,
+                  candidate_cw[lat_cmd],
+                  geometry[lat_cmd].frames_per_cycle,
+                  best.goodput, best.tie_break_probe ? " probe" : "", startup_note);
         return;
     }
 
@@ -2746,8 +3281,6 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     }
     if (crater) ++rx_auth_crater_streak_;
     else if (all_ok) rx_auth_crater_streak_ = 0;
-    if (all_ok) ++rx_auth_clean_streak_;
-    else rx_auth_clean_streak_ = 0;
     // DENSE-MOD FAST DEMOTE (ULTRA_DENSE_FAST_DEMOTE): the two-crater grace is calibrated
     // for robust rungs (a single QPSK crater is an ARQ-absorbed null). A dense-mod rung's
     // tight rings make a FULL crater (0/N) genuine over-commit, and the stall cost is
@@ -3192,8 +3725,196 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
 // receiver's ACK. Dedup by target (repeat ACK copies re-carry the same command);
 // clamp to the locally-enabled ladder (env knobs may differ across ends); commit
 // via the descriptor (mid-window era-safe) with the legacy MODE_CHANGE fallback.
-void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
+bool Connection::acceptAuthorityCommandRevision(uint8_t cmd_word, uint8_t group_seq,
+                                                uint16_t frame_mask,
+                                                uint8_t move_epoch) {
+    const uint8_t cmd_idx = static_cast<uint8_t>(
+        cmd_word & kRungAuthorityIndexMask);
+    const bool same_episode =
+        tx_authority_ack_identity_valid_ &&
+        tx_authority_ack_group_seq_ == group_seq &&
+        tx_authority_ack_move_epoch_ == move_epoch;
+    if (same_episode) {
+        // An ACK re-emission may revise a startup probe UP into a timeout rollback
+        // DOWN while its cumulative SACK bitmap grows.  The bitmap is a revision of
+        // the same sequence/epoch episode, not a new authority decision: a delayed
+        // older mask must never reverse the safety revision after applyDataMode resets
+        // the target dedup latch.
+        tx_authority_ack_frame_mask_ = static_cast<uint16_t>(
+            tx_authority_ack_frame_mask_ | frame_mask);
+        if (cmd_idx != kRungIdxNone &&
+            tx_authority_ack_lowest_cmd_ != kRungIdxNone &&
+            cmd_idx > tx_authority_ack_lowest_cmd_) {
+            LOG_MODEM(WARN,
+                      "Connection: stale upward authority revision dropped for "
+                      "the same seq/epoch ACK episode (idx=%u floor=%u)",
+                      cmd_idx, tx_authority_ack_lowest_cmd_);
+            return false;
+        }
+        if (cmd_idx != kRungIdxNone &&
+            (tx_authority_ack_lowest_cmd_ == kRungIdxNone ||
+             cmd_idx < tx_authority_ack_lowest_cmd_)) {
+            tx_authority_ack_lowest_cmd_ = cmd_idx;
+        }
+        return true;
+    }
+
+    tx_authority_ack_identity_valid_ = true;
+    tx_authority_ack_group_seq_ = group_seq;
+    tx_authority_ack_frame_mask_ = frame_mask;
+    tx_authority_ack_move_epoch_ = move_epoch;
+    tx_authority_ack_lowest_cmd_ = cmd_idx;
+    return true;
+}
+
+bool Connection::startupProbeHasSufficientPayload() const {
+    constexpr size_t kMinTrustedProbeFrames = 4;
+    if (file_transfer_.getState() != FileTransferState::SENDING) return false;
+    const auto progress = file_transfer_.getProgress();
+    if (progress.total_bytes <= progress.transferred_bytes) return false;
+
+    const int cw = (config_.forced_cw_count != 0)
+        ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
+        : connection_policy::recommendCWCountForChannel(
+              Modulation::QPSK, CodeRate::R2_3, negotiated_mode_,
+              connection_policy::coherenceAdjustedFadingIndex(
+                  fading_index_, coherence_score_, coherence_valid_),
+              wireSnrDb());
+    const int physical_cw = physicalDataFrameCodewordsFor(
+        Modulation::QPSK, CodeRate::R2_3, cw);
+    const int lifting_z = selectBurstLiftingZFor(
+        Modulation::QPSK, CodeRate::R2_3, cw);
+    const size_t frame_payload = (lifting_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(CodeRate::R2_3, physical_cw, 81)
+        : v2::getFixedFramePayloadCapacity(CodeRate::R2_3, physical_cw);
+    if (frame_payload <= FileTransferController::FILE_DATA_OVERHEAD) return false;
+
+    // Four bytes-worth of prospective frames is not enough: all four must fit in
+    // ONE physical target-rung key-down, because the receiver deliberately refuses
+    // to qualify a startup probe with M<4.  Forced long CWs and unusual airtime
+    // ceilings can otherwise pass the byte test below but produce only N=2/3, wasting
+    // the QSO-scoped experiment on an outcome we are required to distrust.  Mirror the
+    // exact post-switch window/ceiling/re-anchor geometry used by configureArqForCurrentDataMode()
+    // and burstAirtimeBudgetFrames().
+    size_t target_window = connection_policy::ofdmWindowSizeForChannel(
+        Modulation::QPSK, CodeRate::R2_3, fading_index_, rateSelectionSnrDb());
+    if (kInteractiveToneAckEnabled()) {
+        target_window = std::min<size_t>(
+            target_window, connection_policy::kToneBurstAckWindowCapFrames);
+    }
+    const uint32_t target_ceiling_ms = connection_policy::burstAirtimeCeilingMs(
+        Modulation::QPSK, CodeRate::R2_3, burst_clean_group_streak_);
+    const uint32_t target_reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, Modulation::QPSK, fading_index_)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    const size_t target_group_frames =
+        connection_policy::wideOFDMBurstFrameBudget(
+            Modulation::QPSK, CodeRate::R2_3, physical_cw, target_window,
+            target_ceiling_ms, target_reanchor_ms, lifting_z);
+    if (target_group_frames < kMinTrustedProbeFrames) return false;
+
+    const size_t chunk = frame_payload - FileTransferController::FILE_DATA_OVERHEAD;
+    const size_t remaining = progress.total_bytes - progress.transferred_bytes;
+    const size_t prospective_frames = (remaining + chunk - 1) / chunk;
+    return prospective_frames >= kMinTrustedProbeFrames;
+}
+
+bool Connection::authorityClimbHasSufficientPayload(
+    Modulation target_mod, CodeRate target_rate,
+    int post_ack_clean_streak) const {
+    // This is an economic guard for an ACTIVE file only.  Between payloads there is
+    // no short tail to strand, and reliability DOWN commands never call this helper.
+    if (file_transfer_.getState() != FileTransferState::SENDING) return true;
+
+    // maybeObeyAuthorityCommand calls this only at a clean send boundary, where
+    // remainingTxBytes() is exact: all submitted chunks have been ACKed and the value
+    // therefore represents the complete unsent tail.  Calling it while the window is
+    // busy would under-count already-submitted bytes, so keep the busy guard at the
+    // caller immediately ahead of this one.
+    const size_t remaining = file_transfer_.remainingTxBytes();
+    const int cw = (config_.forced_cw_count != 0)
+        ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
+        : connection_policy::recommendCWCountForChannel(
+              target_mod, target_rate, negotiated_mode_,
+              connection_policy::coherenceAdjustedFadingIndex(
+                  fading_index_, coherence_score_, coherence_valid_),
+              wireSnrDb());
+    const int physical_cw = physicalDataFrameCodewordsFor(
+        target_mod, target_rate, cw);
+    const int lifting_z = selectBurstLiftingZFor(
+        target_mod, target_rate, cw);
+    const size_t frame_payload = (lifting_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(target_rate, physical_cw, 81)
+        : v2::getFixedFramePayloadCapacity(target_rate, physical_cw);
+    if (frame_payload <= FileTransferController::FILE_DATA_OVERHEAD) return false;
+
+    size_t target_window = connection_policy::ofdmWindowSizeForChannel(
+        target_mod, target_rate, fading_index_, rateSelectionSnrDb());
+    if (kInteractiveToneAckEnabled()) {
+        target_window = std::min<size_t>(
+            target_window, connection_policy::kToneBurstAckWindowCapFrames);
+    }
+    const uint32_t target_ceiling_ms = connection_policy::burstAirtimeCeilingMs(
+        target_mod, target_rate, post_ack_clean_streak);
+    const uint32_t target_reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, target_mod, fading_index_)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    const size_t target_group_frames =
+        connection_policy::wideOFDMBurstFrameBudget(
+            target_mod, target_rate, physical_cw, target_window, target_ceiling_ms,
+            target_reanchor_ms, lifting_z);
+    const size_t chunk = frame_payload - FileTransferController::FILE_DATA_OVERHEAD;
+    const size_t prospective_frames =
+        (remaining == 0) ? 0 : (remaining + chunk - 1) / chunk;
+
+    // The latent argmax prices a steady-state candidate using a full target group.
+    // Executing that result as a shorter tail is a different counterfactual.  The
+    // final_default_07 trace priced N=8, switched for N=3, decoded 1/3, then paid a
+    // synchronized demote and two-chunk rewind.  Refuse only the optimistic move;
+    // current-rung refill continues and the logical FINAL ACK neutralizes the command.
+    if (target_group_frames == 0 || prospective_frames < target_group_frames) {
+        LOG_MODEM(INFO,
+                  "Connection: RX-AUTHORITY tail hold %s %s -> %s %s "
+                  "(%zu prospective target frame(s) < post-ACK target group %zu; "
+                  "%zu byte(s) remain)",
+                  modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_),
+                  modulationToString(target_mod), codeRateToString(target_rate),
+                  prospective_frames, target_group_frames, remaining);
+        return false;
+    }
+    return true;
+}
+
+void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx,
+                                           bool accepted_clean_round) {
+    const bool startup_probe_command =
+        (cmd_idx & kRungAuthorityStartupProbeFlag) != 0;
+    cmd_idx &= kRungAuthorityIndexMask;
     if (cmd_idx == kRungIdxNone || cmd_idx >= kRungIdxCount) return;
+    if (startup_probe_command && cmd_idx != kRungIdxQpskR23) {
+        LOG_MODEM(WARN,
+                  "Connection: ignoring malformed startup-probe authority idx=%u",
+                  cmd_idx);
+        return;
+    }
+    if (startup_probe_command && !on_transmit_burst_) {
+        // The one-physical-group guarantee depends on staged timeout batches.  A
+        // transport without burst staging cannot safely run this experiment.
+        LOG_MODEM(WARN,
+                  "Connection: ignoring startup probe without staged burst egress");
+        return;
+    }
+    if (startup_probe_command && !startupProbeHasSufficientPayload()) {
+        LOG_MODEM(INFO,
+                  "Connection: ignoring startup probe — remaining payload/physical "
+                  "geometry cannot form one trusted four-frame target group");
+        return;
+    }
     if (state_ != ConnectionState::CONNECTED ||
         negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
     // The operator pin is the final authority. Receiver authority replaces the
@@ -3201,6 +3922,16 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
     // ULTRA_RATE_ADAPT=0 fixed-rung measurement.
     if (!rateAdaptationActive()) return;
     if (mode_change_pending_) return;  // a move is already in flight — obey later copies
+    // The endpoints may have asymmetric environments.  Re-apply the sender-local
+    // absolute ceiling before resolving the peer's command; receiver authority is not
+    // permission to violate an operator cap on this transmitter.
+    const uint8_t ceiling = latentConfiguredRungCeiling();
+    if (ceiling != kRungIdxNone && cmd_idx > ceiling) {
+        LOG_MODEM(INFO,
+                  "Connection: RX-AUTHORITY command idx=%u capped locally to idx=%u",
+                  cmd_idx, ceiling);
+        cmd_idx = ceiling;
+    }
     CoherentPick pick = coherentRungFromIndex(cmd_idx);
     Modulation mod = pick.mod;
     CodeRate rate = pick.rate;
@@ -3229,6 +3960,17 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
         rate = pick.rate;
     }
     if (mod == data_modulation_ && rate == data_code_rate_) {
+        if (tx_latent_startup_probe_active_ && !startup_probe_command &&
+            cmd_idx == kRungIdxQpskR23) {
+            // The receiver decoded the one physical target group and retained the
+            // target without the probe bit: direct success confirmation.
+            tx_latent_startup_probe_active_ = false;
+            tx_latent_startup_probe_airborne_ = false;
+            tx_latent_startup_probe_timeout_rollback_pending_ = false;
+            tx_latent_startup_probe_base_rung_ = kRungIdxNone;
+            LOG_MODEM(INFO,
+                      "Connection: LATENT startup probe confirmed by target-group ACK");
+        }
         tx_authority_last_obeyed_ = cmd_idx;  // already there — arm dedup anyway
         return;
     }
@@ -3238,7 +3980,31 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
         // repeated ACK copy carrying the same command.
         return;
     }
+    const uint8_t current_before_move = coherentRungIndexFor(
+        data_modulation_, data_code_rate_);
+    const bool valid_startup_probe =
+        startup_probe_command && current_before_move == kRungIdxQpskR12 &&
+        cmd_idx == kRungIdxQpskR23;
+    if (startup_probe_command && !valid_startup_probe) {
+        LOG_MODEM(WARN,
+                  "Connection: ignoring startup-probe command outside R1/2->R2/3 "
+                  "transition (cur=%u target=%u)",
+                  current_before_move, cmd_idx);
+        return;
+    }
+    if (tx_latent_startup_probe_active_ && !startup_probe_command) {
+        // A non-probe command is the receiver's success/rollback verdict. Let the
+        // ordinary authority move below obey it, but disarm RTO interception.
+        tx_latent_startup_probe_active_ = false;
+        tx_latent_startup_probe_airborne_ = false;
+        tx_latent_startup_probe_timeout_rollback_pending_ = false;
+        tx_latent_startup_probe_base_rung_ = kRungIdxNone;
+    }
     const bool faster = isFasterMode(mod, rate, data_modulation_, data_code_rate_);
+    const bool busy =
+        arq_.getTxInFlightBytes() > 0 ||
+        (file_transfer_.getState() == FileTransferState::SENDING &&
+         file_transfer_.hasPendingChunks());
     if (faster) {
         // UP-commands defer to a CLEAN send boundary (F122): a mid-window switch
         // discards the receiver's buffered frames and rewinds the file cursor by
@@ -3248,25 +4014,61 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx) {
         // DOWN-commands obey immediately: a failing window never drains (waiting
         // would deadlock), and its frames need resending anyway — the rewind is
         // free information-wise; move-epoch makes it era-safe.
-        const bool busy =
-            arq_.getTxInFlightBytes() > 0 ||
-            (file_transfer_.getState() == FileTransferState::SENDING &&
-             file_transfer_.hasPendingChunks());
         if (busy) {
             LOG_MODEM(DEBUG,
                       "Connection: RX-AUTHORITY hold climb idx=%u for clean boundary",
                       cmd_idx);
             return;  // do NOT arm dedup — the re-carried command must retry
         }
+        // A clean boundary makes remainingTxBytes() exact.  Keep the automatic
+        // steady-state argmax from spending a descriptor/MODE_CHANGE on a file tail
+        // shorter than the complete target burst it priced.  This return is a real
+        // HOLD, not tryDescriptorModeSwitch(false): never fall through to the legacy
+        // control exchange, and do not arm the dedup latch.
+        // A flagged startup probe has its own deliberately smaller M>=4 evidence
+        // contract, checked above.  The ordinary latent argmax instead assumes a
+        // complete steady-state target burst.  Account for this accepted clean ACK
+        // now, even though noteArqRoundOutcome() commits the streak later in order to
+        // preserve the callback's single coalesced refill.
+        if (!valid_startup_probe) {
+            const int post_ack_clean_streak = burst_clean_group_streak_ +
+                (accepted_clean_round ? 1 : 0);
+            if (!authorityClimbHasSufficientPayload(
+                    mod, rate, post_ack_clean_streak)) {
+                return;
+            }
+        }
     }
     const uint8_t reason = faster ? v2::ModeChangeReason::CHANNEL_IMPROVED
                                   : v2::ModeChangeReason::CHANNEL_DEGRADED;
     const char* old_mod = modulationToString(data_modulation_);
     const char* old_rate = codeRateToString(data_code_rate_);
-    const bool desc_committed =
-        tryDescriptorModeSwitch(mod, rate, wireSnrDb(), reason);
+    if (valid_startup_probe) {
+        // Arm BEFORE the commit: descriptor switching synchronously refills the file,
+        // so the first target group can reach noteDataBurstKeydown inside
+        // tryDescriptorModeSwitch().
+        tx_latent_startup_probe_active_ = true;
+        tx_latent_startup_probe_airborne_ = false;
+        tx_latent_startup_probe_timeout_rollback_pending_ = false;
+        tx_latent_startup_probe_base_rung_ = current_before_move;
+        LOG_MODEM(INFO,
+                  "Connection: LATENT sender armed one-shot R1/2->R2/3 probe");
+    }
+    // A DOWN command may arrive mid-window.  Descriptor regrid is era-safe there only
+    // with move-epoch enabled; otherwise use the synchronized MODE_CHANGE handshake.
+    bool desc_committed = false;
+    if (!busy || arq_.moveEpochEnabled()) {
+        desc_committed = tryDescriptorModeSwitch(mod, rate, wireSnrDb(), reason);
+    }
     if (!desc_committed) {
-        requestModeChange(mod, rate, wireSnrDb(), reason);
+        // A legacy synchronized launch needs its own give-up semantics. If the peer
+        // applies R2/3 but every control ACK is lost, resuming base-rung DATA would
+        // create a split-geometry session. The timeout path recognizes this reason
+        // and disconnects instead of resuming ambiguous file intents.
+        requestModeChange(
+            mod, rate, wireSnrDb(),
+            valid_startup_probe ? v2::ModeChangeReason::STARTUP_PROBE_BEGIN
+                                : reason);
     }
     tx_authority_last_obeyed_ = cmd_idx;
     LOG_MODEM(INFO, "Connection: RX-AUTHORITY obey %s %s -> %s %s via %s",
@@ -3394,8 +4196,8 @@ void Connection::maybeEscapeStuckFrame() {
 // Collapse-conditioned escape (§RETX_PACING_DESIGN_2026_07_03 §2, behind
 // ULTRA_COLLAPSE_ESCAPE_ROUNDS, default OFF). Polled from the CONNECTED tick beside
 // maybeEscapeStuckFrame — NEVER fired from inside an ARQ callback (an RTO-batch round
-// increments the counter inside the ARQ transmit callback; the escape lands one tick
-// later in a proven-safe context). Zero-DELIVERED evidence: only a whole-window zero
+// increments the counter while its physical batch is staged; the escape lands after
+// arq_.tick unwinds and before that batch is committed). Zero-DELIVERED evidence: only a whole-window zero
 // streak (the g43/rig frozen-base signature) trips it; any progress reset the counter
 // (noteArqRoundOutcome), so a lone straggler amid deliveries cannot (g42-protective).
 void Connection::maybeCollapseEscape() {
@@ -3474,18 +4276,103 @@ bool Connection::retxPacingScopeActive() const {
 // ~3-4 s on the fast-NACK path (deferral bites), ~10+ s on the RTO path (deferral ≈ 0 at
 // Good, correct: the RTO already over-paces that path). Recording is unconditional and
 // behavior-free (a clock read + member store); every DECISION stays knob-gated.
-void Connection::noteDataBurstKeydown(size_t frame_count) {
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || frame_count == 0) {
-        return;
+Connection::PhysicalDataRoundTiming Connection::physicalDataRoundTiming(
+    const std::vector<Bytes>& transmitted_frames) const {
+    PhysicalDataRoundTiming result;
+    // This model is deliberately the 48 kHz wide OFDM encoder geometry.  Narrow OFDM
+    // and MC-DPSK have independent, already-derived RTT policies and must never be
+    // re-timed from wide symbols/anchors.
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP ||
+        transmitted_frames.empty()) {
+        return result;
     }
+
     const uint32_t reanchor_ms =
         connection_policy::shouldUseWideOFDMShortReanchor(
             negotiated_mode_, data_modulation_, fading_index_)
             ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
             : 0;
-    const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
-        data_modulation_, data_code_rate_, frame_count, data_frame_cw_count_,
-        reanchor_ms, selectBurstLiftingZ());
+    // Every one-frame Connection egress uses the standalone on_transmit_ path;
+    // ModemEngine::transmit() resets that encoder path to z=27 because there is
+    // no BURST_HEADER descriptor that could announce z=81 to the receiver.
+    const int fixed_lifting_z =
+        transmitted_frames.size() == 1 ? 27 : selectBurstLiftingZ();
+    uint64_t data_airtime_ms = 0;
+    uint64_t remaining_data_ms = 0;
+    uint32_t max_frame_ms = 0;
+
+    for (size_t i = 0; i < transmitted_frames.size(); ++i) {
+        const auto header = v2::parseHeader(transmitted_frames[i]);
+        int codewords = physicalDataFrameCodewords();
+        int lifting_z = fixed_lifting_z;
+        if (header.valid && !header.is_control && header.total_cw > 0) {
+            codewords = header.total_cw;
+            // StreamingEncoder::encodeFrameBytes routes large variable DATA and
+            // DATA_REPAIR through encodeFrameWithLDPC/encodeInfoCodewordsWithLDPC,
+            // whose wire codewords are always the short z=27 LDPC geometry.
+            if (codewords > v2::kMaxFixedFrameCodewords ||
+                header.type == v2::FrameType::DATA_REPAIR) {
+                lifting_z = 27;
+            }
+        }
+
+        const auto timing = connection_policy::wideOFDMFrameTimingForCodewords(
+            data_modulation_, data_code_rate_, codewords, lifting_z);
+        data_airtime_ms += timing.data_ms;
+        if (i > 0) {
+            remaining_data_ms += timing.data_ms;
+        }
+        max_frame_ms = std::max(max_frame_ms, timing.data_ms);
+        result.total_codewords += static_cast<uint32_t>(std::clamp(codewords, 1, 255));
+        result.max_codewords = std::max<uint8_t>(
+            result.max_codewords, static_cast<uint8_t>(std::clamp(codewords, 1, 255)));
+        if (codewords > v2::kMaxFixedFrameCodewords) {
+            ++result.variable_frames;
+        }
+    }
+
+    // StreamingEncoder emits one full chirp+LTS anchor for every nonempty physical
+    // OFDM turn, including encodeBurstLight's one-frame special case.
+    uint64_t burst_ms = data_airtime_ms +
+                        connection_policy::kWideOFDMFullAnchorExtraMs;
+    if (transmitted_frames.size() > 1) {
+        burst_ms += static_cast<uint64_t>(transmitted_frames.size() - 1) * reanchor_ms;
+    }
+    result.airtime_ms = static_cast<uint32_t>(
+        std::min<uint64_t>(burst_ms, UINT32_MAX));
+    result.ack_timeout_ms =
+        connection_policy::unifiedBurstAckTimeoutFromPhysicalGeometryMs(
+            result.airtime_ms,
+            static_cast<uint32_t>(std::min<uint64_t>(remaining_data_ms, UINT32_MAX)),
+            max_frame_ms,
+            wideOFDMControlModulationForData(data_modulation_),
+            transmitted_frames.size() > 1
+                ? connection_policy::kWideOFDMFullAnchorExtraMs
+                : 0u,
+            reanchor_ms);
+    return result;
+}
+
+uint32_t Connection::noteDataBurstKeydown(
+    const std::vector<Bytes>& transmitted_frames) {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || transmitted_frames.empty()) {
+        return 0;
+    }
+    if (tx_latent_startup_probe_active_ &&
+        coherentRungIndexFor(data_modulation_, data_code_rate_) == kRungIdxQpskR23) {
+        if (tx_latent_startup_probe_airborne_) {
+            // Defense in depth: the staged RTO path below should intercept before a
+            // second target egress. Never silently weaken the one-shot contract.
+            LOG_MODEM(ERROR,
+                      "Connection: invariant violation — second LATENT startup-probe "
+                      "egress reached physical accounting");
+        } else {
+            tx_latent_startup_probe_airborne_ = true;
+            LOG_MODEM(INFO,
+                      "Connection: LATENT startup probe physical group committed");
+        }
+    }
+    const uint32_t airtime_ms = physicalDataRoundTiming(transmitted_frames).airtime_ms;
     // F163 PLAY-HEAD CARRY: the audio device serializes — a burst submitted while
     // the previous one is still (modeled as) airing QUEUES BEHIND it and starts
     // at the previous modeled end, not now. Without the carry, back-to-back
@@ -3502,16 +4389,12 @@ void Connection::noteDataBurstKeydown(size_t frame_count) {
     last_data_burst_end_ = start + std::chrono::milliseconds(airtime_ms);
     last_data_burst_end_valid_ = true;
     if (queue_delay_ms > 0) {
-        // Shift every pending slot's RTO by the queue delay so timers run on the
-        // AIR schedule, not the submit schedule. Pure extension — resending
-        // later than RTO is always protocol-legal; the dangerous direction
-        // (resend while the previous copy is still airing) is what this removes.
-        arq_.deferPendingRetransmits(queue_delay_ms);
         LOG_MODEM(INFO,
-                  "Connection: TX queue-behind %u ms — slot RTOs deferred to the "
-                  "air schedule (burst airtime %u ms)",
+                  "Connection: TX queue-behind %u ms — transmitted-frame deadline "
+                  "will follow the air schedule (burst airtime %u ms)",
                   queue_delay_ms, airtime_ms);
     }
+    return queue_delay_ms;
 }
 
 uint32_t Connection::elapsedSinceLastDataBurstEndMs() const {
@@ -3603,7 +4486,7 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
         }
         zero_progress_rounds_ = 0;
         retx_pace_hold_ms_ = 0;
-        consecutive_escape_drops_ = 0;  // PHASE-3: channel proved alive — descriptor escapes re-enabled
+        consecutive_escape_drops_ = 0;  // channel proved alive — end the silent escape episode
         // GROUP-SIZE LEVER: a CLEAN round = full retire, nothing left in flight
         // (an ack with holes leaves retransmits in flight). Two in a row unlock
         // the escalated 11.5 s ceiling (burstAirtimeBudgetFrames); anything
@@ -3613,7 +4496,8 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
             if (burst_clean_group_streak_ == 2) {
                 LOG_MODEM(INFO,
                           "Connection: GROUP-SIZE streak proven (2 clean rounds) — "
-                          "burst ceiling escalates 8600 -> 11500 ms (N≈8)");
+                          "11.5 s ceiling eligibility now depends on the active-rung/"
+                          "ULTRA_BURST_ESC_STREAK gate");
             }
         } else {
             burst_clean_group_streak_ = 0;  // holey round: keep short key-downs
@@ -4139,7 +5023,8 @@ void Connection::maybeConfirmResponderHandshake(const char* evidence) {
 
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                                       bool all_ok, float quality, uint16_t frame_mask,
-                                      bool interleaved, uint8_t group_size) {
+                                      bool interleaved, uint8_t group_size,
+                                      bool geometry_proven) {
     if (!use_burst_transport_) {
         return;
     }
@@ -4180,12 +5065,15 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
             // reads mask==0 as zero delivered), so popcount/group_size is the measured
             // per-group delivery. Only meaningful with a known group size — pass -1
             // otherwise so the predicate keeps its legacy binary form.
+            const uint8_t delivered_frames = static_cast<uint8_t>(
+                std::min<unsigned>(std::popcount(frame_mask), group_size));
             const float delivered_fraction =
                 (group_size > 0)
-                    ? static_cast<float>(std::popcount(frame_mask)) / static_cast<float>(group_size)
+                    ? static_cast<float>(delivered_frames) / static_cast<float>(group_size)
                     : -1.0f;
             updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0,
-                                     delivered_fraction);
+                                     delivered_fraction, delivered_frames, group_size,
+                                     geometry_proven);
         }
         // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
         // accumulated LOW-level streak — those readings were fade-trough artifacts,
@@ -4225,6 +5113,14 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
             burst_activity_.frames_in_group = static_cast<uint8_t>(Y);
             ++burst_activity_.groups_seen;
         }
+        // onBurstGroupReceived() is invoked only after the streaming decoder has
+        // closed the physical burst.  Keep physical-egress provenance true for
+        // the *whole* logical processing transaction, not just the final
+        // endGroupReceiveAndAck(): a FINAL DATA frame may synchronously emit its
+        // completion SACK from inside processArqFrame().  Labelling that callback
+        // asynchronous makes the headless TNC suppress a causally-safe ACK, which
+        // triggers a duplicate tail and can poison the following file chunk.
+        tone_ack_group_complete_context_ = true;
         arq_.beginGroupReceive();
         for (const auto& frame : frames) {
             auto hdr = v2::parseHeader(frame);
@@ -4241,7 +5137,11 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
             }
             processArqFrame(frame);  // a file-completing frame clears burst_activity_ (wins)
         }
+        // The ARQ emit callback is synchronous.  The provenance bracket began
+        // before frame processing so both FINAL-immediate and boundary SACKs are
+        // identified as causally safe.
         arq_.endGroupReceiveAndAck();
+        tone_ack_group_complete_context_ = false;
         // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3, gated on
         // ULTRA_RX_RATE_CMD): checked AFTER the frames processed — if THIS group carried
         // the era base, the interregnum just ended and no voice is needed. While it
@@ -4254,15 +5154,23 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         if (rx_rate_cmd_enabled_ && arq_.rxWaitingRebase() &&
             kInteractiveToneAckEnabled() && on_transmit_tone_burst_ack_) {
             ultra::waveform::tone_burst_ack::ToneBurstAckPayload voice;
-            voice.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
+            // This is an event identity, not the descriptor's transport group_seq.
+            // Unified BURST_HEADER currently carries group_seq=0 for every physical
+            // group, which made the sender dedup every voice after the first one.
+            // Allocate once at the distinct group-outcome boundary; the front end's
+            // cached RF repeat reuses this already-stamped payload unchanged.
+            voice.group_seq = rebase_voice_event_seq_;
+            rebase_voice_event_seq_ = static_cast<uint8_t>(
+                (rebase_voice_event_seq_ + 1u) & 0x3Fu);
             voice.frame_mask = 0;  // meaningless — consumed whole, never as a SACK
             voice.type = ultra::waveform::tone_burst_ack::AckType::Nack;
             voice.rung_cmd = ultra::waveform::tone_burst_ack::kRungCmdReserved;  // 3
             LOG_MODEM(WARN,
                       "Connection: WAITING-REBASE — voicing unanchored state to the "
-                      "sender (group_seq=%u)",
-                      group_seq);
-            on_transmit_tone_burst_ack_(voice);
+                      "sender (event_seq=%u, descriptor_group_seq=%u)",
+                      static_cast<unsigned>(voice.group_seq),
+                      static_cast<unsigned>(group_seq));
+            on_transmit_tone_burst_ack_(voice, /*inbound_group_complete=*/true);
         }
         return;
     }
@@ -4284,6 +5192,22 @@ void Connection::sendNextFragment() {
     // unified OFDM path, preserving legacy fill-the-window message behavior.
     const size_t burst_frame_cap = prepareUnifiedBurstWindow();
     size_t submitted_this_call = 0;
+    size_t retransmitted_frames = 0;
+
+    // STOP-AND-WAIT parity with the file path: a tone SACK ends the previous physical
+    // turn and identifies any holes. Put those repairs at the front of this turn, then
+    // use the remaining airtime budget for new fragments. This also handles the tail
+    // case where next_fragment_idx_ already reached the end and only one hole remains.
+    if (is_ofdm && kUnifiedSeqEnabled() && burst_mode_active_) {
+        retransmitted_frames =
+            arq_.retransmitInFlightUnacked(burst_frame_cap);
+        submitted_this_call = retransmitted_frames;
+        if (deferred_arq_failure_abort_) {
+            burst_mode_active_ = false;
+            burst_tx_buffer_.clear();
+            return;
+        }
+    }
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
         if (submitted_this_call >= burst_frame_cap) {
             break;  // one budget-sized group per burst (unified path)
@@ -4332,7 +5256,7 @@ void Connection::sendNextFragment() {
     // Flush burst buffer
     if (is_ofdm && on_transmit_burst_) {
         burst_mode_active_ = false;
-        flushBurstBuffer();
+        flushBurstBuffer(retransmitted_frames > 0);
     }
 }
 
@@ -4340,7 +5264,8 @@ void Connection::sendNextFragment() {
 // FRAME DISPATCHING
 // =============================================================================
 
-void Connection::onFrameReceived(const Bytes& frame_data) {
+void Connection::onFrameReceived(const Bytes& frame_data,
+                                 bool physical_turn_complete) {
     if (frame_data.size() < 2) {
         return;
     }
@@ -4513,25 +5438,66 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                 maybeReassertFileCancelForStaleData();
                 return;
             }
-            processArqFrame(frame_data);
+            if (physical_turn_complete) {
+                // The classic path can carry either a full-anchored singleton or
+                // the CRC-protected final member recovered after descriptor/head
+                // loss. The decoder proved the physical turn is over in both
+                // cases. Recreate the same logical group transaction used by
+                // onBurstGroupReceived so the cumulative window (including prior
+                // orphan DATA), duplicates, and FINAL each emit exactly one SACK
+                // with safe reverse-egress provenance.
+                // No exact group k/M reaches this classic tail path.  Never let an
+                // outstanding startup UP command hitch a ride on its ACK.
+                failClosedLatentStartupProbeUnknown("classic physical tail");
+                tone_ack_group_complete_context_ = true;
+                arq_.beginGroupReceive();
+                processArqFrame(frame_data);
+                arq_.endGroupReceiveAndAck();
+                tone_ack_group_complete_context_ = false;
+            } else {
+                processArqFrame(frame_data);
+            }
         }
     }
 }
 
-void Connection::noteAnchoredBurstNoGroup() {
+void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     if (state_ != ConnectionState::CONNECTED || !use_burst_transport_ ||
         !kUnifiedSeqEnabled()) {
         return;
     }
     LOG_MODEM(WARN,
-              "Connection: ANCHORED-BURST BACKSTOP — re-confirm ack + crater "
-              "verdict for an anchored burst that framed no group");
+              "Connection: ANCHORED-BURST BACKSTOP — re-confirm ack; "
+              "payload_seen=%d group geometry unavailable",
+              payload_seen ? 1 : 0);
+    // This timer/backstop has no wire-proven group geometry.  Clear a standing startup
+    // probe command before every ACK variant, including payload_seen=true where the
+    // selector observation itself is intentionally withheld.
+    failClosedLatentStartupProbeUnknown("anchored no-group backstop");
     // Crater verdict BEFORE the ack so the command rides it (same ordering as
-    // onBurstGroupReceived).
-    if (rxRateAuthorityEnabled()) {
+    // onBurstGroupReceived). A decoded fallback payload makes k=0 false, while
+    // the lost descriptor leaves M unknowable; skip the selector observation
+    // rather than inventing the latent controller's fallback 0/5 sample.
+    if (rxRateAuthorityEnabled() &&
+        connection_policy::shouldGradeAnchoredBackstopAsCrater(payload_seen)) {
         updateRxAuthorityCommand(/*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/true);
+    } else if (payload_seen) {
+        LOG_MODEM(INFO,
+                  "Connection: ANCHORED-BURST selector observation withheld — "
+                  "fallback DATA decoded but exact group k/M is unknown");
     }
+    // This is a TIMER backstop, not a synchronous physical group boundary.  Its
+    // 14.6 s deadline can expire after the peer has already started a new burst;
+    // live IONOS logs caught two such ACKs erasing the head descriptors of the
+    // recovery turns.  Keep asynchronous provenance so the frontend's CCA,
+    // recent-RX, and decoder-air gates can defer/drop it safely.  A real group or
+    // standalone physical completion uses the explicitly-safe paths instead.
+    tone_ack_group_complete_context_ = false;
     arq_.endGroupReceiveAndAck();
+}
+
+void Connection::noteBurstOutcomeUnknown() {
+    failClosedLatentStartupProbeUnknown("decoder abandoned unproven marker");
 }
 
 void Connection::processArqFrame(const Bytes& frame_data) {
@@ -4714,10 +5680,112 @@ void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
               sync_correlation);
 }
 
+bool Connection::drainDeferredArqFailureAbort() {
+    if (!deferred_arq_failure_abort_) {
+        return false;
+    }
+
+    const bool failed_file =
+        file_transfer_.getState() == FileTransferState::SENDING;
+    const bool failed_fragment_batch = !pending_tx_fragments_.empty();
+    const uint16_t failed_seq = deferred_arq_failure_seq_;
+
+    // Resolve every status record owned by the active logical fragment batch, but do
+    // not invoke application code while iterating the live deque. A FAILED callback is
+    // allowed to synchronously send/reset/disconnect; publishing from local copies only
+    // after ARQ retirement and epoch bump makes that reentrancy safe.
+    std::vector<OutboundMessageTxRecord> failed_message_records;
+    for (auto it = outbound_message_tx_records_.begin();
+         it != outbound_message_tx_records_.end();) {
+        const bool failed_seq_belongs_to_record =
+            deferred_arq_failure_seq_valid_ && it->first_seq_valid &&
+            (failed_seq == it->first_seq ||
+             failed_seq == it->last_seq ||
+             (seqBefore(it->first_seq, failed_seq) &&
+              seqBefore(failed_seq, it->last_seq)));
+        const bool belongs_to_active_fragment_batch =
+            std::find(pending_tx_fragment_message_tokens_.begin(),
+                      pending_tx_fragment_message_tokens_.end(),
+                      it->token) != pending_tx_fragment_message_tokens_.end();
+        if (!it->terminal_reported &&
+            (failed_seq_belongs_to_record || belongs_to_active_fragment_batch)) {
+            it->terminal_reported = true;
+            failed_message_records.push_back(*it);
+            it = outbound_message_tx_records_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    deferred_file_refill_ = false;
+    deferred_fragment_refill_ = false;
+    burst_mode_active_ = false;
+    burst_tx_buffer_.clear();
+
+    // The failed slot was retired before this post-callback drain. Force a fresh
+    // move epoch even if it was the only live slot, so the next DATA frame carries
+    // EPOCH_REBASE and the peer can skip the deliberately abandoned sequence.
+    arq_.abortPendingTx(/*force_move_epoch_bump=*/true);
+
+    const bool must_disconnect = failed_file || !arq_.moveEpochEnabled();
+
+    // Clear logical-transfer state before publishing any external callback. A callback
+    // can now enqueue a new message safely: the old slots are gone, the epoch has
+    // already advanced, and no outer iterator references application-owned state.
+    if (failed_fragment_batch) {
+        const size_t remaining =
+            next_fragment_idx_ < pending_tx_fragments_.size()
+                ? pending_tx_fragments_.size() - next_fragment_idx_
+                : 0;
+        LOG_MODEM(WARN,
+                  "Connection: Fragment send failed, aborting remaining %zu fragments",
+                  remaining);
+    }
+    pending_tx_fragments_.clear();
+    pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
+    next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
+
+    deferred_arq_failure_abort_ = false;
+    deferred_arq_failure_seq_valid_ = false;
+
+    if (must_disconnect && state_ == ConnectionState::CONNECTED) {
+        // Without the negotiated move-epoch wire semantics there is no safe way to
+        // continue DATA after abandoning a sequence the peer never received. A failed
+        // FILE also requires a disconnect: move-epoch resets ARQ, but the peer's file
+        // assembler remains RECEIVING and would reject the next FILE_START.
+        LOG_MODEM(ERROR, "Connection: Terminal ARQ %s failure%s; disconnecting to "
+                         "reset peer transfer and sequence state",
+                  failed_file ? "FILE" : "DATA",
+                  arq_.moveEpochEnabled() ? "" : " with MOVE-EPOCH disabled");
+        disconnect();
+    } else {
+        LOG_MODEM(ERROR,
+                  "Connection: Terminal ARQ failure aborted the remaining logical "
+                  "TX window; next DATA will rebase at move-epoch %u",
+                  static_cast<unsigned>(arq_.txMoveEpoch()));
+    }
+
+    for (auto& record : failed_message_records) {
+        emitMessageTxStatus(record, MessageTxStatus::FAILED);
+    }
+
+    if (failed_file) {
+        file_transfer_.onSendFailed();
+    } else if (on_message_sent_) {
+        on_message_sent_(false);
+    }
+    return true;
+}
+
 void Connection::runDeferredArqRefill() {
     if (arq_callback_defer_refill_) {
         return;
     }
+
+    drainDeferredArqFailureAbort();
 
     if (mode_change_pending_) {
         return;
@@ -4750,12 +5818,23 @@ void Connection::runDeferredArqRefill() {
 
     if (refill_file && file_transfer_.getState() == FileTransferState::SENDING) {
         sendNextFileChunk();
+        if (drainDeferredArqFailureAbort()) {
+            sendNextQueuedPayloadIfReady();
+            return;
+        }
     }
 
+    const bool fragment_hole_remains =
+        !pending_tx_fragments_.empty() && arq_.getTxInFlightBytes() > 0;
     if (refill_fragments &&
         !pending_tx_fragments_.empty() &&
-        next_fragment_idx_ < pending_tx_fragments_.size()) {
+        (next_fragment_idx_ < pending_tx_fragments_.size() ||
+        fragment_hole_remains)) {
         sendNextFragment();
+        if (drainDeferredArqFailureAbort()) {
+            sendNextQueuedPayloadIfReady();
+            return;
+        }
     }
 
     sendNextQueuedPayloadIfReady();
@@ -4764,6 +5843,38 @@ void Connection::runDeferredArqRefill() {
 // =============================================================================
 // TIMER / TICK
 // =============================================================================
+
+bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
+    if (!disconnect_pending_) {
+        return false;
+    }
+
+    if (elapsed_ms >= disconnect_pending_ms_) {
+        const bool crossed_close = state_ == ConnectionState::DISCONNECTING;
+        disconnect_pending_ = false;
+        disconnect_pending_ms_ = 0;
+        disconnect_ack_retransmit_ms_ = 0;
+        disconnect_ack_frame_.clear();
+        enterDisconnected(crossed_close ? "Mutual disconnect complete"
+                                        : "Remote disconnected");
+        return true;
+    }
+    disconnect_pending_ms_ -= elapsed_ms;
+
+    // Proactively re-send ACK periodically because the first copy may fade.
+    if (!disconnect_ack_frame_.empty()) {
+        if (elapsed_ms >= disconnect_ack_retransmit_ms_) {
+            disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+            LOG_MODEM(INFO,
+                      "Connection: Re-sending disconnect ACK (proactive, %dms remaining)",
+                      disconnect_pending_ms_);
+            transmitFrame(disconnect_ack_frame_);
+        } else {
+            disconnect_ack_retransmit_ms_ -= elapsed_ms;
+        }
+    }
+    return false;
+}
 
 void Connection::tick(uint32_t elapsed_ms) {
     soft_combine_harq_.tick(elapsed_ms);
@@ -4818,8 +5929,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                                         config_.mode_capabilities,
                                                                         static_cast<uint8_t>(config_.preferred_mode),
-                                                                        static_cast<uint8_t>(config_.forced_modulation),
-                                                                        static_cast<uint8_t>(config_.forced_code_rate),
+                                                                        static_cast<uint8_t>(outbound_forced_modulation_),
+                                                                        static_cast<uint8_t>(outbound_forced_code_rate_),
                                                                         config_.forced_cw_count);
                     transmitFrame(connect_frame.serialize());
                     timeout_remaining_ms_ = connectRetryIntervalMs();
@@ -5004,62 +6115,89 @@ void Connection::tick(uint32_t elapsed_ms) {
                 // keyed: hold the deadline (neither decrement nor fire)
             } else if (mode_change_pending_) {
                 if (elapsed_ms >= mode_change_timeout_ms_) {
-                    mode_change_retry_count_++;
-                    if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
-                        LOG_MODEM(WARN,
-                                  "Connection: MODE_CHANGE ACK unresolved after %d retries; keeping current %s %s because peer ACK was not proven",
-                                  MODE_CHANGE_MAX_RETRIES,
-                                  modulationToString(data_modulation_),
-                                  codeRateToString(data_code_rate_));
-                        mode_change_pending_ = false;
-                        mode_change_timeout_ms_ = 0;
-                        mode_change_retry_count_ = 0;
-                        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-                        runDeferredArqRefill();
+                    // A MODE_CHANGE retry is a new half-duplex key-down.  Even after
+                    // its control-geometry deadline expires, never launch it over a
+                    // reverse ACK (or any other inbound signal).  Poll again after the
+                    // existing carrier-sense coalesce interval without consuming retry
+                    // budget; an unwired provider keeps the headless/test behavior.
+                    if (channel_busy_query_ && channel_busy_query_()) {
+                        mode_change_timeout_ms_ =
+                            connection_policy::kCarrierSenseSackCoalesceMs;
+                        LOG_MODEM(DEBUG,
+                                  "Connection: MODE_CHANGE retry due but channel busy; "
+                                  "holding retry budget for %ums",
+                                  mode_change_timeout_ms_);
                     } else {
-                        LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
-                                  mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);
-                        // Resend MODE_CHANGE with same parameters (incl. CW)
-                        auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
-                                                                       mode_change_seq_, pending_modulation_,
-                                                                       pending_code_rate_, pending_snr_db_,
-                                                                       pending_fading_index_,
-                                                                       pending_reason_,
-                                                                       pending_cw_count_,
-                                                                       pending_ladder_rung_id_);
-                        transmitFrame(frame.serialize());
-                        mode_change_timeout_ms_ = modeChangeRetryMs();
+                        mode_change_retry_count_++;
+                        if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
+                            const bool startup_probe_control =
+                                pending_reason_ ==
+                                    v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT ||
+                                pending_reason_ ==
+                                    v2::ModeChangeReason::STARTUP_PROBE_BEGIN;
+                            LOG_MODEM(WARN,
+                                      "Connection: MODE_CHANGE ACK unresolved after %d retries; keeping current %s %s because peer ACK was not proven",
+                                      MODE_CHANGE_MAX_RETRIES,
+                                      modulationToString(data_modulation_),
+                                      codeRateToString(data_code_rate_));
+                            mode_change_pending_ = false;
+                            mode_change_timeout_ms_ = 0;
+                            mode_change_retry_count_ = 0;
+                            pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+                            // Old-geometry timeout intents were suspended while the
+                            // synchronized exchange owned egress. The peer never confirmed
+                            // the switch, so make those exact live slots promptly eligible
+                            // again at the retained geometry.
+                            if (startup_probe_control) {
+                                // For BEGIN, the peer may already have applied R2/3 even
+                                // though every ACK was lost; for TIMEOUT, resuming these
+                                // intents would put a second unACKed target group on air.
+                                // In both cases peer geometry is ambiguous. If robust
+                                // control diversity cannot synchronize the episode, reset
+                                // the session instead of resuming split-rung DATA.
+                                LOG_MODEM(ERROR,
+                                          "Connection: startup-probe control could not "
+                                          "be confirmed; refusing ambiguous DATA intents "
+                                          "and disconnecting (reason=%u)",
+                                          pending_reason_);
+                                disconnect();
+                            } else {
+                                arq_.resumeDeferredTimeoutRetransmits(/*timeout_ms=*/1);
+                                runDeferredArqRefill();
+                            }
+                        } else {
+                            LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
+                                      mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);
+                            // Resend MODE_CHANGE with same parameters (incl. CW)
+                            auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
+                                                                           mode_change_seq_, pending_modulation_,
+                                                                           pending_code_rate_, pending_snr_db_,
+                                                                           pending_fading_index_,
+                                                                           pending_reason_,
+                                                                           pending_cw_count_,
+                                                                           pending_ladder_rung_id_);
+                            transmitFrame(frame.serialize());
+                            mode_change_timeout_ms_ = modeChangeRetryMs();
+                        }
                     }
                 } else {
                     mode_change_timeout_ms_ -= elapsed_ms;
                 }
             }
 
-            // Disconnect grace period (responder side): stay connected and
-            // proactively re-send ACK until initiator confirms (goes silent)
-            if (disconnect_pending_) {
-                if (elapsed_ms >= disconnect_pending_ms_) {
-                    disconnect_pending_ = false;
-                    disconnect_ack_frame_.clear();
-                    enterDisconnected("Remote disconnected");
-                    break;
-                }
-                disconnect_pending_ms_ -= elapsed_ms;
-
-                // Proactively re-send ACK periodically (fading may have lost it)
-                if (!disconnect_ack_frame_.empty()) {
-                    if (elapsed_ms >= disconnect_ack_retransmit_ms_) {
-                        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
-                        LOG_MODEM(INFO, "Connection: Re-sending disconnect ACK (proactive, %dms remaining)",
-                                  disconnect_pending_ms_);
-                        transmitFrame(disconnect_ack_frame_);
-                    } else {
-                        disconnect_ack_retransmit_ms_ -= elapsed_ms;
-                    }
-                }
+            // Responder grace: stay connected long enough to make the ACK robust.
+            if (tickDisconnectResponderGrace(elapsed_ms)) {
+                break;
             }
 
+            arq_tick_in_progress_ = true;
             arq_.tick(elapsed_ms);
+            arq_tick_in_progress_ = false;
+            if (drainDeferredArqFailureAbort() &&
+                state_ != ConnectionState::CONNECTED) {
+                break;
+            }
+            handleLatentStartupProbeTimeoutRollback();
 
             // KEEPALIVE ACK (BUG-ANCHOR-WAIT-NO-ACK-STALL, ULTRA_KEEPALIVE_ACK,
             // default off): break the 44 s RTO stall when marginal bursts get
@@ -5125,14 +6263,25 @@ void Connection::tick(uint32_t elapsed_ms) {
             maybeEscapeStuckFrame();
             // §RETX-PACING §2: the collapse-conditioned escape is POLLED here (proven-safe
             // context, same as maybeEscapeStuckFrame) — rounds counted inside the ARQ
-            // transmit callback (RTO batch) escape one tick later, never re-entrantly.
+            // transmit callback (RTO batch) and act after ARQ unwinds, never re-entrantly.
             maybeCollapseEscape();
+            // The timeout batch was serialized by ARQ before these escape decisions, but
+            // has not gone on air. Commit it only if the rung/geometry is still current;
+            // otherwise the mode-change refill owns the next physical turn.
+            flushStagedArqTimeoutBatch();
             maybeYieldDataTurn();
             runDeferredArqRefill();
             sendNextQueuedPayloadIfReady();
             break;
 
         case ConnectionState::DISCONNECTING:
+            // Mutual close: once the peer's own DISCONNECT is decoded, its close
+            // intent is conclusive. Keep its ACK alive for one responder grace
+            // window and suppress our phase-locked local DISCONNECT retries.
+            if (disconnect_pending_) {
+                (void)tickDisconnectResponderGrace(elapsed_ms);
+                break;
+            }
             if (elapsed_ms >= timeout_remaining_ms_) {
                 LOG_MODEM(INFO, "Connection: Disconnect timeout, forcing disconnect");
                 enterDisconnected("Disconnect timeout");
@@ -5405,29 +6554,58 @@ uint32_t Connection::modeChangeRetryMs() const {
         return env_pin;
     }
 
-    // Airtime-only RTT (2x anchor+ctl + coalesce) UNDER-budgets the real exchange:
-    // the peer cannot ACK until it drains its RX decode backlog (it may be
-    // mid-burst-decode when the MODE_CHANGE lands), and each too-early retry keys
-    // down half-duplex ON TOP of the ACK in flight — rig W5 (first run at the
-    // airtime-only ~5 s timer): 72 MODE_CHANGE receptions, moves never committed,
-    // livelock. Floor at HALF the unified burst ACK deadline: that deadline's
-    // non-airtime half models exactly the receiver decode/SACK-hold budget, and
-    // both terms stay ratiometric (scale with mod/rate/window). Empirically ~9 s
-    // wideband — above every clean rig ACK RTT (W1-W4: all ACKs < 18.5 s, most
-    // first-try), half the old full-deadline borrow.
+    // Airtime-only RTT (2x anchor+ctl + coalesce) under-budgets the real exchange:
+    // USB/CoreAudio buffering and decode scheduling are material on a half-duplex
+    // control round.  But borrowing arq_.getAckTimeout() is the opposite error: that
+    // scalar is sized for the ENTIRE current DATA window (44.75 s at QPSK R2/3,
+    // window 16), although MODE_CHANGE and ACK are each one hardened 1-CW control
+    // frame. fixed_default_03 measured exactly that coupling: key-up at 317.337 s,
+    // retry at 362.098 s, while the peer had sent all ACK copies by 324.931 s.
     const uint64_t control_round_trip_ms =
         2ULL * static_cast<uint64_t>(dataTurnControlGuardMs()) +
         static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
-    // 2026-07-03 rig bisect W5/W5b/W6: HALF the deadline (~9 s) still stalled
-    // transfers (retries keyed onto ACKs still being produced while the peer
-    // drained its decode backlog); the FULL deadline ran clean (W6: 1.88 kbps,
-    // 5 MC receptions). The full burst deadline IS the ratiometric bound the
-    // user asked for — it scales with mod/rate/window — and the peer may
-    // legitimately not ACK until the whole outstanding burst is processed.
-    // What survives of the fast-timer work: the 4-retry budget and the env pin.
-    const uint64_t decode_backlog_floor_ms = arq_.getAckTimeout();
+
+    // Wide OFDM already has a field-proven one-physical-frame timing policy with
+    // the required audio/decode margin and an 8 s floor.  Evaluate that policy at
+    // the actual control profile (QPSK/DQPSK R1/4, one frame, one CW), rather than
+    // at the current DATA modulation/rate/window.  At the production QPSK control
+    // geometry this is 8,000 ms: safely above the observed 3.85-5.06 s key-up->ACK
+    // decode paths, yet 5.6x shorter than the unrelated 44.75 s DATA-window scalar.
+    uint64_t control_decode_floor_ms = control_round_trip_ms;
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        const Modulation control_mod =
+            wideOFDMControlModulationForData(data_modulation_);
+        control_decode_floor_ms = connection_policy::computeWideOFDMAckTimeoutMs(
+            control_mod,
+            CodeRate::R1_4,
+            /*window_size=*/1,
+            connection_policy::kCarrierSenseSackCoalesceMs,
+            /*ack_repeat_count=*/1,
+            /*cw_count=*/1);
+    } else {
+        // Narrow OFDM and MC-DPSK retain their separately-derived DATA deadline;
+        // this fix is deliberately scoped to the measured wide-OFDM transaction.
+        control_decode_floor_ms =
+            std::max<uint64_t>(control_decode_floor_ms, arq_.getAckTimeout());
+    }
+
+    // A lost transaction is fade-conditioned.  Space the sender's next REQUEST
+    // by at least one coherence interval, capped by the existing 8 s trough-pacing
+    // engineering bound so an implausibly slow/noisy estimate cannot recreate the
+    // old multi-tens-of-seconds freeze.  Standard Good/Moderate/Poor design Dopplers
+    // yield Tc=4230/846/423 ms, all already covered by the 8 s control floor.
+    const float retry_doppler_hz = connection_policy::retxTroughDopplerHz(
+        coherence_doppler_hz_, fading_index_, coherence_score_, coherence_valid_);
+    const uint32_t coherence_ms = connection_policy::coherenceTimeMsForDoppler(
+        retry_doppler_hz);
+    const uint64_t decorrelation_floor_ms = std::min<uint32_t>(
+        coherence_ms, connection_policy::kRetxTroughDeferAbsCapMs);
+
     return static_cast<uint32_t>(std::min<uint64_t>(
-        std::max(control_round_trip_ms, decode_backlog_floor_ms), 0xFFFFFFFFull));
+        std::max({control_round_trip_ms,
+                  control_decode_floor_ms,
+                  decorrelation_floor_ms}),
+        0xFFFFFFFFull));
 }
 
 void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ack_seq) {
@@ -5435,14 +6613,7 @@ void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ac
         return;
     }
 
-    // The MODE_CHANGE ACK is the ONE control ACK that still rides the fragile
-    // 1-CW control path AND gates every rate move — but it inherited the DATA
-    // ack-repeat count, which the tone-ACK path dials to 1 (kWideOFDMAckRepeat
-    // = interactive ? 1 : 3). One lost ~1.4 s copy in a trough = a full-deadline
-    // (~18.5 s) sender retry; rig measured up to 5 receptions per climb. Decouple:
-    // on a fading channel send staggered repeats (the scheduler below already
-    // exists and early-returned at count 1); AWGN-class keeps the single copy.
-    // ULTRA_MC_ACK_REPEATS [1..3] pins for A/B.
+    // ULTRA_MC_ACK_REPEATS [1..3] pins the full-control ACK-copy count for A/B.
     static const int env_pin = [] {
         if (const char* e = std::getenv("ULTRA_MC_ACK_REPEATS")) {
             const int n = std::atoi(e);
@@ -5450,9 +6621,14 @@ void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ac
         }
         return 0;
     }();
-    const int fading_aware = fading_index_ >= kFadingAwgnMax ? 3 : 1;
-    const int repeat_count =
-        env_pin > 0 ? env_pin : std::max(arq_.getAckRepeatCount(), fading_aware);
+    // Default to one immediate ACK.  The old fading default sent copies 2/3 at
+    // roughly 0.25/0.83 s; fixed_default_03 measured fD=0.181 Hz (Tc=2.34 s),
+    // so all three occupied the same fade and all three were lost together.  The
+    // pending sender's 8 s CCA-gated REQUEST retry now supplies real time diversity,
+    // and the existing duplicate path returns exactly one fresh ACK.  Keeping late
+    // receiver-side copies would also risk keying over DATA after copy 1 succeeded.
+    // ULTRA_MC_ACK_REPEATS remains available for explicit A/B experiments.
+    const int repeat_count = env_pin > 0 ? env_pin : 1;
     if (repeat_count <= 1) {
         return;
     }
@@ -5515,7 +6691,13 @@ void Connection::tickModeChangeAckRepeats(uint32_t elapsed_ms) {
 
 void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
-    arq_.setFixedFrameCodewords(data_frame_cw_count_);
+    const int physical_data_cw = physicalDataFrameCodewords();
+    const int physical_data_z = selectBurstLiftingZ();
+    // Fixed DATA serialization and the PHY descriptor must consume the same
+    // (cw, Z) tuple. Passing only cw here used makeFixedDataFrame's default
+    // Z=27, silently truncating cw4/Z81 file chunks from 629 to 216 bytes while
+    // BURST_HEADER correctly announced Z=81 to the receiver.
+    arq_.setFixedFrameGeometry(physical_data_cw, physical_data_z);
     arq_.setAckBatchThroughMoreFrag(false);
     arq_.setSackDelaySlidesOnData(false);
 
@@ -5639,7 +6821,8 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
-            data_modulation_, data_code_rate_, data_frame_cw_count_);
+            data_modulation_, data_code_rate_, physical_data_cw,
+            physical_data_z);
         const auto control_timing = connection_policy::wideOFDMFrameTiming(
             wideOFDMControlModulationForData(data_modulation_), CodeRate::R1_4);
         const bool adaptive_short_reanchor =
@@ -5653,7 +6836,7 @@ void Connection::configureArqForCurrentDataMode() {
             control_timing.ack_ms + continuation_reanchor_ms;
         const uint32_t burst_airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
-            data_frame_cw_count_, continuation_reanchor_ms);
+            physical_data_cw, continuation_reanchor_ms, physical_data_z);
         // ACK diversity (repeat the ack N times) protects a single fade-lost ack on a
         // SACK-frame path. The tone-burst group-ack is different: it fires ONE prompt ack
         // per received burst, and a lost ack is already backstopped by the sender's ARQ
@@ -5661,11 +6844,13 @@ void Connection::configureArqForCurrentDataMode() {
         // keys the receiver down for ~5 s of redundant acks (deaf to the sender that whole
         // time) — the "4-5 ack chain" the operator saw. So: ONE ack on the tone-burst path.
         const int kWideOFDMAckRepeatCount = kInteractiveToneAckEnabled() ? 1 : 3;
-        const uint32_t physical_sack_hold_ms = connection_policy::wideOFDMSackDelayMs(
-            data_modulation_, data_code_rate_, arq_.getWindowSize(),
-            data_frame_cw_count_, continuation_reanchor_ms);
-        const uint32_t sack_delay_ms = connection_policy::wideOFDMSlidingSackDelayMs(
-            data_modulation_, data_code_rate_, data_frame_cw_count_);
+        const uint32_t physical_sack_hold_ms = burst_airtime_ms +
+            connection_policy::kCarrierSenseSackCoalesceMs;
+        const uint64_t sliding_sack_delay_ms =
+            static_cast<uint64_t>(timing.data_ms) + timing.ack_ms +
+            connection_policy::kCarrierSenseSackCoalesceMs;
+        const uint32_t sack_delay_ms = static_cast<uint32_t>(
+            std::min<uint64_t>(sliding_sack_delay_ms, UINT32_MAX));
         arq_.setSackDelay(adaptive_short_reanchor ? physical_sack_hold_ms : sack_delay_ms);
         arq_.setSackDelayShort(connection_policy::wideOFDMSackTailDelayMs());
         arq_.setSackDelaySlidesOnData(!adaptive_short_reanchor);
@@ -5675,14 +6860,16 @@ void Connection::configureArqForCurrentDataMode() {
             adaptive_short_reanchor ? 0 : arq_.getSackDelay());
         arq_.setAckRepeatDelay(ackRepeatDelayForControlAirtimeMs(control_ack_airtime_ms));
 
-        uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
-            data_modulation_,
-            data_code_rate_,
-            arq_.getWindowSize(),
-            arq_.getSackDelay(),
-            kWideOFDMAckRepeatCount,
-            data_frame_cw_count_,
-            continuation_reanchor_ms);
+        uint32_t ack_timeout_ms = physical_data_z == 81
+            ? connection_policy::unifiedBurstAckTimeoutMs(
+                  data_modulation_, data_code_rate_, physical_data_cw,
+                  arq_.getWindowSize(), physical_data_z,
+                  wideOFDMControlModulationForData(data_modulation_),
+                  arq_.getSackDelay(), continuation_reanchor_ms)
+            : connection_policy::computeWideOFDMAckTimeoutMs(
+                  data_modulation_, data_code_rate_, arq_.getWindowSize(),
+                  arq_.getSackDelay(), kWideOFDMAckRepeatCount,
+                  physical_data_cw, continuation_reanchor_ms);
         const uint32_t ack_repeat_tail_ms =
             selective_repeat_arq_policy::ackRepeatTailGuardMs(
                 control_ack_airtime_ms,
@@ -5715,18 +6902,24 @@ void Connection::configureArqForCurrentDataMode() {
                 arq_.getWindowSize(), selective_repeat_arq_policy::kMaxWindow);
             uint32_t table[selective_repeat_arq_policy::kMaxWindow + 1] = {};
             for (size_t n = 1; n <= win; ++n) {
-                const uint32_t sack_hold_n = connection_policy::wideOFDMSackDelayMs(
-                    data_modulation_, data_code_rate_, n, data_frame_cw_count_,
-                    continuation_reanchor_ms);
-                uint32_t t = connection_policy::computeWideOFDMAckTimeoutMs(
-                    data_modulation_, data_code_rate_, n,
-                    adaptive_short_reanchor ? sack_hold_n : sack_delay_ms,
-                    kWideOFDMAckRepeatCount, data_frame_cw_count_,
-                    continuation_reanchor_ms);
+                const uint32_t burst_n = connection_policy::wideOFDMBurstAirtimeMs(
+                    data_modulation_, data_code_rate_, n, physical_data_cw,
+                    continuation_reanchor_ms, physical_data_z);
+                const uint32_t sack_hold_n = burst_n +
+                    connection_policy::kCarrierSenseSackCoalesceMs;
+                uint32_t t = physical_data_z == 81
+                    ? connection_policy::unifiedBurstAckTimeoutMs(
+                          data_modulation_, data_code_rate_, physical_data_cw, n,
+                          physical_data_z,
+                          wideOFDMControlModulationForData(data_modulation_),
+                          adaptive_short_reanchor ? sack_hold_n : sack_delay_ms,
+                          continuation_reanchor_ms)
+                    : connection_policy::computeWideOFDMAckTimeoutMs(
+                          data_modulation_, data_code_rate_, n,
+                          adaptive_short_reanchor ? sack_hold_n : sack_delay_ms,
+                          kWideOFDMAckRepeatCount, physical_data_cw,
+                          continuation_reanchor_ms);
                 if (adaptive_short_reanchor) {
-                    const uint32_t burst_n = connection_policy::wideOFDMBurstAirtimeMs(
-                        data_modulation_, data_code_rate_, n, data_frame_cw_count_,
-                        continuation_reanchor_ms);
                     const uint64_t covered_n =
                         static_cast<uint64_t>(burst_n) +
                         static_cast<uint64_t>(sack_hold_n) +
@@ -5747,7 +6940,7 @@ void Connection::configureArqForCurrentDataMode() {
         }
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums/control=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums, sack_slides=%d, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, ack_repeat_delay=%ums, ack_repeat_guard=%ums, cw=%d, continuation_reanchor=%ums (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums/control=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums, sack_slides=%d, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, ack_repeat_delay=%ums, ack_repeat_guard=%ums, cw=%d, z=%d, continuation_reanchor=%ums (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
@@ -5764,7 +6957,8 @@ void Connection::configureArqForCurrentDataMode() {
                   kWideOFDMAckRepeatCount,
                   arq_.getAckRepeatDelay(),
                   arq_.getAckRepeatPeerBurstGuardMs(),
-                  data_frame_cw_count_,
+                  physical_data_cw,
+                  physical_data_z,
                   continuation_reanchor_ms,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
@@ -5775,7 +6969,8 @@ void Connection::configureArqForCurrentDataMode() {
 
 void Connection::configureSoftCombineHARQBounds() {
     const size_t max_entries = arq_.getWindowSize() *
-        static_cast<size_t>(v2::sanitizeFixedFrameCodewords(data_frame_cw_count_));
+        static_cast<size_t>(v2::sanitizeFixedFrameCodewords(
+            physicalDataFrameCodewords()));
     soft_combine_harq_.setMaxEntries(max_entries);
 }
 
@@ -5795,10 +6990,129 @@ bool Connection::usesBoundedVariableMCDPSKFrames() const {
     return negotiated_mode_ == WaveformMode::MC_DPSK;
 }
 
-int Connection::selectBurstLiftingZ() const {
-    // ULTRA_LDPC_Z is the SINGLE discovery override (force long LDPC for sweeps).
-    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-        if (std::atoi(env) == 81) return 81;
+bool Connection::usesExperimental8PSKLongLDPCFor(
+    Modulation mod, CodeRate rate, int logical_cw) const {
+    // Exact capacity/airtime substitution only: 12 short codewords and four
+    // long codewords both carry 7776 coded bits, and at R2/3 both expose the
+    // same 648 information bytes before the fixed-frame overhead.  Do not
+    // silently reinterpret an operator-forced or coherence-shortened CW count.
+    return experimental_8psk_long_ldpc_transfer_active_ &&
+           negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+           use_burst_transport_ &&
+           config_.forced_cw_count == 0 &&
+           mod == Modulation::QAM8 &&
+           rate == CodeRate::R2_3 &&
+           logical_cw == 12;
+}
+
+bool Connection::usesExperimental8PSKLongLDPC() const {
+    return usesExperimental8PSKLongLDPCFor(
+        data_modulation_, data_code_rate_, data_frame_cw_count_);
+}
+
+bool Connection::usesExperimentalQPSKR34LongLDPCFor(
+    Modulation mod, CodeRate rate, int logical_cw) const {
+    // The production QPSK R3/4 logical frame is cw8/Z27 (5184 coded bits,
+    // 480 information bytes before fixed-frame overhead). The experimental
+    // physical representation is cw3/Z81 (5832 coded bits, 546 information
+    // bytes). This deliberately buys a 12.5% longer coded frame; it is not the
+    // equal-airtime cw9/Z27 laboratory comparison. Never reinterpret an
+    // operator-forced or coherence-shortened logical geometry.
+    return experimental_qpsk_r34_long_ldpc_transfer_active_ &&
+           negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+           use_burst_transport_ &&
+           config_.forced_cw_count == 0 &&
+           mod == Modulation::QPSK &&
+           rate == CodeRate::R3_4 &&
+           logical_cw == 8;
+}
+
+bool Connection::usesExperimentalQPSKR34LongLDPC() const {
+    return usesExperimentalQPSKR34LongLDPCFor(
+        data_modulation_, data_code_rate_, data_frame_cw_count_);
+}
+
+bool Connection::usesExperimentalLongLDPCFor(
+    Modulation mod, CodeRate rate, int logical_cw) const {
+    return usesExperimental8PSKLongLDPCFor(mod, rate, logical_cw) ||
+           usesExperimentalQPSKR34LongLDPCFor(mod, rate, logical_cw);
+}
+
+bool Connection::usesExperimentalLongLDPC() const {
+    return usesExperimentalLongLDPCFor(
+        data_modulation_, data_code_rate_, data_frame_cw_count_);
+}
+
+int Connection::physicalDataFrameCodewordsFor(
+    Modulation mod, CodeRate rate, int logical_cw) const {
+    if (usesExperimental8PSKLongLDPCFor(mod, rate, logical_cw)) {
+        return 4;
+    }
+    if (usesExperimentalQPSKR34LongLDPCFor(mod, rate, logical_cw)) {
+        return 3;
+    }
+    return logical_cw;
+}
+
+int Connection::physicalDataFrameCodewords() const {
+    return physicalDataFrameCodewordsFor(
+        data_modulation_, data_code_rate_, data_frame_cw_count_);
+}
+
+void Connection::setExperimentalLongLDPCTransferProfilesActive(
+    bool psk8_active, bool qpsk_r34_active) {
+    if (experimental_8psk_long_ldpc_transfer_active_ == psk8_active &&
+        experimental_qpsk_r34_long_ldpc_transfer_active_ == qpsk_r34_active) {
+        return;
+    }
+    experimental_8psk_long_ldpc_transfer_active_ = psk8_active;
+    experimental_qpsk_r34_long_ldpc_transfer_active_ = qpsk_r34_active;
+
+    // The negotiated logical geometry remains unchanged. Re-grid only the
+    // physical ARQ/chunker/timer view while the file owns the link, then put it
+    // back before the application observes transfer completion/failure/cancel.
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        configureArqForCurrentDataMode();
+    }
+    LOG_MODEM(INFO,
+              "Connection: experimental long-LDPC transfer profiles "
+              "8PSK=%s QPSK-R3/4=%s active_matching_rung=%s "
+              "(logical cw=%d, physical cw=%d, z=%d)",
+              psk8_active ? "armed" : "off",
+              qpsk_r34_active ? "armed" : "off",
+              usesExperimentalLongLDPC() ? "yes" : "no",
+              data_frame_cw_count_, physicalDataFrameCodewords(),
+              selectBurstLiftingZ());
+}
+
+void Connection::appendExperimentalLongLDPCTailPad(
+    std::vector<Bytes>& frames) const {
+    if (!usesExperimentalLongLDPC() || !on_transmit_burst_ ||
+        frames.size() != 1) {
+        return;
+    }
+
+    // A singleton normally takes on_transmit_ and has no BURST_HEADER, so the
+    // receiver cannot learn Z=81. Reuse the existing addressed-away ULPAD
+    // frame to make a two-frame physical group. encodeBurstLight then stamps
+    // PHYSICAL_BURST_END on this pad (not on the logical FINAL DATA), emits the
+    // descriptor, and the receiver's callsign filter keeps the pad out of ARQ.
+    const int cw = physicalDataFrameCodewords();
+    auto pad = v2::makeFixedDataFrame(
+        local_call_, kOFDMBurstPadCallsign, kOFDMBurstPadSeq,
+        makeOFDMBurstPadPayload(data_code_rate_, cw, /*pad_index=*/0, /*z=*/81),
+        data_code_rate_, cw, /*lifting_z=*/81).serialize();
+    frames.push_back(std::move(pad));
+    LOG_MODEM(INFO,
+              "Connection: padded experimental Z=81 singleton 1 -> 2 frames "
+              "so BURST_HEADER can announce cw=%d/z=81",
+              cw);
+}
+
+int Connection::selectBurstLiftingZFor(
+    Modulation mod, CodeRate rate, int logical_cw) const {
+    if (usesExperimentalLongLDPCFor(mod, rate, logical_cw)) {
+        return 81;
     }
     // Traffic-class policy (C-policy): long LDPC (Z=81, n=1944) for bulk/file OFDM
     // bursts — a 1944-bit codeword spans ~1.8x the coherence interval at 0.1 Hz
@@ -5806,22 +7120,29 @@ int Connection::selectBurstLiftingZ() const {
     // control, interactive messages, and MC-DPSK (fast ACK turnaround).
     //
     // GATED ON use_burst_transport_: long LDPC needs the burst-group machinery —
-    // the BURST_HEADER descriptor (so the RX learns Z=81 off the wire) and the
-    // z=81 ⟹ cw=2 coupling. The default SelectiveRepeatARQ file path
-    // (use_burst_transport_=false) emits NO descriptor, so it MUST stay Z=27 or the
-    // RX can't know Z and the chunker/frame sizes diverge. The app/cli pushes this
-    // Z to the TX encoder so its Z matches the chunker.
+    // the BURST_HEADER descriptor announces BOTH Z and the independently-selected
+    // physical CW count. A descriptor-less SelectiveRepeatARQ file path must stay
+    // Z=27 because the RX otherwise cannot infer either physical geometry. The
+    // app/cli pushes this Z to the TX encoder so its Z matches the chunker.
     // See docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md.
     //
     // TRANSPORT MERGE (increment 1, ULTRA_UNIFIED_SEQ): the unified path sends the
     // file as REGULAR arq_ DATA frames (sendNextFileChunk → flushBurstBuffer), NOT
     // through burst_transport_'s long-LDPC group machinery. Those frames are
     // serialized declaring cw=data_frame_cw_count_ at the connection's data geometry;
-    // forcing z=81 would re-couple the encoder to cw=2, so the RX reassembles 2
-    // codewords where the frame header claims 4 → frame parse fails → 0/N decode.
+    // forcing z=81 without rewriting the fixed DATA header and capacity together
+    // would make the announced physical geometry disagree with the serialized frame.
     // Keeping Z at the DEFAULT 27 makes z/cw consistent end-to-end AND makes the
     // descriptor's z=27 itself the on-wire "regular frames, not a file" signal the RX
     // routes on (operator's keystone — no extra descriptor bit needed).
+    //
+    // The former ULTRA_LDPC_Z=81 override deliberately does NOT live above this
+    // gate anymore. It could select long LDPC for descriptor-less singleton DATA:
+    // the connection would size/serialize at Z=81 while ModemEngine correctly
+    // forced that unannounced transmission back to Z=27. Long LDPC experiments
+    // must use a scoped profile such as ULTRA_8PSK_LONG_LDPC or
+    // ULTRA_QPSK_R34_LONG_LDPC, which guarantees a BURST_HEADER and changes
+    // serializer, timing, and PHY from one policy tuple.
     if (isOFDMMode(negotiated_mode_) &&
         use_burst_transport_ &&
         !kUnifiedSeqEnabled() &&
@@ -5829,6 +7150,11 @@ int Connection::selectBurstLiftingZ() const {
         return 81;
     }
     return 27;
+}
+
+int Connection::selectBurstLiftingZ() const {
+    return selectBurstLiftingZFor(
+        data_modulation_, data_code_rate_, data_frame_cw_count_);
 }
 
 size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
@@ -5855,16 +7181,6 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // 6->8 on 2026-06-17, 8->16 on 2026-07-02, so thin-frame cw5 bursts can fill the budget — a cw8 burst stays
     // airtime-bound at 5 frames regardless). Replaces the 3-frame 7000 ms default that re-paid the 1.2 s anchor +
     // turnaround every 3 frames. Still env-overridable for sweeps (clamped [5000, 12000]).
-    static const uint32_t kMaxBurstAirtimeMs = [] {
-        uint32_t v = 8600;  // group 5 (see above); ULTRA_MAX_BURST_AIRTIME_MS overrides
-        if (const char* env = std::getenv("ULTRA_MAX_BURST_AIRTIME_MS")) {
-            const long parsed = std::strtol(env, nullptr, 10);
-            if (parsed >= 5000 && parsed <= 12000) {
-                v = static_cast<uint32_t>(parsed);
-            }
-        }
-        return v;
-    }();
     // GROUP-SIZE LEVER (2026-07-07, docs/GROUP_SIZE_LEVER_2026_07_07.md §2.3):
     // STREAK-GATED ceiling escalation. After 2 consecutive CLEAN groups at the
     // current rung (full retire, no holes — burst_clean_group_streak_), the
@@ -5877,11 +7193,6 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // deliberate [5000,12000] PA clamp; the ~2 s turnaround stays the cooling
     // gap. Same evidence doctrine as the predictive climb: prove it, then
     // spend it.
-    constexpr uint32_t kEscalatedBurstAirtimeMs = 11500;
-    static const bool kEscalationEnabled = []() {
-        const char* e = std::getenv("ULTRA_BURST_ESCALATION");
-        return !(e && e[0] == '0' && e[1] == '\0');  // default ON; =0 opts out (A/B)
-    }();
     // RUNG GATE (gate A/B 2026-07-07): the streak alone over-escalates at
     // Moderate — clean pairs happen between fades there, and 11 s key-downs
     // then eat the next fade (moderate@16 s42: escalation ON = FAIL 690 bps
@@ -5891,9 +7202,6 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // rungs by construction, so requiring a dense rung (>= QAM8 R2/3) makes
     // long key-downs reachable exactly when the receiver's own measurement
     // rates the channel calm — no new estimator, no new threshold.
-    const bool dense_rung =
-        coherentRungIndexFor(data_modulation_, data_code_rate_) >=
-        kRungIdxQam8R23;
     // ── DENSE-RUNG PROXY REPAIR (ULTRA_BURST_ESC_STREAK, default-off) ──────────
     // `dense_rung` above is a PROXY for "the receiver rates this channel calm": the
     // anchor columns encode fading class, so Moderate-class operation lives at QPSK
@@ -5925,44 +7233,22 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // Read per call (not latched): this runs once per burst-group formation (~10 s
     // apart), never on the audio thread, so the getenv is free — and it keeps the knob
     // togglable mid-session for A/B and unit-testable in a single process.
-    const int kNonDenseEscalationStreak = []() {
-        const char* e = std::getenv("ULTRA_BURST_ESC_STREAK");
-        if (e == nullptr) return 0;  // default-OFF ⇒ dense-rung gate only (byte-identical)
-        const long v = std::strtol(e, nullptr, 10);
-        return (v >= 2 && v <= 8) ? static_cast<int>(v) : 0;
-    }();
-    const bool streak_proven =
-        dense_rung ? (burst_clean_group_streak_ >= 2)
-                   : (kNonDenseEscalationStreak > 0 &&
-                      burst_clean_group_streak_ >= kNonDenseEscalationStreak);
     // STREAK = 2 with rung gate + climb-carry. Measured trail: streak-2 alone
     // won +15 % paired in calm epochs but re-escalated between craters in rough
     // ones (F198-F207 cross-epoch mean 1.42 vs 1.57 — confounded by a 23 %
     // rougher epoch); streak-6 fired too late to pay on normal transfers.
     // The 2026-07-07 interleaved same-epoch A/B is the deciding measurement —
     // see docs/GROUP_SIZE_LEVER_2026_07_07.md addendum.
-    const uint32_t ceiling_ms =
-        (kEscalationEnabled && streak_proven)
-            ? std::max(kMaxBurstAirtimeMs, kEscalatedBurstAirtimeMs)
-            : kMaxBurstAirtimeMs;
+    const uint32_t ceiling_ms = connection_policy::burstAirtimeCeilingMs(
+        data_modulation_, data_code_rate_, burst_clean_group_streak_);
     const uint32_t reanchor_ms =
         connection_policy::shouldUseWideOFDMShortReanchor(
             negotiated_mode_, data_modulation_, fading_index_)
             ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
             : 0;
-    // Grow n until the NEXT frame would breach the ceiling. Uses the same airtime
-    // formula the ARQ timeout is derived from, so budget and timeout stay coherent.
-    size_t n = 1;
-    while (n < max_frames) {
-        const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
-            data_modulation_, data_code_rate_, n + 1, data_frame_cw_count_,
-            reanchor_ms, selectBurstLiftingZ());
-        if (airtime_ms > ceiling_ms) {
-            break;
-        }
-        ++n;
-    }
-    return n;
+    return connection_policy::wideOFDMBurstFrameBudget(
+        data_modulation_, data_code_rate_, physicalDataFrameCodewords(), max_frames,
+        ceiling_ms, reanchor_ms, selectBurstLiftingZ());
 }
 
 uint32_t Connection::unifiedBurstAckTimeoutMs(size_t burst_frames) const {
@@ -5983,48 +7269,78 @@ uint32_t Connection::unifiedBurstAckTimeoutMs(size_t burst_frames) const {
     // guarantees coverage of the receiver's full physical hold (the sender's own configured value is
     // its shorter sliding delay, not necessarily the peer's full-burst coalesce hold).
     return connection_policy::unifiedBurstAckTimeoutMs(
-        data_modulation_, data_code_rate_, data_frame_cw_count_, burst_frames, data_z,
+        data_modulation_, data_code_rate_, physicalDataFrameCodewords(), burst_frames, data_z,
         wideOFDMControlModulationForData(data_modulation_), arq_.getSackDelay(), reanchor_ms);
 }
 
 size_t Connection::prepareUnifiedBurstWindow() {
-    if (!(isOFDMMode(negotiated_mode_) && kUnifiedSeqEnabled())) {
+    if (!(negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+          kUnifiedSeqEnabled())) {
         return std::numeric_limits<size_t>::max();  // legacy: fill the whole window
     }
-    const size_t cap = burstAirtimeBudgetFrames(arq_.getWindowSize());
-    // Size the ARQ retransmit timeout (→ the tone-burst ack-listen window, which floors
-    // to it) to THIS burst's frame count under the prompt group-ack model. Set BEFORE
-    // the submit loop so the per-frame arm reads the new value.
-    arq_.setAckTimeout(unifiedBurstAckTimeoutMs(cap));
-    return cap;
+    // Logical submission keeps the conservative mode-wide slot timeout. The physical
+    // egress commits an exact deadline only to frames that really go on air.
+    return burstAirtimeBudgetFrames(arq_.getWindowSize());
 }
 
-void Connection::armToneBurstAckListenWindow() {
+uint32_t Connection::finalizeUnifiedBurstWindow(
+    const std::vector<Bytes>& transmitted_frames,
+    uint32_t queue_delay_ms) {
+    if (!(negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+          kUnifiedSeqEnabled()) ||
+        transmitted_frames.empty()) {
+        return 0;
+    }
+
+    const size_t physical_frame_count = transmitted_frames.size();
+    const auto timing = physicalDataRoundTiming(transmitted_frames);
+    const uint64_t timeout_with_queue =
+        static_cast<uint64_t>(timing.ack_timeout_ms) + queue_delay_ms;
+    const uint32_t timeout_ms = static_cast<uint32_t>(
+        std::min<uint64_t>(timeout_with_queue, UINT32_MAX));
+    const size_t rearmed =
+        arq_.rearmTransmittedDataFrames(transmitted_frames, timeout_ms);
+    LOG_MODEM(INFO,
+              "Connection: Finalized DATA round: physical=%zu, ARQ=%zu, "
+              "cw_total=%u, cw_max=%u, variable=%zu, airtime=%ums, "
+              "queue=%ums, timeout=%ums",
+              physical_frame_count, rearmed, timing.total_codewords,
+              static_cast<unsigned>(timing.max_codewords), timing.variable_frames,
+              timing.airtime_ms, queue_delay_ms, timeout_ms);
+    return timeout_ms;
+}
+
+void Connection::armToneBurstAckListenWindow(uint32_t explicit_timeout_ms) {
     if (!(kInteractiveToneAckEnabled() && on_arm_tone_burst_ack_monitor_)) {
         return;
     }
     // Listen for the ack as long as we'd wait before resending — the ARQ ack timeout is
     // burst-aware (it covers the burst airtime + decode jitter + ack return), so the
     // monitor can never expire mid-round-trip. Floor at the interactive value for short
-    // MC-DPSK/interactive sends. (Re-armed per (re)send; the monitor keeps the later
-    // deadline and auto-disarms the instant an ack decodes.)
+    // MC-DPSK/interactive sends. Each physical DATA round replaces the prior round's
+    // deadline and the monitor auto-disarms the instant an ACK decodes.
     uint32_t window_ms = kInteractiveToneAckWindowMs;
-    if (isOFDMMode(negotiated_mode_)) {
-        window_ms = std::max(window_ms, arq_.getAckTimeout());
+    if (isOFDMMode(negotiated_mode_) ||
+        negotiated_mode_ == WaveformMode::MC_DPSK) {
+        const uint32_t timeout_ms = explicit_timeout_ms > 0
+            ? explicit_timeout_ms
+            : arq_.getAckTimeout();
+        window_ms = std::max(window_ms, timeout_ms);
     }
     on_arm_tone_burst_ack_monitor_(window_ms);
 }
 
 size_t Connection::currentDataPayloadCapacity() const {
     if (isOFDMMode(negotiated_mode_)) {
+        const int physical_cw = physicalDataFrameCodewords();
         // Z-aware capacity: at z=81 info bytes per codeword scale 3x. Sizing the
         // chunker at the active z (selectBurstLiftingZ) keeps the encoder from
         // zero-padding 70%+ of every burst (the real-world throughput killer).
         if (selectBurstLiftingZ() == 81) {
             return v2::getFixedFramePayloadCapacityZ(
-                data_code_rate_, data_frame_cw_count_, 81);
+                data_code_rate_, physical_cw, 81);
         }
-        return v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+        return v2::getFixedFramePayloadCapacity(data_code_rate_, physical_cw);
     }
     if (usesBoundedVariableMCDPSKFrames()) {
         return v2::getVariableFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
@@ -6262,6 +7578,10 @@ void Connection::commitPendingModeChange(const char* outcome) {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    // A normal rate/CW regrid has already invalidated old serialized identities. This
+    // matters for the same-rate/same-CW modulation edge, where live bytes remain valid
+    // and only the physical constellation changes.
+    arq_.resumeDeferredTimeoutRetransmits(/*timeout_ms=*/1);
 
     // pending_snr_db_ is what WE embedded in our MODE_CHANGE request — a LOCAL value.
     notifyDataModeChanged(pending_snr_db_, pending_fading_index_, /*snr_is_wire=*/false);
@@ -6282,14 +7602,10 @@ void Connection::commitPendingModeChange(const char* outcome) {
 // (RX-RATE-CMD, maybeApplyRxRateCommand) adds the ONE sanctioned mid-window caller: a
 // receiver-commanded demote, pre-gated on arq_.moveEpochEnabled() so the resulting
 // commitLocalModeSwitch regrid is era-safe (the ARQ abort bumps the move-epoch).
-// PHASE-3 (2026-07-04) added the second mid-window caller class: the sender's OWN
-// ESCAPE/collapse drops — the FIRST of a silent stretch commits via descriptor (same
-// move-epoch pre-gate); a second consecutive silent escape reverts to the legacy
-// exchange so the deaf-peer escalation stays reachable (see executeEscapeDrop).
 // Excluded BY DESIGN (all keep the legacy MODE_CHANGE exchange, in every knob state):
 //   - connect-time INITIAL_SETUP and USER_REQUEST moves,
 //   - MC-DPSK rung moves (carriers/sps need ladder_rung_id on the wire) and OFDM_NARROW,
-//   - the deaf-peer escalation fallback (§6.5).
+//   - sender-initiated stuck/collapse escapes (silence does not prove descriptor receipt).
 bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
                                          float measured_snr, uint8_t reason) {
     if (!descriptor_mode_switch_enabled_) return false;
@@ -6321,9 +7637,11 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
     const auto progress = file_transfer_.getProgress();
     if (progress.total_bytes <= progress.transferred_bytes) return false;
     const size_t remaining_bytes = progress.total_bytes - progress.transferred_bytes;
-    const size_t frame_payload = (selectBurstLiftingZ() == 81)
-        ? v2::getFixedFramePayloadCapacityZ(rate, cw, 81)
-        : v2::getFixedFramePayloadCapacity(rate, cw);
+    const int physical_cw = physicalDataFrameCodewordsFor(mod, rate, cw);
+    const int lifting_z = selectBurstLiftingZFor(mod, rate, cw);
+    const size_t frame_payload = (lifting_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(rate, physical_cw, 81)
+        : v2::getFixedFramePayloadCapacity(rate, physical_cw);
     const size_t chunk_bytes =
         (frame_payload > FileTransferController::FILE_DATA_OVERHEAD)
             ? frame_payload - FileTransferController::FILE_DATA_OVERHEAD
@@ -6460,9 +7778,44 @@ void Connection::onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_pe
     runDeferredArqRefill();
 }
 
-void Connection::enterConnected() {
+void Connection::resetAdaptiveDecisionState() {
+    // All outcome estimators and burst-policy evidence are scoped to one QSO. A persistent
+    // GUI/TNC process must not seed the next peer/channel from the preceding transfer, nor
+    // inherit the every-Nth probe phase, an already-escalated eight-frame burst streak,
+    // a saturated collapse-escape episode, or the preceding QSO's rung-dwell clock.
+    latent_ctl_.reset();
+    latent_startup_probe_allowed_ = true;
+    latent_startup_probe_waiting_ = false;
+    latent_startup_probe_spent_ = false;
+    latent_startup_probe_clean_groups_ = 0;
+    latent_startup_probe_pending_base_groups_ = 0;
+    latent_startup_probe_rollback_pending_ = false;
+    latent_startup_probe_failed_ = false;
+    tx_latent_startup_probe_active_ = false;
+    tx_latent_startup_probe_airborne_ = false;
+    tx_latent_startup_probe_timeout_rollback_pending_ = false;
+    tx_latent_startup_probe_base_rung_ = kRungIdxNone;
+    tx_authority_ack_identity_valid_ = false;
+    tx_authority_ack_group_seq_ = 0;
+    tx_authority_ack_frame_mask_ = 0;
+    tx_authority_ack_move_epoch_ = 0;
+    tx_authority_ack_lowest_cmd_ = kRungIdxNone;
+    goodput_ctl_ = GoodputRateController{};
+    goodput_last_verdict_ = {};
+    goodput_last_verdict_valid_ = false;
+    burst_clean_group_streak_ = 0;
+    consecutive_escape_drops_ = 0;
+    rx_auth_last_change_ = {};
+    rx_auth_last_change_valid_ = false;
+}
+
+void Connection::enterConnected(bool automatic_rate_allowed) {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    resetAdaptiveDecisionState();
+    latent_startup_probe_allowed_ = automatic_rate_allowed;
+    staged_timeout_batch_.clear();
+    arq_tick_in_progress_ = false;
     // #58 increment 3: the handshake spent (or never needed) its one pick-defer;
     // re-arm for the next handshake. Consulted only pre-CONNECT, so this is safe here.
     connect_pick_deferred_once_ = false;
@@ -6505,6 +7858,7 @@ void Connection::enterConnected() {
     // the ARQ reset below; a stale standing command must never leak across sessions).
     rx_rate_cmd_pending_ = 0;
     rx_rate_cmd_seq_seen_ = -1;
+    rebase_voice_event_seq_ = 0;
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
     tx_authority_last_obeyed_ = 0;
@@ -6543,6 +7897,8 @@ void Connection::enterConnected() {
     }
 
     arq_.setCallsigns(local_call_, remote_call_);
+    deferred_arq_failure_abort_ = false;
+    deferred_arq_failure_seq_valid_ = false;
     arq_.reset();
     configureArqForCurrentDataMode();
     mode_change_ack_repeat_jobs_.clear();
@@ -6566,6 +7922,12 @@ void Connection::enterConnected() {
 
 void Connection::enterDisconnected(const std::string& reason) {
     state_ = ConnectionState::DISCONNECTED;
+    experimental_8psk_long_ldpc_transfer_active_ = false;
+    experimental_qpsk_r34_long_ldpc_transfer_active_ = false;
+    resetAdaptiveDecisionState();
+    latent_bootstrap_rung_ = kRungIdxNone;  // no connect verdict may cross a QSO boundary
+    staged_timeout_batch_.clear();
+    arq_tick_in_progress_ = false;
     is_initiator_ = false;
     handshake_confirmed_ = false;
     burst_activity_ = BurstActivity{};  // clear the "incoming burst" GUI indicator
@@ -6574,10 +7936,13 @@ void Connection::enterDisconnected(const std::string& reason) {
     std::string old_remote = remote_call_;
     remote_call_.clear();
     pending_remote_call_.clear();
+    outbound_forced_modulation_ = Modulation::AUTO;
+    outbound_forced_code_rate_ = CodeRate::AUTO;
     mode_change_pending_ = false;
     desc_switch_full_anchor_pending_ = false;
     rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
     rx_rate_cmd_seq_seen_ = -1;
+    rebase_voice_event_seq_ = 0;
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
     tx_authority_last_obeyed_ = 0;
@@ -6629,7 +7994,13 @@ void Connection::enterDisconnected(const std::string& reason) {
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
+    deferred_arq_failure_abort_ = false;
+    deferred_arq_failure_seq_valid_ = false;
     arq_.reset();
+    // SelectiveRepeatARQ::reset intentionally preserves negotiated geometry.
+    // A session boundary does not: no transfer-scoped Z=81 state may leak into
+    // descriptor-less traffic in the next connection attempt.
+    arq_.setFixedFrameGeometry(data_frame_cw_count_, /*lifting_z=*/27);
     soft_combine_harq_.clear();
     file_transfer_.cancel();
     queued_file_path_.reset();
@@ -6673,11 +8044,13 @@ void Connection::setTransmitInfoCallback(TransmitInfoCallback cb) {
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
     on_transmit_burst_ = std::move(cb);
     if (on_transmit_burst_) {
+        arq_.setDeferredTimeoutCommitEnabled(true);
         arq_.setTransmitBatchCallback([this](const std::vector<Bytes>& frames) {
-            transmitFrameBatch(frames);
+            handleArqTimeoutBatch(frames);
         });
     } else {
         arq_.setTransmitBatchCallback(SelectiveRepeatARQ::TransmitBatchCallback{});
+        arq_.setDeferredTimeoutCommitEnabled(false);
     }
 }
 
@@ -6698,7 +8071,13 @@ void Connection::setPhyMaskV1Negotiated(bool enabled) {
     }
 }
 
-void Connection::flushBurstBuffer() {
+void Connection::flushBurstBuffer(bool retransmission_required) {
+    if (deferred_arq_failure_abort_) {
+        LOG_MODEM(WARN,
+                  "Connection: Discarding buffered DATA after terminal ARQ failure");
+        burst_tx_buffer_.clear();
+        return;
+    }
     if (burst_tx_buffer_.empty()) return;
 
     const size_t real_frame_count = burst_tx_buffer_.size();
@@ -6717,14 +8096,17 @@ void Connection::flushBurstBuffer() {
             real_frame_count % connection_policy::burstInterleaveGroupFrames();
         const size_t pad_count =
             connection_policy::burstInterleaveGroupFrames() - remainder;
+        const int pad_cw = physicalDataFrameCodewords();
+        const int pad_z = selectBurstLiftingZ();
         for (size_t i = 0; i < pad_count; ++i) {
             auto pad_frame = v2::makeFixedDataFrame(
                 local_call_,
                 kOFDMBurstPadCallsign,
                 static_cast<uint16_t>(kOFDMBurstPadSeq - i),
-                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
+                makeOFDMBurstPadPayload(data_code_rate_, pad_cw, i, pad_z),
                 data_code_rate_,
-                data_frame_cw_count_).serialize();
+                pad_cw,
+                pad_z).serialize();
             burst_tx_buffer_.push_back(pad_frame);
         }
         LOG_MODEM(INFO,
@@ -6733,40 +8115,215 @@ void Connection::flushBurstBuffer() {
                   burst_tx_buffer_.size());
     }
 
-    if (burst_tx_buffer_.size() == 1 && on_transmit_) {
+    // Long Z cannot ride a descriptor-less singleton. This applies to the
+    // logical FINAL/tail as well as a one-hole selective retry; the added pad
+    // is addressed away and exists only to preserve the physical wire group.
+    appendExperimentalLongLDPCTailPad(burst_tx_buffer_);
+
+    // This is the first point where the physical round geometry is exact: optional
+    // interleave padding has been appended, and nothing else below changes the frame
+    // count. Re-time only the matching live ARQ slots and arm once before handing the
+    // group to a transport callback (which is allowed to synchronously loop back ACKs).
+    const bool expects_data_ack = std::any_of(
+        burst_tx_buffer_.begin(), burst_tx_buffer_.end(), [](const Bytes& frame) {
+            const auto header = v2::parseHeader(frame);
+            return header.valid && !header.is_control;
+        });
+    const uint32_t queue_delay_ms = noteDataBurstKeydown(burst_tx_buffer_);
+    const uint32_t round_timeout_ms = finalizeUnifiedBurstWindow(
+        burst_tx_buffer_, queue_delay_ms);
+    if (expects_data_ack) {
+        // Wide OFDM supplies its exact serialized-round deadline.  Narrow OFDM and
+        // MC-DPSK deliberately return zero and retain their waveform-specific scalar
+        // ARQ/monitor timeout.  Buffering suppresses the per-frame arm in the ARQ
+        // transmit callback, so arm exactly once here for every physical group.
+        armToneBurstAckListenWindow(round_timeout_ms);
+    }
+
+    // Detach the committed physical round before entering a host callback. A test
+    // transport may synchronously return an ACK, and that ACK is allowed to build the
+    // next burst recursively; keeping the outer round in the shared member would let
+    // the nested refill clear/overwrite it (or let the outer cleanup erase the refill).
+    std::vector<Bytes> committed_frames;
+    committed_frames.swap(burst_tx_buffer_);
+
+    if (committed_frames.size() == 1 && on_transmit_) {
         // Single frame, no burst needed. NOTE: desc_switch_full_anchor_pending_ is
         // deliberately NOT consumed here — a single-frame send carries no BURST_HEADER
         // descriptor (encodeBurstLight:476-489), so the one-shot stays armed for the
         // next descriptor-bearing (multi-frame) burst.
-        on_transmit_(burst_tx_buffer_[0]);
+        on_transmit_(committed_frames[0]);
     } else if (on_transmit_burst_) {
-        LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", burst_tx_buffer_.size());
+        LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", committed_frames.size());
         // DESC-SWITCH §5.1 step 2: the first burst group after a descriptor-committed
         // mode switch carries the full chirp+LTS anchor (one-shot; the §2.6-arm-3
-        // geometry-change mitigation). force_full_preamble routes through the frontend
-        // to StreamingEncoder::forceNextBurstGroupStartFullPreamble AND resets the
-        // encoder's anchor-skip clean streak (warm_descriptor=false path).
+        // geometry-change mitigation). The anchor reason stays bound to this physical
+        // request through the frontend and resets the encoder's anchor-skip clean streak
+        // at encode time (warm_descriptor=false path).
         const bool desc_switch_anchor = desc_switch_full_anchor_pending_;
         desc_switch_full_anchor_pending_ = false;
-        on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0,
-                           /*anchor_reason=*/desc_switch_anchor ? kAnchorReasonModeSwitch
-                                                                : kAnchorReasonNone);
+        // An ACK-revealed hole is just as much negative delivery evidence as an
+        // RTO.  The receiver already closed the failed group and deliberately
+        // overrides that descriptor's stale NEXT_LIGHT bit.  Mark this refill as
+        // a resend so both the descriptor and group start carry a full anchor and
+        // the encoder's delivery-earned skip streak is recooled.  A resend takes
+        // precedence over the weaker mode-switch reason when both coincide.
+        const uint8_t anchor_reason = retransmission_required
+            ? kAnchorReasonResend
+            : (desc_switch_anchor ? kAnchorReasonModeSwitch : kAnchorReasonNone);
+        on_transmit_burst_(committed_frames, /*group_seq=*/0,
+                           anchor_reason);
     } else if (on_transmit_) {
         // Fallback: send individually
-        for (const auto& frame : burst_tx_buffer_) {
+        for (const auto& frame : committed_frames) {
             on_transmit_(frame);
         }
     }
-    // §RETX-PACING: stamp the modeled key-down end for this data burst (no-op off wideband
-    // OFDM; behavior-free — see noteDataBurstKeydown).
-    noteDataBurstKeydown(burst_tx_buffer_.size());
-    burst_tx_buffer_.clear();
 }
 
-void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
+void Connection::handleArqTimeoutBatch(const std::vector<Bytes>& frame_data_list) {
+    if (frame_data_list.empty()) return;
+    if (!arq_tick_in_progress_) {
+        transmitFrameBatch(frame_data_list);
+        return;
+    }
+
+    // One ARQ tick produces at most one timeout batch. Account the missing ACK now so
+    // maybeCollapseEscape() can consume this very round, but delay every irreversible
+    // physical side effect (play-head, timeout commit, monitor arm, encoder queue).
+    noteArqRoundOutcome(0, "rto");
+    staged_timeout_batch_ = frame_data_list;
+    staged_timeout_mod_ = data_modulation_;
+    staged_timeout_rate_ = data_code_rate_;
+    staged_timeout_cw_ = data_frame_cw_count_;
+    if (tx_latent_startup_probe_active_ && tx_latent_startup_probe_airborne_ &&
+        coherentRungIndexFor(data_modulation_, data_code_rate_) == kRungIdxQpskR23) {
+        // Do not commit this higher-rung retransmission. The post-ARQ-tick handler
+        // starts a robust synchronized rollback; the normal staged-batch flush then
+        // cancels/suspends these old-geometry intents under mode_change_pending_.
+        tx_latent_startup_probe_timeout_rollback_pending_ = true;
+    }
+    LOG_MODEM(DEBUG,
+              "Connection: Staged ARQ timeout batch of %zu frame(s) pending escape check",
+              staged_timeout_batch_.size());
+}
+
+void Connection::handleLatentStartupProbeTimeoutRollback() {
+    if (!tx_latent_startup_probe_timeout_rollback_pending_) return;
+
+    tx_latent_startup_probe_timeout_rollback_pending_ = false;
+    const uint8_t base = tx_latent_startup_probe_base_rung_;
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+    if (mode_change_pending_) {
+        // Never erase the probe identity and silently return here. The peer may have
+        // applied either this target descriptor or the unrelated pending control; there
+        // is no safe way to overwrite/queue a second MODE_CHANGE while preserving order.
+        // Disconnect leaves the staged target timeout obsolete and prevents any refill.
+        LOG_MODEM(ERROR,
+                  "Connection: LATENT startup-probe RTO collided with pending "
+                  "MODE_CHANGE; refusing ambiguous geometry and disconnecting");
+        disconnect();
+        return;
+    }
+    if (base == kRungIdxNone || base >= kRungIdxCount) {
+        LOG_MODEM(ERROR,
+                  "Connection: LATENT startup-probe RTO has no valid base rung; "
+                  "disconnecting instead of retransmitting target DATA");
+        disconnect();
+        return;
+    }
+    const CoherentPick rollback = coherentRungFromIndex(base);
+    if (rollback.mod == data_modulation_ && rollback.rate == data_code_rate_) {
+        tx_latent_startup_probe_active_ = false;
+        tx_latent_startup_probe_airborne_ = false;
+        tx_latent_startup_probe_base_rung_ = kRungIdxNone;
+        return;
+    }
+
+    LOG_MODEM(WARN,
+              "Connection: LATENT startup probe ACK timeout — suppressing target "
+              "retransmit and synchronizing rollback to idx %u",
+              base);
+    // ACK silence does not prove whether the receiver adopted the target descriptor.
+    // Always use the robust control-plane handshake, even when move-epoch is enabled.
+    requestModeChange(rollback.mod, rollback.rate, wireSnrDb(),
+                      v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT);
+    if (!mode_change_pending_ ||
+        pending_reason_ != v2::ModeChangeReason::STARTUP_PROBE_TIMEOUT) {
+        LOG_MODEM(ERROR,
+                  "Connection: LATENT startup-probe rollback could not be armed; "
+                  "disconnecting before target DATA can refill");
+        disconnect();
+        return;
+    }
+    // The synchronized rollback now owns egress and its special retry-exhaustion path
+    // disconnects instead of resuming target intents. It is safe to disarm the physical
+    // probe interceptor only after that ownership is established.
+    tx_latent_startup_probe_active_ = false;
+    tx_latent_startup_probe_airborne_ = false;
+    tx_latent_startup_probe_base_rung_ = kRungIdxNone;
+}
+
+void Connection::flushStagedArqTimeoutBatch() {
+    if (staged_timeout_batch_.empty()) return;
+
+    const bool obsolete =
+        state_ != ConnectionState::CONNECTED || deferred_arq_failure_abort_ ||
+        mode_change_pending_ || data_modulation_ != staged_timeout_mod_ ||
+        data_code_rate_ != staged_timeout_rate_ ||
+        data_frame_cw_count_ != staged_timeout_cw_;
+    if (obsolete) {
+        std::vector<Bytes> canceled;
+        canceled.swap(staged_timeout_batch_);
+        // A legacy synchronized MODE_CHANGE keeps the old ARQ identities live while
+        // control-plane agreement is pending. Suspend exactly these expired intents so
+        // repeated ticks cannot burn retries or launch DATA under the control exchange.
+        // Successful regrid invalidates them by exact identity; give-up resumes them.
+        const bool suspend_for_mode_change =
+            state_ == ConnectionState::CONNECTED && mode_change_pending_ &&
+            !deferred_arq_failure_abort_;
+        const size_t matched = arq_.cancelDeferredTimeoutRetransmits(
+            canceled, suspend_for_mode_change);
+        LOG_MODEM(WARN,
+                  "Connection: Discarding staged old-geometry timeout batch (%zu frame(s)); "
+                  "matched=%zu suspended=%d; mode/escape boundary owns next egress",
+                  canceled.size(), matched, suspend_for_mode_change ? 1 : 0);
+        return;
+    }
+
+    std::vector<Bytes> intents;
+    intents.swap(staged_timeout_batch_);
+    auto committed = arq_.commitDeferredTimeoutRetransmits(intents);
+    if (committed.terminal_failure) {
+        // The terminal callback is deliberately deferred to this post-escape commit
+        // boundary. Drain it NOW; the earlier post-tick drain ran before commit and
+        // therefore could not observe it.
+        drainDeferredArqFailureAbort();
+        return;
+    }
+    if (!committed.frames.empty()) {
+        transmitFrameBatch(committed.frames, /*account_rto_round=*/false);
+    }
+}
+
+void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
+                                    bool account_rto_round) {
     if (frame_data_list.empty()) {
         return;
     }
+    if (deferred_arq_failure_abort_) {
+        // ARQ tick may assemble a timeout batch after one slot in that same scan
+        // terminal-fails. The failure callback already owns the logical outcome;
+        // never key residual retries before the post-tick abort drains the window.
+        LOG_MODEM(WARN,
+                  "Connection: Suppressing timeout batch after terminal ARQ failure");
+        return;
+    }
+
+    std::vector<Bytes> physical_frames = frame_data_list;
+    appendExperimentalLongLDPCTailPad(physical_frames);
 
     // §RETX-PACING §1.1: this callback fires ONLY as the ARQ slot-RTO batch (arq_.tick →
     // transmitDataBatch), and an RTO round is zero-progress BY DEFINITION — a timeout IS
@@ -6774,13 +8331,29 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     // end time (the elapsed-listening subtraction must reference the PREVIOUS burst). The
     // collapse escape itself is polled from the CONNECTED tick, never fired from inside
     // this ARQ transmit callback.
-    noteArqRoundOutcome(0, "rto");
-    noteDataBurstKeydown(frame_data_list.size());
+    if (account_rto_round) {
+        noteArqRoundOutcome(0, "rto");
+    }
+    const uint32_t queue_delay_ms = noteDataBurstKeydown(physical_frames);
+
+    // A timeout batch is a new physical round and may contain only a subset of the
+    // still-open window. Commit the exact n-frame deadline to those identities only;
+    // unsent holes retain their previous countdown.
+    const uint32_t round_timeout_ms = finalizeUnifiedBurstWindow(
+        physical_frames, queue_delay_ms);
+    const bool expects_data_ack = std::any_of(
+        physical_frames.begin(), physical_frames.end(), [](const Bytes& frame) {
+            const auto header = v2::parseHeader(frame);
+            return header.valid && !header.is_control;
+        });
+    if (expects_data_ack) {
+        armToneBurstAckListenWindow(round_timeout_ms);
+    }
 
     const bool burst_capable_mode =
         isOFDMMode(negotiated_mode_) || negotiated_mode_ == WaveformMode::MC_DPSK;
-    if (frame_data_list.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
-        for (const auto& frame_data : frame_data_list) {
+    if (physical_frames.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
+        for (const auto& frame_data : physical_frames) {
             transmitFrame(frame_data);
         }
         return;
@@ -6803,16 +8376,10 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     // on resends (rare) — first-attempt groups keep warm light-LTS (+goodput). Restores the
     // pre-unification reliability coupling the merge dropped when it hardcoded this to false.
     LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames (full anchor)",
-              frame_data_list.size());
-    on_transmit_burst_(frame_data_list, /*group_seq=*/0,
+              physical_frames.size());
+    on_transmit_burst_(physical_frames, /*group_seq=*/0,
                        /*anchor_reason=*/kAnchorReasonResend);  // full chirp re-anchor +
                                                               // recool the skip streak
-    // RE-ARM the ack monitor for THIS resend's ack. The initial send arms via the
-    // tx-frame-submitted hook, but a timeout RESEND comes through here (arq_ retransmit →
-    // transmitDataBatch) and would otherwise leave the sender deaf after the first
-    // window expired — the half-duplex phase lock on fading (resend forever, never hear
-    // the ack). Mirrors the original burst sender, which re-armed per group (re)send.
-    armToneBurstAckListenWindow();
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {
@@ -6859,13 +8426,10 @@ void Connection::setFileReceivedCallback(FileReceivedCallback cb) {
 }
 
 void Connection::setFileSentCallback(FileSentCallback cb) {
-    // Wrap so the [LADDER] per-transfer telemetry summary is emitted exactly once at
-    // completion (success OR failure/cancel — every on_sent_ path), before the app callback.
-    file_transfer_.setSentCallback(
-        [this, cb = std::move(cb)](bool success, const std::string& error) {
-            ladderTelemetryFinish(success);
-            if (cb) cb(success, error);
-        });
+    // The controller-owned wrapper is installed in the constructor so internal
+    // transfer cleanup still runs when the application does not register a
+    // callback. Store only the outward notification here.
+    on_file_sent_ = std::move(cb);
 }
 
 // =============================================================================
@@ -6912,6 +8476,12 @@ Connection::harqProvisionalContext() const {
 
 void Connection::reset() {
     state_ = ConnectionState::DISCONNECTED;
+    experimental_8psk_long_ldpc_transfer_active_ = false;
+    experimental_qpsk_r34_long_ldpc_transfer_active_ = false;
+    resetAdaptiveDecisionState();
+    latent_bootstrap_rung_ = kRungIdxNone;
+    staged_timeout_batch_.clear();
+    arq_tick_in_progress_ = false;
     is_initiator_ = false;
     handshake_confirmed_ = false;
     setPhyMaskV1Negotiated(false);
@@ -6956,7 +8526,10 @@ void Connection::reset() {
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
+    deferred_arq_failure_abort_ = false;
+    deferred_arq_failure_seq_valid_ = false;
     arq_.reset();
+    arq_.setFixedFrameGeometry(data_frame_cw_count_, /*lifting_z=*/27);
     soft_combine_harq_.clear();
     file_transfer_.cancel();
     queued_file_path_.reset();
@@ -6978,6 +8551,8 @@ void Connection::reset() {
     trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
+    rebase_voice_event_seq_ = 0;
+    rx_rebase_voice_seq_seen_ = -1;
     ladder_telemetry_active_ = false;
     // #58 increment 3: the connect-SNR pool is per-session (its entry horizon IS the
     // handshake scope); the defer one-shot re-arms for the next handshake.

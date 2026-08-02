@@ -267,7 +267,12 @@ enum class FrameType : uint8_t {
 namespace Flags {
     constexpr uint8_t NONE       = 0x00;
     constexpr uint8_t VERSION_V2 = 0x01;  // Always set for v2
-    constexpr uint8_t URGENT     = 0x02;  // High priority
+    constexpr uint8_t URGENT     = 0x02;  // Legacy name; no DATA writer uses it
+    // DATA-only physical-envelope marker. The streaming encoder owns this bit:
+    // it clears stale copies and stamps only the last frame actually placed in a
+    // non-interleaved OFDM burst. It is distinct from FINAL, which is a logical
+    // transfer boundary and may still have physical group members after it.
+    constexpr uint8_t PHYSICAL_BURST_END = URGENT;
     constexpr uint8_t TURN_REQUEST = URGENT;  // ACK flag: IRS has queued DATA
     constexpr uint8_t COMPRESSED = 0x04;  // Payload is compressed
     constexpr uint8_t ENCRYPTED  = 0x08;  // (reserved) encryption was never implemented
@@ -293,6 +298,12 @@ namespace Flags {
     // MODE_CHANGE / CONNECT_ACK / BURST_HEADER instead), so they were free.
     constexpr uint8_t EPOCH_MASK  = 0xC0;
     constexpr uint8_t EPOCH_SHIFT = 6;
+
+    // CONNECT_ACK-only profile provenance. Bit 6 is otherwise a DATA-frame move-epoch
+    // bit, so this is wire-compatible with existing peers and does not consume payload
+    // space. A new initiator uses it to retain the responder's operator-forced rung for
+    // the whole QSO; old peers safely ignore unknown CONNECT_ACK flag bits.
+    constexpr uint8_t CONNECT_FORCED_PROFILE = 0x40;
 }
 
 // MOVE-EPOCH helpers (DATA-frame flags bits 6-7). Pure bit accessors — the
@@ -329,6 +340,8 @@ namespace ModeChangeReason {
     constexpr uint8_t CHANNEL_DEGRADED = 1;  // SNR decreased, need more robust mode
     constexpr uint8_t USER_REQUEST     = 2;  // Manual mode selection
     constexpr uint8_t INITIAL_SETUP    = 3;  // First mode negotiation after connect
+    constexpr uint8_t STARTUP_PROBE_TIMEOUT = 4;  // One-shot higher-rung group was unACKed
+    constexpr uint8_t STARTUP_PROBE_BEGIN = 5;  // Legacy control-plane launch of one-shot UP
 }
 
 // SNR encoding for MODE_CHANGE (maps 0-255 to -10 to +53.75 dB, 0.25 dB steps)
@@ -485,7 +498,9 @@ struct ControlFrame {
     static ControlFrame makeTurnRequest(const std::string& src, const std::string& dst);
     static ControlFrame makeFileCancel(const std::string& src, const std::string& dst);
     // Burst descriptor (§14.17): declares the decode params of the data group that follows.
-    // interleave_flags: bit0 = burst (cross-frame) interleave, bit1 = carrier-LDPC interleave.
+    // interleave_flags: bit0 = burst (cross-frame) interleave, bit1 = carrier-LDPC
+    // interleave, bit2 = next descriptor is light, bit3 = following DATA group
+    // starts with a full chirp+LTS anchor.
     // lifting_z (2026-05-28): LDPC lifting size for the data group. 27 -> n=648
     // (legacy, short LDPC); 81 -> n=1944 (long LDPC for OFDM data). 0 / default
     // is wire-encoded as legacy 27 for backward compatibility with older peers.
@@ -580,6 +595,14 @@ struct ControlFrame {
     // (chirp-less). Lets the RX full-search chirp groups and light-search skip groups IMMEDIATELY
     // (no grinding through light rejects). Only set when ULTRA_ANCHOR_SKIP_K>1; default-off byte 0.
     static constexpr uint8_t BURST_FLAG_NEXT_LIGHT_ANCHOR = 0x04;
+    // The DATA group immediately following this descriptor starts with a full
+    // chirp+LTS anchor rather than the normal warm light-LTS marker. The sender
+    // uses this for reliability/mode-switch anchors and timeout repairs. Without an
+    // explicit bit, a same-mode receiver predicts a light marker inside the
+    // full chirp, performs a guaranteed-junk demodulation, then has to recover
+    // by searching for the real LTS. Absent on legacy peers => normal light
+    // handoff, preserving the historical wire behavior.
+    static constexpr uint8_t BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR = 0x08;
 
     struct BurstHeaderInfo {
         uint8_t group_size = 0;     // frames in the interleaved group
@@ -589,6 +612,7 @@ struct ControlFrame {
         bool burst_interleave = false;  // cross-frame interleave applied
         bool carrier_ldpc = false;      // carrier-LDPC interleave applied
         bool next_light_anchor = false; // #69: the NEXT group's descriptor is light (chirp-less)
+        bool current_group_full_anchor = false; // following DATA group starts chirp+LTS
         // LDPC lifting size Z for the data group's codewords (2026-05-28).
         //   27 -> n=648 (legacy short LDPC, fast handshake / ACK class)
         //   81 -> n=1944 (long LDPC for OFDM data, ~3 dB more FEC margin)
@@ -626,6 +650,8 @@ struct ControlFrame {
         info.burst_interleave = (payload[4] & BURST_FLAG_INTERLEAVE) != 0;
         info.carrier_ldpc = (payload[4] & BURST_FLAG_CARRIER_LDPC) != 0;
         info.next_light_anchor = (payload[4] & BURST_FLAG_NEXT_LIGHT_ANCHOR) != 0;  // #69
+        info.current_group_full_anchor =
+            (payload[4] & BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR) != 0;
         // payload[5] == 0 -> legacy/unspecified -> Z=27 (n=648).
         // payload[5] == 81 -> long LDPC (n=1944). Any other unexpected value
         // also falls back to 27 (defensive: we'd rather decode a control-size
