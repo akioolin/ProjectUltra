@@ -29,7 +29,6 @@
 #include <fstream>
 #include <iostream>
 #include <system_error>
-#include "test_env_compat.hpp"
 
 using namespace ultra;
 using namespace ultra::protocol;

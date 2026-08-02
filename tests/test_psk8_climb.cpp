@@ -18,7 +18,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
-#include "test_env_compat.hpp"
 
 using namespace ultra;
 using namespace ultra::protocol;

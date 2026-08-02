@@ -20,7 +20,6 @@
 #include <queue>
 #include <string>
 #include <vector>
-#include "test_env_compat.hpp"
 
 using namespace ultra;
 using namespace ultra::protocol;

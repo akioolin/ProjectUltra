@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include "test_env_compat.hpp"
 
 using namespace ultra;
 using namespace ultra::protocol;

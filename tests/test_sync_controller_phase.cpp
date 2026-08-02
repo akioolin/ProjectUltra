@@ -13,7 +13,7 @@
 #include "protocol/frame_v2.hpp"
 
 #include <iostream>
-#include "test_env_compat.hpp"
+#include "env_compat.hpp"
 
 using namespace ultra;
 using sync::SyncController;

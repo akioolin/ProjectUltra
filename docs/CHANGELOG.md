@@ -10,20 +10,19 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-08-02 — FIX: Windows test builds — setenv/unsetenv are POSIX
+## 2026-08-02 — FIX: Windows test builds — two tests missed the existing env_compat.hpp
 
 ### What was broken
 
 The Windows CI leg failed to COMPILE the test suite. `setenv`/`unsetenv` are POSIX
-and absent from MSVC, so every test that toggles an `ULTRA_*` knob errored with
-`C3861: 'setenv': identifier not found`. Linux, macOS, sanitizer and coverage all
-passed, so this presented as a red Windows job with no Windows test coverage at
-all — a silent gap rather than a failing assertion.
+and absent from MSVC, so `C3861: 'setenv': identifier not found` in exactly two
+files: `test_iterative_chest_remod.cpp` and `test_sync_controller_phase.cpp`.
+Linux, macOS, sanitizer and coverage all passed, so this read as one red job while
+actually meaning Windows had NO test coverage at all — a silent gap rather than a
+failing assertion.
 
-**12** test files were affected, not the two the compiler happened to stop on
-(`test_iterative_chest_remod.cpp`, `test_sync_controller_phase.cpp`). Three other
-test files already carried a correct local `#ifdef _WIN32 / _putenv_s` guard, which
-is precisely why the pattern was easy to miss when adding new ones.
+`tests/env_compat.hpp` has provided the portable pair for a while; these two tests
+simply never included it. Every other knob-toggling test already did.
 
 NOT introduced by v0.5.2: the offending call in `test_iterative_chest_remod.cpp`
 arrived in `4055831`, which predates `v0.5.1-pre-alpha`. `main` was green at
@@ -32,22 +31,29 @@ arrived in `4055831`, which predates `v0.5.1-pre-alpha`. `main` was green at
 
 ### What changed
 
-`tests/test_env_compat.hpp` (new) maps `setenv`/`unsetenv` onto `_putenv_s` under
-`_WIN32` only, at global scope where MSVC declares neither name so no collision is
-possible. `_putenv_s(name, "")` is the documented Windows idiom for REMOVING a
-variable. All 12 affected files include it; **no call sites changed**.
+One line in each of the two files: `#include "env_compat.hpp"`. Nothing else.
 
-### Why this shape
+### Process note — a wrong first fix, caught by CI
 
-A shared header rather than a 13th scattered `#ifdef`: local guards are what let
-ten of these through. Off Windows the header is a no-op, so the POSIX build is
-byte-unaffected and `::setenv(...)` / `setenv(...)` both keep working.
+The first attempt (`483fffc`) added a NEW `tests/test_env_compat.hpp` duplicating
+`env_compat.hpp`, and applied it to 12 files on the theory that 12 were affected.
+That was wrong twice over. The detection scanned each `.cpp` for the literal token
+`_WIN32`, but the guard lives in the HEADER, so the 10 files that already included
+`env_compat.hpp` were misclassified as unguarded. Adding a second definition to
+those translation units produced `C2084: 'setenv' already has a body` — a
+regression that turned 2 broken files into 12.
+
+The rule this violates is already in the project's working notes: grep for the
+existing helper BEFORE writing a new one. `grep -rn "_putenv_s"` would have found
+`env_compat.hpp` in seconds. The compiler's original message named exactly the two
+real files; the over-generalisation was unforced.
 
 ### Verification
 
-`cmake --build build -j4 && ctest -j4` → 101/101. Zero unguarded `setenv` remain
-in `tests/`. Windows compilation is verified by CI, not locally — a macOS gate
-structurally cannot see this class of break, which is how it reached a release tag.
+`cmake --build build -j4 && ctest -j4` → 101/101. No `tests/*.cpp` calls `setenv`
+without either including `env_compat.hpp` or carrying its own `_WIN32` guard.
+Windows compilation is verified by CI, not locally — a macOS gate structurally
+cannot see this class of break, which is how it reached a release tag.
 
 ---
 
