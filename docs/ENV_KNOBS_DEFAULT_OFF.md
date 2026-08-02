@@ -1,6 +1,6 @@
 # Default-off environment knobs
 
-Status: written 2026-08-01, against `v0.5.1-pre-alpha`.
+Status: written 2026-08-01 and refreshed 2026-08-02, against `v0.5.1-pre-alpha`.
 Scope: every `ULTRA_*` knob that is **off by default**, plus the handful of default-ON
 knobs whose *opt-out* is the interesting half. Companion to
 `docs/MODEM_INFRASTRUCTURE_MAP.md` (the live stage/knob map) and
@@ -31,7 +31,7 @@ them are traps:
 | `getenv(...) != nullptr` | `streaming_burst_interleave.cpp:512` | **OFF**, presence-only — **`=0` ENABLES it** |
 | numeric with a fallback | `connection.cpp:5104` | the **fallback value is the default**; out-of-range input silently falls back |
 
-Three live footguns, verified in the tree today:
+Four live footguns, verified in the tree today:
 
 * **`ULTRA_ACK_REPEAT_SILENT_MS=0` does not turn the feature off.** The guard is
   `if (v >= 300 && v <= 5000) return v; return 4000u;` (`src/gui/app.cpp:2913-2919`), so
@@ -44,6 +44,10 @@ Three live footguns, verified in the tree today:
   `ULTRA_CHEST_DELAY_SCAN`, `ULTRA_CHEST_NMSE_DUMP`, `ULTRA_TNC_ACCUM_PROBE`,
   `ULTRA_TNC_FLUSH_LOG`, `ULTRA_CHANNEL_DELAY_MS` (the `=0` case additionally flips
   `multipath_enabled=false`).
+* **An invalid `ULTRA_MAX_OFDM_RATE` means no ceiling.** Only `R1_2`, `R2_3` and
+  `R3_4` (or their lowercase forms) are recognized; any other text maps silently to the
+  no-cap sentinel. This is deliberately different from the atomic `ULTRA_FORCE_DATA_*`
+  parser described below, which diagnoses and rejects a malformed force as one unit.
 
 Also: a knob wrapped in a function-local `static const` **latches on first call** and
 cannot be toggled within one process. `ULTRA_ITERATIVE_CHEST`, `ULTRA_CHEST_NOISE_SCALE`
@@ -135,7 +139,7 @@ Ranked by *expected value net of rig cost*, not by how good the idea sounds.
 | # | Knob | file:line | What it would do | Why it is worth a run | Can the rig resolve it? |
 |---|---|---|---|---|---|
 | 1 | `ULTRA_CRATER_REANCHOR_HOLD` | `streaming_ofdm_decode.cpp:2691` | Two-crater discipline for the receiver's **sync** re-anchor: hold warm sync through crater #1, re-anchor from #2 | Only knob here with a mechanism metric *and* a positive paired result that was never refuted by a clean solo test. The revert is confounded 3 ways (see below) | Marginal. Effect is now smaller than the +44 % that motivated it → **n≥12** |
-| 2 | `ULTRA_BURST_INTERLEAVE` | `connection_policy.hpp:239` | Cross-frame codeword interleave: TX permutation + whole-group ACK semantics + wire flag | **Two measurements disagree**, each at n=5–6, and the mechanism is channel-class-dependent *by construction* | Yes, but only **per channel class**, n≥8 each. Do not re-A/B it as a global boolean |
+| 2 | `ULTRA_BURST_INTERLEAVE` | `connection_policy.hpp:239` | Cross-frame codeword interleave: TX permutation + whole-group ACK semantics + wire flag | Repaired Good@20 local screens are strongly positive for QPSK/8PSK Z81, but the latest real MPG@20 16QAM pairs favored OFF with far fewer craters. The mechanism is modulation/channel-class-dependent *by construction* | Yes, but only **per profile and channel class**, n≥8 each. Do not re-A/B or ship it as a global boolean |
 | 3 | `ULTRA_ACK_REPEAT_SILENT_MS` | `app.cpp:2914` | Second, Tc-decorrelated copy of the tone ACK after an unbroken quiet window | Default-ON at 4000 ms with **no goodput A/B at any n** and seven collision-repair patches behind it. Cheapest real A/B in the tree once R2 lands: one env var, no rebuild | Yes — n≥8, and the arms genuinely differ once the guard is fixed |
 | 4 | `ULTRA_KEEPALIVE_ACK` (+`_MS`) | `connection.cpp:5093` / `:5104` | Re-emit the cumulative tone ACK after `_MS` of silence during an active receive | Upside is rig-proven and reproducible (max ACK-silence gap **capped at exactly 8.0 s vs 36.7 s off**). Both original blockers named a specific, bounded fix | **Blocked** — two prerequisites first (below). Prize is ~3–4× smaller than the retracted headline |
 | 5 | `ULTRA_CONNECT_ACK_RESCUE_DEFER` | `connection.cpp:4635` | Defer, rather than destroy, an armed CONNECT_ACK rescue when an OFDM data sync is accepted | **Do not flip this knob** — 3/3 deadlocks vs ~1-in-20 baseline. But the bug it targets is rig-proven twice and open: permanent half-open, **420 s per attempt** | It is a reliability redesign, not an A/B. Ranks high if "never hangs for 7 minutes" outweighs bps |
@@ -207,15 +211,20 @@ permutation (each LDPC codeword spread across all N frames of the group), the AR
 (ON = whole-group ACK/NACK, OFF = per-frame SACK masks via `Connection::burst_interleave_off_`),
 and the on-wire `BURST_FLAG_INTERLEAVE` bit. Consumed at `src/gui/modem/modem_mode.cpp:323`.
 
-**Two measurements, opposite signs, neither adequate.**
+**Real measurements had opposite signs; the new local screen adds useful but non-live
+profile evidence.**
 
 | Date | Config | n | Result |
 |---|---|---|---|
 | 2026-06-14 | GUI, Good@20, 16QAM R2/3 | 6 | interleave **ON** +47 % (~1270 → 2033-2240 bps) |
 | 2026-07-21 (F440-449) | rig MPG@20, forced 16QAM R1/2 | 5 | interleave **OFF** +37 % (1.55 vs 1.13), 5/5 vs 4/5 delivery, **5× fewer full craters (12 vs 62)** |
+| 2026-08-02 | `measure_ack_fer`, Good@20, QPSK R3/4 cw3/Z81, seeds 7/11/23/42 | 320 groups/arm | steady complete groups **298 BI0 → 319 BI1**; incomplete groups 22 → 1; equal 8.410 s emitted groups |
+| 2026-08-02 | `measure_ack_fer`, Good@20, first/resend FULL DATA, same seeds | 80 groups/arm/profile | QPSK complete **73 → 78** and 8PSK cw4/Z81 **60 → 72**; repaired descriptor/acquisition path, simulator only |
 
-They differ in rung, in forcing, and in epoch. The OFF side is stronger because it carries
-a mechanism metric, but 5 pairs does not close a question at this bench.
+The real campaigns differ in rung, forcing, and epoch. The OFF side is stronger because it
+carries a real-rig mechanism metric, but five pairs do not close the question. The new
+simulator cells are properly powered for those exact local profiles and show why BI deserves
+a real test; they cannot overturn the contrary hardware result or establish a global default.
 
 **The mechanism is class-dependent by construction.** Interleaving turns a frozen
 *frequency*-selective null into a recoverable ~1/N nick — but couples a *time*-localized
@@ -227,9 +236,10 @@ single global boolean whose modulation argument is discarded: exactly the
 **What changed.** The project now has a working channel-class discriminator it did not have
 in July (fixed 2026-07-25: GOOD +0.606 vs MOD/POOR −0.285, 0.89 separation).
 
-**Experiment.** Not another global A/B. Gate the profile on the **measured class** — ON
-where delay spread dominates, OFF where Doppler does — and test per class at n≥8
-(MPG and MPM). Do **not** re-flip the global default on the 2026-06-14 number.
+**Experiment.** First run matched-build, byte-exact BI0/BI1 pairs for the exact Z81
+modulation under consideration. Then gate the profile on the **measured class** — ON where
+delay spread dominates, OFF where Doppler does — and test per class at n>=8 (MPG and MPM).
+Do **not** re-flip the global default from either a simulator cell or the 2026-06-14 number.
 
 #### 3. `ULTRA_ACK_REPEAT_SILENT_MS` — `src/gui/app.cpp:2914`
 
@@ -501,14 +511,60 @@ observable relax controls), then sweep relax at 0.15 / 0.35 / 0.7, n≥8.
 | `ULTRA_LATENT_RELAX_DB` | 0.35 dB, [0,5] | `connection.cpp:2627` | Forgetting rate of the latent posterior | UNDER-TESTED | Controller as a whole: +14.5 %, 8 pairs, p=0.022. Value never swept; named risk checked (sd 1.4-2.1 on rig) |
 | `ULTRA_ENTRY_EVM_CAP` | OFF strict | `waveform_selection.hpp:445` → consumed `connection_handlers.cpp:376-398` | Caps the CONNECT-time entry rung using usable-domain EVM floors vs the data-aided connect reading; cap-only | NEVER-TESTED, **blocked** | No A/B. Blocked by `CHANGELOG:2793` pending the §3 anchor re-measure — precondition **unmet** (`kOfdmLegacyAnchorScaleOffsetDb = 8.70f` still live at `connection_policy.hpp:43`). Fights `ULTRA_CONNECT_AFFINE_BASIS` (default-ON, deliberately **slope-0**: `connection_policy.hpp:876-881`), applies a hard threshold with **no confidence gate** against a 3.14 dB sample σ and 1.1–3.1 dB rung spacing, and is absent from the manual-accept path (`connection.cpp:600-670`) |
 | `ULTRA_ENTRY_QAM16_SNR` | unset = OFF | `waveform_selection.hpp:937` | Enter the ladder directly at 16QAM R2/3 on a Good channel above a dB threshold | MEASURED-HARMFUL | F73 (`KNOWN_BUGS.md:809`): a **cold** 16QAM entry decodes marginal (quality 0.35, no warm channel estimate) and its slow decode widened the handshake race, collapsing the ladder to R1/4. Mechanism-level, not a bps delta. Now *worse*: the latent controller seeds its prior from the entry rung |
-| `ULTRA_MAX_OFDM_RATE` | unset = no cap; string | `connection.cpp:679`, `:3939`; `connection_handlers.cpp:415`, `:607` | Caps the OFDM code rate | FORCE/DEBUG — **broken** | Caps the **entry only**: `maybeObeyAuthorityCommand` (`connection.cpp:3195-3240`) applies no cap, and `applyAdaptiveRateFeedback` is dead by default. Unparsable values map silently to the AUTO no-cap sentinel — a typo'd arm looks valid and is not. Use `ULTRA_LOCK_RATE` / `ULTRA_RATE_ADAPT=0`, which `:3202` honours |
-| `ULTRA_FORCE_DATA_RATE` (+`_MOD`) | unset = AUTO | `waveform_selection.hpp:971`, `:1117` | Pins the code rate; also makes `capInitialOFDMRateImpl` return the candidate unchanged | FORCE/DEBUG | The cautionary example: "+10.6 % unanimous over 2 pairs" → **+5.2 %, p=0.73 at n=8**. Two usage notes: set it on the station holding rate authority; under the latent controller a forced rung also freezes the posterior's evidence stream, so it no longer measures the shipped system |
+| `ULTRA_MAX_OFDM_RATE` | unset = no ceiling; `R1_2`, `R2_3`, `R3_4` | `latent_rate_controller.hpp::latentConfiguredRungCeiling`; compatibility readers in `connection.cpp` and `connection_handlers.cpp` | Caps **automatic** coherent-ladder selection | FORCE/DEBUG | Fixed on the live path: the latent argmax, bounded startup probe and received authority commands share one absolute canonical-rung ceiling. It never overrides an exact forced profile. Invalid text still silently means no ceiling. The bootstrap/legacy-reader caveat is recorded below. |
+| `ULTRA_FORCE_DATA_MOD` + `ULTRA_FORCE_DATA_RATE` | both unset = AUTO; either may be set alone | parser in `waveform_selection.hpp`; handshake in `connection.cpp` / `connection_handlers.cpp` | Negotiates and QSO-pins an exact modulation/rate measurement profile | FORCE/DEBUG | Parsed atomically, carried in CONNECT/CONNECT_ACK, and pinned at both endpoints even when configured on only one station. A valid partial override resolves its AUTO half normally; any present invalid field rejects the whole environment pair. Exact force outranks MAX. The cautionary result still applies: "+10.6 % unanimous over 2 pairs" became **+5.2 %, p=0.73 at n=8**; a forced run does not measure the shipped adaptive selector. |
+
+#### Current forced-profile and MAX contract (2026-08-02)
+
+This is a negotiation contract, not merely a local selector override:
+
+* `forcedDataProfileFromEnvironment()` parses `ULTRA_FORCE_DATA_MOD` and
+  `ULTRA_FORCE_DATA_RATE` together. If either variable is present but invalid, the parser
+  marks the pair malformed, resets **both** fields to AUTO, logs the error at the handshake
+  owner, and contributes no environment force or adaptation pin. A separate explicit
+  `ConnectionConfig` force, if any, still stands. A valid one-field environment override is
+  supported: the unset half stays AUTO until the ordinary recommendation/configuration path
+  resolves it, after which the requested half is applied. It is never left uninitialized.
+* The initiator snapshots the resolved config/environment fields into
+  `outbound_forced_modulation_` / `outbound_forced_code_rate_` before serializing CONNECT.
+  CONNECT retries reuse that attempt-scoped snapshot, so clearing or changing the process
+  environment after the first send cannot mutate the requested profile.
+* The responder first computes the ordinary automatic entry and its MAX/safety caps, then
+  applies a valid responder-local environment force, and finally applies any explicit
+  non-AUTO CONNECT fields. It serializes the **actual committed profile** in CONNECT_ACK.
+  Duplicate-CONNECT and proactive ACK retries resend the cached ACK bytes, preserving both
+  the profile and its provenance.
+* A force on only the initiator therefore travels in CONNECT. A force on only the responder
+  is echoed in CONNECT_ACK with `Flags::CONNECT_FORCED_PROFILE`. The initiator rejects a
+  CONNECT_ACK that conflicts with any field it explicitly requested; the provenance bit
+  covers the responder-only case, where the original CONNECT necessarily carried AUTO.
+* Either explicit outbound fields or the CONNECT_ACK provenance bit establishes a
+  QSO-scoped automatic-rate pin at **both** endpoints before `on_connected` can start data.
+  The pin survives later environment removal and gates the latent selector/startup probe,
+  receiver-authority commands, automatic escape/demote paths, and the legacy feedback
+  controller through `Connection::rateAdaptationActive()`. Manual protocol actions remain
+  manual; the promise is that no automatic rate actuator invalidates the measurement rung.
+* Precedence is: automatic recommendation and safety/MAX caps, then exact local force, then
+  explicit CONNECT fields at the responder; the committed CONNECT_ACK is never rewritten
+  by an initiator-local MAX. Thus `ULTRA_FORCE_DATA_MOD=8PSK` plus
+  `ULTRA_FORCE_DATA_RATE=R2_3` remains 8PSK R2/3 even beside
+  `ULTRA_MAX_OFDM_RATE=R1_2`.
+
+`ULTRA_MAX_OFDM_RATE` is intentionally weaker: it is an **automatic-selector ceiling**, not
+a profile negotiation or lock. On the shipped latent/RX-authority route,
+`latentConfiguredRungCeiling()` maps it to the absolute canonical QPSK R1/2, R2/3 or R3/4
+rung and applies it to normal argmax, startup exploration, and sender-local resolution of a
+peer authority command. Two bootstrap compatibility readers (manual accept and auto accept)
+still perform the older code-rate-only comparison, and the reader inside
+`applyAdaptiveRateFeedback()` belongs to the default-bypassed legacy sender controller.
+Those legacy sites may be consolidated, but they are not evidence that the live ceiling is
+entry-only, and they must not be used to delete the central latent/authority reader.
 
 ### ARQ, timeouts, and the ACK plane
 
 | Knob | Default | file:line | What it does | Status | Evidence |
 |---|---|---|---|---|---|
-| `ULTRA_INFLIGHT_RTO` | OFF strict | `selective_repeat_arq_policy.hpp:287`; table `connection.cpp:5721-5747`; consumed `selective_repeat_arq.cpp:2274` | Sizes the ARQ RTO on frames outstanding instead of the window max | SUPERSEDED — **code fix, not a campaign** | n=2, "+65 % / −19 %, inconclusive" (`609fc71`). Premise is false on the live path: burst transport is unconditional (`connection.cpp:35`) and `prepareUnifiedBurstWindow` already re-derives a **frames-parameterised** timeout every burst (`connection.cpp:5998` → `connection_policy.hpp:1606`) — reproduced exactly against the rig's own `configured=17420 / 23144`. The table is drawn from the superseded windowed model and `min()`s against it, so at full window it arms **1.5 s shorter** than the burst deadline. It is also consulted **only on first transmission** — `retransmitFrame` re-arms from the scalar (`selective_repeat_arq.cpp:1676`, `:1330`), which is the NACK-driven tail the motivating 57 s observation came from. Real fix: re-issue `unifiedBurstAckTimeoutMs(submitted_this_call)` after the submit loop and route the retransmit re-arm through it |
+| `ULTRA_INFLIGHT_RTO` | OFF strict | legacy table in `connection.cpp`; legacy consumer in `selective_repeat_arq.cpp` | Sizes the old logical-window RTO from frames outstanding | SUPERSEDED — **closed by unconditional physical-egress timing** | The live MPG@20 trace proved the knob could not repair the motivating tail: a one-frame resend still inherited the stale scalar and repeated at ~23.15 s. The default path now finalizes every DATA egress from the exact serialized frame vector after padding, applies queue carry only to identities that actually go on air, replaces the tone-monitor deadline with the same round timeout, and timeout-suspends later holes until a subsequent physical round emits them. Padding counts toward airtime but cannot alias a slot because matching uses full serialized identity. Focused regressions cover adaptive-state override, singleton tail RTO, near-expiry multi-hole cap shrink, padding alias, synchronous ACK ordering, and monitor replacement. Keep this experimental table OFF; it is now a deletion candidate. |
 | `ULTRA_ADAPTIVE_RTO` | OFF strict | `selective_repeat_arq_policy.hpp:255`; `:314-321`; call `selective_repeat_arq.cpp:2313` | Stops `configured_ack_timeout_ms` being the RFC6298 estimator **floor** as well as its ceiling (the legacy `clamp()` collapses to a point) | UNDER-TESTED, low | n=1 paired: 1.12 vs 1.50 kbps. Mechanism measured with a null control (53 `ADAPTIVE-RTO ENGAGED` firings): the adaptive floor moves the RTO by **0–20 %**, not the 7.5× the synthetic unit test implies, because measured srtt is 10.7–12.6 s. **Do not pair it with `ULTRA_INFLIGHT_RTO`**: where INFLIGHT acts (tail, table[1]=8.0 s) ADAPTIVE is inert (min(8.0, ~18)=8.0); where they interact, min(table[16]=47.7 s, ~20.5 s)=20.5 s sits **under the ~21.5 s burst airtime** — a guaranteed spurious mid-burst retransmit. Blast radius is wider than the RTO: it also scales the hole-probe timers (`:1301`,`:1462`), the DATA_REPAIR guard (`:1544`) and the post-fast-retx re-arm (`:1330`) |
 | `ULTRA_KEEPALIVE_ACK` | OFF | `connection.cpp:5093` | Re-emit the cumulative tone ACK after `_MS` of silence | UNDER-TESTED → see [shortlist #4](#4-ultra_keepalive_ack--ultra_keepalive_ack_ms--connectioncpp5093--5104) | Reverted 2026-07-14 on a mechanism-level cause (re-emits re-assert the rung command) |
 | `ULTRA_KEEPALIVE_ACK_MS` | **8000** ms, [3000,60000] | `connection.cpp:5104` | Silence threshold | sub-parameter | 8000 has a cap measurement with a two-point null control (36.7 → 25.0 → 8.0 s). No room below it: normal group cadence is 9-10 s. Comment at `:5096` says "default 25000" — **stale** |
@@ -531,12 +587,14 @@ observable relax controls), then sweep relax at 0.15 / 0.35 / 0.7, n≥8.
 | `ULTRA_CRATER_REANCHOR_HOLD` | OFF strict | `streaming_ofdm_decode.cpp:2691` | Two-crater discipline for the receiver's sync re-anchor | UNDER-TESTED → [shortlist #1](#1-ultra_crater_reanchor_hold--srcguimodemstreaming_ofdm_decodecpp2691) | F470-481 +44 %, re-anchors 25 vs 50; revert confounded 3 ways |
 | `ULTRA_CHEAP_REANCHOR` | OFF strict, **and inert unless HOLD=1** | `streaming_ofdm_decode.cpp:2709` | On a crater: hold warm timing, roll CFO back to the last certified value (`certifyWarm()` fires unconditionally at `streaming_burst_interleave.cpp:1398-1399`), full chirp only every 4th | NEVER-TESTED, low | **Trap:** setting it alone is a strict no-op — the dispatch at `:2714-2721` makes `force_chirp` unconditionally true when HOLD is off, and the rollback lives in the unreachable else-arm. Target is only ~1.2 s/run once HOLD lands (HOLD already cuts re-anchors to ~1/run), i.e. **1.3–1.7 % of transfer time** — an order of magnitude below rig resolution. Also: the documented "1 chirp per 4 craters" is **wrong** — the streak resets on any decoded frame, so it is "no chirp unless 4 **consecutive**", and riding warm through 3 craters injects up to 3 extra `k=0` observations into the latent posterior. Fix the doc (`CHANGELOG:3674`, `MAP:412`); do not spend rig time |
 | `ULTRA_COMMANDED_GEOMETRY` | OFF since 2026-07-29 (`4055831`), loose, non-latching | `streaming_decode_policy.hpp:53`; readers `streaming_ofdm_decode.cpp:426` (B) and `:656` (A) | **(A)** truncation guard — never arm a group from a group-start frame that `std::min(frame_len, available)` shortened. **(B)** on a missed BURST_HEADER, slice with the rung *this* receiver commanded, gated by cadence + demote-only + not-declined | UNDER-TESTED; **(A) is a silently-disabled correctness guard** → R1 | (A): unit-pinned only (knob=0 → 0/3, knob=1 → 3/3, `trunc_holds=1`); **zero rig measurement in either direction**. (B): rig 8 interleaved transfers, `cmd_arms=0` in 7 of 8 → the +23 % arm-mean is a self-declared **null control**. Suppression cause known and unfixed: three `have_burst_descriptor_` stale-TRUE leaks, `MAP §7b:352-360`. Do not score a (B) A/B without `cmd_arms > 0` |
-| `ULTRA_BURST_INTERLEAVE` | OFF for all mods | `connection_policy.hpp:239` | TX permutation + whole-group ACK semantics + wire flag | UNDER-TESTED → [shortlist #2](#2-ultra_burst_interleave--srcprotocolconnection_policyhpp239) | Two contradicting measurements at n=5-6 |
+| `ULTRA_BURST_INTERLEAVE` | OFF for all mods | `connection_policy.hpp:239` | TX permutation + whole-group ACK semantics + wire flag | UNDER-TESTED → [shortlist #2](#2-ultra_burst_interleave--srcprotocolconnection_policyhpp239) | The repaired Good@20 harness is strongly positive but simulator-only: QPSK R3/4 cw3/Z81 steady groups went 298/320 complete BI0 → 319/320 BI1, and full first/resend groups went 73/80 → 78/80; 8PSK R2/3 cw4/Z81 full groups went 60/80 → 72/80. This still conflicts with the historical real MPG@20 16QAM result: BI0 +37%, 5/5 vs 4/5 delivery, and 12 vs 62 craters. Keep OFF until matched, byte-exact IONOS evidence exists **per modulation/channel class**; do not infer a global boolean from the local screen. |
 | `ULTRA_BURST_ERASURE_ABSOLUTE` | OFF | `streaming_burst_interleave.cpp:679` | Forces the legacy fixed 0.015 broadband-RMS erasure floor | FORCE/DEBUG — keep as the OFF arm | Only recorded use is ctest triage (UltraTncSimAudio fails identically with `=1`, proving the failure is unrelated) |
 | `ULTRA_BURST_RMS_DIAG` | OFF | `streaming_burst_interleave.cpp:645` | Logs the erasure-gate inputs per collected frame | DIAGNOSTIC → [shortlist #7](#7-ultra_burst_rms_diag--ultra_burst_erasure_absolute) | Owed since 2026-06-16 (`KNOWN_BUGS.md:1279`) |
 | `ULTRA_HARQ_PROVISIONAL` | OFF (opt-in) | `streaming_ofdm_decode.cpp:3756` | On CW0 header-peek failure, key the HARQ soft-combine buffer by the ARQ-mirror predicted seq so CW0-dead frames still accumulate LLR energy | UNDER-TESTED, **parked** | Shipped default-ON on a sim A/B (0/212 key mispredictions, combines 28 → 289/run), flipped to opt-in the same evening on **n=1** (one poison-loop). The named blocker **is structurally gone** — Phase F fresh-only rescue is unconditional (`frame_v2.cpp:2237-2280`) plus a provisional-key accumulator reset capping poison at one round. But it is gated to `getBitsPerSymbol >= 4` and the only selectable ≥4 bps rung is QAM16 R2/3, enabled solely in the Good column at an **extrapolated 26.0 dB** — so on the default ladder it cannot fire. Both prior measurements forced 16QAM, which measures a configuration deliberately not shipped (51.4 % FER on ITU Good). **Make it a dependent of the 16QAM unlock, not an independent rig candidate.** Two stale claims to fix now: `streaming_ofdm_decode.cpp:3752-3754` and `MAP:257` both still name the re-enable precondition as unmet. Any A/B must carry decoder `backlog_ms` and shed-seconds (BUG-DECODE-BACKLOG-COLLISIONS is open) |
 | `ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH` | OFF strict, documented permanent | `streaming_encoder.cpp:687` | Preserve the #69 reactive-anchor-skip clean streak across a descriptor mode/rate switch | MEASURED-HARMFUL (closed at n=2) | Stopped on a pre-committed falsifier: chirp SKIP rate **7.7 % ON vs 28.9 % OFF** — the knob's entire purpose was to raise it and it more than halved it. Craters 2.0 vs 1.0/run, resends 1.0 vs 0.0. The recool was doing double duty as a **post-switch acquisition guard**. A future attempt is a different design (explicit post-switch holdoff). **Keep** the `anchor_reason` plumbing (None/Resend/ModeSwitch) — it is what made this measurable |
 | `ULTRA_BURST_HEADER_ONCE` | OFF | `modem_engine.cpp:582` | Emit the BURST_HEADER descriptor only on `group_seq == 0` | MEASURED-HARMFUL, **delete** | `PHY_ADAPTATION_DESIGN_2026_05_26.md §14.32`. The gate worked (1 header sent); BRAVO then reported every inner group as `group_seq=0` and re-ACKed seq 0 forever. The header does **three** jobs — format, chirp/sync, **and group sequence number** — and (3) is required every burst. The claimed saving is illusory anyway: the header's airtime is almost entirely chirp+LTS. **KEEP** `ULTRA_BURST_DESCRIPTOR` — the descriptor is the only RX source of the LDPC lifting Z |
+| `ULTRA_8PSK_LONG_LDPC` | OFF strict, transfer-scoped | `connection.cpp:42`; profile `:6950-7065` | For connected OFDM file bursts only, substitutes physical cw4/Z81 for the logical QAM8 R2/3 cw12/Z27 rung. Capacity and 7776 coded bits/frame are unchanged; BURST_HEADER announces both CW and Z. A one-frame tail/retry gains one addressed-away ULPAD frame so it cannot escape without a descriptor | EXPERIMENTAL; REAL IONOS INTEGRITY PROVEN, PROMOTION UNPOWERED | The two-pair post-fix MPG@20 follow-up was byte-exact and directionally positive but below its predeclared n>=8 gate. A later immutable-build `8psk_z81_01` transfer was again byte-exact (51,200 B, 1.83 kbps application / 1.77 kbps physical span, 22/22/22 bursts and 22/22 ACKs), but had 9 partial groups and 2 craters; it is another sequential realization, not a promotion trial. The repaired Good@20 geometry screen favors cw4/Z81 over equal-capacity cw12/Z27 (2174/2400 vs 2113/2400 frames; 348/480 vs 323/480 complete groups) and disfavors shorter cw3/cw2. BI1 lifted a smaller cw4 sample to 753/800 frames and 147/160 groups, but that is simulator-only and conflicts with historical live 16QAM interleave evidence. The initial Z81 capacity/cache/HARQ defects and stale-lifecycle exits are repaired, and the current-group FULL anchor is now announced on wire, but the new acquisition/anchor fixes have **no fresh live run yet**. Keep OFF pending matched-build, order-balanced real IONOS evidence. |
+| `ULTRA_QPSK_R34_LONG_LDPC` | OFF strict, transfer-scoped | `connection.cpp:51`; profile `:7005-7149` | For connected `OFDM_CHIRP` file bursts only, maps the normal unforced logical QPSK R3/4 cw8/Z27 rung to physical cw3/Z81. This is **not** equal airtime: capacity is 461→527 bytes and coded bits are 5184→5832 (+12.5%). Chunking, ARQ serialization, burst budget/RTO, and the BURST_HEADER all consume cw3/Z81; singleton tails/retries gain an addressed-away ULPAD so Z81 never escapes descriptor-less | EXPERIMENTAL; REAL IONOS INTEGRITY PROVEN, ACQUISITION FIX NOT LIVE-VALIDATED | The immutable-build `qpsk_r34_z81_01` MPG@20 transfer was byte-exact (51,200 B, 1.85 kbps application / 1.64 kbps physical span, 23 bursts sent / 22 decoded, all 22 committed ACKs accepted). Its first descriptor was lost to the now-fixed future-training clamp; a later 0/5 was a separate real near-0 dB fade, for 13 repaired chunks total. After repairing `measure_ack_fer`, Good@20 steady cw3/Z81 groups reached 1567/1600 frames and 298/320 complete BI0 versus 1595/1600 and 319/320 BI1; full first/resend groups were 390/400 in both arms and 73/80 versus 78/80 complete. This extends the earlier 390/400 matched-frame screen but remains simulator evidence. The profile, new future-position/earlier-candidate/current-anchor fixes, and BI choice still require a fresh matched-build real transfer; keep OFF. |
 | `ULTRA_WARM_TURNAROUND_OFF` | knob OFF ⇒ **feature DEFAULT-ON** | `modem_engine.cpp:1185` | Setting it to 1 **restores the slow behaviour** | FORCE/DEBUG — **do not set** | The feature is rig-proven on two classes: Good MPG@20 turnaround 2.71 → **1.54 s (−43 %)**, Moderate MPM@20 1.59 s with zero burst-timeout stalls. The old per-ACK echo-clear called `clearRxBuffer` → `reset()`, wiping warm-sync state every turnaround. The name reads like something you would switch on to *get* warm turnaround. Keep the knob — the faithful gate structurally cannot regression-test this (the sim TX returns before the echo-clear, `app.cpp:3040`), so it is the one-line bisect if a rig regression implicates turnaround |
 
 ### Channel estimation, LLR, and RX front end
@@ -572,7 +630,7 @@ and the COH/MIN pair) are the reason several other estimator knobs rank low. Rea
 | Knob | Default | file:line | What it does | Status | Notes |
 |---|---|---|---|---|---|
 | `ULTRA_CHANNEL_DELAY_MS` (+`ULTRA_CHANNEL_DOPPLER_HZ`) | unset = model default; **presence-only, `=0` also sets `multipath_enabled=false`** | `ota_channel_core/channel.cpp:184` | Overrides the sim delay spread | DIAGNOSTIC / test apparatus | `DELAY_MS=0 DOPPLER_HZ=0` gives **truth H = 1 at every carrier** — an identity control. If an estimate-vs-truth comparison is still wrong under it, the fault is in the **tool**. Worth documenting prominently: this project has already had an analyzer that manufactured a 2.5 s latency figure from two hardcoded constants |
-| `ULTRA_MEASURE_BURST_FULL_ANCHOR` | OFF | `tools/measure_ack_fer.cpp:1172` | Forces a full chirp+LTS anchor at each burst chunk's group start | FORCE/DEBUG — **do not promote to default** | It reproduces production's **resend / session-first** anchor regime, not the shipped §16.8 warm handoff (production sends a full-anchor BURST_HEADER *descriptor* then a **light-LTS** group start; `streaming_encoder.cpp:620-626`, `streaming_ofdm_decode.cpp:1268-1311`). Forcing it every chunk would emit two full anchors back to back in descriptor-on configs and would pin the anchor-skip clean streak at 0 forever. The harness's real fidelity defect is its **descriptor-off default** (`args.burst_descriptor=false`, `:65`) — fix that instead. The 0-frames-recovered symptom was a missing `burst_group_callback_`, fixed unconditionally at `:1201` |
+| `ULTRA_MEASURE_BURST_FULL_ANCHOR` | OFF | `tools/measure_ack_fer.cpp:1184` | Passes a per-request full chirp+LTS option for each burst chunk's DATA group start | FORCE/DEBUG — **do not promote to default** | It reproduces production's **resend / session-first** DATA-anchor regime, not the steady warm handoff. The request option cannot be consumed by the preceding descriptor. The harness now pumps one 4800-sample idle interval through the real channel before the descriptor so a fresh decoder does not skip a chirp beginning at absolute zero, and expected frames use the production `PHYSICAL_BURST_END` stamping policy; those are unconditional fidelity repairs, while this knob remains the explicit FULL-vs-LIGHT regime selector. Descriptor-FULL + DATA-FULL screens also exercise the earlier-complete-candidate recovery because both chirps can occupy one detector window. Do not turn it into a shipping modem default. |
 | `ULTRA_MEASURE_BURST_NO_ANCHOR_WAIT` | OFF | `tools/measure_ack_fer.cpp:1102` | Skips the harness's `expectFullOFDMAnchorOnce()` demand so a light-LTS group start (corr ~0.26 vs the 0.52 threshold) is accepted | FORCE/DEBUG | The RX-side alternative to the above. Use to isolate "acquisition-threshold artifact" from "geometry/decode problem" |
 | `ULTRA_CHEST_DELAY_SCAN` | OFF, **presence-only (`=0` enables)** | `tools/measure_ack_fer.cpp:752` | Prints residual-vs-delay over ±2560 samples in 64-sample steps | DIAGNOSTIC | The production fine search (±1200 at 0.5-sample steps) runs regardless. The coarse scan is how you would detect the fine search converging to a local minimum — its window is **narrower** than the coarse one. Hygiene: normalise the enable test |
 | `ULTRA_CHEST_NMSE_DUMP` | OFF, presence-only | `tools/measure_ack_fer.cpp:689` | First frame only: dumps estimate-array geometry plus \|est\| at **deliberately unoccupied** bins (0, 100, 500, 900) and adjacent carriers | DIAGNOSTIC | A well-built sanity check: energy at an unoccupied bin means the array is not what the caller believes. Guards the same class of assumption error that produced a real stale-geometry mistake (12.67 ms/symbol from the 512-FFT spec on a 1024/128 modem — actual 24.0 ms) |
@@ -606,7 +664,7 @@ only reader is gone. Route them through `docs/REMOVAL_BACKLOG.md`.
 | `ULTRA_EVM_DEMOTE_CONFIDENT` | `connection.cpp:2965` | Inside the above block. Measured harmful at n=2 **with a null control that proved the gate worked as designed** (8.0 firings/run vs 0) and the outcome still degraded — churn 17.0 vs 7.5 | **Keep the form in the record:** `mean + 1.645·se < floor − margin` over a ring is correct for *any* rung decision fed by a σ≈3 dB estimator against 1.2-3.1 dB spacing; z=1.645 is a probability constant, same family as −ln(0.05) and ln(9). Reuse it if the tie-break probe is ever gated on confidence. Keep `tests/test_rx_authority.cpp:616-657` |
 | `ULTRA_LINEAR_SNR_RING` | `connection_policy.hpp:92`; ring `connection.cpp:2519-2534` | Decision-inert: the ring executes but `snr_avg` is unread by the latent controller, and `ofdmAnchorScaleOffsetDb()` now has exactly one production consumer (`modem_protocol_binding.hpp:129-138`) whose value is used only as a freshness gate. Measured wash: 4 pairs, −2.5 %, sign p=0.688, with sizing independently confirmed neutral (ladder input 23.7 vs 23.6) | **Keep the code and the KNOWN_BUGS entry.** The underlying defect is real and large: per-frame dB-mean 13.89 vs power-mean 16.42 over 1023 readings = **1.74 dB**, the single largest identified term in the ~5.4 dB sim-vs-rig discrepancy against a measured analog loss of 0.36 dB. Any future SNR measurement — the §3 anchor re-measure, a per-class θ_r fit — **must be run in the linear-power domain** or it bakes the Jensen error into the new table |
 | `ULTRA_GOODPUT_RATE` | `goodput_rate_controller.hpp:91`; path `connection.cpp:2664-2720` | Its early return sits **below** the latent one, so it needs `ULTRA_LATENT_RATE=0` to run. Same thesis, better implementation shipped: n=3, +8.0 % mean, spread −24 % to +43 %, self-described "NOT a result" | Two findings to salvage into notes: (a) its demote rule credits the rung below with f=1, inherited from a helper whose comment calls that "deliberately conservative" — right for crater regrading, a systematic downward bias as a primary rule; (b) **η(16QAM R1/2) = 2.000 and η(8PSK R2/3) = 2.001** — 16QAM R1/2 is a **dominated rung**, buying zero throughput for a denser constellation and worse PAPR (pinned by `test_dominated_rung_is_always_left`). That fact outlives any controller |
-| `ULTRA_QAM16_CALM_FADING` | `connection.cpp:4010` | On the **sender's** `applyAdaptiveRateFeedback`, whose sole production call site is the `else` arm at `connection.cpp:2000-2013` — dead since `rxRateAuthorityEnabled()` went default-ON on 2026-07-05, **~26 hours after the knob was written**. It also gates the *wrong* hop: with the PSK8 ladder default-ON the climb target is QAM8 R2/3, not QAM16, and the QAM8→QAM16 step returns before `:4010`. The over-commit it would block was fixed upstream in the rung table (QAM16 R2/3 Good anchor 20.0 → 26.0, measured 51.4 % FER) | The whole sender-side dense-climb block dies together (`qam16_clean_streak_`, `qam16_r34_clean_streak_`, `qam16_reclimb_cooldown_`, `ULTRA_QAM16_CLIMB`, `ULTRA_QAM16_R34`, `ULTRA_R34_CALM_FADING`, `ULTRA_MAX_OFDM_RATE`'s `:3939` site). **KEEP:** the ACK-silence escapes (collapse escape, stuck-frame escape, RTO machinery) are not in this arm; `last_group_quality_` (`:3706`) still feeds the GUI "Adapt:" bar. **Sequence after** the `ULTRA_LATENT_RATE=0` fallback is dropped in 0.5.2 |
+| `ULTRA_QAM16_CALM_FADING` | `connection.cpp:4010` | On the **sender's** `applyAdaptiveRateFeedback`, whose sole production call site is the `else` arm at `connection.cpp:2000-2013` — dead since `rxRateAuthorityEnabled()` went default-ON on 2026-07-05, **~26 hours after the knob was written**. It also gates the *wrong* hop: with the PSK8 ladder default-ON the climb target is QAM8 R2/3, not QAM16, and the QAM8→QAM16 step returns before `:4010`. The over-commit it would block was fixed upstream in the rung table (QAM16 R2/3 Good anchor 20.0 → 26.0, measured 51.4 % FER) | The sender-side dense-climb block dies together (`qam16_clean_streak_`, `qam16_r34_clean_streak_`, `qam16_reclimb_cooldown_`, `ULTRA_QAM16_CLIMB`, `ULTRA_QAM16_R34`, `ULTRA_R34_CALM_FADING`) and its **legacy** `ULTRA_MAX_OFDM_RATE` reader can go with it. **KEEP:** `latentConfiguredRungCeiling()` plus the responder/manual-entry MAX readers; those are the live automatic-ceiling contract. The ACK-silence escapes (collapse escape, stuck-frame escape, RTO machinery) are not in this arm; `last_group_quality_` (`:3706`) still feeds the GUI "Adapt:" bar. **Sequence after** the `ULTRA_LATENT_RATE=0` fallback is dropped in 0.5.2 |
 | `ULTRA_UNIFIED_SEQ` | comment-only: `connection.cpp:5816`, `streaming_burst_interleave.cpp:242`, `modem_engine.cpp:530` | **The getenv is gone.** `kUnifiedSeqEnabled()` returns `true`; ~1000 lines of `BurstStopAndWaitController` were deleted | Rewrite the three comments without the dead knob name — a reader grepping it today concludes the unified path is optional. **Preserve** the fast-NACK note at `streaming_burst_interleave.cpp:242` and the burst-sizing note at `modem_engine.cpp:530` |
 | `ULTRA_TONE_ACK_INTERACTIVE` | comment-only: `connection.cpp:401` | Same merge, same commit | The merge had to explicitly re-wire `applyAdaptiveRateFeedback` into the unified ACK branch. That is the same now-dead sender arm above — do not treat the comment as evidence the path is live |
 | `ULTRA_WARM_TURNAROUND` | not a knob | Prefix false positive; the real knob is `ULTRA_WARM_TURNAROUND_OFF` (`modem_engine.cpp:1185`) | **Methodology note:** a plain substring diff of knob names against the map produces prefix false positives. Of the 61 "undocumented" knobs in the audit set, **seven are not env knobs at all** — this one, `ULTRA_HAVE_LIBHAMLIB`, `ULTRA_OTASIM_AUDIO_DIAGNOSTICS`, `ULTRA_TNC_TESTING` (compile-time `#ifdef`/CMake), `ULTRA_PHY_DIAG_LOG` (a log-format name in a Python tool's help text), plus `ULTRA_UNIFIED_SEQ` and `ULTRA_TONE_ACK_INTERACTIVE` above. True count: **54** |
@@ -649,7 +707,7 @@ apparatus** — exhaust it before constructing a new oracle.
 entry causes a wrong deletion later. The list below was produced by grepping each knob name
 against the map (`grep -c`, zero hits), not by substring diff.
 
-**44 knobs with a real getenv site are absent.** In rough priority order:
+**43 knobs from this audit still have a real getenv site and are absent.** In rough priority order:
 
 **Critical — default-ON behaviour, or the default rate path:**
 
@@ -667,8 +725,8 @@ against the map (`grep -c`, zero hits), not by substring diff.
 `ULTRA_TRUST_LADDER_PICK` (`connection.cpp:3048`), `ULTRA_RUNG_DWELL_MS` (`:3113`),
 `ULTRA_RUNG_CLASS_ANCHOR` (`waveform_selection.hpp:597`), `ULTRA_FER_FLOOR_ANCHOR`
 (`:610`), `ULTRA_QAM16_CALM_FADING` (`connection.cpp:4010`), `ULTRA_ENTRY_QAM16_SNR`
-(`waveform_selection.hpp:937`), `ULTRA_FORCE_DATA_RATE` (`waveform_selection.hpp:971`),
-`ULTRA_INFLIGHT_RTO` (`selective_repeat_arq_policy.hpp:287`), `ULTRA_KEEPALIVE_ACK` /
+(`waveform_selection.hpp:937`), `ULTRA_INFLIGHT_RTO`
+(`selective_repeat_arq_policy.hpp:287`), `ULTRA_KEEPALIVE_ACK` /
 `_MS` (`connection.cpp:5093` / `:5104`), `ULTRA_MC_ACK_REPEATS` (`connection.cpp:5447`),
 `ULTRA_CONNECT_ACK_RESCUE_DEFER` (`connection.cpp:4635`), `ULTRA_DROP_RX_SEQ`
 (`connection.cpp:4542`).
@@ -693,7 +751,7 @@ against the map (`grep -c`, zero hits), not by substring diff.
 | `MAP:57,58,426` + `KNOWN_BUGS.md:147,278` | `ULTRA_COMMANDED_GEOMETRY` DEFAULT-ON | DEFAULT-OFF since `4055831` |
 | `MAP:233` | `ULTRA_MODE_CHANGE_RETRY_MS` default ~5 s ratiometric, "replaces the `getAckTimeout()` borrow" | The `getAckTimeout()` floor was **restored** after the W5/W5b/W6 bisect — ~18.5 s |
 | `MAP:262` | `ULTRA_TNC_BULK_ACCUM` live | **Deleted**; superseded by `ULTRA_TNC_ACCUM_DISABLE` |
-| `MAP:267` | `ULTRA_MAX_OFDM_RATE` at `connection.cpp:673`, one site | Four sites (`connection.cpp:679`, `:3939`; `connection_handlers.cpp:415`, `:607`) |
+| `MAP:267` | `ULTRA_MAX_OFDM_RATE` at one old `connection.cpp` site | Four readers with different roles: the live canonical ceiling in `latentConfiguredRungCeiling()`, manual-accept and auto-accept bootstrap compatibility readers, and the default-bypassed legacy reader in `applyAdaptiveRateFeedback()` |
 | `MAP:247` + `streaming_decoder.hpp:930` | `ULTRA_RX_AGC` makes the CCA quiet gate gain-independent | The CCA is on a **parallel raw-audio path** (`modem_rx.cpp:176,181-183`) and has been ratiometric since 2026-05-23 — the AGC cannot reach it |
 | `MAP:257` + `streaming_ofdm_decode.cpp:3752-3754` | `ULTRA_HARQ_PROVISIONAL` re-enable precondition unmet | The fresh-only rescue **shipped** (`frame_v2.cpp:2237-2280`) |
 | `MAP:291` + `iterative_chest.hpp:49` | `ULTRA_ITERATIVE_CHEST` "MEASURED NULL" | Accurate **but imprecise** — null by the *family* control (`ULTRA_LTS_DFT_DENOISE`, n=240/cell), not by a direct A/B of this knob. Say which |
@@ -707,10 +765,10 @@ against the map (`grep -c`, zero hits), not by substring diff.
 
 So nobody re-proposes them from the name alone:
 
-* **`ULTRA_INFLIGHT_RTO`** — the tail RTO defect it describes is real, but the burst path
-  already re-derives a frames-parameterised timeout every burst, and the knob only affects
-  *first* transmissions while the observed 57 s tail was NACK-driven. Fix
-  `unifiedBurstAckTimeoutMs`; do not run the knob.
+* **`ULTRA_INFLIGHT_RTO`** — the tail RTO defect was real, but the experimental table acted
+  on logical/window state and missed the NACK/RTO retransmission paths. Physical egress now
+  commits exact frame identities and pauses unsent holes by default. Keep the knob off and
+  delete it separately; do not A/B a superseded correctness mechanism.
 * **`ULTRA_ADAPTIVE_RTO` paired with `ULTRA_INFLIGHT_RTO`** — where one acts the other is
   inert, and where they interact the composite RTO can land **under** the burst it is
   timing.

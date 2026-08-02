@@ -10,6 +10,512 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-02 — FIX: Z81 repair-anchor contract, live-audio sync deferral, and faithful burst measurement (UNCOMMITTED; fresh IONOS validation pending)
+
+### What was actually broken
+
+The first forced-QPSK R3/4 cw3/Z81 transfer on the current frozen build exposed four
+different defects which must not be collapsed into one "Z81 is unreliable" result:
+
+1. The first live `BURST_HEADER` chirp was detected with training at absolute sample
+   673085 while only 671744 samples had reached the ring. The old guard clamped that
+   legitimate future training position to the write head and decoded 1341 samples early.
+   The resulting approximately 221 samples modulo one OFDM symbol explains the abnormal
+   roughly 225-sample LTS timing offset. This defect applies to that very-first descriptor;
+   it does not explain the later real `0/5` data-group fade.
+2. A first/resend physical turn contains a full-anchor descriptor and may also contain a
+   full-anchor DATA group. One detector window can therefore contain a weaker, complete
+   descriptor chirp pair followed by a stronger DATA up-chirp whose down-chirp/training is
+   not yet readable. The strongest-only dual-chirp primitive could advance past or defer
+   on the later candidate and lose the earlier complete descriptor. This is a separate
+   candidate-ordering failure from the future-training clamp above.
+3. The descriptor wire flags said whether the *next* descriptor could be light, but did
+   not say whether the descriptor's *current DATA group* starts with a full chirp+LTS.
+   Resends and mode-switch groups could therefore arrive full-anchored while the receiver
+   remained armed for a warm light marker, causing an avoidable false probe before the
+   real anchor was recovered.
+4. The resend/mode-switch full-anchor request was represented as a shared encoder one-shot
+   before the GUI's carrier-sense defer. An older queued burst could consume a newer
+   repair's one-shot, while purging the repair could leak its anchor into unrelated DATA.
+
+Two measurement defects hid the production behavior. A fresh `measure_ack_fer` decoder
+was born on the descriptor's first sample; its initial 4800-sample processing pass moved
+the correlation cursor to the write head and permanently skipped that sample-zero chirp.
+The tool also compared recovered frames against the ARQ-owned inputs even though the
+production encoder stamps the CRC-protected `PHYSICAL_BURST_END` bit into a private copy.
+Perfect two-frame controls could consequently be reported as `1/2` and zero complete
+groups.
+
+Finally, every unified `BURST_HEADER` currently carries descriptor `group_seq=0`.
+`WAITING-REBASE` voice events reused that constant as their duplicate-suppression identity,
+so only the first completed-group request could prompt the sender to rebase; later distinct
+requests in the same QSO looked like RF repeats of the first.
+
+### What changed
+
+- `streaming_sync_acquisition.cpp`, `streaming_decoder.{cpp,hpp}`,
+  `sync_controller.{cpp,hpp}`, and `signal_policy.hpp` now classify a detector's absolute
+  training start before any acceptance side effect. A position beyond `total_fed` is
+  deferred, never clamped. The decoder retains the exact immutable search buffer and its
+  absolute origin, then replays that same window when the announced training exists.
+  Reset, mode change, ring overflow, and generation changes discard stale deferred work.
+- `chirp_sync.hpp` retains the normal strongest-usable result, but when the strongest
+  candidate is incomplete/unreadable it can peel at most four earlier prefixes and recover
+  an earlier complete, CFO-sane pair. The deterministic repair regression deliberately
+  weakens only the descriptor chirp, proves that the legacy primitive chooses the later
+  incomplete DATA candidate, and then requires the earlier descriptor, cw/Z geometry, and
+  complete DATA group to recover.
+- `frame_v2.hpp` assigns backward-compatible bit `0x08` as
+  `BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR`. A new sender sets it from the exact current
+  physical request; a new receiver disables the warm-light handoff and arms full search
+  when it is present. An old receiver ignores the unused bit, and a new receiver treats an
+  old sender's absent bit as the historical light-group behavior.
+- `BurstAnchorOptions` now travels with the exact transmit request through
+  `Connection` -> GUI callback -> `App::DeferredTx` -> `ModemEngine` ->
+  `StreamingEncoder`. CCA deferral cannot detach, steal, or leak the resend/mode-switch
+  anchor. An ACK-revealed hole is marked as a resend just like an RTO repair; resend takes
+  precedence if a mode switch and repair coincide.
+- `Connection` now gives each completed-group `WAITING-REBASE` voice a QSO-local mod-64
+  event identity. Repeating the same cached RF voice retains its identity, while the next
+  distinct completed-group request increments it. Descriptor `group_seq` remains
+  unchanged and lifecycle resets clear the event counter.
+- `measure_ack_fer --config burst_chunk` pumps one real 4800-sample idle interval through
+  the same channel/noise model before every descriptor. It also derives its expected wire
+  frames with the production physical-tail stamping policy and passes the full-group
+  anchor as a per-call option instead of an encoder latch. The test-only Z override is now
+  explicit and cannot become a production environment authority.
+
+### Real MPG@20 evidence which motivated the fixes (pre-fix frozen build)
+
+Both 51,200-byte transfers used the same immutable source/payload and passed receiver CRC,
+SHA-256, and `cmp`. They are valid observations of the frozen build, not validation of the
+uncommitted fixes above:
+
+| run | forced physical profile | application / physical-span goodput | burst result |
+|---|---|---:|---|
+| `qpsk_r34_z81_01` | QPSK R3/4 cw3/Z81 | 1.85 / 1.64 kbps | 23 sent, 22 decoded/matched; 3 partial groups, 1 real crater, 1 first-burst no-callback; 13 missing chunks repaired |
+| `8psk_z81_01` | 8PSK R2/3 cw4/Z81 | 1.83 / 1.77 kbps | 22/22/22 sent/decoded/matched; 9 partial groups and 2 craters |
+
+All 22 committed tone ACKs in each run were accepted, there were no rate-change requeues,
+and the final payloads were byte exact. The QPSK first descriptor loss is the future-read
+software defect above. Its later crater was different: the actual data LTS was near 0 dB
+in-band with EVM around 6.8-7.8, i.e. a genuine fading outage. The 8PSK run's nearby RX SNR
+was about 8 dB versus about 11 dB for QPSK, so these sequential realizations are not a
+causal modulation comparison.
+
+Frozen artifacts:
+
+```text
+/private/tmp/projectultra-z81-current-freeze.20260802T170932Z
+/private/tmp/projectultra-z81-current-campaign.20260802T170932Z/qpsk_r34_z81_01
+/private/tmp/projectultra-z81-current-campaign.20260802T170932Z/8psk_z81_01
+```
+
+### Local ITU Good @ 20 dB evidence after the harness repairs
+
+All cells below use production MEDIUM CP, group size five, seeds `{7,11,23,42}`, and the
+same samples in BI0/BI1 arms. These are deterministic simulator screens, not fresh IONOS
+evidence.
+
+QPSK R3/4 cw3/Z81, steady descriptor-FULL + DATA-LIGHT regime, `n=80/seed`:
+
+| arm | decoded frames | complete groups | emitted group | fixed-frame capacity | capacity proxy, frame-weighted / complete-group-only |
+|---|---:|---:|---:|---:|---:|
+| BI0 | 1567/1600 (97.94%) | 298/320 (93.13%) | 403680 samples / 8.410 s | 527 B/frame, 2635 B/group | 2454.8 / 2334.2 bps |
+| BI1 | 1595/1600 (99.69%) | 319/320 (99.69%) | same | same | 2498.7 / 2498.7 bps |
+
+The incomplete-group count fell from 22 to one. In the descriptor-FULL + DATA-FULL
+first/resend regime (`n=20/seed`), descriptors were 160/160 and the decoder accepted
+exactly 320 expected syncs. Earlier-complete-candidate recovery fired 74 times:
+
+| arm | decoded frames | complete groups |
+|---|---:|---:|
+| BI0 | 390/400 (97.50%) | 73/80 (91.25%) |
+| BI1 | 390/400 (97.50%) | 78/80 (97.50%) |
+
+The equal-capacity 8PSK geometry screen first compared the normal steady regime:
+
+| physical geometry | BI | sample | decoded frames | complete groups | goodput proxy with 1.790 s turnaround |
+|---|---:|---:|---:|---:|---:|
+| cw12/Z27 | 0 | `n=120/seed` | 2113/2400 (88.04%) | 323/480 (67.29%) | 2342 bps |
+| cw4/Z81 | 0 | `n=120/seed` | 2174/2400 (90.58%) | 348/480 (72.50%) | 2410 bps |
+| cw3/Z81 | 0 | `n=40/seed` | 673/800 (84.13%) | 102/160 (63.75%) | 1947 bps |
+| cw2/Z81 | 0 | `n=40/seed` | 615/800 (76.88%) | 86/160 (53.75%) | 1427 bps |
+| cw4/Z81 | 1 | `n=40/seed` | 753/800 (94.13%) | 147/160 (91.88%) | 2504 bps |
+
+cw12/Z27 and cw4/Z81 both carry 624 useful file bytes per frame and emit 364480 samples
+(7.593 s) per five-frame steady group. cw4/Z81 beat cw12/Z27 on every seed; shortening to
+cw3/cw2 was harmful. The repaired descriptor-FULL + DATA-FULL cw4/Z81 screen
+(`n=20/seed`) decoded all 160 descriptors, accepted exactly 320 syncs, used
+earlier-candidate recovery 88 times, and produced:
+
+| arm | decoded frames | complete groups | emitted group | fixed-frame capacity |
+|---|---:|---:|---:|---:|
+| BI0 | 353/400 (88.25%) | 60/80 (75.00%) | 422080 samples / 8.793 s | 629 B/frame, 3145 B/group |
+| BI1 | 360/400 (90.00%) | 72/80 (90.00%) | same | same |
+
+No future-training defer fired in those repaired 8PSK cells. The data support retaining
+cw4/Z81 and justify a real BI0/BI1 test; they do **not** justify globally enabling burst
+interleave. The historical real MPG@20 16QAM test favored BI0 by 37%, delivered 5/5 versus
+4/5, and observed 12 versus 62 craters. `ULTRA_BURST_INTERLEAVE`,
+`ULTRA_8PSK_LONG_LDPC`, and `ULTRA_QPSK_R34_LONG_LDPC` therefore all remain default-OFF
+pending matched-build, byte-exact real IONOS evidence. No post-fix live transfer is claimed
+in this entry.
+
+### Focused verification
+
+Regressions cover future/ready/invalid training classification, exact-window replay
+lifecycle, earlier-complete descriptor recovery, current-anchor flag round-trip and
+receiver search selection, request-bound anchor deferral, physical-tail comparison,
+Z81 lifecycle cleanup, and distinct/repeated WAITING-REBASE identities. The complete
+workspace build succeeds. All 97 runnable non-socket tests pass, including the new
+`MeasureAckFerBurstDescriptorZ81` gate. Four loopback UDP/gRPC integration tests cannot
+bind sockets in the managed sandbox and remain externally unrerun; `TNCSession` remains
+disabled. A fresh immutable-build IONOS transfer is therefore still the release gate.
+
+---
+
+## 2026-08-02 — FIX: completion-owned teardown and crossed-close convergence
+
+### What was actually broken
+
+The fixed9 real Pi 5 -> IONOS MPG@20 -> Mac run delivered its 51,200-byte file exactly,
+then both scripted endpoints acted on `--disconnect-on-file-done`. The receive callback
+armed a close as soon as the final file ACK was queued, while the sender callback armed a
+second close after consuming that ACK. The two full-anchor DISCONNECT requests overlapped
+and caused retry churn after an otherwise completed transfer.
+
+Two supporting invariants were also absent. A failed outbound transfer could arm the same
+completion-driven close, and the GUI published `scenario_disconnect_issued_` and its
+timestamp after calling `disconnect()`, even though that call may synchronously invoke state
+callbacks. At protocol level, genuine simultaneous operator closes remained phase-locked:
+each side could continue retransmitting its own DISCONNECT instead of treating the decoded
+peer request as conclusive mutual close intent.
+
+### What changed
+
+- `src/gui/app.{cpp,hpp}`, `src/gui/main_gui.cpp`, and
+  `src/protocol/protocol_engine.{cpp,hpp}` now define the automation option as
+  caller-sender-owned teardown. Only a **successful outbound** `FileSent` callback arms the
+  request; receive completion and failed sends do not. The GUI tick additionally requires
+  the QSO initiator role before calling `disconnect()`.
+- Both completion-driven and timer-driven GUI paths publish the issued flag and timestamp
+  before `disconnect()`. Synchronous state callbacks and duplicate completion events
+  therefore observe a close that is already owned and timestamped.
+- `src/protocol/connection.{cpp,hpp}` and `src/protocol/connection_handlers.cpp` now treat a
+  peer DISCONNECT decoded while locally `DISCONNECTING` as mutual close. They send and keep
+  the peer's ACK alive for the responder grace window, suppress local DISCONNECT retries,
+  converge after grace, and count the session teardown once.
+- `tests/test_protocol.cpp` adds a crossed-close regression that disconnects both stations
+  simultaneously and drops every DISCONNECT ACK. It requires exactly one DISCONNECT request
+  from each station, proactive peer-ACK retries, one disconnect statistic per peer, and
+  convergence to `DISCONNECTED` after grace.
+
+### Why the fixes are invariant-preserving
+
+Receive completion cannot own teardown because it proves only that the final ACK entered
+the local transmit queue. Successful sender completion is later and proves that ACK was
+consumed; restricting the scripted close to the caller provides one deterministic owner.
+Failure remains available for inspection or recovery instead of being mislabeled as normal
+completion. Publishing state before the call closes the synchronous-callback ordering hole.
+
+The connection-layer mutual-close rule is independent defense for real simultaneous operator
+actions. Once a valid peer request is decoded, repeatedly transmitting a competing local
+request adds no information. Retaining the responder ACK/grace behavior preserves fading
+reliability even when every ACK is lost, while bounded grace still guarantees convergence.
+
+### Verification and live evidence
+
+Build and focused regression:
+
+    cmake --build build --target test_protocol ultra_gui -j4
+    ./build/tests/test_protocol
+    Protocol: 19/19 passed
+
+All runnable non-socket tests and the transfer-analyzer regressions passed:
+
+    ctest --test-dir build --output-on-failure \
+      -E '^(GrpcServiceSmoke|OtasimServeSmoke|UltraGuiOtaClient|UltraTncSimAudio)$'
+    100% tests passed, 0 tests failed out of 96
+
+    python3 -m unittest tests.test_analyze_transfer
+    Ran 13 tests — OK
+
+`TNCSession` is disabled in this build. The excluded local UDP/gRPC smoke tests require
+socket binding denied by the managed environment; they are not modem failures. The GUI
+caller/success/timestamp plumbing is build- and code-reviewed plus exercised by the live
+run; the dropped-ACK mutual-close behavior has the direct protocol regression above.
+
+The fixed10 matched-build `final_default_09` run received 51,200 bytes with CRC, `cmp`, MD5,
+and SHA-256 exact. Receiver application timing was 265.6 s / 1.54 kbps; the distinct first
+DATA key-down -> CRC-completion span was 273.358 s / 1.498 kbps. It completed 28/28/28
+sent/decoded/physically matched bursts, with eight selectively repaired partial groups and
+zero crater, missing callback, rate-change requeue, or data collision. All 28 committed
+group ACKs were accepted.
+
+Only the Pi caller logged `Sending DISCONNECT`; the Mac emitted no DISCONNECT request. The
+Pi sent one scheduled retry before an ACK returned. The Mac decoded one request and ACKed
+it, but unsynchronized endpoint clocks do not identify which copy it decoded. The Pi logged
+`Disconnect acknowledged`, and both applications cleanly reached disconnected state and
+quit. Thus `_09` validates single-owner live teardown through the normal bounded retry/grace
+path; the separate dropped-ACK regression validates the mutual-close fallback.
+
+Exact fixed10 provenance is Git HEAD
+`eac3c9f37e88d3ceb216fb9ee66b8ca52ee1e734`, diff SHA-256
+`abfcdec648696b7c300fba5fe222f408cda9cd961ecf7bd14ad4cf040aad1f40`, source archive
+`f58052bfa2f3383eef16f4274901251c46b416594572843b3e957c1685a42add`, Mac binary
+`c0eca62f8ed77078f764d62eebdfa2c8a1a4f1229aa0ab7000a124bbef3e6c2c`, and Pi binary
+`a5beeebbfa02fa1c9a0fbc5506c352e183ff3c9fbd215841ec547864c987784f`.
+The source freeze is `/tmp/projectultra-throughput-fixed10.5LDRWF/source.tar.gz`, the Pi
+build is `/tmp/projectultra-throughput-fixed10-5LDRWF`, and raw run artifacts are under
+`/tmp/projectultra-throughput-campaign.jr8b2G/final_default_09`.
+
+This is another sequential, unpaired fading realization. Its rate is an observed outcome,
+not a causal throughput delta. The 3,085.6 bps comparison remains the project-recorded VARA
+MPG@20 benchmark with a timer contract not established as identical to this application
+receive timer.
+
+---
+
+## 2026-08-02 — FIX: negotiated force contract and full-burst price for automatic tail climbs
+
+### What was actually broken
+
+The real Pi 5 -> IONOS MPG@20 -> Mac campaign exposed two independent control-plane
+contract errors after the physical-tail/RTO repairs:
+
+1. `ULTRA_FORCE_DATA_MOD` / `ULTRA_FORCE_DATA_RATE` were process-local hints at several
+   selection sites, not a QSO-scoped negotiated profile. `final_psk8_01` recorded the
+   requested 8PSK R2/3 variables on both endpoints but stayed at QPSK R1/2 for seven
+   groups. It was deliberately aborted and is a null diagnostic, not a throughput or
+   8PSK-reliability sample.
+2. The automatic receiver-authority selector priced an UP candidate using one complete
+   target-rung physical cycle but could execute that move when only a shorter file tail
+   remained. In `final_default_07`, the late selector decision priced 8PSK `N=8`, switched
+   for only `N=3`, decoded `1/3`, demoted, and requeued two chunks. The earlier nine-chunk
+   requeue in that run followed a genuine `0/5` crater and was correct recovery; only the
+   later short-tail climb was avoidable.
+
+The campaign also found reporting/model errors. Transfer reports first called
+payload/key-down divided by wall time "scheduling efficiency." Renaming that value did not
+fix its deeper timer mismatch: receiver application goodput starts when `FILE_START` is
+delivered, which can be after the first physical burst, while the key-down numerator already
+included that burst. The historical 8PSK R2/3 `~2,450 bps` "ceiling" also applied a stale
+`0.593` fixed scheduling factor and counted eight pilots among 59 occupied carriers as
+payload.
+
+### What changed
+
+- `src/protocol/waveform_selection.hpp`, `src/protocol/connection_handlers.cpp`,
+  `src/protocol/connection.{cpp,hpp}`, and `src/protocol/frame_v2.hpp` now make a force an
+  explicit handshake contract:
+  - modulation/rate environment fields parse atomically; a malformed present half rejects
+    the environment profile as one unit, while a valid partial force keeps automatic
+    resolution of its complement;
+  - CONNECT carries the resolved forced profile and retries preserve it;
+  - the responder applies it before CONNECT_ACK and marks forced-profile provenance,
+    including responder-only force;
+  - a conflicting ACK fails closed instead of creating a split data PHY;
+  - the negotiated profile pins every automatic rate actuator for that QSO. Exact force
+    outranks `ULTRA_MAX_OFDM_RATE`; MAX remains an automatic-selector ceiling.
+- `src/protocol/connection.{cpp,hpp}` now gates only automatic **faster** authority moves
+  during an active file on exact target-burst economics. It derives target CW, lifting
+  `Z`, useful chunk bytes, window/tone cap, airtime ceiling, re-anchor cost, and physical
+  group `N`, then requires the exact unsent tail to fill at least that complete group.
+  The hold precedes both descriptor and legacy MODE_CHANGE paths, emits nothing, and does
+  not arm dedup. The just-accepted clean ACK is credited before computing `N`, matching
+  the receiver's pre-command pricing and the sender's later deferred refill. Reliability
+  DOWN moves remain unconditional, including a one-frame tail. The flagged startup probe
+  keeps its separate trusted `M>=4` contract.
+- `tools/analyze_transfer.py` now keeps the application and physical clocks separate:
+  - the logged application outcome remains `FILE_START` -> CRC completion;
+  - PA duty, rung dwell, keyed efficiency, and non-keyed headroom use first DATA key-down
+    -> CRC completion;
+  - DATA key-down is interval-clipped at completion and any remaining TX tail is reported
+    separately;
+  - mode logs are state announcements, while only changes after first key-down count as
+    physical-transfer transitions;
+  - per-frame-position profiles are descriptive and do not alone rule stale CSI in or out.
+  Mode SNR is labelled nearby RX SNR, and latent decisions are explicitly attributed to
+  proven `k/M` outcomes rather than those SNR labels.
+- `tools/analyze_fading_sweep.py` and
+  `docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md` now use 51 data carriers plus eight pilots.
+  Current raw rates are about 3,188 bps for QPSK R3/4 and 4,250 bps for 8PSK R2/3.
+
+### Why the fixes are invariant-preserving
+
+A forced diagnostic is now observable and symmetric on the wire: both peers either commit
+the same profile or the initiator disconnects. Clearing the environment after handshake
+cannot silently reactivate a ladder because the pin is QSO-scoped. A typo cannot degrade
+into a different, half-forced physical experiment.
+
+The tail rule is deliberately asymmetric. An UP decision is an optimization and may be
+held when the file no longer contains the complete cycle the optimizer scored. A DOWN
+decision may be the only way to recover a failed FINAL-bearing member and is never blocked.
+The sender uses exact clean-boundary remaining bytes, so the comparison does not omit
+already-submitted payload.
+
+The revised PHY arithmetic does not claim that 8PSK will deliver 4,250 bps end-to-end.
+It says only that 3,000 bps is mathematically possible at that raw rung if total efficiency
+exceeds `3000 / 4250 = 70.6%`; current correlated-fade reliability is the measured blocker.
+
+### Verification and live evidence
+
+Focused verification after the tail-price patch:
+
+    ./build/tests/test_protocol                  # Protocol: 18/18 passed
+    ./build/tests/test_waveform_policy           # WaveformPolicy: 151/151 passed
+    ./build/tests/test_connection_adaptive       # ConnectionAdaptive: 456/456 passed
+    ./build/tests/test_rx_authority               # RxAuthority: 21/21 passed
+    python3 -m unittest -v tests/test_analyze_transfer.py  # 13/13 passed
+
+The deterministic climb test retires FILE_START, models the production deferred-ACK
+ordering, and observes physical burst egress. `N-1=7` holds without a switch while normal
+current-rung refill continues; `N=8` climbs and emits exactly one eight-frame 8PSK burst.
+Descriptor-disabled `N-1` cannot fall through to legacy MODE_CHANGE, a one-frame DOWN tail
+still demotes, and a four-frame flagged startup probe retains its explicit `M>=4` contract.
+
+Live 51,200-byte observations, all CRC/MD5/SHA-256/cmp exact when completed:
+
+| run | policy | receiver application result | physical groups | mechanism result |
+|---|---|---:|---:|---|
+| `final_default_05` | automatic | 2.32 kbps / 176.6 s | 17/17/17 | no partials, craters, callbacks lost, collisions, or requeues |
+| `final_default_06` | automatic | 1.62 kbps / 252.6 s | 27/27/27 | four selective repairs; no crater, callback loss, collision, or requeue |
+| `final_psk8_01` | requested force, broken contract | deliberately aborted | 8/7/7 before stop | stayed QPSK R1/2; null diagnostic only |
+| `final_psk8_02` | proved forced 8PSK R2/3 | 1.51 kbps / 271.6 s | 27/27/27 | 15 partials, four `0/N` craters, no callback loss/collision/requeue |
+| `final_default_07` | automatic | 1.50 kbps / 272.4 s | 27/27/27 | six partials, one crater, two requeues; exposed late short-tail climb |
+| `final_default_08` | automatic, fixed9 | 2.26 kbps / 181.1 s | 18/18/18 | one `6/8` partial; no crater, callback loss, collision, or requeue |
+
+`final_psk8_02` met the force proof gate before payload: Pi CONNECT logged
+`forced_mod=5, forced_rate=3`; Mac logged forced 8PSK and R2/3; both peers logged the
+same connected data mode. Its exact fixed8 provenance is Git HEAD
+`eac3c9f37e88d3ceb216fb9ee66b8ca52ee1e734`, diff SHA-256
+`f9ba0ddb1235ff7383aca3e84afa86a63c70ed188e380bef0f435dc0089e5efd`, source archive
+`b15f5ad3ed9458fdcb6804e35d7a833cdf8eed2565b6d3a5169d9d083c5e2d6b`, Mac binary
+`a5c7eea007be449bfcdab88b53ee8933e81dc154e9b1bbdbb4f8d748b76f2941`, and Pi binary
+`5f703c6519afaa7ca6ba07eeb597ed9b9933c240150b9dcb0576487cccf60027`.
+
+`final_default_08` used exact fixed9 provenance: diff
+`f7d0fd28e06b46789f9805cca3acf7e672f31852865fe562b906f81094987cd9`, source archive
+`5499222dee4436b113e23cb225c52d0229764615fac5f193eae4f5bb073e41a2`, Mac binary
+`5d560e5ba19716e1c5408e75d24cb68dba14bc9388415bc7e1c93035bdded658`, and Pi binary
+`682cf96e2e6f3120f3186f9c38349bd7f505cbeee0d3e45a535291724bfad3ba`.
+All 18 committed group ACKs were accepted. The transfer reached 8PSK when a complete target
+group remained and never presented the near-EOF UP opportunity, so it is live integration
+evidence—not a claim that the run dynamically exercised the hold branch.
+
+The corrected `_08` accounting preserves its application outcome of 2.26 kbps over
+181.1 s, but does not use that late-starting timer for physical efficiency. First DATA
+key-down to receiver CRC completion was 188.884 s, or 2.169 kbps. The run occupied 85.92%
+of that physical span with sender DATA key-down, leaving 0.355 kbps of non-keyed-only
+headroom; retransmitted key-down remains charged. Another 0.138 s of sender key-down after
+the RX completion callback is reported separately and excluded from delivery-span duty.
+Rung accounting likewise clips to the physical transfer: QPSK R1/2 occupied 11.03 s, and
+three state announcements represented two actual transitions. These corrections change
+accounting labels and denominators, not the sequential-run result or any causal claim.
+
+These are sequential unpaired fading realizations. They establish mechanisms and live
+integrity, not a causal policy delta, expected mean, or universal 8PSK ranking. The
+3,085.6 bps comparison is the **project-recorded VARA MPG@20 benchmark**, not a result
+reproduced by this campaign; its timer contract is not established as identical to the
+receiver application timer used for the run-result column.
+
+The detailed evidence and exact artifact paths are in
+`docs/IONOS_THROUGHPUT_CAMPAIGN_2026_08_02.md`. The tail hold itself is claimed from the
+physical-boundary regression; `_08` establishes that the fixed9 build remains byte-exact
+and fast in one real sequential fading realization.
+
+---
+
+## 2026-08-01 — FIX: final-tail feedback collision and physical-round RTO
+
+### What was actually broken
+
+A 50 KiB Mac/Pi transfer through IONOS MPG@20 completed CRC-clean, but its final
+five-frame group had one missing base frame (`seq=90`) and four SACKed successors.
+The receiver emitted two feedback waveforms for the same event at the same instant:
+
+- a legacy OFDM frame NACK (`77,280` audio samples), and
+- the unified tone SACK (`29,184` samples, base 89 / bitmap `0x1e`).
+
+The sender heard the short tone SACK and immediately retried `seq=90` while the receiver
+was still keyed on the legacy NACK.  That self-collision lost the repair.  The remaining
+retries then inherited the configured/full-group scalar RTO (~23.15 s), so three failed
+rounds consumed ~69.45 s.  The tail took 75.32 s from the first repair turn to success.
+
+The frame's 12-CW geometry was **not** erroneous: it carried a full R2/3 payload and
+decoded 12/12 when the fade permitted.  The error was using configured group geometry
+instead of the serialized physical turn.  A one-frame 12-CW transmission is 2,472 ms
+including its full anchor; it must not inherit a five-frame/window deadline.
+
+### What changed
+
+- `SelectiveRepeatARQ` now suppresses the legacy frame NACK for a FINAL tail gap only
+  when the physical tone-SACK callback is actually installed.  Legacy-only hosts retain
+  explicit frame NACK behavior.
+- Every wide-OFDM DATA egress is timed from the exact serialized physical vector after
+  padding is known.  `total_cw`, standalone z=27 encoding, mandatory full anchor,
+  inter-frame geometry, and modeled audio queue carry all feed one physical-round RTO.
+  Only matching live ARQ identities are re-armed; holes not sent in that turn are
+  timeout-suspended until selected.
+- The tone-ACK monitor uses replace/rearm semantics and the same round deadline.  Wide
+  OFDM alone uses the new exact model; OFDM-NARROW and MC-DPSK retain their independently
+  derived scalar RTTs.  Buffered MC-DPSK arms once per physical group, not once per frame.
+- Tone-SACK turns explicitly refill message/file tails so a base hole is repaired before
+  new data.  Identical file keepalive SACKs still wake the hole before the long RTO; the
+  monitor, rather than payload equality, suppresses duplicate audio detections.
+- Terminal ARQ failure now aborts the whole logical transfer after the ARQ stack unwinds,
+  publishes no false successes for a SACKed suffix, and either rebases the move epoch or
+  disconnects when continuation cannot be made sequence-safe.  Completion/failure
+  callbacks snapshot and clear old state before allowing reentrant replacement sends.
+
+Primary implementation files: `src/protocol/connection.{cpp,hpp}`,
+`src/protocol/selective_repeat_arq.{cpp,hpp}`, `src/protocol/file_transfer.cpp`,
+`src/waveform/tone_burst_ack/tone_burst_ack_monitor.{cpp,hpp}`, plus GUI/TNC monitor and
+transport-readiness plumbing.
+
+### Verification
+
+Focused regressions cover physical transport readiness, legacy-vs-tone tail feedback,
+exact singleton/wrapped/variable-CW timers, suspended holes, file/message tail repair,
+identical keepalive SACK recovery, terminal failure/reentrancy, OFDM-NARROW isolation,
+and grouped/singleton MC-DPSK monitor timing:
+
+    cmake --build build --target test_connection_adaptive -j4
+    ./build/tests/test_connection_adaptive
+    ConnectionAdaptive: 292/292 passed
+
+Every non-socket test passed. `TNCSession` is disabled in this build; the managed test
+environment denied local UDP/gRPC binding for four simulator-server smoke tests, so those
+socket-only cases were excluded rather than misreported as modem failures:
+
+    ctest --test-dir build --output-on-failure \
+      -E "GrpcServiceSmoke|OtasimServeSmoke|UltraGuiOtaClient|UltraTncSimAudio|TNCSession"
+    100% tests passed, 0 tests failed out of 96
+
+Final matched-build Mac/Pi run (tracked-tree archive SHA-256
+`5f62c8ef1489b191e1fb268c562df90b0a71790846be668fc93cb2d51e2c9f9a`):
+
+| evidence | before fix | final matched build |
+|---|---:|---:|
+| missing tail base | seq 90, 12 CW | seq 105, 12 CW |
+| duplicate feedback | frame NACK + tone SACK | tone SACK only |
+| singleton modeled airtime | not used | 2,472 ms |
+| singleton RTO cadence | ~23.15 s | 8.588 s |
+| first repair turn -> final ACK | 75.32 s | 21.88 s (**-70.9%**) |
+
+The final run reproduced the exact tail-hole condition in real fading, logged
+`Tail gap seq=105 carried by tone SACK only`, and emitted no paired legacy frame NACK.
+The 51,200-byte receive was bit-identical (`MD5 c48be6e5657be076dd55f49388522a9d`),
+CRC-clean, and completed at 1.40 kbps receiver / 1.36 kbps sender.  Whole-transfer goodput
+is not an A/B claim because the fading realization and selected-rung dwell differed; the
+causal result is the same-tail event's feedback plane and retry cadence.
+
+Artifacts: `/tmp/projectultra-tailfix-live.DyAZHR/` (`mac.log`, `pi5.log`, source and
+received references, `analysis.json`, and the exact staged source archive).
+
+---
+
 ## v0.5.1-pre-alpha (2026-08-01) — latent-state rate control DEFAULT-ON
 
 ### Headline

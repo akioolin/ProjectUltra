@@ -66,8 +66,10 @@ for pair in 1 2 3 4 5 6 7 8; do
     $SSH "cd ~/ProjectUltra && : > logs/gui.log" >/dev/null 2>&1
     rm -f ~/Downloads/testfile_50k.bin
 
+    # The caller owns teardown. Do not arm completion-driven DISCONNECT on the responder:
+    # the final file ACK completes both sides at once and would otherwise cross the closes.
     env $menv nohup ./build/ultra_gui --auto-accept --log-level info --log-category all \
-        --disconnect-on-file-done --exit-after 400 > /tmp/run.out 2>&1 &
+        --exit-after 400 > /tmp/run.out 2>&1 &
     sleep 5
     $SSH "cd ~/ProjectUltra && DISPLAY=:0 XAUTHORITY=/home/math/.Xauthority \
           setsid nohup ./build/ultra_gui --auto-connect MAC --connect-delay 8 \

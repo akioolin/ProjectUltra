@@ -1,7 +1,8 @@
 # Per-rung FER on FADING — measured 2026-07-26
 
-**What this settles.** Why the modem does not reach 3000 bps, whether 8PSK R3/4 should be
-re-enabled, and which anchor-table entries are wrong. Reproduce with
+**What this settles.** The fading FER ordering, whether 8PSK R3/4 should be re-enabled,
+and which anchor-table entries are wrong.  Its historical delivered-bps model is not a
+current throughput ceiling (see §2). Reproduce with
 `tools/sweep_fading_anchors.sh` then `tools/analyze_fading_sweep.py`.
 
 Channel: **ITU-R F.1487 Good (0.1 Hz Doppler / 0.5 ms delay) = the IONOS MPG setting.**
@@ -19,29 +20,37 @@ StreamingEncoder/StreamingDecoder). 6 seeds × 24 frames per point, 120 points.
 | 8PSK R3/4 | 76.4% | 60.4% | 50.7% | 42.4% | **38.9%** | **> 24 dB** |
 | 16QAM R2/3 | 85.4% | 71.5% | 51.4% | 41.7% | **30.6%** | **> 24 dB** |
 
-Modelled delivered throughput (`raw × pass-rate × 0.593` scheduling, where 0.593 =
-payload 6.19 s / (payload + 1.41 s sync + 1.79 s turnaround) × 0.90 retx):
+Historical modelled delivered throughput (`raw × pass-rate × 0.593` scheduling, where
+0.593 = payload 6.19 s / (payload + 1.41 s sync + 1.79 s turnaround) × 0.90 retx).
+The original 2026-07-26 calculation incorrectly treated all 59 occupied carriers as data;
+production spacing-8 pilots leave 51 data carriers.  The corrected values below are 51/59
+of the old table:
 
 | rung | @20 dB | @24 dB |
 |---|---|---|
-| QPSK R3/4 | 2066 | 2111 |
-| **8PSK R2/3** | **2450** | **2754** ← best measured anywhere |
-| 8PSK R3/4 | 1618 | 2005 |
-| 16QAM R2/3 | 1890 | 2700 |
+| QPSK R3/4 | 1785 | 1824 |
+| **8PSK R2/3** | **2117** | **2380** ← best value in this historical model |
+| 8PSK R3/4 | 1398 | 1733 |
+| 16QAM R2/3 | 1633 | 2332 |
 
 ---
 
-## 2. Why 3000 bps is not reachable on this channel
+## 2. What this sweep does—and does not—say about 3000 bps
 
-**The best point in the entire sweep is ~2754 bps** (8PSK R2/3 at 24 dB). At the bench's
-dial of 20 the best available is **8PSK R2/3 at ~2450**. Nothing reaches 3000 at any swept SNR.
+Under the historical 0.593 scheduling model, the best point is ~2380 bps (8PSK R2/3 at
+24 dB); at the bench's dial of 20 it is ~2117 bps.  Nothing reaches 3000 *under those
+assumptions*.
 
-3000 bps would require sustaining 8PSK R3/4 (raw 5531) or 16QAM R2/3 (raw 6556). **Both are
-above 30% FER on fading even at 24 dB.** This is a channel limit, not a tuning problem — no
-scheduling, churn or level work changes it.
+That is not a hard current channel ceiling.  Production raw rates with 51 data carriers are
+3188 bps for QPSK R3/4, 4250 for 8PSK R2/3, 4781 for 8PSK R3/4, and 5667 for 16QAM R2/3.
+Consequently, 8PSK R2/3 has enough raw capacity to exceed 3000 if combined FER and protocol
+efficiency exceed 70.6%; higher-order rungs are not mathematically mandatory.  The sweep still
+shows why 8PSK R3/4 and 16QAM R2/3 are poor automatic choices: both remain above 30% FER even
+at 24 dB.
 
-> Note the model is optimistic: it predicts 2450 at dial 20 where the rig delivers ~1700.
-> Treat the ORDERING and the CEILING as the results, not the absolute bps.
+> Treat the FER ordering as the result.  Do not treat these modelled bps as a measured or
+> current ceiling: the model uses an old fixed scheduling factor, assumes independent
+> per-frame errors, and predates the current burst/turnaround stack.
 
 ---
 
@@ -86,8 +95,9 @@ goodput*, which must be measured rather than assumed.
 
 ## 5. Caveats
 
-- Modelled bps assumes the measured scheduling efficiency is rung-independent. It is not
-  exactly: denser rungs pack more payload per frame, so their scheduling share differs slightly.
+- Modelled bps uses a historical fixed scheduling factor.  Current keyed-to-wall efficiency is
+  trace-dependent, and correlated burst outages are not represented by multiplying raw rate by
+  an independent per-frame pass rate.
 - `data4_full` is one frame configuration; burst/group behaviour on the rig adds ARQ effects
   this per-frame FER does not capture.
 - 6 seeds per point; FER differences under ~5 points are not resolved.
