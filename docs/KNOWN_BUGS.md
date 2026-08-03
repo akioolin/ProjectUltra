@@ -8,6 +8,34 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-QAM16-MMSE-SLICER-BIAS (open, inherited 2026-06-12) — P3, UNVERIFIED ON CURRENT CODE
+
+**Rescued from `fable_analysis/02_LLR_CALIBRATION_THE_MISSED_FIX.md` §4.4 when that folder was
+deleted 2026-08-03.** Filed so the finding is not lost; the line references are from June 2026
+and `soft_demap.hpp` has changed since, so **verify before acting**.
+
+**Claimed defect.** MMSE equalisation outputs a SHRUNKEN estimate: mean is `beta * x` with
+`beta = |H|^2 / (|H|^2 + sigma^2)`. The 16QAM demapper was said to compare that shrunken
+magnitude against an UNBIASED fixed slicer grid (`2/sqrt(10)` = 0.6325), with no bias
+compensation. On any low-gamma carrier the outer constellation points then read as inner ones,
+giving deterministic wrong-sign ring-bit LLRs.
+
+QPSK is immune by construction: its sign-bit LLR is proportional to `eq/nv` and therefore
+invariant to the shrinkage. This is a 16QAM-structural asymmetry that fires even with an
+ACCURATE channel estimate.
+
+**Proposed fix (unverified).** Scale the slicer grid by `beta`, or divide the equaliser output
+by `beta` before slicing.
+
+**Scope.** Vanishes at high SNR, so it would explain fading-carrier fragility, NOT a broad
+decline. Relevant only while the 16QAM rungs are enabled — all of them currently ship
+DISABLED (measured 51.4% FER on Good at 20 dB for R2/3), so this is not on any live path today.
+
+**Also inherited from the same document, unverified:** a CARRIER_ADAPTIVE_K constant-modulus
+bias (the |eq|-EMA instability detector reading 16QAM's three rings as channel instability),
+and LLR scale conventions reported as ~4x (8PSK) and ~3.16x (16QAM) overconfident versus the
+QPSK-exact convention, which advances the +/-20 clip and erases CSI dynamic range.
+
 ### BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (open, 2026-07-29) — P2, ATTRIBUTION UNRESOLVED
 
 **Symptom.** `ultra_gui` segfaults in the RX decode thread during DISCONNECT teardown.

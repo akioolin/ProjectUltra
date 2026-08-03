@@ -395,3 +395,30 @@ ChannelIdleNoiseSNRCalibration.
 
 **KEEP (anti-footgun):** the CTest calibration suite and
 `docs/PERFORMANCE_HISTORY.md` records — this removal is the SCRIPT only.
+
+## R13 — `fable_analysis/` audit folder (REMOVED 2026-08-03)
+
+**Scope (deleted).** All 17 tracked files in `fable_analysis/`: the June 2026 Fable-audit
+record (`00_EXECUTIVE_SUMMARY` … `08_STALE_DOCS_AND_BUGS_REGISTER`), the July follow-up
+`09_WHY_STUCK_AT_2000_2026_07_01.md`, `NEXT_SESSION_BRIEF.md`, `README.md`, and the five
+`data_phase*.tsv` sweep files.
+
+**Why dead.** It was a point-in-time campaign workspace, not durable documentation. Its own
+kickoff brief routed future sessions to branch `wip/live-ladder-unvalidated`, which **no
+longer exists** — so the brief could not be acted on. Its central subject (the 16QAM wall and
+the "stuck at 2000" question) has since been superseded twice: the 16QAM rungs were MEASURED
+on fading and are now all default-DISABLED, and the throughput ceiling it was reasoning about
+turned out to rest on a raw-rate error corrected 2026-08-02 (pilots counted as payload).
+
+**KEEP — do NOT treat as also-deleted:**
+- The finding in `02_LLR_CALIBRATION` §4.4 was RESCUED first, as
+  `BUG-QAM16-MMSE-SLICER-BIAS` in `docs/KNOWN_BUGS.md`. It documents a 16QAM MMSE
+  slicer-bias defect that exists nowhere else. Do not delete that bug entry.
+- `docs/LLR_NOTCH_CALIBRATION_2026_07_06.md` cites `fable_analysis/02` as its source for the
+  same defect. That citation is now a dangling path; the content lives in KNOWN_BUGS.
+- `docs/CHANGELOG.md` cites `fable_analysis/02`, `/07`, `/09` and the `data_phase2b_epsH_*.tsv`
+  files as evidence in ~9 places. Those are HISTORICAL entries and were deliberately left
+  unedited — the paths resolve in git history (`git show <rev>:fable_analysis/...`).
+
+**Recovery.** Nothing is lost. The folder is in git history up to `a65d50b`; restore any file
+with `git show a65d50b:fable_analysis/<file>`.
