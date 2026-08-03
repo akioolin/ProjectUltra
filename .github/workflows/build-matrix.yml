@@ -23,9 +23,20 @@ jobs:
   test:
     name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    # Measured worst case is Windows at ~59 min; 90 leaves headroom for a slow runner
-    # while still failing fast instead of riding GitHub's 6-hour default on a hang.
-    timeout-minutes: 90
+    # Windows dominates this budget: "Install Test Dependencies (Windows)" builds
+    # grpc:x64-windows from source whenever the vcpkg binary cache misses.
+    #
+    # 2026-08-02: 90 was NOT enough. Run 30771798808 was cancelled at exactly 90:06
+    # still inside that step, having never reached Build Tests. The old "~59 min
+    # worst case" note was measured on runs that finished at ~61 min, i.e. already
+    # within ~30 min of the cap, so one slow runner was always going to breach it.
+    #
+    # The failure is self-perpetuating: the cache is written by "Post Cache vcpkg
+    # Binaries", which never runs when the job is cancelled, so a timed-out cold run
+    # leaves the next run equally cold. 150 buys enough room for one cold gRPC build
+    # to COMPLETE and repopulate the cache; warm runs return in ~12 min regardless.
+    # Still far below GitHub's 6-hour default, so a genuine hang still fails fast.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
