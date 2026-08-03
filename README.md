@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-06-03*
+*Last updated: 2026-08-03 — current release `v0.5.2.1-pre-alpha`*
 
 > **EXPERIMENTAL SOFTWARE — WORK IN PROGRESS**
 >
@@ -18,6 +18,11 @@ operator path is:
 - **GUI application** — `ultra_gui` provides a local operator UI with
   waterfall, constellation, message log, and ARQ health view.
 
+**In practice:** connect two stations over HF SSB and transfer a file byte-exact, at roughly
+**1.5–2.5 kbps on a good 20 dB path**. Modulation and code rate adapt automatically as
+conditions change, stepping down to a low-SNR waveform that still works around 5 dB, plus a
+500 Hz narrowband mode for crowded bands.
+
 The same repo also contains the modem core and diagnostic / lab tools
 (`ota_simulator`, `measure_ack_fer`, `tools/gui_qso_scenario.sh`, raw frame CLI).
 Those are for validation, profiling, and development; they are not the first-run
@@ -30,21 +35,25 @@ operator path.
 
 ---
 
-## Current direction (2026-06)
+## Current state (2026-08)
 
-Three things drive the work right now:
+- **The OFDM band is coherent.** Differential is gone from the OFDM ladder, which now runs
+  QPSK R1/4 → R1/2 → R2/3 → R3/4 → 8PSK R2/3. Differential (DBPSK/DQPSK/D8PSK) lives on
+  MC-DPSK, its low-SNR home. 8PSK R3/4 and the 16QAM rungs exist but ship **disabled** —
+  each was measured on fading and did not hold (details in the ladder table below).
+- **Rate control is outcome-fitted, not threshold-tuned.** A latent-state controller fits a
+  link quality `x` from actual frame outcomes and picks the rung maximising expected
+  goodput, so a common-mode calibration error cancels instead of biasing every decision.
+  Default-on since `v0.5.1-pre-alpha` (+14.5% over the SNR-anchor ladder, 8 paired runs,
+  p = 0.022 — its gain is *stability*: 2.2 vs 5.0 mode changes per transfer).
+- **Where the throughput actually goes.** On a live ITU-Good path at 20 dB the sender is
+  keyed down **~83% of wall-clock**, so turnaround is largely wrung out. Roughly 44% of the
+  theoretical maximum is lost to FEC failure and repair — that, not airtime, is the
+  remaining gap.
 
-- **OFDM goes coherent-only.** Differential (DQPSK/D8PSK) is retired from the OFDM modes in
-  favor of a clean coherent ladder (QPSK → 16QAM) — ~81%/89% clean-frame rate on Good@10 /
-  Mod@14 vs ~32% differential. Differential moves to **MC-DPSK**, its low-SNR home.
-- **Measured anchors, not hand-tuning.** Each rung is set from real file transfers on the
-  faithful two-station gate (CRC-clean across fade seeds). Good is anchored
-  (R1/2@10 → R2/3@15 → R3/4@20); AWGN and Moderate are next.
-- **Airtime efficiency next.** Spend less air per byte — fewer turnarounds, leaner
-  tone-burst ACKs — pushing goodput toward each rung's ceiling within half-duplex limits.
-
-Near-term focus is reliable **file transfer**; the tables below are historical and are being
-re-measured under the coherent ladder.
+**Honest limits.** Numbers below are measured on a hardware HF channel simulator, not on
+the ionosphere. No claim is made about relative performance versus other HF data modems:
+that needs paired on-air testing this project has not done.
 
 ---
 
@@ -72,60 +81,69 @@ Production geometry used below:
 - OFDM-NARROW: 21 occupied carriers, 2240 samples/symbol → 21.429 sym/s,
   pilot spacing 10 → 18 data carriers.
 
-| SNR  | Mode                 | Data carriers | Raw PHY     | Notes |
-|------|----------------------|--------------:|------------:|-------|
-| -5+  | MC-DPSK adaptive ladder  |        8 | 47–375 bps  | DBPSK→DQPSK + variable symbol rate via auto-rung |
-| 8+   | OFDM-NARROW DQPSK R1/4   |       18 |     193 bps | 500 Hz BW for crowded bands |
-| 8+   | OFDM-NARROW DQPSK R1/2   |       18 |     386 bps | 500 Hz BW |
-| 10+  | OFDM-CHIRP DQPSK R1/4    |       53 |    1104 bps | Fading-tolerant baseline (6 pilots @ spacing 10) |
-| 15+  | OFDM-CHIRP DQPSK R1/2    |       53 |    2208 bps | Good + moderate fading (6 pilots @ spacing 10) |
-| 15+  | OFDM-CHIRP DQPSK R2/3    |       53 |    2944 bps | Near-AWGN only (6 pilots @ spacing 10) |
-| 15+  | OFDM-CHIRP DQPSK R3/4    |       55 |    3438 bps | AWGN-class channel only (4 pilots @ spacing 15) |
-| 25+  | OFDM-CHIRP 16QAM R3/4    |       51 |    6375 bps | Stable paths (NVIS, ground wave; 8 pilots @ spacing 8) |
-| 30+  | OFDM-CHIRP 32QAM R3/4    |       47 |    7344 bps | Stable paths only (12 pilots @ spacing 5) |
+**59 occupied carriers is not 59 data carriers.** Pilots are subtracted first:
+`recommendedPilotSpacing()` returns 8 for R1/2–R3/4 (→ 8 pilots, **51 data**) and 5 for the
+R1/4 survival band (→ 12 pilots, **47 data**). The table below is generated from the
+production functions, not hand-derived.
 
-(2026-05-09: prior table mixed CP=MEDIUM/LONG arithmetic and inherited a
-938 bps "MC-DPSK" constant from a 20-carrier preset that production
-never selects. Numbers above are now derived directly from
-`recommendedPilotSpacing()` and the production CP setting.)
+| Rung (OFDM-CHIRP wideband) | Pilot spacing | Data carriers | Raw PHY | Ladder status |
+|---|---:|---:|---:|---|
+| QPSK R1/4  | 5 | 47 |  **979 bps** | entry rung |
+| QPSK R1/2  | 8 | 51 | **2125 bps** | enabled |
+| QPSK R2/3  | 8 | 51 | **2833 bps** | enabled |
+| QPSK R3/4  | 8 | 51 | **3188 bps** | enabled (AWGN 15 / Good 20) |
+| 8PSK R2/3  | 8 | 51 | **4250 bps** | enabled — top rung on Good (17 dB) |
+| 8PSK R3/4  | 8 | 51 |   4781 bps  | **disabled** — 38.9% FER on Good even at 24 dB |
+| 16QAM R1/2 | 8 | 51 |   4250 bps  | **disabled** — no gain over 8PSK R2/3 at equal η |
+| 16QAM R2/3 | 8 | 51 |   5667 bps  | **disabled** — 51.4% FER on Good at 20 dB |
+| 16QAM R3/4 | 8 | 51 |   6375 bps  | **disabled** |
 
-(2026-06: the OFDM-CHIRP rows above show the **retired differential** (DQPSK)
-geometry. The band is now coherent (QPSK → 16QAM), which uses a different
-pilot spacing and therefore a different data-carrier count per rung — the
-coherent raw-PHY re-tabulation lands alongside the measured-anchor work in
-*Current direction*. Differential DQPSK now runs on MC-DPSK, not OFDM.)
+Other modes: MC-DPSK adaptive ladder (8 carriers) 47–375 bps; OFDM-NARROW (18 data
+carriers, 500 Hz) 193 bps at R1/4, 386 at R1/2.
+
+> **Correction (2026-08-02).** An earlier "~2450 bps ceiling on ITU Good" circulated in this
+> project's docs. It was wrong twice: it counted all 59 *occupied* carriers as payload when 8
+> are pilots, and applied a stale fixed scheduling factor. True 8PSK R2/3 raw is **4250 bps**,
+> so the headroom above today's delivered rate is a protocol-efficiency problem, not the
+> channel limit it was described as. The measured FER data behind that document was never in
+> question; only the derived throughput column was.
 
 ### End-to-end measured (real hardware)
 
-What a user actually sees over the cable / air, including handshake,
-ACK roundtrips, retransmissions, and auto-rate downgrades. Auto-rate
-ladder is on; Connection picks among R1/4 / R1/2 / R2/3 / R3/4 based
-on measured SNR and fading.
+What a user actually waits for: handshake, ACK round-trips, retransmissions and rate
+changes all included.
 
-| Test                          | Channel                | Wall   | Throughput      | Notes |
-|-------------------------------|------------------------|-------:|----------------:|-------|
-| 50 KB Mac↔Pi5 cable           | Clean USB cable        |  174 s |      2354 bps   | Auto DQPSK R3/4 @ SNR=28 — handshake ≈ 3% of wall |
-| 20 KB Mac↔Pi5 injected ×5     | AWGN, SNR=15           |  ~94 s | **1736.5 bps**  | Median of 5; range [1730.1, 1739.8]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
-| 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps**  | Median of 5; range [1726.8, 1739.6]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
-| 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
-| 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
-| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=0   |  235 s |    **34.9 bps** | MC-DPSK Robust-Mid (DBPSK R1/4) + continuous burst + ARQ-tuned window=3; 0 retx; below the OFDM SNR floor |
-| 1 KB Mac↔Pi5 injected         | Watterson Good, SNR=5  |  101 s |    **81.0 bps** | MC-DPSK Robust (DQPSK R1/4 4-CW) + continuous burst + ARQ-tuned window=5; 0 retx; ladder above Robust-Mid |
-| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=-5  |  608 s |    **13.5 bps** | MC-DPSK Robust-Low (DBPSK 2048sps R1/4 3-CW); 0 retx; preamble-dominated, window=1 |
+Measured over a **hardware HF channel simulator** — real soundcards, real audio, real
+half-duplex turnaround — between two machines (Raspberry Pi 5 sender → channel sim →
+Mac receiver). Wall-clock from first key-down to CRC-verified completion.
 
-Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The 1.83-1.90 kbps wall-clock asymptote at R1/2 SNR=15 sits below the 2208 bps raw-PHY ceiling because the 8-CW frame carries 301 useful payload bytes inside 51 OFDM symbols (`2 LTS + ceil(8*648/(53*2))` = 1.224 s) — that effective single-frame payload rate is ~1967 bps before ARQ overhead, and ACK turnaround takes the rest. Beyond ~50 KB, throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
+**Latest: 16 consecutive 50 KB transfers, ITU Good (0.1 Hz / 0.5 ms) at 20 dB, 2026-08-02.**
+Rung forced to 8PSK R2/3 to isolate the PHY from rate-selection variance:
 
-End-to-end throughput is wall-clock measured between A's `Connection: Starting
-file transfer` and the final ACK received at A — handshake + ACK turnaround
-latency included (what an operator actually waits for). The faithful gate is now
-`tools/gui_qso_scenario.sh` (two real `ultra_gui -sim` stations over an
-`ota_simulator serve` channel); the older Mac↔Pi5 hardware-cable rig was retired
-2026-05-30 (superseded by OTASim). The table above is historical hardware-rig data.
+| | |
+|---|---|
+| Completed byte-exact | **16 / 16** (no timeouts, no void runs) |
+| Mean | **1.98 kbps** |
+| Median | 2.01 kbps |
+| Best / worst | **2.47** / 1.37 kbps |
+| Sender duty cycle | 82.8% mean |
+| End-to-end efficiency | **58.1%** of the 4250 bps rung ceiling on the best run; 46.5% at the mean |
 
-End-to-end results match or exceed real-world numbers reported for
-existing commercial HF data modems in equivalent conditions. The 500 KB
-Good15 result is the realistic-HF baseline; 50 KB cable is the upper
-bound given a clean channel.
+Under the **automatic** ladder (rate control live, which is what an operator actually gets)
+the same path and file measured **1.50 – 2.32 kbps** across a separate campaign. Automatic
+is lower and more variable than forced because it must *find and hold* the right rung; the
+forced number is the ceiling that rate control is chasing, not a user-facing figure.
+
+**Run-to-run spread is large and irreducible** on a fading channel: two runs on *identical
+binaries* over this path have differed by 0.70 kbps. Quote the distribution, not a best run.
+
+Low-SNR MC-DPSK figures (13–81 bps at −5 to +5 dB) come from a Mac↔Pi5 USB-cable rig retired
+2026-05-30 and have **not** been re-measured on the current stack. They are kept only as an
+order-of-magnitude indication of the sub-OFDM floor.
+
+The faithful in-repo gate is `tools/gui_qso_scenario.sh` (two real `ultra_gui -sim` stations
+over an `ota_simulator serve` channel). Anything claiming fade, throughput, or
+full-protocol behaviour goes through it or the hardware path — never a unit test.
 
 ### Features
 
@@ -146,16 +164,23 @@ correlation, Schmidl-Cox training, light-preamble (LTS-only) for
 in-session frames, LTS-residual CFO refinement, per-symbol pilot
 tracking with common-phase-error correction.
 
-**ARQ.** Selective-repeat with cumulative + selective ACKs,
-window 1 (DPSK / narrowband) or 8–16 (wideband OFDM), variable
-1–8 codeword frames, wire-negotiated CW count, frame +
-optional channel + burst interleavers.
+**ARQ.** Selective-repeat with cumulative + selective ACKs. Window is
+per-mode: MC-DPSK uses a timing-derived 1–5, OFDM-NARROW 3, wideband
+OFDM 8 (up to 16 on near-AWGN). Variable 1–8 codeword frames with
+wire-negotiated CW count; burst transport is the wideband file path.
+Frame interleaving is **default-off** — it spreads each codeword across
+every frame in a burst, so one time-localized fade craters the whole
+group instead of a single frame (measured: 5x fewer full craters off).
 
-**Adaptive rate.** SNR + fading-index ladder (R3/4 / R2/3 /
-R1/2 / R1/4) with bootstrap cap, per-burst clean-window upgrade,
-two-window hysteresis on downshift to prevent panic-downshift on
-short fading transfers. Exact thresholds live in
-`src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`.
+**Adaptive rate.** A **latent-state controller** (default-on since `v0.5.1-pre-alpha`) fits
+a single link-quality value `x` from observed frame outcomes and evaluates
+`P_success(rung) = f(x − θ_rung)` for *every* rung, then picks the stateless argmax on
+expected goodput. Because all rungs are scored against the same `x`, a common-mode
+calibration error cancels rather than biasing every decision — the failure mode of the
+SNR-threshold ladder it replaced. Per-rung `θ` comes from a measured FER waterfall, and
+correlated fading is handled by tempering each 5-frame group to ~2.2 effective independent
+observations. `ULTRA_LATENT_RATE=0` restores the legacy SNR-anchor ladder in
+`selectOFDMCodeRate()`.
 
 **Per-carrier RX erasure.** Each OFDM-CHIRP frame computes
 `γ_k = |H_k|² / σ²_k` from its own LTS + pilots; carriers below
@@ -184,7 +209,7 @@ end-to-end validation.
 (`ota_simulator serve`) that hosts the HF medium in software:
 multiple clients join a session, audio flows over gRPC (control) +
 UDP (samples), and the channel model is applied server-side.
-`ultra_gui`, `ultra_tnc`, and `cli_simulator` can all run as OTASim
+`ultra_gui` and `ultra_tnc` can both run as OTASim
 clients instead of opening a soundcard, so protocol/feature work
 needs no cable rig and no audio hardware. The server holds a
 session reference clock that bridges per-host audio-clock drift,
@@ -210,11 +235,17 @@ SDL2). Virtual-station / simulator mode for development.
 ```
 SNR         Waveform              Reason
 ─────────────────────────────────────────────────────────────────────
--5 to +9 dB MC-DPSK (auto-rung)   DBPSK→DQPSK + variable SPS, adaptive
+-5 to +7 dB MC-DPSK (auto-rung)   DBPSK→DQPSK + variable SPS, adaptive
 5–10 dB     OFDM-NARROW (500 Hz)  Crowded bands, low SNR
-10+ dB      OFDM-CHIRP (1024)     Production auto ladder, coherent QPSK
-forced      OFDM 16QAM            Coherent; clean-channel rung (measuring)
+8+ dB       OFDM-CHIRP (1024)     Production auto ladder, coherent
+              ├─ QPSK R1/4 → R3/4   the working range
+              └─ 8PSK R2/3          top enabled rung (Good ≥17 dB)
+forced only 8PSK R3/4, 16QAM      measured on fading, did not hold — disabled
 ```
+
+Wideband entry floors are AWGN 8 / Good 8 / Moderate 14 dB (Poor disabled), lowered from
+10/12/14/18 on measured sweeps. In-session the latent-state controller takes over from the
+entry pick and re-decides per burst group from observed frame outcomes.
 
 Selection happens during CONNECT (peer-advertised SNR + fading index)
 and continues adapting during the session. See `docs/PROJECT_GOALS.md`
@@ -250,7 +281,7 @@ cmake -S . -B build && cmake --build build -j 4
 
 # Smoke test from another terminal
 printf 'VERSION\r' | nc 127.0.0.1 8300
-# -> VERSION 0.3.1
+# -> VERSION 0.5.2
 ```
 
 Full command reference: [`docs/TNC_INTERFACE.md`](docs/TNC_INTERFACE.md).
@@ -274,15 +305,14 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: **38/38** (TNC parser, TCP integration, bridge tests, throughput utility,
-  decode-bench replay fixtures, plus
-  modem regressions including the new `CarrierLDPC v1` math gate
-  and per-carrier mask plumbing).
-- End-to-end byte-exact transfers (hardware harness, Mac ↔ Pi5
-  over USB sound cards): see throughput table at the top of this
-  README. 50 KB cable run hits 2,354 bps; injected Watterson
-  Good at SNR=15 holds 1,631 bps clean; forced R3/4 at SNR=15
-  AWGN delivers 2,676 bps clean (2026-05-07 calibration).
+- ctest: **101/101**, green on Linux, macOS and Windows, plus a
+  sanitizer and a coverage gate (`v0.5.2.1-pre-alpha`, CI run 30778355854).
+  Covers the TNC parser, TCP integration, bridge tests, and the modem
+  regressions including the `CarrierLDPC v1` math gate and per-carrier
+  mask plumbing.
+- End-to-end byte-exact transfers over the hardware channel simulator:
+  **16/16** at 50 KB on ITU Good @20 dB, mean 1.98 kbps — see the
+  throughput table above.
 - **Real HF data client validated end-to-end** across Mac and Pi5
   over real audio cable: full B2F session
   matrix passes byte-exact (empty connect/disconnect, text up
@@ -315,10 +345,10 @@ Simulator and bench binaries are published separately as
 - Linux, macOS, or Windows
 - CMake 3.16+
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
-- SDL2 (GUI + audio I/O for `cli_simulator` / `ultra_tnc`)
+- SDL2 (GUI + audio I/O for `ultra_gui` / `ultra_tnc`)
 - gRPC + Protobuf + Abseil + c-ares + OpenSSL + RE2 + zlib
   (network audio plane for `ota_simulator` and the OTASim client modes
-  of `ultra_gui` / `ultra_tnc` / `cli_simulator`)
+  of `ultra_gui` / `ultra_tnc`)
 
 ### Building
 
@@ -401,18 +431,17 @@ EOF
 # Clients (any combination, same or different hosts):
 ./build/ultra_gui  -sim --ota-host <server>:50051 --station-id ALPHA --token alice_token
 ./build/ultra_tnc       --sim-audio --ota-host <server>:50051 --station-id BRAVO --token bob_token
-./build/cli_simulator   --snr 15 --channel good --rate auto --test
 ```
 
 Use OTASim instead of the cable rig for protocol/feature work: no
 soundcard needed, fully portable, and the server-side reference clock
 bridges per-host audio-clock drift across multiple machines.
 
-**CLI simulator** (full protocol, two-station, channel injection; not the
-operator TNC):
+**Two-station scenario gate** (full protocol, real stations, channel injection;
+not the operator TNC):
 
 ```bash
-./build/cli_simulator --snr 15 --channel good --rate auto --test
+tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21 --out /tmp/X
 ```
 
 **Replay and capture analysis** (deterministic decode fixtures and recorded
@@ -491,6 +520,22 @@ If no PONG after 5 PINGs (~15 s), connection fails fast.
 
 ## Testing
 
+### Measuring throughput (read before quoting a number)
+
+A fading channel is a noisy measurement instrument, and this project has retracted claims
+for ignoring that. The rules that survived contact with the hardware:
+
+- **Paired and interleaved.** Run arm A and arm B back to back and compare the per-pair
+  delta. The channel drifts; comparing arm means across epochs has read −10% purely from a
+  rougher epoch.
+- **n ≥ 8 pairs.** Paired standard deviation here is 14–36%, so n=8 resolves about 15% and
+  **n=3 resolves nothing**. Single runs are observations, not evidence.
+- **Report both tests.** A paired t-test and a sign test, and say so when they disagree.
+- **Prove the knob engaged.** Grep the log for it. A knob that silently did not engage has
+  produced confident null results more than once.
+- **Report the mechanism, not just goodput** — craters, mode changes, retransmits. Goodput
+  alone has called levers a "wash" that mechanism metrics then decided.
+
 ### Unit + regression gate
 
 ```bash
@@ -510,18 +555,27 @@ Hardware smoke remains opt-in. Configure with either
 ctest --test-dir build-hw -R HardwareSmoke --output-on-failure
 ```
 
-### Full-protocol simulator
+### Full-protocol gate
+
+Two real `ultra_gui -sim` stations over a live `ota_simulator serve` channel:
+PING/PONG → CONNECT → MODE_CHANGE → file transfer → DISCONNECT, in real time.
+This is the ONLY gate that backs a fade, throughput, or full-protocol claim.
 
 ```bash
-# Default regression (full handshake + ARQ data + disconnect)
-./build/cli_simulator --snr 15 --channel good --rate auto --test
+# Full handshake + ARQ file transfer + disconnect; reads RESULT/GOODPUT_BPS from summary.env
+tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 \
+    --expect-rate R3/4 --file-kb 21 --out /tmp/X
 
-# Force specific PHY config
-./build/cli_simulator --snr 20 --channel awgn --mod dqpsk --rate r2_3 --test
+# Force a specific PHY rung (measurement only — these bypass rate control)
+ULTRA_FORCE_DATA_MOD=QAM8 ULTRA_FORCE_DATA_RATE=R2_3 ULTRA_LOCK_RATE=1 \
+  tools/gui_qso_scenario.sh --channel good --snr-db 20 --out /tmp/X
 
 # CFO chain verification
 ./tests/verify_cfo_chain.sh --cfo 50 --channel awgn --snr 20 --seed 42
 ```
+
+(`cli_simulator` was retired 2026-05-30: it was CPU-paced and wrapped a PHY that
+had diverged from production, so it produced misleading passes.)
 
 ### Hardware loopback (two stations)
 
@@ -589,8 +643,8 @@ necessary. Be ready to QSY.
 - OFDM-CHIRP wideband PHY pipeline: dual-chirp sync, LTS warm-sync,
   per-symbol pilot tracking, adaptive-rate ladder
   (`selectCoherentOFDM()` is the rung source). The band is now
-  coherent (QPSK → 16QAM); rungs are being re-anchored on the
-  faithful gate — see *Current direction*.
+  coherent (QPSK → 8PSK → 16QAM), with rungs anchored on the
+  faithful gate — see *Current state*.
 - OFDM-NARROW (500 Hz) for crowded bands or low-SNR conditions.
 - Per-carrier RX erasure with CarrierLDPC v1 interleaver
   (deep notch / QRM survival on OFDM-CHIRP).
