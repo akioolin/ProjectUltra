@@ -157,19 +157,49 @@ defers, whatever the knob is supposed to move. Goodput alone called four differe
    logic bug. Do a full build when a header's layout changes.
 4. **`UltraTncSimAudio` fails under CPU load** and passes standalone (~57 s). Do not chase it
    while a rig A/B or a workflow is running.
-5. **The handshake deadlocks ~1-in-5** (BUG-CONNECT-ACK-RESCUE-DISARM, still open): a sync
-   correlation is wrongly treated as proof the peer decoded our CONNECT_ACK. Those runs are
-   void, not evidence.
+5. **Older builds deadlocked the handshake ~1-in-5**
+   (BUG-CONNECT-ACK-RESCUE-DISARM): a sync correlation was wrongly treated as proof the peer
+   decoded CONNECT_ACK. The 2026-08-03 cache-only/reactive cross-mode fix has deterministic
+   coverage but still needs a fresh IONOS transfer. Any pre-fix deadlock run remains void,
+   not evidence.
 6. **Levels.** A low Pi5 PipeWire sink volume looks exactly like a dead link (peer rms flat
    ~0.03, 0 chirp locks). `wpctl set-volume 57 1.0`.
+7. **Long-profile flags are endpoint policy, not negotiation.**
+   `ULTRA_8PSK_LONG_LDPC` and `ULTRA_QPSK_R34_LONG_LDPC` must be identical on Mac and
+   Pi. The immutable runner writes and checks both endpoint env manifests; an ad-hoc run
+   that does not prove parity is invalid. The selector can price the configured CW/Z
+   geometry, but its FER model is still logical-rung/Z27 calibrated, so do not use an
+   adaptive long-profile run as a graduation test.
+8. **ARQ progress is not physical k/N.** Cumulative base retirement can legitimately
+   report `9/8`, `11/6`, or more after an old base hole releases already-SACKed suffixes.
+   Any physical-round optimization must bind the exact serialized frame identities before
+   and after the accepted ACK; never infer the latest burst outcome from cumulative ARQ
+   progress.
 
 ---
 
-## 6. Current state (2026-08-01, v0.5.1-pre-alpha)
+## 6. Current state (2026-08-04, v0.5.1-pre-alpha)
 
 - `ULTRA_LATENT_RATE` is **DEFAULT-ON** — outcome-fitted latent-state rate controller,
   +14.5% (8 pairs, p=0.022). `=0` restores the legacy SNR-anchor ladder.
-- Baseline to beat at MPG@20, 50 KB: **~1.45–1.65 kbps**. Best single run recorded: 2.55.
-- The channel ceiling is ~2450 bps on ITU Good @20 (8PSK R2/3, including its crater rate) —
-  see `docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md`. 3000 bps is not reachable there.
+- Fresh fixed-build reference transfers are byte-exact and teardown-clean: QPSK R3/4
+  cw3/Z81 delivered **1.890 kbps physical / 2.143 kbps keyed**; 8PSK R2/3 cw4/Z81
+  delivered **1.979 / 2.260 kbps**. A favorable independent 8PSK draw reached
+  2.494 / 2.862 kbps. These are sequential realizations, not a powered A/B; QPSK is
+  the steadier fallback and 8PSK is the higher but more variable rung.
+- The descriptor-only partial-repair A/B is complete and is a **MEASURED WASH**.
+  Pair 1 is void as a whole because OFF recorded a Pi RX FIFO overrun; pairs 2--9
+  provide eight valid order-balanced pairs. Physical paired effect was **+1.468%**,
+  95% CI `[-14.006,+16.942]%`, `p=0.8289`; sign 5/8, `p=0.7266`; log effect
+  `-0.119%`. Sixty-one engagements mechanically avoided 73.2 s (3.975% mean enabled
+  physical span), but ON saw 12 craters versus 4 OFF and two enabled runs lost an
+  engaged light repair after severe partials. Keep strict default-OFF and redesign
+  acquisition diversity before any new campaign. The observed log SD 0.194 means
+  n=8 cannot resolve the expected ~4% effect.
+- A clean steady N8 8PSK cycle is about **3.02 kbps**, but a complete 50 KiB transfer
+  also pays FILE_START, a short final group, eleven descriptors/guards, and ten measured
+  half-duplex turnarounds. Even with zero frame loss the current format is only about
+  **2.95–2.96 kbps physical-span goodput**. Therefore 3,000 bps for the complete file
+  needs both near-zero repairs and a small structural overhead reduction; ACK tuning
+  alone cannot close a loss-heavy run because retransmitted key-down is the dominant cost.
 - Full default-off knob inventory: `docs/ENV_KNOBS_DEFAULT_OFF.md`.

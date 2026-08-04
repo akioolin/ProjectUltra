@@ -9,6 +9,17 @@
 namespace ultra {
 namespace protocol {
 
+namespace {
+
+bool isDisconnectTeardownControlFrame(const Bytes& frame_data) {
+    const auto header = v2::parseHeader(frame_data);
+    return header.valid && header.seq == v2::DISCONNECT_SEQ &&
+           (header.type == v2::FrameType::DISCONNECT ||
+            header.type == v2::FrameType::ACK);
+}
+
+}  // namespace
+
 ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     : connection_(config)
 {
@@ -76,6 +87,25 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
             on_connection_changed_(state, info);
         }
     });
+
+    // This internal edge must exist even when a frontend does not subscribe to
+    // teardown notifications. A response generated earlier in the same modem RX
+    // callback can be sitting in tx_queue_ when a later concatenated DISCONNECT
+    // activates the close quarantine. Purge that stale response before tick()
+    // hands anything to the physical frontend.
+    connection_.setDisconnectTeardownCallback([this](bool active) {
+        if (active) {
+            tx_queue_.erase(
+                std::remove_if(tx_queue_.begin(), tx_queue_.end(),
+                               [](const PendingTxFrame& pending) {
+                                   return !isDisconnectTeardownControlFrame(pending.data);
+                               }),
+                tx_queue_.end());
+        }
+        if (on_disconnect_teardown_) {
+            on_disconnect_teardown_(active);
+        }
+    });
 }
 
 void ProtocolEngine::setLocalCallsign(const std::string& call) {
@@ -122,6 +152,16 @@ void ProtocolEngine::setMessageTxStatusCallback(MessageTxStatusCallback cb) {
 void ProtocolEngine::setConnectionChangedCallback(ConnectionChangedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_connection_changed_ = std::move(cb);
+}
+
+void ProtocolEngine::setDisconnectTeardownCallback(DisconnectTeardownCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    on_disconnect_teardown_ = std::move(cb);
+    // Match Connection's level-triggered registration contract: a frontend
+    // binding during an in-progress close must see the current phase at once.
+    if (on_disconnect_teardown_) {
+        on_disconnect_teardown_(connection_.isDisconnectTeardownActive());
+    }
 }
 
 void ProtocolEngine::setIncomingCallCallback(IncomingCallCallback cb) {
@@ -181,7 +221,11 @@ void ProtocolEngine::rejectCall() {
 void ProtocolEngine::disconnect() {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.disconnect();
-    if (on_connection_changed_) {
+    // disconnect() can complete synchronously (or be a no-op while already
+    // disconnected). Never overwrite the terminal callback with a stale
+    // DISCONNECTING notification after Connection has returned.
+    if (connection_.getState() == ConnectionState::DISCONNECTING &&
+        on_connection_changed_) {
         on_connection_changed_(ConnectionState::DISCONNECTING, "");
     }
 }
@@ -558,6 +602,14 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
     std::vector<PendingTxFrame> to_send;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        if (connection_.isDisconnectTeardownActive()) {
+            tx_queue_.erase(
+                std::remove_if(tx_queue_.begin(), tx_queue_.end(),
+                               [](const PendingTxFrame& pending) {
+                                   return !isDisconnectTeardownControlFrame(pending.data);
+                               }),
+                tx_queue_.end());
+        }
         to_send = std::move(tx_queue_);
         tx_queue_.clear();
     }
@@ -617,6 +669,12 @@ void ProtocolEngine::reset() {
 
 void ProtocolEngine::handleTxFrame(const Bytes& frame_data,
                                    bool expect_full_ofdm_anchor_after_tx) {
+    if (connection_.isDisconnectTeardownActive() &&
+        !isDisconnectTeardownControlFrame(frame_data)) {
+        LOG_MODEM(WARN,
+                  "Protocol teardown egress: dropped non-close frame before queue");
+        return;
+    }
     LOG_MODEM(INFO, "[%s] Protocol TX: %zu bytes -> modem%s",
               connection_.getLocalCallsign().c_str(), frame_data.size(),
               defer_tx_ ? " (queued)" : "");
@@ -805,6 +863,11 @@ void ProtocolEngine::setBurstChannelObservation(float snr_db, float fading_index
 void ProtocolEngine::setBurstEvmObservation(float evm_snr_db) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setBurstEvmObservation(evm_snr_db);
+}
+
+void ProtocolEngine::clearBurstEvmObservation() {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.clearBurstEvmObservation();
 }
 
 bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {

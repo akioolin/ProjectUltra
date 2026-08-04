@@ -10,6 +10,898 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-04 — MEASURED WASH: exact partial-SACK descriptor repair stays default-OFF
+
+### What was measured
+
+The immutable MPG@20 campaign alternated `ULTRA_PARTIAL_SACK_DESCRIPTOR_REPAIR=0/1`
+with 8PSK R2/3 cw4/Z81 BI0 and one exact 51,200-byte payload. Pair 1 is void as a
+whole because its OFF arm recorded a 3.145-second Pi audio-consumer service gap
+coincident with an RX FIFO overrun before DATA. Pairs 2--9 form the eight-pair analysis
+set; pair 9 is the complete OFF/ON order-balancing replacement, leaving four ON-first
+and four OFF-first. All sixteen valid files were byte-exact, all teardowns passed,
+endpoint environments matched, and physical/collision/no-unmatched-callback accounting
+gates passed.
+
+Descriptive physical per-pair changes were `+17.511, -10.037, +4.238, -29.142, +10.398,
++11.191, -17.166, +24.753%`: mean `+1.468%`, median `+7.318%`, SD `18.509`
+percentage points, 95% CI `[-14.006, +16.942]%`, `t(7)=0.224`, `p=0.8289`.
+Five of eight pairs favored ON (exact sign `p=0.7266`). Log-ratio sensitivity was
+`-0.119%`, CI `[-15.062, +17.453]%`, `p=0.9866`. Keyed throughput was also a wash:
+mean `+0.548%`, `p=0.9376`. Mean physical rates were 1.812693 kbit/s OFF and
+1.814288 kbit/s ON.
+
+### Mechanism and safety evidence
+
+The enabled arms recorded 143 provenance events, 96 decisions, and 61 engagements.
+Removing one 1.2-second DATA chirp per engagement avoided exactly 73.2 seconds,
+averaging 3.975% of enabled physical spans. That deterministic same-outcome
+counterfactual is not added to the A/B effect because shortening one burst moves all
+later bursts in the fading process.
+
+Valid OFF/ON outcomes were 4/12 craters, 261/346 NACK retransmission entries, 30/19
+ARQ-timeout entries, and one/one no-callback burst. Pair 9 ON's missing callback was
+an engaged descriptor-only/light-DATA repair immediately after a 1/8 partial and cost
+seven timeout retransmissions. The otherwise void pair 1 ON had another engaged
+no-callback repair after 3/6. An OFF arm also lost a full-anchor group, so this is not
+a causal rate comparison; it does prove the light repair is not an unconditional
+acquisition substitute in severe fading.
+
+### Verdict
+
+Keep the feature strict default-OFF. The observed log-ratio SD was 0.194, so n=8 can
+resolve only about a 21--24% multiplicative effect with conventional power, not the
+expected 4% mechanical gain. A successor must preserve acquisition diversity when
+the robust descriptor is missed, or fail closed on severe partials, before a new
+predeclared trial. Full table and immutable hashes are in
+`docs/IONOS_MPG20_CAMPAIGN_2026_08_04.md`.
+
+---
+
+## 2026-08-04 — FIX: learned long-profile geometry is session-epoch synchronized
+
+### What was broken
+
+Session teardown cleared `learned_rung_geometry_` from `setMode()` while holding the
+audio ring mutex, but descriptor learning and both decode resolvers accessed that
+table after releasing the ring lock. A protocol/GUI-thread disconnect could therefore
+race a decode-thread read or write. Besides C++ undefined behavior, a descriptor decode
+that began before teardown could repopulate the cleared Z81 tuple for the next peer.
+
+### What changed
+
+- A dedicated mutex protects complete cw/Z snapshots, writes, and session clearing;
+  the ring mutex is no longer claimed to protect decode-thread geometry.
+- Each connected-session teardown increments a geometry epoch. Descriptor learning
+  captures the epoch at decode start and rejects a late write after teardown.
+- Ordinary `reset()` and TX echo-clear retain same-session wire truth. Only a true
+  connected-to-disconnected transition clears the table and commanded-rung evidence.
+
+### Verification
+
+`BurstStaleGeometry` now checks same-session reset retention, stale-epoch rejection,
+and a real reader thread across 256 connected/disconnected transitions. It passes in
+normal and ASan+UBSan builds. The complete normal build also passed, ensuring every
+translation unit consumed the new decoder layout.
+
+---
+
+## 2026-08-04 — FIX: an accepted queued file cannot disappear on geometry shrink
+
+### What was broken
+
+`sendFile()` returned true after storing a deferred ISS file request. When the turn
+later opened, `tryStartQueuedFileIfReady()` cleared the path before calling
+`startFileTransferNow()` and discarded its false return. If adaptation had shrunk the
+frame below FILE_START's 11-byte minimum—or another start failure occurred—the caller
+had an accepted request but received no terminal callback and could wait forever.
+
+### What changed
+
+- `sendFile()` validates bounded-frame FILE_START capacity before both immediate start
+  and queue admission.
+- A request that was valid when queued but cannot start after a geometry change is
+  cleared reentrancy-safely and reports exactly one failed-file callback.
+- The queue remains observable through `isFileTransferInProgress()` until it starts or
+  emits that terminal result; no impossible FILE_START is placed on wire.
+
+### Verification
+
+`ConnectionAdaptive` covers immediate undersized queue rejection and a valid queued
+request that shrinks to QPSK R1/3 cw1 before the turn opens. The latter must emit one
+failure callback, clear all file state, and transmit nothing. Normal and ASan+UBSan
+focused suites pass. After both final lifecycle fixes, the complete loopback-enabled
+CTest passed 101/101 enabled tests in 174.24 seconds (`TNCSession` intentionally
+disabled), including byte-exact `UltraTncSimAudio` in 78.03 seconds.
+
+---
+
+## 2026-08-04 — FIX: file transfer rejects profiles that cannot carry FILE_START
+
+### What was broken
+
+`FileTransferController` derived the FILE_START filename budget as
+`chunk_size + 5 - 10`. A fixed frame may legally have only 6–10 payload bytes:
+that is enough for a later FILE_DATA fragment, but not for FILE_START's ten fixed
+bytes plus its required filename byte. In particular, forced QPSK R1/3 cw1 has
+an 8-byte payload. The unsigned subtraction wrapped, built an oversized metadata
+packet, and frame serialization truncated it; the receiver then rejected the
+short FILE_START and the transfer could strand before its first data byte.
+
+The GCC 14 diagnostics that led to this audit were optimizer false positives for
+the reported `std::vector` operations. Sanitizer tests proved those three memory
+paths safe, but the adjacent protocol-capacity bug above was real and reachable.
+
+### What changed
+
+- FILE_START's ten-byte fixed overhead and eleven-byte minimum payload are now
+  explicit protocol constants.
+- `startSend()` and `Connection::startFileTransferNow()` reject a new transfer
+  below that minimum before any wire frame is queued. Metadata construction also
+  checks the bound before subtracting, so a requeued FILE_START fails closed if
+  geometry shrinks meanwhile.
+- The physical payload bound is stored separately from FILE_DATA's usable chunk
+  length. After valid metadata has already been sent, a later 8-byte profile may
+  still carry three data bytes per frame; the fix does not unnecessarily outlaw
+  low-rate continuation.
+
+### Verification
+
+- Controller regressions require capacities 8 and 10 to remain idle and emit
+  nothing, while capacity 11 emits an exact valid FILE_START. That transfer then
+  moves to capacity 8 and round-trips nine exact bytes in three FILE_DATA frames.
+- A connection regression forces QPSK R1/3 cw1, proves its physical capacity is
+  8 bytes, and requires `sendFile()` to fail with zero wire TX and no queued or
+  active transfer.
+- Normal and ASan+UBSan runs pass `FileTransferController` 129/129 and
+  `ConnectionAdaptive` 696/696; `git diff --check` is clean.
+
+---
+
+## 2026-08-04 — FIX: disconnect ACK diversity now remains full-anchor through teardown
+
+### What was broken
+
+`DISCONNECT` itself used the hardened full-chirp/LTS control profile, but its
+`ACK seq=0xFFFF` was classified as an ordinary connected ACK. The first copy only
+appeared full because entering connected mode left an unrelated one-shot full-anchor
+latch armed; every proactive and reactive retry after that was light. A faded first
+copy therefore made the carefully repeated teardown ACKs strictly less acquirable than
+the request they answered. The receiver contract also attached its post-TX full-anchor
+expectation only in `CONNECTED`, not while the caller was `DISCONNECTING`.
+
+This explains the prior QPSK R3/4 transfer which delivered the exact file but never
+accepted the disconnect ACK: it missed the accidental full copy and then searched for
+the later light copies under the wrong acquisition contract.
+
+### What changed
+
+- `ModemEngine` classifies an ACK carrying the reserved disconnect sentinel sequence as
+  teardown turn-control. Every initial, proactive, and duplicate-triggered copy now uses
+  the same full control anchor as `DISCONNECT`; no session-entry latch is involved.
+- `Connection::expectsFullOFDMAnchorAfterTx` includes `DISCONNECT` and the sentinel ACK,
+  and `transmitFrame` preserves that metadata in both `CONNECTED` and
+  `DISCONNECTING`.
+- Ordinary connected ACKs remain light. No DATA, SACK, or general control profile was
+  widened.
+
+### Verification
+
+- `test_hardware_tx_normalization` consumes the session-entry latch, proves an ordinary
+  ACK is light, then requires a sentinel ACK to equal the full `DISCONNECT` geometry and
+  exceed the ordinary ACK by the full anchor. It passes 757/757.
+- Teardown state-machine tests require full-anchor expectation on the initial, retry,
+  proactive, and reactive sentinel copies.
+- Fresh immutable real IONOS MPG@20 transfers were byte-exact and teardown-clean:
+  QPSK R3/4 cw3/Z81 delivered at 1.890 kbps physical / 2.143 kbps keyed, and 8PSK
+  R2/3 cw4/Z81 at 1.979 / 2.260 kbps. The QPSK teardown is the causal stress proof:
+  several full ACK copies faded, two full `DISCONNECT` retries re-armed acquisition,
+  and a later full ACK was acquired at correlation 0.78. Both peers then disconnected.
+
+---
+
+## 2026-08-04 — FIX: partial-repair eligibility measures the latest physical k/N, not cumulative ARQ progress
+
+### What was broken
+
+The default-off descriptor-only partial-repair experiment used
+`lastAckProgressFrames()` as if it were the number of members decoded from the latest
+physical group. It is intentionally a different quantity: cumulative base retirement
+plus newly set SACK bits. Filling an old base hole can retire already-SACKed suffixes
+again, so live partial groups legitimately logged `progress=8/8` and `progress=12/8`.
+The gate read those as clean and fell back to the slower full-descriptor + full-DATA
+repair. One fallback made the following round ineligible too, suppressing the
+optimization across an entire repair chain.
+
+### What changed
+
+- Each descriptor-bearing physical request records the exact serialized ARQ DATA
+  identities it emitted (ULPAD members are excluded).
+- Immediately before an accepted tone ACK mutates the ARQ, `Connection` snapshots how
+  many of those exact identities are still active and unacknowledged. Immediately after,
+  it counts again. Descriptor-only/light-DATA repair is eligible only when all `N`
+  identities were live before this ACK, this ACK retired at least one, and at least one
+  exact current-round hole remains.
+- Full serialized identity plus the ARQ slot's seq/active/acked checks protects against
+  sequence wrap and slot reuse. A prior classic/control SACK, duplicate ACK, zero-progress
+  callback, RTO, singleton, mode transition, or session boundary fails closed to the
+  established double/full repair.
+- Cumulative ARQ progress remains unchanged and continues to drive retry pacing; it is
+  now telemetry only for this physical k/N decision.
+
+### Verification and real evidence
+
+- The regression creates a base-hole release where the current repair is physically
+  3/M but the ARQ reports at least `N` cumulative progress. It must keep the proven
+  descriptor-only/light policy. A second adversarial regression first SACKs one captured
+  identity through another ARQ path, then supplies a fresh zero-progress provenance ACK;
+  it must use the full repair. `ConnectionAdaptive` passes 691/691.
+- Before this gate fix, a fresh immutable enabled IONOS run delivered the exact 51,200
+  bytes and tore down cleanly. It accounted for 20/20 groups, zero missing callbacks,
+  zero collisions, four descriptor-only engagements, 14 partial groups, and one crater.
+  Every engaged light group reacquired and produced a synchronous group callback. The
+  run's later seven timeout retransmission entries came from a different full-anchor
+  round whose ACK was missed, not from any engagement.
+- That run was a much harsher independent fade draw (1.548 kbps physical), so it proves
+  integrity and mechanism safety, not a goodput A/B. It motivated the now-complete
+  order-balanced campaign summarized below and in the MEASURED-WASH entry above.
+- After the exact-identity fix, a new immutable MPG@20 run was byte-exact and
+  teardown-clean at 1.924 kbps physical / 2.206 kbps keyed. It matched 17/17
+  groups with zero callback misses, craters, timeouts, or collisions. All twelve
+  strict physical partials engaged, including the decisive cases where cumulative
+  ARQ progress read `9/8` and `11/6` while exact current-round delivery was `4/8`
+  and `5/6`. Every repair reacquired and returned its synchronous callback.
+- Those twelve engagements mechanically removed 14.4 seconds of redundant DATA
+  chirp airtime from this emitted sequence. The neighboring feature-off run was a
+  different fading realization, so the throughput delta was not a causal A/B.
+- The prescribed order-balanced eight-pair campaign is now complete; see the
+  MEASURED-WASH entry above. Mean physical effect was +1.468% (`p=0.8289`), log-ratio
+  effect -0.119%, and the feature remains default-OFF pending an acquisition-safe
+  redesign rather than more interpretation of this single favorable mechanism run.
+
+---
+
+## 2026-08-04 — FIX: BI0 can recover a later Z81 member after both descriptor and marked head are lost
+
+### What was broken
+
+A fresh immutable Pi5 -> IONOS MPG@20 -> Mac 8PSK R2/3 cw4/Z81 BI0
+transfer delivered the exact 51,200-byte file, but one physical turn produced no
+group callback and forced an ARQ timeout. The accepted full anchor was real
+(`corr=0.73`), but its BURST_HEADER decoded 0/4 and the marked DATA head was also
+lost in the same fade. A later ordinary light-LTS member was strong
+(`corr=0.951`, roughly 14.5 dB in-band), yet the receiver had returned to the
+classic path at default Z27. It therefore waited for only 2,592 LLRs instead of
+  the member's 7,776-LLR cw4/Z81 geometry and sliced the body at the wrong boundary.
+
+The earlier same-rung Z81 repair below covered a missed descriptor when a marked
+head still armed the burst path. It could not engage when both pieces of group
+provenance disappeared. Weakening the ACK/backstop safety gate was not a valid
+repair: without a decoded physical tail, reverse egress could still collide with
+the sender's live burst.
+
+### What changed
+
+- After the hardened connected-control hypothesis fails, a narrowly scoped
+  classic fallback may retry that same candidate with an exact Z81 tuple learned
+  from a prior wire descriptor. It is limited to BI0, RX authority, an accepted
+  full-anchor epoch, correlation at or above the existing 0.80 recovery floor,
+  no active descriptor/marker, the same commanded/current rung, active Z27, and
+  the two exact long-file profiles (8PSK R2/3 cw4 or QPSK R3/4 cw3).
+- The temporary geometry changes only per-frame CW/Z and interleaver sizing. It
+  does not manufacture BURST_HEADER provenance, physical `N`, group sequence, or
+  a group callback. Only a successfully decoded, CRC-protected
+  `PHYSICAL_BURST_END` flag proves turn completion and permits the existing
+  cumulative ACK path.
+- Cadence is measured at the accepted anchor, not the later member. In the live
+  incident the later member was 15.55 seconds after the prior group while the
+  new anchor was only 10.73 seconds after it. A genuinely post-RTO anchor still
+  fails closed. A successful arm advances the cadence reference to that anchor
+  so two consecutive descriptor/head losses remain recoverable.
+- Z81 is restored to ordinary Z27 after decode and consumed-stride accounting,
+  and on timeout, reset, mode transition, and teardown. Learned rung geometry and
+  commanded-rung state survive connected TX echo resets but are cleared when the
+  connected session ends, preventing one peer's Z81 tuple from leaking into a
+  later peer/session.
+- No ACK timing, backstop, or collision-safety rule was relaxed.
+
+### Verification
+
+- A real encoder-to-streaming-decoder regression destroys the descriptor/marked
+  head, retains a later light Z81 tail, and requires one successful callback,
+  `physical_turn_complete=true`, no timer-backstop callback, one classic-long arm,
+  and Z27 restored afterward.
+- Deterministic negatives reject BI1, absent learned geometry, Z27-only geometry,
+  sub-threshold correlation, and a post-RTO anchor. The cadence test uses a
+  nonzero prior group with anchor `+10 s` and candidate `+16 s`; it passes only
+  because cadence authority belongs to the anchor. Disconnect/reconnect must
+  erase the learned tuple and reject the same candidate.
+- Combined focused verification passed 7/7:
+  `ConnectionPolicy`, `ConnectionAdaptive`, `LatentRateController`,
+  `StreamingConfig`, `BurstStaleGeometry`, `StreamingDecodePolicy`, and
+  `StreamingSignalPolicy`.
+- All 101 enabled project tests passed. The four loopback UDP/gRPC tests require
+  an approved unsandboxed bind and passed 4/4 there, including the 75.76-second
+  byte-exact `UltraTncSimAudio` transfer. One slow wall-clock scenario test remains
+  intentionally disabled by project configuration.
+- Fresh immutable Pi/Mac deployment and a real IONOS transfer are still required
+  to validate this new fallback on air.
+
+---
+
+## 2026-08-04 — FIX: latent rate selection prices the emitted CW/Z geometry and first-switch cost
+
+### What was broken
+
+The default latent selector correctly used outcome-fitted success probability,
+but its value table still priced every candidate as a warm Z27 burst. That is
+wrong for the transfer-scoped long profiles: QPSK R3/4 is physically cw3/Z81
+(522 useful file bytes per frame), not cw8/Z27 (456 bytes), while 8PSK R2/3 is
+cw4/Z81. It also priced a non-incumbent as steady state even though a descriptor-
+committed move forces one additional 1.2-second full group-start anchor, reducing
+the first emitted group's frame budget.
+
+A second ownership error made the table optimistic after ACK loss. The receiver's
+`rx_auth_clean_streak_` increments on every clean physical callback, including a
+clean retransmission whose earlier ACK never reached the sender. The sender earns
+its larger burst ceiling only from fresh accepted ACKs. The receiver therefore
+could price N8 while the sender was only authorized to emit the base N5/N4 shape.
+
+### What changed
+
+- `Connection` now has one logical-to-physical OFDM file-profile resolver. Sender
+  serialization/timing calls it with transfer-scoped active arms; receiver
+  counterfactual scoring calls the same tuple mapping with the strict default-off
+  local experiment policy. Default policy remains Z27.
+- Candidate payload capacity, physical CW, lifting Z, frame budget, burst airtime,
+  and cycle value now come from the same production helpers as TX. Telemetry prints
+  logical CW, physical CW, Z, N, and whether the candidate pays a full switch anchor.
+- Every non-incumbent candidate includes the extra full-anchor cost both when
+  determining how many frames fit and in cycle time. The incumbent keeps its
+  ordinary group start. This is physical switching cost, not an arbitrary dwell
+  or hysteresis constant.
+- Candidate scoring uses sender-clean streak zero: the guaranteed configured base
+  ceiling. It never invents private sender ACK history. A sender that actually
+  hears enough clean ACKs remains free to exploit its independently proven larger
+  group.
+- The trace-conditioned MPG@20 replay now competes against every enabled rung,
+  uses the exact 11,500-ms campaign ceiling, enables only the 8PSK cw4/Z81 profile
+  used by that runner, and charges switch anchors to all alternatives. One 1/8
+  fade still does not make the outcome posterior chase the next group; the next
+  real 7/7 result is consumed only after it completes.
+
+### Scope and remaining calibration boundary
+
+This fixes geometry and actuator economics; it does not create a profile-specific
+link model. `latentThetaForRung()` is still keyed by logical modulation/code rate
+and its published waterfall was measured on the legacy Z27 profiles. Automatic
+Z81 selection therefore remains experimental until matched cw/Z-specific FER
+curves are measured and both observation and prediction use them. The long-code
+flags are also not negotiated on wire: matched endpoint configuration is a hard
+campaign precondition, enforced by the IONOS runner. Do not call this general
+interoperable profile negotiation. A CW-only CONNECT override is not yet retained
+symmetrically as QSO-scoped provenance on both peers; such diagnostic QSOs must
+keep adaptation pinned until that pre-existing ownership edge is repaired.
+
+### Verification
+
+- `test_connection_adaptive` now cross-checks receiver candidates against armed
+  sender geometry: QPSK incumbent cw3/Z81 is 522 B, N5, 8.400 s; switched QPSK is
+  N4 and 8.160 s including its anchor; switched 8PSK cw4/Z81 is 624 B, N4, 7.488 s.
+  A sender-private two-clean streak can emit anchored N7, while receiver scoring
+  deliberately remains at the guaranteed base N4.
+- `test_latent_rate_controller` passes 50/50 checks, including the full-rung
+  causal replay. `test_connection_adaptive` passes 664/664 checks.
+- Combined focused CTest passed 7/7 and `git diff --check` is clean. The selector
+  changes are covered by the same 101-enabled-test result recorded above.
+
+---
+
+## 2026-08-04 — FIX: partial burst restores the last proven CFO before retry
+
+### What was broken
+
+The first immutable Pi5 -> IONOS MPG@20 -> Mac transfer containing the
+control-first CFO fix completed byte-exact and teardown-clean, but exposed the
+adjacent state-machine hole. The receiver's first BURST_HEADER correctly
+certified approximately +0.05 Hz. During its DATA group, fade-corrupted
+per-frame pilot residuals moved the mutable tracker to -0.79 Hz before the
+cross-frame decoder returned a partial 2/8 result.
+
+The old three-way outcome policy certified an all-good group and revoked a 0/N
+group, but did nothing for a partial group. `pilot_seeded` therefore still said
+the estimate was proven while the value consumed by connected-anchor warm
+seeding was the mutable, unproven -0.79 Hz value. The next full anchor measured
++0.20 Hz at 0.79 correlation and a following DATA anchor measured +0.15 Hz at
+0.88, yet both retained -0.79 as "warm". The robust descriptor then
+re-certified that poison and the next group failed 0/7. After the 0/7 outcome
+revoked warm trust, cold chirp acquisition restored approximately +0.10 Hz and
+the following group decoded 7/7.
+
+This is not a claim that CFO caused the transfer's other failures. The immutable
+run delivered the exact 51,200 bytes at 1.402 kbps physical-span goodput, with
+24/24 groups physically accounted, zero collisions/timeouts, ten full craters,
+and two partials. Frame telemetry classifies most other craters as genuine
+weak-LLR fading outages. Clean N8 8PSK cycles still carried 5,184 bytes in a
+13.13-second median cycle (about 3.16 kbps), so reliability rather than the
+clean-cycle PHY capacity remains the limiting factor.
+
+### What changed
+
+- `CFOTracker::applyBurstDecodeOutcome()` now owns the complete authoritative
+  three-way transition: all-good certifies the current value; 0/N restores the
+  last proven numeric reference and revokes warm trust; and 0<k<N rolls the
+  mutable tracker back to the last certified snapshot. Restoring before revoke
+  matters because connected-cold chirp sanity still compares against the tracked
+  value; leaving a multi-frame pilot walk there could clamp the fresh chirp back
+  to the same poison.
+- If a partial group has no certified snapshot, it remains cold. If a historical
+  snapshot exists after a previous revoke, its numeric value may be restored but
+  the revoked `pilot_seeded` state is not silently re-certified.
+- If no certified snapshot exists at all, a failed or uncertain burst clears the
+  numeric tracker to zero as well as revoking warm trust. This prevents an
+  unproven pilot walk beyond the connected-cold drift limit from clamping the
+  next valid chirp back to that same value.
+- Descriptor-proven timeout and malformed-group 0/N exits use the same outcome
+  transition. Hard-process aborts and unproven-geometry abandonment use an
+  uncertain-end transition which restores prior proof without manufacturing a
+  new verdict. Every transition runs before its synchronous outcome/group
+  callback, so an ACK or retry observes reconciled CFO state.
+- Compound CFO certificate, rollback, store, and reset operations are serialized
+  as one state transaction. A reset can no longer interleave halfway through a
+  certification and create a cross-session warm flag. NaN/Inf chirp, pilot, and
+  direct-store inputs fail closed without replacing a finite tracked reference.
+- Partial outcomes log the before/after values and whether they rolled back or
+  stayed cold, making the invariant auditable in the next rig run.
+
+### Verification
+
+- `test_burst_outcome_cfo_reconciliation` pins the exact +0.05 -> -0.79 Hz
+  incident, verifies the partial rollback, and proves the next connected anchor
+  consumes +0.05 rather than the poison.
+- The same regression covers all-good certification, 0/N revocation, partial
+  without a snapshot, historical rollback without accidental re-certification,
+  uncertain abort, malformed counts, reset cleanup, and non-finite rejection.
+- The descriptor-backed Z81 timeout integration test poisons the live tracker to
+  -0.79 Hz, then requires its synchronous failed-group callback to observe the
+  restored near-zero CFO with warm trust already revoked.
+- `ctest --test-dir build --output-on-failure -R
+  '^(StreamingSignalPolicy|StreamingConfig)$'`: 2/2 passed.
+- The causal pre-fix artifact is
+  `/tmp/projectultra-ionos-campaign.20260804T074857Z/`
+  `mpg20_8psk_n8_bi1_m8192_p8192_cfo_ar0_01`.
+- Three subsequent immutable transfers exercised the corrected CFO lifecycle and
+  all completed byte-exact with clean teardown: 8PSK baseline (1.921 kbps physical),
+  8PSK provisional-HARQ diagnostic (1.964 kbps), and QPSK R3/4 (1.712 kbps).
+  Valid LIGHT/FULL control headers repeatedly fed and certified their current CFO;
+  partial/failed outcomes did not reproduce the warm-poison chain. Those runs do
+  not claim that CFO removal fixes the remaining weak-LLR fading losses.
+
+---
+
+## 2026-08-04 — FIX: control-first OFDM frames restore the warm CFO certificate
+
+### What was broken
+
+The first teardown-clean, byte-exact IONOS MPG@20 8PSK R2/3 cw4/Z81 BI1
+transfer delivered 51,200 bytes at 2.134 kbps physical goodput. Three groups
+failed 0/N and one was partial. Post-run frame telemetry separated two genuine
+low-EVM fade troughs from one receiver-created crater:
+
+- group 2 failed 0/8 at 9.231 dB pooled EVM and correctly revoked the warm CFO
+  certificate;
+- the following robust BURST_HEADER decoded successfully with a good roughly
+  +0.05 Hz estimate;
+- the BURST_HEADER control-first success path returned before both the common
+  pilot-CFO feedback and classic-success certification;
+- the next DATA full anchor therefore remained cold. Its faded chirp-gap
+  estimate of -0.70 Hz (correlation 0.70) passed the cold sub-1-Hz clamp, and all
+  seven group members were demodulated with the false seed. LTS quality remained
+  high and LLRs were confident, but every logical frame failed 0/7;
+- the next group used approximately +0.05 Hz and decoded 7/7.
+
+`CFOTracker::ingestPilotResidual()` deliberately does not certify its input:
+failed demodulations publish residuals too. Production implemented delivered-
+group certification but the successful control-first early return had neither
+pilot feedback nor outcome certification.
+
+### What changed
+
+- A CRC/LDPC-valid connected control-first OFDM frame now feeds its pilot
+  residual back into `CFOTracker` before the early return, updates `sync_cfo_`,
+  and certifies that value before any BURST_HEADER handoff or synchronous
+  protocol callback.
+- Partial-codeword results, failed frames, disconnected acquisition, MC-DPSK,
+  the common classic recovery paths, and grouped frames retained their existing
+  outcome rules in that frozen fix. A 0/N grouped result revoked, a partial group
+  still left the certificate unchanged, and an all-good group certified. The
+  newly exposed partial-group hole is corrected by the entry above. The common path
+  is intentionally not blanket-certified here: fixed-frame, small-frame, and
+  sync-offset recovery can replace the initial demod result, so certification
+  must eventually be coupled to the residual from the accepted attempt rather
+  than whatever attempt ran first.
+
+### Verification
+
+- `test_burst_header_current_anchor_controls_receiver_search` now requires both
+  LIGHT and FULL production-encoded BURST_HEADER paths to leave the warm CFO
+  certificate set before DATA acquisition. This assertion fails on the prior
+  control-first return path.
+- The existing `test_connected_anchor_cfo_seed` pins the downstream consequence:
+  a certified tracker keeps its proven value instead of accepting a sub-1-Hz
+  phantom chirp estimate.
+- `ctest --test-dir build --output-on-failure -R
+  'StreamingConfig|StreamingSignalPolicy'`: 2/2 passed.
+- A subsequent immutable Pi5→IONOS→Mac transfer proved that valid LIGHT/FULL
+  BURST_HEADER frames now feed back and certify their own CFO. It also exposed
+  the separate partial-group mutable-state hole documented above. Neither fix
+  claims to remove the separately measured weak-LLR fade troughs.
+
+---
+
+## 2026-08-04 — FIX: silent ACK repeat ignores the group that armed it
+
+### What was broken
+
+The optional `ULTRA_ACK_REPEAT_SILENT_MS` diversity copy is correctly
+safety-default OFF, but its enabled path could not rescue the two reverse-link
+ACK losses observed in the Mac-2048 IONOS transfer. The broad RX-signal safety
+gate held a repeat whenever the latest signal stamp was less than 13 seconds
+old. At arm time that stamp is necessarily fresh because it belongs to the
+just-decoded group whose ACK is being sent. The group therefore held its own
+repeat until after the sender's RTO.
+
+For the two measured misses, only 9.748 and 9.054 seconds remained from primary
+ACK commit to sender timeout. A 4000-ms repeat plus the 608-ms ACK waveform would
+have started after 4.608 seconds and retained roughly 3.2–3.9 seconds of margin;
+the old self-hold lasted 13 seconds. This was the same baseline-lifecycle class
+already fixed for substantive evidence, still present on the separate broad-
+signal path.
+
+### What changed
+
+- The repeat arm now snapshots both decoder-evidence clocks: the existing
+  substantive baseline and a new broad-signal baseline.
+- The broad-signal hold requires a stamp strictly newer than the arm baseline.
+  The group that generated the ACK can no longer postpone its own repeat, while
+  any new post-arm chirp/LTS/decode attempt still gets the full conservative
+  13-second hold.
+- Energy CCA, declared burst-airtime, new substantive-evidence cancellation,
+  one-repeat-per-distinct-ACK deduplication, connection state, and teardown gates
+  are unchanged.
+- Arm telemetry now records distinct eligibility, requested delay, ACK airtime,
+  and both evidence baselines. Teardown clears the new baseline with the rest of
+  the pending ACK state.
+
+### Verification
+
+- `test_silent_ack_repeat_broad_signal_hold_is_waveform_independent` now pins
+  the arm lifecycle for every waveform family: equal-to-baseline and older
+  stamps do not hold; a one-millisecond-newer post-arm stamp does; stale and
+  future timestamps still fail closed.
+- `ctest --test-dir build --output-on-failure -R '^ConnectionPolicy$'`: 1/1
+  passed.
+- The knob remains default-OFF. The required next step is a new immutable,
+  matched OFF-versus-4000-ms IONOS A/B with explicit engagement, collision,
+  sender-listen-window, byte-integrity, physical-accounting, and teardown gates.
+  The older locked campaign must not be modified or used as the matched OFF arm.
+- The distinct-ACK guard deliberately remains unchanged. Repeated identical
+  cumulative state does not earn another diversity copy; broadening that rule is
+  a separate experiment.
+
+---
+
+## 2026-08-04 — FIX: safe BI0 Z81 descriptor-loss recovery; BI1 unknown-N fails closed
+
+### What was broken
+
+In the immutable IONOS MPG@20 8PSK R2/3 cw4/Z81 BI0 transfer, one physical
+group lost only its BURST_HEADER descriptor. Its later DATA members recovered at
+roughly 9.3–9.7 dB EVM, but the receiver retained the same modulation, rate, and
+codeword count with the stale default Z27. It therefore collected only
+`4 * 648 = 2592` LLRs for each `4 * 1944 = 7776`-LLR Z81 member, produced no
+group callback, and made the sender wait for a real RTO. The old same-rung
+identity check compared modulation/rate/codewords but omitted lifting Z.
+
+### What changed
+
+- `resolveCommandedGeometry()` now treats lifting Z as part of geometry identity.
+- A narrow default-active recovery may restore learned Z81 when the current
+  descriptor is absent. It is limited to the two exact transfer profiles already
+  decoded from the wire: 8PSK R2/3 cw4/Z81 and QPSK R3/4 cw3/Z81, and to
+  non-interleaved (BI0) bursts.
+- Recovery still requires connected burst receive, RX rate authority, the exact
+  same current modulation/rate/codeword count, active Z27, learned Z81, no wire
+  evidence that the sender declined the command, and the existing steady-cadence
+  gate. A post-RTO arrival fails closed to the latched geometry.
+- The broad commanded-rung reconstruction remains default-OFF. The independent
+  group-start truncation guard remains unconditional.
+- BI1 deliberately fails closed because a lost descriptor also loses physical
+  group size `N`. BI0 can recover exact `N` from each member's independently
+  decoded, CRC-protected `PHYSICAL_BURST_END`; BI1 cannot inspect that flag until
+  after deinterleaving, while deinterleaving itself requires `N`.
+- For descriptorless BI0 commanded geometry, the stale configured count is no
+  longer a completion condition in either direction. Collection continues to a
+  policy-derived upper bound (the sender's 12-second airtime and 16-frame SACK
+  ceilings), the physical interlock conservatively covers that same span, and
+  only a CRC-valid tail can finalize. Ceiling/timeout without a tail clears the
+  candidate with no callback or ACK.
+- The arm preserves the already-live, nonzero provisional physical deadline until
+  it directly replaces the same atomic with the conservative unknown-N ceiling,
+  before control returns to the event loop. There is no transient zero-gate window,
+  and it no longer waits for member 2, so an older deferred control/SACK cannot
+  escape during that one-member gap.
+- An unproven configured-span fallback no longer emits the analyzer's exact
+  `Burst group complete` physical-end marker. It has a distinct log line so stale
+  configured `N` cannot masquerade as measured air-end.
+
+### Verification
+
+- The deterministic 8PSK encoder-to-streaming-decoder regression, with
+  `ULTRA_COMMANDED_GEOMETRY=0`, changed from no callback/no arm to one callback,
+  mask `0x1E`, four recovered members, one geometry arm, Z81, and 7776 LLRs.
+- The corresponding QPSK R3/4 regression changed from no callback/no arm to one
+  callback, mask `0x1E`, four recovered members, one arm, Z81, and 5832 rather
+  than 1944 LLRs.
+- The first immutable BI1 IONOS validation was byte-exact (51,200 bytes) and
+  teardown-clean, but falsified the original scope: sender `N=7`, stale receiver
+  `N=8`, descriptor missed. The receiver declared air-end 2.382 s early, its ACK
+  was dropped into inbound audio, and seven frames waited for RTO retransmission.
+  The analyzer correctly rejected the fabricated marker (18/19 association).
+- A deterministic BI1 regression now pins that exact N7-wire/N8-receiver case:
+  with the broad knob off, the narrow recovery must not arm or publish a guessed
+  N8 callback. The existing BI0 regressions continue to require exact Z81
+  restoration and finalization at the CRC-proven tail.
+- Independent review found the inverse hazard before deployment: stale N7 with
+  wire N8 could have finalized while member 8 was still on air. The new inverse
+  regression crosses stale N7 without a callback, then requires one exact N8
+  callback at the tail (mask `0xFE`, seven recovered members). Its paired
+  tail-corrupt arm requires recovery engagement but zero callback/ACK and one
+  fail-closed unknown outcome.
+- The N8/Z81 inverse regression records a 488,448-sample physical gate at the arm
+  site, already larger than the real eight-member span (`8 * 59,360 = 474,880`),
+  and still requires zero remaining air when the exact-tail callback eventually
+  runs.
+- `ctest --test-dir build-dbg -R
+  '^(BurstStaleGeometry|StreamingDecodePolicy|StreamingConfig)$'
+  --output-on-failure`: 3/3 passed in 65.63 seconds.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
+  tests/test_analyze_transfer.py`: 16/16 passed, including rejection of the new
+  unproven configured-span log as a physical-end anchor.
+- Fresh immutable-build, byte-exact IONOS revalidation is still required after
+  the BI1 fail-closed correction.
+
+---
+
+## 2026-08-04 — FIX: BI1 decoder work no longer masquerades as radio clock drift
+
+### What was broken
+
+A byte-exact IONOS MPG@20 8PSK R2/3 cw4/Z81, N8, BI1 transfer completed
+13/13 groups with no crater or missing callback and measured 2.262 kbps over the
+physical span. The hardware campaign nevertheless rejected it because
+`analyze_transfer.py` reported a 0.542-second cross-host clock-fit residual,
+above the campaign's 0.350-second accounting gate.
+
+The analyzer aligned sender signal ends to `delivered as unit`, a post-decode
+callback. BI1 deliberately defers group deinterleaving and LDPC work. One partial
+group spent 0.575 seconds between `Burst group complete` and that callback while
+the other observed decode intervals were roughly 0.04–0.12 seconds. The analyzer
+therefore interpreted variable decoder CPU time as radio/path clock variation.
+
+### What changed
+
+- `tools/analyze_transfer.py` now prefers the existing pre-decode
+  `Burst group complete (N frames), deinterleaving` marker for clock consensus.
+  That marker is emitted after the physical group is buffered but before
+  data-dependent deinterleaving/LDPC work.
+- Legacy logs without the marker retain the post-decode callback fallback.
+  Human and JSON provenance now records `physical-end` versus `group-callback`.
+- The stable downstream support fields and two-value `align()` API are retained;
+  the campaign's completeness/residual gates continue to operate unchanged.
+
+### Verification
+
+- `python3 -m unittest -v tests/test_analyze_transfer.py`: 16/16 passed,
+  including an exact regression with 50 ms versus 575 ms callback latency and a
+  legacy-fallback assertion.
+- Reanalysis of the BI1 hardware logs matched 13/13 sender bursts and 13/13
+  physical-end markers, reduced maximum residual from 0.542 to 0.231 seconds,
+  kept collision counts at zero, and yielded 2.261 kbps physical goodput. It now
+  passes the unchanged 0.350-second accounting gate.
+- Three completed BI0/PR arms also remained fully associated with zero collisions:
+  residuals were 0.136, 0.186, and 0.189 seconds. Their physical goodput changed
+  only by clock-offset rounding (at most about 0.001 kbps).
+
+---
+
+## 2026-08-03 — FIX: completion-driven disconnect is now a real close transaction
+
+### What was broken
+
+The first immutable IONOS MPG@20 8PSK R2/3 cw4/Z81 transfer delivered the exact
+51,200-byte payload, but the campaign correctly failed its teardown gate. The Pi
+queued DISCONNECT and the Mac decoded it, yet the Pi never proved the sentinel ACK
+or reached `DISCONNECTED` before the scripted GUI quit. The old five-second retry
+and five-second responder lifetime were wall-clock constants unrelated to the
+full anchored control waveform, audio wrapper, CCA deferral, or decoder latency.
+The frontend could also keep DATA acquisition and several deferred TX paths alive
+while `Connection` was trying to close.
+
+The apparent 7.98-second request/decode delay was initially misleading because the
+two endpoint logs have different process clocks. The analyzer's 17/17-burst clock
+fit gives receiver = sender + 6.106333 s (maximum residual 0.156 s): the initial
+request actually took about 1.871 s from Pi queue to Mac decode. Its full ACK ended
+at sender-aligned 254.287 s; the finite copies ended by approximately 257.121 s.
+An eight-second retry at 258.708 s therefore retains about 1.59 s of quiet margin.
+
+### What changed
+
+- Wide-OFDM disconnect timing is now derived from the hardened one-codeword control
+  geometry: 8 s retry, 30 s hard timeout, two budget-valid retries, two finite ACK
+  copies, and a roughly 23.7 s responder grace that also covers a CCA-deferred
+  legal retry. Retry/ACK copies obey channel-busy and own-TX gates.
+- `Connection` publishes an explicit teardown phase before the first DISCONNECT
+  callback. During that phase it accepts only a duplicate/crossed DISCONNECT or
+  the reserved-sequence ACK, suppresses every DATA/burst/tone/descriptor ingress
+  and non-close egress path, and cannot resurrect `CONNECTED` on abort.
+- The GUI and headless TNC mirror that phase into control-only receive. They purge
+  deferred burst/tone work and recheck raw/burst/tone/PING egress at the final
+  physical audio-queue boundary; only DISCONNECT and its sentinel ACK are allowed.
+- `ProtocolEngine` purges a non-close response queued earlier in the same RX
+  callback if a later concatenated DISCONNECT activates teardown. Its explicit
+  `disconnect()` notification is emitted only while the underlying state is still
+  `DISCONNECTING`, so a synchronous/terminal close cannot be overwritten by a
+  stale frontend state.
+- Scripted GUIs now start their quit grace only after the protocol reports actual
+  disconnect completion. The responder's remote-owned close follows the same
+  bounded natural-exit path as the caller.
+
+### Verification
+
+- `test_connection_adaptive`: 655/655, including lost ACKs, finite copies,
+  CCA-held retries, long deferred retry grace, crossed close, abort during grace,
+  ingress/egress quarantine, and synchronous loopback.
+- `test_protocol`: 21/21, including stale state suppression and a concatenated
+  MODE_CHANGE+DISCONNECT callback whose ordinary queued ACK must be purged while
+  the sentinel close ACK survives.
+- All 97 enabled non-socket tests passed; the four permission-requiring local
+  socket/GUI tests then passed 4/4, including the 75.7-second TNC audio test.
+- A new immutable real IONOS run is still required before marking the live incident
+  closed. The prior byte-exact run remains the performance reference:
+  1.915 kbps physical-span goodput, 2.197 kbps keyed goodput, 34 NACK repairs,
+  zero timeout repairs, one crater, and nine partial groups.
+
+---
+
+## 2026-08-03 — FIX: lost CONNECT_ACK no longer strands or collision-deadlocks the responder
+
+### What was broken
+
+A real IONOS MPG@20 transfer exposed a permanent half-open handshake. The responder
+decoded CONNECT, sent CONNECT_ACK, and entered connected OFDM receive mode. The
+initiator lost that ACK and repeated the fixed DBPSK R1/4 MC-DPSK CONNECT. The
+responder accepted the repeated frame's shared dual chirp as weak OFDM DATA sync,
+cleared its cached CONNECT_ACK, and later reported a synthetic 0/6 result. It could
+then neither decode the MC-DPSK retry in OFDM mode nor answer it from the protocol
+cache.
+
+Restoring the old proactive full CONNECT_ACK timer was not safe. The rig had already
+falsified that design 3/3 times: an approximately 8.3-second ACK retransmission
+overlapped the initiator's own CONNECT retry, keying both half-duplex stations at
+once. A timer adjustment cannot prove the peer has stopped transmitting.
+
+### What changed
+
+- Responder confirmation now requires a locally addressed post-CONNECT frame from
+  the established peer. A PHY sync, empty/all-failed group, probe, duplicate
+  CONNECT, or another station's valid frame cannot confirm or retire recovery.
+- CONNECT_ACK recovery is cache-only. No proactive full-ACK timer is armed. A
+  fully decoded duplicate CONNECT is the sole replay trigger, so the retry body is
+  physically complete before the responder keys the cached ACK.
+- While a connected wide-OFDM (`OFDM_CHIRP`) responder is unconfirmed, only a real expected full
+  dual-chirp anchor arms one bounded shadow decode of the retained raw samples as
+  the fixed MC-DPSK handshake profile. Weak LTS/DATA fallback locks cannot arm it.
+  A recovered CONNECT silently tears down the false OFDM group, advances past the
+  completed MC body, and re-arms the genuine OFDM full-anchor search.
+- The false-OFDM teardown is receive-epoch checked before and after the expensive
+  MC decode and serialized against reset/mode changes. It clears burst/HARQ cadence,
+  anti-replay, interleave, pilot/CFO, and physical-air state without emitting a
+  synthetic group result.
+- Half-open physical-SNR, OFDM/EVM, and fading readouts are snapshotted
+  before speculative OFDM receives. A proven duplicate CONNECT restores that
+  baseline before its callback, preventing MC-as-OFDM junk (the rig recorded
+  5.4 dB broadband SNR and fading 1.140) from entering the selector. A genuine
+  first OFDM frame confirms the handshake and keeps its measurements.
+
+### Verification
+
+- `test_connection_adaptive`: 566/566, including 120 seconds of responder silence,
+  reactive duplicate replay, 0/6 non-confirmation, wrong-peer rejection, and
+  authoritative classic/burst confirmation.
+- `test_streaming_mc_dpsk`: fixed-profile repeated CONNECT is recovered from the
+  connected OFDM state, delivered once per retry with physical-turn provenance,
+  emits no false group, re-arms OFDM acquisition, and leaves no speculative
+  physical/OFDM/fading observation. The regression repeats the lost-ACK cycle
+  twice to prove the baseline and recovery state survive another faded replay.
+- `ultra_gui` and `ultra_tnc` integration targets build successfully.
+- Fresh end-to-end IONOS transfer validation is still required before calling the
+  live incident closed; the focused deterministic regression is green.
+
+---
+
+## 2026-08-03 — FIX/EXPERIMENT: 8PSK CW0-dead HARQ repairs were structurally blocked
+
+### What was broken
+
+The immutable MPG@20 8PSK R2/3 cw4/Z81 baseline was byte-exact, but delivered only
+84/108 physical data frames. Several ARQ sequences then repeated without useful
+soft combining: seq 3 needed four resends, and seq 9, 12, and 15 each needed three.
+The receiver logged 12 failed CW0 header peeks. Without CW0 it could not build the
+normal `(sender, seq, profile)` HARQ key, so those attempts were discarded instead
+of accumulating evidence.
+
+The existing provisional-key experiment could not test that mechanism for two
+independent reasons:
+
+1. Its policy admitted only QPSK R3/4; 8PSK was a guaranteed null control.
+2. Commit `60b87dd7` ORed `descriptor_current_group_full_anchor` into the variable
+   passed as the cadence block. Every prompt selective-SACK repair deliberately
+   announces a FULL anchor, so a normal roughly 9-second repair was mislabeled as
+   a greater-than-15-second timeout batch and rejected. Live logs showed the exact
+   contradiction: a LIGHT descriptor at 42.448 s, a FULL repair at 51.843 s, then
+   `gap_block=1` despite only a 9.395-second cadence.
+
+There was also a safety hole: the ARQ-mirror context was pulled only after the first
+CW0 failure. Earlier successfully decoded headers therefore could not invalidate a
+stale prediction before a later dead CW0 used it.
+
+### What changed
+
+- `streaming_decode_policy.hpp` now separates the real sample-clock RTO predicate
+  from anchor choice and admits only the measured new tuple: QAM8/8PSK R2/3,
+  physical cw4, Z81. Existing QPSK R3/4 scope is preserved. Wrong CW, Z, rate,
+  BI-on, tail, late-descriptor, missing-context, invalid-prediction, and true RTO
+  cases remain rejected.
+- `streaming_ofdm_decode.cpp` stores `burst_harq_cadence_blocked_` independently;
+  FULL selective-repair acquisition no longer impersonates an RTO. It pulls the
+  context before the first eligible CW0 peek so every earlier real header can
+  check both sender and sequence. Unknown/non-forward cadence blocks; the first
+  descriptor only seeds the reference. At least one current-group header must
+  match before any provisional key can be used. Tail headers may validate the
+  mirror but remain key-ineligible.
+- Decoder reset now ends the whole provisional-HARQ identity epoch: cadence stamp,
+  context, pulled/invalid flags, logical index, and source hash are cleared with
+  the rewound sample clock.
+- The knob remains strict default-OFF. Existing `decodeFixedFrame` Phase F still
+  bounds downside: a failed combined decode gets a fresh-only attempt, and a
+  provisional double-fail retains fresh LLRs instead of the suspect sum.
+
+### Why this is safe enough to measure, not yet safe enough to promote
+
+The descriptor, session callback, known warm cadence, current-group sender/seq
+match, profile identity, non-tail key rule, TTL/eviction, full sender/seq/CW/tail
+finalize guard, and fresh-only rescue all remain mandatory. All-CW0-dead groups
+now decline provisional keying rather than trusting an unfalsified mirror. This
+remains an experiment because the ARQ mirror is predicted rather than carried on
+wire. Promotion requires an order-balanced, same-freeze real IONOS A/B with
+nonzero provisional-key engagement, byte integrity, near-zero mismatch, bounded
+decoder backlog/load shedding, and a measured retry/goodput benefit.
+
+### Verification
+
+- `cmake --build build -j8` — full GUI/tools/tests compilation passed.
+- `ctest --test-dir build -R '^StreamingDecodePolicy$' --output-on-failure` —
+  passed, including exact cw4/Z81 admission and independent CW/Z/rate/gap rejects.
+- `SoftCombine`, `BurstStaleGeometry`, `FrameV2`, and all other modem tests passed
+  in the full local suite. Four loopback-socket tests failed only inside the
+  restricted sandbox (`failed to bind UDP socket`); the same four rerun with local
+  socket permission passed 4/4, including the 76-second `UltraTncSimAudio` test.
+- Real OFF/ON IONOS results: pending below; do not infer a throughput win from the
+  baseline mechanism audit.
+
+---
+
 ## 2026-08-02 — FIX: Windows test builds — two tests missed the existing env_compat.hpp
 
 ### What was broken

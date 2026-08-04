@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused regression tests for transfer-log ACK reconstruction."""
+"""Focused regressions for transfer-log timing and ACK reconstruction."""
 
 import contextlib
 import importlib.util
@@ -69,6 +69,19 @@ class AckReconstructionTests(unittest.TestCase):
             "src": "silent-repeat",
             "s": "40800",
         })
+
+    def test_predecode_group_physical_end_marker_parses(self):
+        match = ANALYZER.RECEIVER_PATTERNS["group_physical_end"].search(
+            "[128.876][INFO ][MODEM] [BRAVO] Burst group complete "
+            "(8 frames), deinterleaving...")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groupdict(), {"tot": "8"})
+
+    def test_unproven_configured_span_is_not_a_physical_end_marker(self):
+        match = ANALYZER.RECEIVER_PATTERNS["group_physical_end"].search(
+            "[104.820][INFO ][MODEM] [BRAVO] Burst configured-span complete "
+            "(8 frames, geometry unproven), deinterleaving...")
+        self.assertIsNone(match)
 
     def test_commit_mode_excludes_rendered_but_dropped_ack(self):
         events = [
@@ -173,6 +186,10 @@ class ClockAlignmentTests(unittest.TestCase):
             "q": "0.99",
         })
 
+    @staticmethod
+    def receiver_physical_end(t, total):
+        return (t, "group_physical_end", {"tot": str(total)})
+
     def test_missing_first_rx_group_uses_multi_burst_consensus(self):
         # Sender clock +100s = receiver clock.  Burst #1 produces no callback;
         # first->first would therefore return +112s and shift the entire run by one
@@ -192,6 +209,7 @@ class ClockAlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(offset, 100.0, places=6)
         self.assertIn("multi-burst consensus 2/3 TX, 2/2 groups", provenance)
         self.assertIn("first matched TX #2", provenance)
+        self.assertIn("anchor=group-callback", provenance)
 
         aligned_txs = [
             (t + offset, d) for t, kind, d in sender if kind == "tx_burst"
@@ -202,6 +220,67 @@ class ClockAlignmentTests(unittest.TestCase):
             aligned_txs, air, groups)
         self.assertEqual(sorted(matches), [1, 2])
         self.assertEqual(unmatched, [])
+
+    def test_predecode_anchors_exclude_variable_decoder_cpu_time(self):
+        # Sender clock +100s = receiver clock. Physical group ends are exact,
+        # while post-decode callbacks move by 50 ms and 575 ms. Aligning to the
+        # callbacks would exceed the campaign's 350 ms residual gate even though
+        # the RF timing is perfectly stable.
+        sender = []
+        sender += self.sender_burst(10.0, 8, 5.0)
+        sender += self.sender_burst(22.0, 8, 5.0)
+        receiver = [
+            self.receiver_physical_end(115.0, 8),
+            self.receiver_group(115.050, 8),
+            self.receiver_physical_end(127.0, 8),
+            self.receiver_group(127.575, 8),
+        ]
+
+        offset, provenance = ANALYZER.align(sender, receiver)
+
+        self.assertAlmostEqual(offset, 100.0, places=6)
+        self.assertIn("multi-burst consensus 2/2 TX, 2/2 groups", provenance)
+        self.assertIn("max residual 0.000s", provenance)
+        self.assertIn("anchor=physical-end", provenance)
+
+
+class DriveAccountingTests(unittest.TestCase):
+    def test_disconnect_reset_does_not_hide_operational_alc_excursion(self):
+        lines = [
+            "ALC: tx_drive 0.500 -> 0.530 (advisory=up group_seq=36)",
+            "ALC: tx_drive 0.530 -> 0.630 (advisory=up group_seq=44)",
+            "ALC: tx_drive 0.630 -> 0.700 (advisory=up group_seq=52)",
+            "ALC: tx_drive 0.700 -> 0.500 (reset: disconnect)",
+        ]
+        events = []
+        for i, line in enumerate(lines):
+            match = ANALYZER.SENDER_PATTERNS['drive'].search(line)
+            self.assertIsNotNone(match)
+            events.append((float(i), match.groupdict()))
+
+        summary = ANALYZER.drive_transition_summary(events)
+
+        self.assertEqual(summary['start'], 0.5)
+        self.assertEqual(summary['minimum'], 0.5)
+        self.assertEqual(summary['peak'], 0.7)
+        self.assertEqual(summary['final_before_reset'], 0.7)
+        self.assertEqual(summary['advisory_moves'], 3)
+        self.assertEqual(summary['lifecycle_resets'], 1)
+        self.assertAlmostEqual(summary['peak_db_from_start'], 2.9225607)
+        self.assertAlmostEqual(summary['final_db_from_start'], 2.9225607)
+
+    def test_legacy_reasonless_drive_lines_remain_operational(self):
+        events = [
+            (1.0, {'a': '0.500', 'b': '0.530', 'reason': None}),
+            (2.0, {'a': '0.530', 'b': '0.500', 'reason': None}),
+        ]
+
+        summary = ANALYZER.drive_transition_summary(events)
+
+        self.assertEqual(summary['advisory_moves'], 2)
+        self.assertEqual(summary['lifecycle_resets'], 0)
+        self.assertEqual(summary['peak'], 0.53)
+        self.assertEqual(summary['final_before_reset'], 0.5)
 
 
 class TransferAccountingTests(unittest.TestCase):
@@ -329,6 +408,8 @@ class TransferAccountingTests(unittest.TestCase):
             data['keyed_to_physical_span_efficiency_pct'], 100.0 / 3.0)
         self.assertEqual(data['rung_state_announcements'], 2)
         self.assertEqual(data['physical_transfer_rung_transitions'], 1)
+        self.assertEqual(
+            data['clock_alignment_anchor_kind'], 'group-callback')
 
 
 if __name__ == "__main__":

@@ -1,12 +1,50 @@
 # Known Bugs
 
-Last updated: 2026-07-05
+Last updated: 2026-08-04
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-GUI-RX-CONSUMER-STALL-OVERRUN (open, 2026-08-04) — P2, APPARATUS/REAL-TIME
+
+**Observed.** During immutable IONOS A/B pair 1 OFF, the Pi SDL capture callback kept
+producing across a 3.145-second consumer-service gap coincident with the two-second FIFO
+overrun. About 1.1 seconds of old CONNECT_ACK-tail/silence audio was discarded.
+The event happened before the first DATA burst and the exact 51,200-byte transfer still
+completed, but the predetermined runtime marker correctly voided the arm.
+
+**Attribution.** All 16 DATA groups in that arm were physically matched. A later missed
+ACK occurred roughly 100 seconds afterward with no second overrun, so it is unrelated.
+This is a consumer scheduling/ownership defect, not evidence that the FIFO should simply
+be enlarged. The render loop drains only a bounded number of chunks per frame and can be
+stalled by GUI/protocol mutex work or OS scheduling while the audio callback continues.
+
+**Fix direction.** Drain raw capture audio on a dedicated real-time-safe pump into a
+bounded SPSC handoff. Add FIFO high-water, longest consumer-stall, and per-event dropped
+sample telemetry; the current warning can make an accumulated drop count look like one
+callback's loss. Keep the total jitter cushion independent from the device callback
+period. Do not paper over this with a larger latency buffer.
+
+### EXPERIMENT-PSDR-ACQUISITION-DIVERSITY (open, 2026-08-04) — DEFAULT-OFF, REDESIGN
+
+`ULTRA_PARTIAL_SACK_DESCRIPTOR_REPAIR=1` removes the second full DATA chirp after a
+robust BURST_HEADER. Its exact-identity ARQ gate is correct, but a missed descriptor then
+leaves a light-only DATA group with no independent acquisition opportunity. Pair 9 ON
+lost the complete callback for such an engaged repair after a 1/8 partial and paid seven
+timeout retransmissions; the otherwise void pair 1 ON repeated the shape after 3/6.
+
+The completed eight-pair MPG@20 result was a wash (+1.468%, `p=0.8289`; log effect
+-0.119%) despite 61 engagements mechanically removing 73.2 seconds. One valid OFF arm
+also lost a full-anchored callback, so the two enabled events are not a causal failure-rate
+estimate. They are sufficient to reject the claim that descriptor-only repair is an
+unconditional acquisition-safe optimization.
+
+Keep the knob strict default-OFF. A successor must either preserve a second acquisition
+opportunity when the descriptor is lost, or fail closed after severe partial delivery.
+Do not promote or rerun this exact design; see `IONOS_MPG20_CAMPAIGN_2026_08_04.md`.
 
 ### BUG-QAM16-MMSE-SLICER-BIAS (open, inherited 2026-06-12) — P3, UNVERIFIED ON CURRENT CODE
 
@@ -172,17 +210,31 @@ theorise first — the harness is hiding the answer, not lacking one.
 
 ### BUG-BURST-STALE-GEOMETRY: a missed switch-descriptor makes the receiver slice the whole group with the PREVIOUS rung's geometry — group destroyed (0 CWs on every frame) AND the ack keyed into the sender's own transmission (~28 s dead air)
 
-- **STATUS: ✅ FIXED 2026-07-28 (`ULTRA_COMMANDED_GEOMETRY`, DEFAULT-ON, opt out `=0`).**
+- **STATUS: ✅ DEFECT (A) FIXED unconditionally; broad defect (B) recovery is
+  DEFAULT-OFF since 2026-07-29. A narrow same-rung Z81 recovery is default-active
+  for BI0 only, covering the two wire-learned long file profiles as of
+  2026-08-04. It covers both a surviving marked head and a later strong classic
+  member after the descriptor plus marked head were lost, but never invents `N`:
+  only a CRC-valid physical tail closes the turn. BI1 fails closed when its
+  descriptor—and therefore `N`—is lost. Fresh IONOS validation of the later-member
+  arm is pending.**
   See CHANGELOG 2026-07-28. Two things this entry got WRONG, both corrected below in place:
   1. **It is TWO independent defects, not one.** (A) an ALIGNMENT/TRUNCATION defect produces
      the TIMEOUT and is NOT fixed by the commanded-geometry work; (B) the stale geometry
-     destroys the group. Both are fixed; §"Mechanism" below only described (B).
+     destroys the group. (A) is fixed; (B) has a safe narrow BI0 recovery while
+     broad reconstruction remains opt-in. §"Mechanism" below only described (B).
   2. **Line refs had drifted** (corrected in the text): the arm site is
      `streaming_ofdm_decode.cpp:1536` not 1533 (1533 is `descriptor_group_size_locked_`), the
      descriptor set-site is **878** not 762, and the mid-burst gate is **1204** not 1013.
-  Remaining work is rig validation only (interleaved A/B at MPG@20); the mechanism is pinned
-  by `tests/test_burst_stale_geometry.cpp`, which runs the pre-fix and fixed arms in one
-  process.
+  A live interleaved MPG@20 run exposed the remaining structural boundary: without
+  the descriptor, BI1 cannot know physical `N` before deinterleaving. The N7 sender /
+  stale-N8 receiver case declared air-end 2.382 s early and forced seven RTO
+  retransmissions. A pre-deployment review then caught the inverse BI0 hazard:
+  stale N7 could stop before a real N8 tail. Descriptorless BI0 now treats configured
+  `N` as no boundary, searches to the sender-policy ceiling, and authorizes a callback
+  only at a CRC-valid tail. The conservative half-duplex interlock is published in
+  the arm transaction itself (not after member 2). `tests/test_burst_stale_geometry.cpp`
+  pins both N directions, the tail-corrupt fail-closed case, and the arm-time span.
 - **DEFECT (A) — ALIGNMENT/TRUNCATION, the one that causes the TIMEOUT (added 2026-07-28).**
   `checkIfReadyToDecode` (`streaming_sync_acquisition.cpp`) releases the group-start frame once
   `available` clears the requirement IT computed. `available` only grows, so reaching
@@ -303,8 +355,17 @@ theorise first — the harness is hiding the answer, not lacking one.
     and it touches neither the chirp anchor nor the ack gate.
     (Superseded a two-hypothesis decode-both-and-pick-by-LDPC-parity design —
     unnecessary hedging against an ambiguity that is already observable.)
-- **✅ IMPLEMENTED 2026-07-28** (`ULTRA_COMMANDED_GEOMETRY`, DEFAULT-ON) — the ✅
-  route above, PLUS the separate defect (A) guard. The three ❌ routes each have a
+- **✅ IMPLEMENTED 2026-07-28, then scoped 2026-07-29/2026-08-04.** The separate
+  defect (A) guard is unconditional. Broad commanded-rung reconstruction is
+  default-OFF after its live engagement/null-control findings. The exact
+  same-rung 8PSK R2/3 cw4/Z81 and QPSK R3/4 cw3/Z81 restoration is default-active
+  only for BI0 and only after that geometry has already been learned from a decoded
+  descriptor; it retains the authority, declined, identity, and cadence gates.
+  BI0 proves exact physical `N` from the CRC-protected tail, never from stale
+  configured count; its search and half-duplex air-end interlock use a conservative
+  sender-policy ceiling. BI1 fails closed until an independently decodable outer
+  `N`/tail signal exists. The three ❌
+  routes each have a
   demonstrated regression or a broken premise and stay rejected. Sites:
   `ofdm_link_adaptation.hpp` (pure geometry query), `ofdm_chirp_waveform.cpp`
   (delegates to it + a latent `initComponents` z-reassert fix),
@@ -783,6 +844,16 @@ production callers (verified by grep); the only production entry is
 `streaming_ofdm_decode.cpp:843`. Full suite 99/99. Faithful gate
 `gui_qso_scenario.sh --channel good --snr-db 20` PASS, 2350 bps, CRC ok, and neither new
 guard fired spuriously.
+
+**Handshake-chain closure (2026-08-03).** The final half-open link in that causal
+chain is now repaired without reviving the collision-prone timer. Accepted OFDM
+sync no longer confirms or clears the cached CONNECT_ACK; empty/all-failed groups
+are non-authoritative. The responder keeps only a cache for reactive replay after
+a decoded duplicate CONNECT. A connected wide-OFDM responder also makes one
+bounded fixed-DBPSK MC-DPSK decode from the retained raw ring when a true expected
+full anchor arrives, then silently tears down the false OFDM group and restores
+the pre-half-open SNR/EVM/fading baseline. Focused regressions cover two successive
+lost replay ACKs; fresh IONOS transfer validation remains pending.
 
 **Audit provenance.** 65-agent adversarial audit, 15 findings confirmed / 44 refuted; the
 load-bearing file:line claims were re-verified by hand before acting.

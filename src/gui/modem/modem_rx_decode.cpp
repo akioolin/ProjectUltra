@@ -2,6 +2,7 @@
 // Frame delivery and notification helpers
 
 #include "modem_engine.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 
@@ -14,7 +15,8 @@ namespace v2 = protocol::v2;
 // FRAME DELIVERY AND NOTIFICATION
 // ============================================================================
 
-void ModemEngine::deliverFrame(const Bytes& frame_data, bool physical_turn_complete) {
+bool ModemEngine::deliverFrame(const DecodeResult& result) {
+    const Bytes& frame_data = result.frame_data;
     // Prefer the LIVE local callsign (tracks runtime MYCALL changes); fall back to the logging
     // label only when it was never set (preserves prior GUI behavior where label == callsign).
     // Using the stale label here silently dropped inbound frames addressed to the operator's
@@ -27,8 +29,19 @@ void ModemEngine::deliverFrame(const Bytes& frame_data, bool physical_turn_compl
     if (header.valid && !v2::isAddressedToCallsign(header, local_call)) {
         LOG_MODEM(TRACE, "[%s] deliverFrame: dropping frame for different station",
                   log_prefix_.c_str());
-        return;
+        return false;
     }
+
+    char fields[256];
+    std::snprintf(fields, sizeof(fields),
+                  "{\"snr_db\":%.1f,\"cfo_hz\":%.1f,"
+                  "\"cw_ok\":%d,\"cw_failed\":%d,"
+                  "\"snr_source\":\"%s\"}",
+                  result.snr_db, result.cfo_hz,
+                  result.codewords_ok, result.codewords_failed,
+                  snrSourceToString(result.snr_source));
+    ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+        "phy", "frame.rx", fields);
 
     LOG_MODEM(INFO, "[%s] deliverFrame: %zu bytes, callback=%s",
               log_prefix_.c_str(), frame_data.size(),
@@ -45,10 +58,11 @@ void ModemEngine::deliverFrame(const Bytes& frame_data, bool physical_turn_compl
     }
 
     if (raw_data_callback_) {
-        raw_data_callback_(frame_data, physical_turn_complete);
+        raw_data_callback_(frame_data, result.physical_turn_complete);
     }
 
     last_rx_complete_time_ = std::chrono::steady_clock::now();
+    return true;
 }
 
 void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type) {

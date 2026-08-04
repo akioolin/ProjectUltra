@@ -233,6 +233,134 @@ bool runContinuousBurstLoopback() {
     return true;
 }
 
+bool runConnectedOFDMHalfOpenConnectFallback() {
+    const auto mc_config = mc_dpsk_presets::robust_mid();
+    auto connect_frame = v2::ConnectFrame::makeConnect(
+        "ALPHA", "BRAVO",
+        static_cast<uint8_t>(protocol::WaveformMode::OFDM_CHIRP),
+        static_cast<uint8_t>(Modulation::QPSK),
+        static_cast<uint8_t>(CodeRate::R1_2));
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_config);
+    encoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    const auto samples = encoder.encodeFrame(connect_frame.serialize());
+    if (samples.empty()) {
+        std::cout << "FAIL: half-open fallback encoder produced no samples\n";
+        return false;
+    }
+
+    // Reproduce the rig's responder state: CONNECT decoded, CONNECT_ACK sent,
+    // primary RX already lifted to OFDM, but no authoritative peer frame has
+    // confirmed that the ACK arrived.  The initiator therefore repeats CONNECT
+    // on the fixed MC-DPSK handshake PHY.
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("HALFOPEN");
+    decoder.setMCDPSKConfig(mc_config);
+    decoder.setMode(protocol::WaveformMode::OFDM_CHIRP, true);
+    ModemConfig ofdm = presets::balanced();
+    ofdm.modulation = Modulation::QPSK;
+    ofdm.code_rate = CodeRate::R1_2;
+    ofdm.use_pilots = true;
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 ofdm, Modulation::QPSK, CodeRate::R1_2);
+    decoder.applyPendingConfigForTesting();
+    decoder.setHandshakeConfirmationPending(true);
+    decoder.expectFullOFDMAnchorOnce();
+
+    int connect_callbacks = 0;
+    bool physical_turn_complete = false;
+    SNRSource routed_snr = SNRSource::SYNC_QUALITY;
+    decoder.setFrameCallback([&](const DecodeResult& result) {
+        if (result.success && result.frame_type == v2::FrameType::CONNECT) {
+            ++connect_callbacks;
+            physical_turn_complete = result.physical_turn_complete;
+            routed_snr = result.snr_source;
+        }
+    });
+    int false_group_callbacks = 0;
+    decoder.setBurstGroupCallback(
+        [&](uint16_t, const std::vector<Bytes>&, bool, float, uint16_t,
+            bool, uint8_t, bool) { ++false_group_callbacks; });
+
+    auto audio = withSilence(samples);
+    feedInChunks(decoder, audio);
+
+    int queued_connects = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && result.frame_type == v2::FrameType::CONNECT) {
+            ++queued_connects;
+        }
+    }
+
+    if (connect_callbacks != 1 || queued_connects != 1) {
+        std::cout << "FAIL: half-open fallback delivered callbacks="
+                  << connect_callbacks << " queued=" << queued_connects << "\n";
+        return false;
+    }
+    if (!physical_turn_complete) {
+        std::cout << "FAIL: half-open fallback did not prove physical turn end\n";
+        return false;
+    }
+    if (routed_snr != SNRSource::NONE) {
+        std::cout << "FAIL: half-open MC fallback leaked SNR into OFDM adaptation\n";
+        return false;
+    }
+    float physical_mean_db = 0.0f;
+    float physical_spread_db = 0.0f;
+    const size_t physical_samples =
+        decoder.physicalSnrStats(physical_mean_db, physical_spread_db);
+    if (physical_samples != 0 ||
+        decoder.hasLastOFDMBroadbandSNREstimate() ||
+        std::abs(decoder.getLastFadingIndex()) > 1e-6f) {
+        std::cout << "FAIL: half-open MC fallback retained speculative OFDM "
+                  << "measurements (physical_n=" << physical_samples
+                  << " ofdm="
+                  << (decoder.hasLastOFDMBroadbandSNREstimate() ? 1 : 0)
+                  << " fading=" << decoder.getLastFadingIndex() << ")\n";
+        return false;
+    }
+    if (false_group_callbacks != 0) {
+        std::cout << "FAIL: half-open fallback emitted " << false_group_callbacks
+                  << " synthetic OFDM group outcome(s)\n";
+        return false;
+    }
+    if (!decoder.expectsFullOFDMAnchorForTesting()) {
+        std::cout << "FAIL: half-open fallback did not re-arm real OFDM anchor\n";
+        return false;
+    }
+
+    // The replayed ACK can itself fade.  The responder remains half-open and
+    // must recover a later duplicate with the same cache-only mechanism while
+    // preserving the original measurement baseline across retries.
+    feedInChunks(decoder, audio);
+    int repeated_queued_connects = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && result.frame_type == v2::FrameType::CONNECT) {
+            ++repeated_queued_connects;
+        }
+    }
+    const size_t repeated_physical_samples =
+        decoder.physicalSnrStats(physical_mean_db, physical_spread_db);
+    if (connect_callbacks != 2 || repeated_queued_connects != 1 ||
+        repeated_physical_samples != 0 ||
+        decoder.hasLastOFDMBroadbandSNREstimate() ||
+        false_group_callbacks != 0 ||
+        !decoder.expectsFullOFDMAnchorForTesting()) {
+        std::cout << "FAIL: repeated half-open CONNECT did not remain "
+                  << "reactive/measurement-clean (callbacks=" << connect_callbacks
+                  << " queued=" << repeated_queued_connects
+                  << " physical_n=" << repeated_physical_samples
+                  << " groups=" << false_group_callbacks << ")\n";
+        return false;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -268,6 +396,7 @@ int main() {
     if (!runLoopback("robust connect", mc_dpsk_presets::robust(), Modulation::DQPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
     if (!runContinuousBurstLoopback()) return 1;
+    if (!runConnectedOFDMHalfOpenConnectFallback()) return 1;
     if (!runLowAmplitudePing("robust low-amplitude ping", mc_dpsk_presets::robust(),
                              0.030f)) return 1;
 

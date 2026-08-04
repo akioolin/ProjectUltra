@@ -322,6 +322,8 @@ void StreamingDecoder::clearActiveBurstDescriptorGeometry() {
     // Keep all owners of active lifting geometry in lockstep. In
     // particular, OFDMChirpWaveform::configure()/reset() intentionally preserve
     // its lifting size, so merely clearing the descriptor latch is insufficient.
+    classic_long_geometry_recovery_active_ = false;
+    classic_long_geometry_sync_pos_ = 0;
     const int target_z = testing_lifting_z_override_ == 81 ? 81 : 27;
     if (waveform_) {
         waveform_->setActiveLDPCLiftingZ(static_cast<uint8_t>(target_z));
@@ -338,6 +340,8 @@ void StreamingDecoder::deferActiveBurstDescriptorGeometryResetLocked() {
     // live object is repaired before the next decode work is allowed to start.
     sync_controller_.have_burst_descriptor_ = false;
     descriptor_group_size_locked_ = false;
+    classic_long_geometry_recovery_active_ = false;
+    classic_long_geometry_sync_pos_ = 0;
     pending_active_burst_geometry_reset_.store(true, std::memory_order_release);
 }
 
@@ -678,6 +682,18 @@ void StreamingDecoder::processBuffer() {
         retired_waveforms_.clear();
     }
 
+    // BUG-HALFOPEN-CONNECT: a responder switches its primary decoder to OFDM
+    // immediately after sending CONNECT_ACK.  If that ACK was lost, the peer's
+    // repeated fixed-profile MC-DPSK CONNECT shares the same full dual-chirp
+    // anchor and is initially indistinguishable from the expected first OFDM
+    // frame.  The complete MC body arrives several seconds later, so retry it
+    // asynchronously from the retained raw ring instead of blocking acquisition.
+    // A recovered CONNECT can synchronously queue an ACK; end this decode tick so
+    // no stale false-OFDM state is processed after the callback.
+    if (tryDecodePendingHandshakeMCDPSKConnect()) {
+        return;
+    }
+
     // ===== [RXLAG-DIAG] TEMPORARY RX-processing-lag instrumentation (ULTRA_RX_LAG_DIAG=1) =====
     // Measures how far the decode/search position trails LIVE audio — the ~2.4s post-burst backlog
     // the SEARCHING comment below describes, suspected to be the bulk of the rig's ~3.1s turnaround
@@ -782,6 +798,270 @@ void StreamingDecoder::processBuffer() {
     }
 }
 
+bool StreamingDecoder::tryDecodePendingHandshakeMCDPSKConnect() {
+    if (!handshake_confirmation_pending_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    PendingHandshakeMCDPSKConnect candidate;
+    std::vector<float> raw_frame;
+    size_t frame_end_abs = 0;
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP ||
+            !pending_handshake_mcdpsk_connect_.valid) {
+            return false;
+        }
+
+        if (pending_handshake_mcdpsk_connect_.generation !=
+            reset_generation_.load(std::memory_order_acquire)) {
+            LOG_MODEM(INFO,
+                      "[%s] Half-open CONNECT fallback dropped: receive epoch changed",
+                      log_prefix_.c_str());
+            pending_handshake_mcdpsk_connect_ = {};
+            return false;
+        }
+
+        candidate = pending_handshake_mcdpsk_connect_;
+        const size_t total_fed = sync_controller_.ring_.total_fed_;
+        const size_t capacity = sync_controller_.ring_.buffer_capacity_samples_;
+        const size_t oldest_abs = total_fed > capacity ? total_fed - capacity : 0;
+
+        if (candidate.required_samples == 0 ||
+            candidate.required_samples > capacity ||
+            candidate.training_abs < oldest_abs) {
+            LOG_MODEM(WARN,
+                      "[%s] Half-open CONNECT fallback dropped: raw span no longer "
+                      "resident (training_abs=%zu oldest_abs=%zu required=%zu cap=%zu)",
+                      log_prefix_.c_str(), candidate.training_abs, oldest_abs,
+                      candidate.required_samples, capacity);
+            pending_handshake_mcdpsk_connect_ = {};
+            return false;
+        }
+
+        // The detector can lock as soon as training begins.  Do not consume the
+        // candidate until all four fixed CONNECT codewords are physically in the
+        // ring; processBuffer remains non-blocking while those samples arrive.
+        if (total_fed < candidate.training_abs ||
+            total_fed - candidate.training_abs < candidate.required_samples) {
+            return false;
+        }
+
+        frame_end_abs = candidate.training_abs + candidate.required_samples;
+        raw_frame.resize(candidate.required_samples);
+        size_t pos = sync_controller_.ring_.absoluteToRingLocked(
+            candidate.training_abs);
+        for (size_t i = 0; i < candidate.required_samples; ++i) {
+            raw_frame[i] = sync_controller_.ring_.buffer_[pos];
+            pos = sync_controller_.ring_.wrapRingIndexLocked(pos + 1);
+        }
+
+        // Exactly one bounded attempt per accepted full anchor.  A failed body
+        // decode is not retried against the same samples; the peer's next CONNECT
+        // retry will carry a new dual-chirp anchor and arm a fresh candidate.
+        pending_handshake_mcdpsk_connect_ = {};
+    }
+
+    if (!handshake_confirmation_pending_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    auto mc_waveform = WaveformFactory::createMCDPSK(candidate.config);
+    if (!mc_waveform) {
+        return false;
+    }
+    mc_waveform->configure(Modulation::DBPSK, CodeRate::R1_4);
+    mc_waveform->setFrequencyOffset(candidate.cfo_hz);
+    if (!mc_waveform->process(
+            SampleSpan(raw_frame.data(), raw_frame.size()))) {
+        LOG_MODEM(INFO,
+                  "[%s] Half-open CONNECT fallback demod failed "
+                  "(corr=%.3f samples=%zu)",
+                  log_prefix_.c_str(), candidate.correlation, raw_frame.size());
+        return false;
+    }
+
+    auto soft_bits = mc_waveform->getSoftBits();
+    DecodeResult result = decodeMCDPSKFrame(
+        soft_bits, CodeRate::R1_4, v2::getBytesPerCodeword(CodeRate::R1_4),
+        /*snr=*/0.0f, candidate.cfo_hz);
+    const auto hdr = result.success ? v2::parseHeader(result.frame_data)
+                                    : v2::HeaderInfo{};
+    if (!result.success || !hdr.valid || hdr.type != v2::FrameType::CONNECT) {
+        LOG_MODEM(INFO,
+                  "[%s] Half-open CONNECT fallback body rejected "
+                  "(success=%d type=%s cw=%d/%d)",
+                  log_prefix_.c_str(), result.success ? 1 : 0,
+                  v2::frameTypeToString(result.frame_type), result.codewords_ok,
+                  result.codewords_ok + result.codewords_failed);
+        return false;
+    }
+    if (reset_generation_.load(std::memory_order_acquire) !=
+        candidate.generation) {
+        LOG_MODEM(INFO,
+                  "[%s] Half-open CONNECT fallback result dropped: "
+                  "receive epoch changed during MC decode",
+                  log_prefix_.c_str());
+        return false;
+    }
+    if (!handshake_confirmation_pending_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    // This path exists only to recover a duplicate handshake request.  Its MC
+    // demod metrics are not an OFDM link-adaptation observation; keep the routed
+    // SNR explicitly empty.  The complete fixed frame is also exact proof that
+    // the peer has finished this physical turn, so Connection may replay the
+    // cached ACK without colliding with the CONNECT body.
+    result.snr_db = 0.0f;
+    result.snr_source = SNRSource::NONE;
+    result.sync_quality_db = 0.0f;
+    result.physical_turn_complete = true;
+
+    if (!resetFalseOFDMStateAfterRecoveredConnect(candidate, frame_end_abs)) {
+        return false;
+    }
+    // reset(false) is allowed on the echo-clear path while the responder stays
+    // half-open.  It increments the epoch before waiting for the ring lock; if
+    // it landed immediately after teardown, do not re-inject a pre-reset frame.
+    if (reset_generation_.load(std::memory_order_acquire) !=
+            candidate.generation ||
+        !handshake_confirmation_pending_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    stampRxSignal();
+    stampRxSubstantive();
+    {
+        std::lock_guard<std::mutex> slock(stats_mutex_);
+        stats_.frames_decoded++;
+    }
+    {
+        std::lock_guard<std::mutex> qlock(queue_mutex_);
+        frame_queue_.push(result);
+    }
+
+    LOG_MODEM(WARN,
+              "[%s] Half-open CONNECT recovered through MC-DPSK fallback; "
+              "delivering duplicate CONNECT for collision-safe cached ACK replay",
+              log_prefix_.c_str());
+    if (frame_callback_) {
+        frame_callback_(result);
+    }
+    return true;
+}
+
+bool StreamingDecoder::resetFalseOFDMStateAfterRecoveredConnect(
+    const PendingHandshakeMCDPSKConnect& candidate, size_t frame_end_abs) {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    if (reset_generation_.load(std::memory_order_acquire) !=
+            candidate.generation ||
+        !handshake_confirmation_pending_.load(std::memory_order_acquire) ||
+        !connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+        LOG_MODEM(INFO,
+                  "[%s] Half-open CONNECT fallback teardown dropped: "
+                  "receive epoch or mode changed",
+                  log_prefix_.c_str());
+        return false;
+    }
+
+    // The accepted chirp may already have armed an OFDM descriptor/group and
+    // consumed several MC symbols as nonsense OFDM.  Tear that state down
+    // silently: in particular, do NOT finalize the group and do NOT emit a 0/N
+    // outcome or tone ACK for it.
+    state_ = DecoderState::SEARCHING;
+    pending_total_cw_ = 0;
+    samples_since_sync_ = 0;
+    deferred_future_sync_ = {};
+    sync_from_warm_timed_window_ = false;
+    sync_from_full_anchor_fallback_ = false;
+    last_sync_expected_full_anchor_ = false;
+    cg_snapshot_ = CommandedGeometry{};
+    cg_snapshot_sync_pos_ = 0;
+    truncation_hold_sync_pos_ = 0;
+    truncation_hold_frame_len_ = 0;
+    burst_blocks_decoded_ = 0;
+
+    clearActiveBurstDescriptorGeometry();
+    if (waveform_) {
+        waveform_->setDataAidedFeedbackEnabled(false);
+        waveform_->reset();
+    }
+    burst_soft_buffer_.clear();
+    burst_predecoded_.clear();
+    burst_metric_templates_.clear();
+    burst_gamma_sum_.clear();
+    burst_gamma_frames_ = 0;
+    descriptor_group_size_locked_ = false;
+    late_join_head_missing_ = false;
+    clearBurstDiagnostics();
+    burst_arm_provenance_ = BurstArmProvenance::NONE;
+    burst_substantive_members_ = 0;
+    burst_unproven_start_abs_ = 0;
+    burst_next_pos_ = 0;
+    burst_min_block_ = 0;
+    burst_logical_index_ = -1;
+    burst_harq_ctx_.reset();
+    burst_harq_ctx_pulled_ = false;
+    burst_harq_prediction_invalid_ = false;
+    burst_harq_prediction_validated_ = false;
+    burst_harq_cadence_blocked_ = true;
+    last_burst_src_hash_ = 0;
+    last_group_start_abs_ = 0;
+    last_descriptor_abs_sample_ = 0;
+    last_decoded_sync_pos_ = SIZE_MAX;
+    use_burst_interleave_ = false;
+
+    burst_air_end_provisional_.store(false, std::memory_order_relaxed);
+    provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(false,
+                                               std::memory_order_relaxed);
+    burst_air_end_abs_.store(0, std::memory_order_relaxed);
+    burst_data_start_abs_ = 0;
+    anchored_burst_backstop_armed_ = false;
+    anchored_burst_backstop_arm_abs_ = 0;
+    anchored_burst_payload_seen_ = false;
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
+
+    // Any pilot updates extracted from the MC body were false OFDM evidence.
+    // Revoke them and retain only the common dual-chirp CFO as a cold seed; the
+    // next genuine OFDM full anchor remains authoritative.
+    cfo_tracker_.reset();
+    cfo_tracker_.store(candidate.cfo_hz);
+    sync_cfo_ = candidate.cfo_hz;
+
+    // `populateDecodeMetrics()` admits physical OFDM readings even for failed
+    // LDPC members.  Those members were the MC CONNECT body viewed through the
+    // wrong demodulator, so restore the exact channel state captured after the
+    // legitimate shared chirp and before any false OFDM body processing.
+    if (candidate.measurements.valid) {
+        {
+            std::lock_guard<std::mutex> physical_lock(physical_ring_mutex_);
+            physical_ring_db_ = candidate.measurements.physical_ring_db;
+            physical_ring_count_ = candidate.measurements.physical_ring_count;
+        }
+        last_ofdm_broadband_snr_db_valid_.store(
+            candidate.measurements.ofdm_snr_valid, std::memory_order_relaxed);
+        last_ofdm_broadband_snr_db_.store(candidate.measurements.ofdm_snr_db,
+                                          std::memory_order_relaxed);
+        last_evm_snr_db_valid_.store(candidate.measurements.evm_snr_valid,
+                                     std::memory_order_relaxed);
+        last_evm_snr_db_.store(candidate.measurements.evm_snr_db,
+                               std::memory_order_relaxed);
+        last_fading_index_.store(candidate.measurements.fading_index,
+                                 std::memory_order_relaxed);
+    }
+
+    pending_handshake_mcdpsk_connect_ = {};
+    sync_controller_.expect_full_ofdm_anchor_ = true;
+    sync_controller_.clearRejectStreak();
+    resetFrameArrivalTrackingLocked();
+    sync_controller_.ring_.correlation_pos_ =
+        sync_controller_.ring_.absoluteToRingLocked(frame_end_abs);
+    sync_controller_.ring_.setSearchFloorLocked(frame_end_abs);
+    burst_next_pos_ = sync_controller_.ring_.correlation_pos_;
+    return true;
+}
+
 bool StreamingDecoder::hasFrame() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     return !frame_queue_.empty();
@@ -805,9 +1085,27 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     if (mode_ == mode && connected_ == connected) return;
 
     const bool waveform_mode_changed = mode_ != mode;
+    const bool ending_connected_session = connected_ && !connected;
     mode_ = mode;
     connected_ = connected;
+    if (ending_connected_session) {
+        // Rung geometry is wire truth for one peer/session, not a durable modem
+        // capability. Retaining it across disconnect lets a new same-rung Z27
+        // session inherit the old peer's cw/Z81 tuple; reset() cannot clear this
+        // because it also runs for every connected TX echo turnaround. This helper
+        // uses the table's own mutex: ring_.buffer_mutex_ is not held by the decode
+        // path while its geometry resolvers run.
+        clearLearnedRungGeometryAtSessionBoundary();
+        commanded_rung_idx_.store(protocol::kRungIdxNone,
+                                  std::memory_order_relaxed);
+        commanded_rung_declined_.store(false, std::memory_order_relaxed);
+    }
+    if (!connected) {
+        handshake_confirmation_pending_.store(false, std::memory_order_release);
+        half_open_measurement_snapshot_ = {};
+    }
     deferred_future_sync_ = {};
+    pending_handshake_mcdpsk_connect_ = {};
 
     // Any mode/connection transition terminates the old physical group. Keep
     // the descriptor latch and the waveform's live block geometry in lockstep;
@@ -884,6 +1182,8 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
+    last_group_evm_snr_frames_.clear();
+    last_group_evm_carrier_counts_.clear();
     burst_arm_provenance_ = BurstArmProvenance::NONE;
     burst_substantive_members_ = 0;
     burst_unproven_start_abs_ = 0;
@@ -950,6 +1250,48 @@ void StreamingDecoder::clearFullOFDMAnchorExpectation() {
 bool StreamingDecoder::expectsFullOFDMAnchorForTesting() const {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     return sync_controller_.expect_full_ofdm_anchor_;
+}
+
+void StreamingDecoder::setHandshakeConfirmationPending(bool pending) {
+    // The candidate contains absolute positions into the current receive epoch.
+    // Clear it on either edge: TRUE starts a fresh half-open interval, while FALSE
+    // is authoritative proof that cross-mode CONNECT recovery is no longer valid.
+    // Publish FALSE before waiting for the ring lock so an in-flight fallback
+    // cannot deliver after confirmation. Publish TRUE only after the old candidate
+    // is gone, so acquisition cannot arm a fresh candidate and have this setter
+    // erase it on the way into the half-open state.
+    if (!pending) {
+        handshake_confirmation_pending_.store(false, std::memory_order_release);
+    }
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    pending_handshake_mcdpsk_connect_ = {};
+    if (pending) {
+        half_open_measurement_snapshot_ = {};
+        {
+            std::lock_guard<std::mutex> physical_lock(physical_ring_mutex_);
+            half_open_measurement_snapshot_.physical_ring_db =
+                physical_ring_db_;
+            half_open_measurement_snapshot_.physical_ring_count =
+                physical_ring_count_;
+        }
+        half_open_measurement_snapshot_.ofdm_snr_valid =
+            last_ofdm_broadband_snr_db_valid_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.ofdm_snr_db =
+            last_ofdm_broadband_snr_db_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.evm_snr_valid =
+            last_evm_snr_db_valid_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.evm_snr_db =
+            last_evm_snr_db_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.fading_index =
+            last_fading_index_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.valid = true;
+        handshake_confirmation_pending_.store(true, std::memory_order_release);
+    } else {
+        // Authoritative peer traffic keeps every genuine OFDM observation made
+        // during the half-open interval; only a proven duplicate CONNECT rolls
+        // those speculative observations back.
+        half_open_measurement_snapshot_ = {};
+    }
 }
 
 void StreamingDecoder::armAnchoredBurstBackstopForTesting(size_t arm_abs) {
@@ -1092,6 +1434,11 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
                                         : 27);
     if (!preserve_descriptor_geometry) {
         sync_controller_.have_burst_descriptor_ = false;
+        // A queued mode rebuild invalidates the exact classic candidate whose
+        // current waveform/rung authorized temporary Z81. The function resets
+        // state/pending below and constructs a fresh Z27 waveform.
+        classic_long_geometry_recovery_active_ = false;
+        classic_long_geometry_sync_pos_ = 0;
     }
 
     // FIXED-GRID (2026-07-06): a connected same-grid OFDM reconfig (mode-hop that
@@ -1227,6 +1574,14 @@ void StreamingDecoder::applyPendingDescriptorDataMode() {
     const CodeRate rate = pending_descriptor_rate_;
     if (mod == current_modulation_ && rate == code_rate_) {
         return;  // already matches, nothing to do
+    }
+    if (classic_long_geometry_recovery_active_) {
+        LOG_MODEM(INFO,
+                  "StreamingDecoder: abandoning temporary classic long-Z candidate "
+                  "for deferred data-mode change");
+        pending_total_cw_ = 0;
+        state_ = DecoderState::SEARCHING;
+        clearClassicLongGeometry();
     }
     LOG_MODEM(INFO,
               "StreamingDecoder: applying deferred descriptor rate change %s %s -> %s %s",
@@ -1468,6 +1823,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     sync_controller_.ring_.correlation_pos_ = 0;
     sync_position_ = 0;
     deferred_future_sync_ = {};
+    pending_handshake_mcdpsk_connect_ = {};
     sync_correlation_ = 0.0f;
     sync_gap_error_samples_ = 0.0f;
     samples_since_sync_ = 0;
@@ -1496,6 +1852,17 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     // episode key is a ring position and must go with it (sync_position_ = 0 above
     // would otherwise collide with a stale key of 1).
     last_group_start_abs_ = 0;
+    // HARQ's cadence discriminator uses the same rewound sample clock. Clear
+    // both the reference and the per-group result so a lifecycle reset cannot
+    // compare a new low timestamp with the previous receive epoch.
+    last_descriptor_abs_sample_ = 0;
+    burst_harq_cadence_blocked_ = true;
+    burst_harq_ctx_.reset();
+    burst_harq_ctx_pulled_ = false;
+    burst_harq_prediction_invalid_ = false;
+    burst_harq_prediction_validated_ = false;
+    burst_logical_index_ = -1;
+    last_burst_src_hash_ = 0;
     truncation_hold_sync_pos_ = 0;
     truncation_hold_frame_len_ = 0;
     cg_snapshot_ = CommandedGeometry{};
@@ -1506,6 +1873,8 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     burst_predecoded_.clear();
     descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
     burst_metric_templates_.clear();
+    last_group_evm_snr_frames_.clear();
+    last_group_evm_carrier_counts_.clear();
     burst_arm_provenance_ = BurstArmProvenance::NONE;
     burst_substantive_members_ = 0;
     burst_unproven_start_abs_ = 0;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include "modem_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
+#include "protocol/connection_policy.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -106,18 +107,9 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         });
 
         if (result.success && !result.frame_data.empty()) {
-            char fields[256];
-            std::snprintf(fields, sizeof(fields),
-                          "{\"snr_db\":%.1f,\"cfo_hz\":%.1f,"
-                          "\"cw_ok\":%d,\"cw_failed\":%d,"
-                          "\"snr_source\":\"%s\"}",
-                          result.snr_db, result.cfo_hz,
-                          result.codewords_ok, result.codewords_failed,
-                          snrSourceToString(result.snr_source));
-            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                "phy", "frame.rx", fields);
-            deliverFrame(result.frame_data, result.physical_turn_complete);
-            notifyFrameParsed(result.frame_data, result.frame_type);
+            if (deliverFrame(result)) {
+                notifyFrameParsed(result.frame_data, result.frame_type);
+            }
         } else if (!result.success && result.codewords_failed > 0) {
             char fields[192];
             std::snprintf(fields, sizeof(fields),
@@ -412,6 +404,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     const auto header = protocol::v2::parseHeader(data);
     const bool is_data_frame = header.valid && protocol::v2::isDataFrame(header.type);
+    const bool is_disconnect_teardown_ack = header.valid &&
+        header.type == protocol::v2::FrameType::ACK &&
+        header.seq == protocol::v2::DISCONNECT_SEQ;
     const bool is_turn_control = header.valid &&
         (header.type == protocol::v2::FrameType::TURNOVER ||
          header.type == protocol::v2::FrameType::TURN_REQUEST ||
@@ -430,6 +425,12 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
          // connected forever (responder never tears down / exits). Send it with a
          // full chirp+LTS anchor so it is robustly acquired, like the GROUP_ACK.
          header.type == protocol::v2::FrameType::DISCONNECT ||
+         // The sentinel ACK is the other half of the same close transaction.
+         // The initiator has entered control-only cold acquisition after a full
+         // DISCONNECT turn, so treating seq=0xFFFF like an ordinary warm/light
+         // DATA ACK makes teardown depend on a fading-sensitive fallback. Give
+         // both directions the same full-anchor acquisition contract.
+         is_disconnect_teardown_ack ||
          // GROUP_NACK is the fast-resend coordination token (§14.30); like the
          // GROUP_ACK it crosses the turnaround to a non-warm sender, so full anchor.
          header.type == protocol::v2::FrameType::GROUP_NACK);
@@ -802,20 +803,18 @@ std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples,
     // lead-in (the ACK path does — ACKs are tiny + low PA-thermal), or override globally via
     // ULTRA_TX_LEADIN_MS / ULTRA_TX_TAIL_MS. FIDELITY CAVEAT: the cheap-card rig has no real 100W
     // PA, so a reduction stays CONFIGURABLE + conservative-by-default until real-radio-proven.
-    static const int kDefaultLeadInMs = [] {
-        const char* e = std::getenv("ULTRA_TX_LEADIN_MS");
-        return (e && *e) ? std::max(0, std::atoi(e)) : 150;
-    }();
-    static const int kDefaultTailMs = [] {
-        const char* e = std::getenv("ULTRA_TX_TAIL_MS");
-        return (e && *e) ? std::max(0, std::atoi(e)) : 50;
-    }();
-    const int eff_lead_in_ms = (lead_in_ms >= 0) ? lead_in_ms : kDefaultLeadInMs;
-    const int eff_tail_ms = (tail_ms >= 0) ? tail_ms : kDefaultTailMs;
+    const int eff_lead_in_ms = (lead_in_ms >= 0)
+        ? lead_in_ms
+        : protocol::connection_policy::configuredTxLeadInMs();
+    const int eff_tail_ms = (tail_ms >= 0)
+        ? tail_ms
+        : protocol::connection_policy::configuredTxTailMs();
 
     // Combine lead-in + signal + tail guard
-    const size_t LEAD_IN_SAMPLES = static_cast<size_t>(48000) * eff_lead_in_ms / 1000;
-    const size_t TAIL_SAMPLES = static_cast<size_t>(48000) * eff_tail_ms / 1000;
+    const size_t LEAD_IN_SAMPLES = static_cast<size_t>(
+        protocol::connection_policy::txGuardSamplesForMs(eff_lead_in_ms));
+    const size_t TAIL_SAMPLES = static_cast<size_t>(
+        protocol::connection_policy::txGuardSamplesForMs(eff_tail_ms));
 
     std::vector<float> output;
     output.reserve(LEAD_IN_SAMPLES + samples.size() + TAIL_SAMPLES);

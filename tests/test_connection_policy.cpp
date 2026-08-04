@@ -654,6 +654,11 @@ void test_candidate_specific_burst_geometry() {
     CHECK(wideOFDMBurstFrameBudget(Modulation::QAM8, CodeRate::R2_3,
                                    qam8_r23_cw, 16, kBaseCeilingMs) == 5,
           "8PSK R2/3 candidate fits five normalized frames at the base ceiling");
+    CHECK(wideOFDMBurstFrameBudget(
+              Modulation::QAM8, CodeRate::R2_3, qam8_r23_cw, 16,
+              kBaseCeilingMs, /*continuation_reanchor_ms=*/0,
+              /*data_lifting_z=*/27, kWideOFDMFullAnchorExtraMs) == 4,
+          "8PSK full-anchor repair fits only four frames at the base ceiling");
 
     CHECK(burstAirtimeCeilingMs(Modulation::QPSK, CodeRate::R1_2, 2) ==
               kBaseCeilingMs,
@@ -665,6 +670,11 @@ void test_candidate_specific_burst_geometry() {
     CHECK(wideOFDMBurstFrameBudget(Modulation::QAM8, CodeRate::R2_3,
                                    qam8_r23_cw, 16, dense_ceiling) == 8,
           "the escalated 8PSK candidate fits eight frames, not observed-M frames");
+    CHECK(wideOFDMBurstFrameBudget(
+              Modulation::QAM8, CodeRate::R2_3, qam8_r23_cw, 16,
+              dense_ceiling, /*continuation_reanchor_ms=*/0,
+              /*data_lifting_z=*/27, kWideOFDMFullAnchorExtraMs) == 7,
+          "the escalated full-anchor repair fits seven frames, not eight");
 
     // Receiver-local fading is not part of a tone-ACK rate command.  In the fixed04
     // hardware transfer the Mac classified its side Moderate and used CW=5 to price
@@ -1443,21 +1453,31 @@ void test_inflight_ack_timeout_scales_with_frames() {
 void test_silent_ack_repeat_broad_signal_hold_is_waveform_independent() {
     constexpr int64_t now_ms = 20000;
     constexpr int64_t fresh_signal_ms = 10000;
+    constexpr int64_t arm_baseline_ms = 9999;
 
     CHECK(shouldHoldSilentAckRepeatForBroadSignal(
-              WaveformMode::MC_DPSK, now_ms, fresh_signal_ms),
+              WaveformMode::MC_DPSK, now_ms, fresh_signal_ms, arm_baseline_ms),
           "MC-DPSK must retain the broad-signal in-progress hold");
     CHECK(shouldHoldSilentAckRepeatForBroadSignal(
-              WaveformMode::OFDM_CHIRP, now_ms, fresh_signal_ms),
+              WaveformMode::OFDM_CHIRP, now_ms, fresh_signal_ms, arm_baseline_ms),
           "wide OFDM RX evidence must hold an opt-in silent ACK repeat");
     CHECK(shouldHoldSilentAckRepeatForBroadSignal(
-              WaveformMode::OFDM_NARROW, now_ms, fresh_signal_ms),
+              WaveformMode::OFDM_NARROW, now_ms, fresh_signal_ms, arm_baseline_ms),
           "narrow OFDM RX evidence must hold an opt-in silent ACK repeat");
     CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
-              WaveformMode::MC_DPSK, now_ms, 6000),
+              WaveformMode::OFDM_CHIRP, 12000, 10000, 10000),
+          "the just-decoded group at the arm baseline must not hold its own repeat");
+    CHECK(shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::OFDM_CHIRP, 12000, 10001, 10000),
+          "a single new post-arm broad signal stamp must retain the full safety hold");
+    CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::OFDM_CHIRP, 12000, 9999, 10000),
+          "an older pre-arm signal stamp must not hold the repeat");
+    CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
+              WaveformMode::MC_DPSK, now_ms, 6000, 5000),
           "an MC-DPSK signal stamp outside the hold window must expire");
     CHECK(!shouldHoldSilentAckRepeatForBroadSignal(
-              WaveformMode::MC_DPSK, now_ms, now_ms + 1),
+              WaveformMode::MC_DPSK, now_ms, now_ms + 1, arm_baseline_ms),
           "a future signal timestamp must not hold the repeat");
 }
 
@@ -1507,6 +1527,21 @@ void test_anchored_backstop_payload_evidence_forbids_fake_crater() {
           "an anchored timeout with no decoded payload may retain zero-progress recovery");
     CHECK(!shouldGradeAnchoredBackstopAsCrater(/*payload_seen=*/true),
           "decoded fallback payload must never be reported to the selector as k=0/M=5");
+}
+
+void test_scripted_disconnect_quit_requires_protocol_completion() {
+    using ultra::protocol::connection_policy::scriptedDisconnectQuitReady;
+
+    CHECK(!scriptedDisconnectQuitReady(false, 8000),
+          "the former fixed 8-second deadline must not quit while DISCONNECTING");
+    CHECK(!scriptedDisconnectQuitReady(false, 30000),
+          "the protocol timeout duration must not substitute for an observed state transition");
+    CHECK(!scriptedDisconnectQuitReady(false, 100000),
+          "even a very old request must not be labelled complete without state evidence");
+    CHECK(!scriptedDisconnectQuitReady(true, 1999),
+          "an observed disconnect retains its short diagnostic log grace");
+    CHECK(scriptedDisconnectQuitReady(true, 2000),
+          "an observed disconnect may quit exactly at the log-grace boundary");
 }
 
 int main() {
@@ -1566,6 +1601,7 @@ int main() {
     test_tone_ack_defer_uses_independent_rx_evidence();
     test_silent_ack_repeat_is_explicit_opt_in();
     test_anchored_backstop_payload_evidence_forbids_fake_crater();
+    test_scripted_disconnect_quit_requires_protocol_completion();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

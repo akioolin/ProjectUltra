@@ -21,6 +21,12 @@ namespace protocol {
 namespace {
 
 constexpr float kFixedFrameDefaultMinSumFactor = 0.9375f;
+constexpr std::array<float, 4> kFixedFrameRetryFactors = {
+    0.875f, 0.75f, 0.625f, 0.5f};
+constexpr std::array<float, 5> kFixedFramePerturbSigmas = {
+    0.3f, 0.7f, 1.0f, 1.5f, 2.0f};
+constexpr std::array<float, 5> kFixedFramePerturbFactors = {
+    0.75f, 0.625f, 0.875f, 0.75f, 0.625f};
 
 int codeRateCacheIndex(CodeRate rate) {
     switch (rate) {
@@ -98,6 +104,45 @@ LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate, int lifting_z) {
     return decoder;
 }
 
+// Diagnostic fresh-shadow decoding must not mutate the production decoder's
+// min-sum state or last-result telemetry. Keep a physically separate cache;
+// it is instantiated only when the default-OFF shadow experiment is enabled.
+LDPCDecoder& shadowFixedFrameDecoderForRate(CodeRate rate, int lifting_z) {
+    struct DecoderCacheEntry {
+        CodeRate rate = CodeRate::AUTO;
+        int lifting_z = 0;
+        std::unique_ptr<LDPCDecoder> decoder;
+    };
+
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    constexpr size_t kLiftingVariants = 2;
+    thread_local std::array<DecoderCacheEntry, 7 * kLiftingVariants> cache;
+    const size_t cache_index =
+        static_cast<size_t>(codeRateCacheIndex(rate)) * kLiftingVariants +
+        static_cast<size_t>(lifting_z == 81 ? 1 : 0);
+    DecoderCacheEntry& entry = cache[cache_index];
+    if (!entry.decoder || entry.rate != rate || entry.lifting_z != lifting_z) {
+        entry.decoder = std::make_unique<LDPCDecoder>(rate, lifting_z);
+        entry.rate = rate;
+        entry.lifting_z = lifting_z;
+    }
+
+    LDPCDecoder& decoder = *entry.decoder;
+    decoder.setRate(rate);
+    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
+    decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+    return decoder;
+}
+
+bool harqShadowFreshEnabled() {
+    // Deliberately not cached: diagnostic tests and one-process harnesses run
+    // OFF/ON arms sequentially. A static first-read would make arm order alter
+    // behavior and invalidate the comparison.
+    const char* value = std::getenv("ULTRA_HARQ_SHADOW_FRESH");
+    return value && value[0] != '\0' &&
+           !(value[0] == '0' && value[1] == '\0');
+}
+
 bool harqDebugLogEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("ULTRA_HARQ_DEBUG_LOG");
@@ -140,6 +185,107 @@ float meanAbsLlr(const std::vector<float>& llrs) {
         sum += std::abs(llr);
     }
     return static_cast<float>(sum / static_cast<double>(llrs.size()));
+}
+
+uint32_t fixedFramePerturbationSeed(const std::vector<float>& llrs) {
+    uint32_t data_hash = 0;
+    for (size_t j = 0; j < std::min(llrs.size(), size_t(16)); ++j) {
+        const uint32_t bits = std::bit_cast<uint32_t>(llrs[j]);
+        data_hash ^=
+            bits + 0x9e3779b9u + (data_hash << 6) + (data_hash >> 2);
+    }
+    return data_hash;
+}
+
+struct FullScheduleDecodeResult {
+    std::vector<uint8_t> decoded;
+    bool success = false;
+    int iterations = 0;
+    int unsatisfied_checks = -1;
+    bool used_perturbation = false;
+    float winning_factor = kFixedFrameDefaultMinSumFactor;
+    float winning_sigma = 0.0f;
+    int attempts = 1;
+};
+
+// Decode one observation with the exact production search budget: primary,
+// four deterministic factor retries, then five deterministic perturbations.
+// Fresh rescue and diagnostic shadow use this common implementation so their
+// verdict cannot drift from what the uncombined production input would get.
+FullScheduleDecodeResult decodeWithFullFixedFrameSchedule(
+    LDPCDecoder& decoder, const std::vector<float>& llrs, bool profile_timing) {
+    FullScheduleDecodeResult result;
+    auto decode_once = [&](const std::vector<float>& input) {
+        if (profile_timing) {
+            ultra::timing::ScopedTimer timer(
+                ultra::timing::globalDecoderProfile().ldpc_cw_total);
+            return decoder.decodeSoft(input);
+        }
+        return decoder.decodeSoft(input);
+    };
+
+    decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+    result.decoded = decode_once(llrs);
+    result.success = decoder.lastDecodeSuccess();
+    result.iterations = decoder.lastIterations();
+    result.unsatisfied_checks = decoder.lastUnsatisfiedChecks();
+
+    for (float factor : kFixedFrameRetryFactors) {
+        if (result.success) {
+            break;
+        }
+        decoder.setMinSumFactor(factor);
+        result.decoded = decode_once(llrs);
+        ++result.attempts;
+        result.success = decoder.lastDecodeSuccess();
+        result.iterations = decoder.lastIterations();
+        result.unsatisfied_checks = decoder.lastUnsatisfiedChecks();
+        if (result.success) {
+            result.winning_factor = factor;
+        }
+    }
+
+    if (!result.success) {
+        const uint32_t data_hash = fixedFramePerturbationSeed(llrs);
+        for (size_t retry = 0; retry < kFixedFramePerturbSigmas.size(); ++retry) {
+            decoder.setMinSumFactor(kFixedFramePerturbFactors[retry]);
+            std::mt19937 rng(data_hash + static_cast<uint32_t>(retry) * 997u +
+                             static_cast<uint32_t>(retry) * 31u);
+            std::normal_distribution<float> noise(
+                0.0f, kFixedFramePerturbSigmas[retry]);
+            auto perturbed = llrs;
+            for (float& llr : perturbed) {
+                llr += noise(rng);
+            }
+            result.decoded = decode_once(perturbed);
+            ++result.attempts;
+            result.success = decoder.lastDecodeSuccess();
+            result.iterations = decoder.lastIterations();
+            result.unsatisfied_checks = decoder.lastUnsatisfiedChecks();
+            if (result.success) {
+                result.used_perturbation = true;
+                result.winning_factor = kFixedFramePerturbFactors[retry];
+                result.winning_sigma = kFixedFramePerturbSigmas[retry];
+                break;
+            }
+        }
+    }
+
+    decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+    return result;
+}
+
+bool fixedFramePayloadIsValid(const Bytes& frame_data) {
+    if (frame_data.empty()) {
+        return false;
+    }
+    const auto header = v2::parseHeader(frame_data);
+    if (!header.valid) {
+        return false;
+    }
+    return header.is_control
+               ? v2::ControlFrame::deserialize(frame_data).has_value()
+               : v2::DataFrame::deserialize(frame_data).has_value();
 }
 
 struct LlrAbsSummary {
@@ -2084,9 +2230,24 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     size_t bytes_per_cw = (lifting_z == 27) ? getBytesPerCodeword(rate)
                                             : infoBytesPerCodewordZ(rate, lifting_z);
 
-    int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
     std::vector<std::vector<float>> decoder_soft_bits(static_cast<size_t>(cw_count));
     std::vector<int> harq_attempts(static_cast<size_t>(cw_count), 1);
+    // Preserve the actual uncombined observation for every true combine hit.
+    // It is decoded eagerly only for a failed sum or the default-OFF shadow;
+    // on a frame-CRC failure it is decoded lazily to enforce the all-fresh
+    // production fallback without taxing successful normal traffic.
+    std::vector<std::vector<float>> harq_fresh_observations(
+        static_cast<size_t>(cw_count));
+    std::vector<std::vector<float>> harq_combined_observations(
+        static_cast<size_t>(cw_count));
+    std::vector<bool> harq_fresh_evaluated(static_cast<size_t>(cw_count), false);
+    std::vector<bool> harq_fresh_decoded(static_cast<size_t>(cw_count), false);
+    std::vector<Bytes> harq_fresh_data(static_cast<size_t>(cw_count));
+    std::vector<int> harq_fresh_iterations(static_cast<size_t>(cw_count), 0);
+    std::vector<int> harq_fresh_unsatisfied(static_cast<size_t>(cw_count), -1);
+    std::vector<uint8_t> harq_fresh_used_perturbation(
+        static_cast<size_t>(cw_count), 0);
+    std::vector<bool> harq_selected_fresh(static_cast<size_t>(cw_count), false);
 
     auto keyForCodeword = [&](int cw) {
         fec::SoftCombineBuffer::Key cw_key = *harq_key;
@@ -2100,21 +2261,46 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         }
         // Provisional-key finalize guard (2026-07-01, design-review MANDATORY):
         // if the key was position-predicted and the frame's header CW decoded,
-        // verify the prediction against the real header seq. On mismatch, touch
+        // verify the prediction against the full header-visible identity. On mismatch, touch
         // NOTHING under this key — a drop would destroy the real seq's
         // legitimate accumulation, and a retain would poison it.
         if (harq_key_provisional && !final_status.decoded.empty() &&
             final_status.decoded[0] && !final_status.data.empty() &&
             !final_status.data[0].empty()) {
-            const auto hdr = parseHeader(final_status.data[0]);
-            if (hdr.valid && hdr.seq != harq_key->seq) {
-                ultra::timing::globalDecoderProfile()
-                    .harq_prediction_mismatch.fetch_add(1,
-                                                        std::memory_order_relaxed);
+            const auto& cw0 = final_status.data[0];
+            const auto hdr = parseHeader(cw0);
+            if (isOFDMBurstPadHeader(hdr)) {
                 LOG_MODEM(INFO,
-                          "HARQ provisional finalize guard: predicted seq=%u but "
-                          "decoded header seq=%u — skipping drop/retain",
-                          harq_key->seq, hdr.seq);
+                          "HARQ provisional finalize guard: decoded physical "
+                          "ULPAD seq=%u dst=0x%06X — skipping drop/retain",
+                          hdr.seq, hdr.dst_hash);
+                return;
+            }
+            const bool actual_tail =
+                cw0.size() > 3 &&
+                (cw0[3] & Flags::PHYSICAL_BURST_END) != 0;
+            const bool identity_matches =
+                hdr.valid && !hdr.is_control &&
+                fec::SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+                    *harq_key, hdr.src_hash, hdr.dst_hash, hdr.seq,
+                    hdr.total_cw, actual_tail);
+            if (!identity_matches) {
+                if (hdr.valid) {
+                    ultra::timing::globalDecoderProfile()
+                        .harq_prediction_mismatch.fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+                LOG_MODEM(INFO,
+                          "HARQ provisional finalize guard: predicted "
+                          "src=0x%06X dst=0x%06X seq=%u cw=%u tail=%u but decoded "
+                          "src=0x%06X dst=0x%06X seq=%u cw=%u tail=%u valid=%d control=%d "
+                          "— skipping drop/retain",
+                          harq_key->sender_hash, harq_key->dst_hash,
+                          harq_key->seq, harq_key->cw_count,
+                          harq_key->physical_burst_end, hdr.src_hash,
+                          hdr.dst_hash, hdr.seq, hdr.total_cw,
+                          actual_tail ? 1 : 0, hdr.valid ? 1 : 0,
+                          hdr.is_control ? 1 : 0);
                 return;
             }
         }
@@ -2164,8 +2350,15 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             const auto cw_key = keyForCodeword(cw);
             const int attempts = harq_buffer->combine(cw_key, cw_bits, combined_cw_bits);
             harq_attempts[static_cast<size_t>(cw)] = attempts;
-            if (!combined_cw_bits.empty()) {
+            // combine() intentionally returns the incoming vector on a miss.
+            // Only attempts>1 proves that stored state actually replaced it;
+            // treating a miss as a combine needlessly ran the fresh fallback
+            // on every ordinary first attempt.
+            if (attempts > 1 && !combined_cw_bits.empty()) {
                 fresh_cw_bits = cw_bits;  // preserve the un-combined copy
+                harq_fresh_observations[static_cast<size_t>(cw)] = cw_bits;
+                harq_combined_observations[static_cast<size_t>(cw)] =
+                    combined_cw_bits;
                 cw_bits = std::move(combined_cw_bits);
             }
             if (attempts > 1) {
@@ -2177,147 +2370,127 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         }
         decoder_soft_bits[static_cast<size_t>(cw)] = cw_bits;
 
-        // The decoder is cached per thread/rate and retry paths mutate this
-        // factor. Reset before every CW so one marginal CW cannot bias the
-        // next CW in the same fixed frame.
-        decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
-
         // Debug: check LLR statistics for this CW
         float llr_sum = 0.0f;
         for (float llr : cw_bits) {
             llr_sum += llr;
         }
-        const float llr_avg = cw_bits.empty() ? 0.0f : llr_sum / cw_bits.size();
-        const auto llr_summary = summarizeAbsLlrs(cw_bits);
+        float llr_avg = cw_bits.empty() ? 0.0f : llr_sum / cw_bits.size();
+        auto llr_summary = summarizeAbsLlrs(cw_bits);
 
-        std::vector<uint8_t> decoded;
-        {
-            ultra::timing::ScopedTimer _ldpc_(
-                ultra::timing::globalDecoderProfile().ldpc_cw_total);
-            decoded = decoder.decodeSoft(cw_bits);
+        auto sum_result = decodeWithFullFixedFrameSchedule(
+            decoder, cw_bits, /*profile_timing=*/true);
+        std::vector<uint8_t> decoded = std::move(sum_result.decoded);
+        bool success = sum_result.success && decoded.size() >= bytes_per_cw;
+        int iterations = sum_result.iterations;
+        int final_unsatisfied = sum_result.unsatisfied_checks;
+        bool used_perturbation = sum_result.used_perturbation;
+        const bool combined_sum_success = !fresh_cw_bits.empty() && success;
+
+        if (success && sum_result.attempts > 1) {
+            LOG_MODEM(INFO,
+                      "CW[%d]: RETRY OK (factor=%.4f sigma=%.1f attempts=%d "
+                      "iters=%d)",
+                      cw, sum_result.winning_factor,
+                      sum_result.winning_sigma, sum_result.attempts, iterations);
         }
-        bool success = decoder.lastDecodeSuccess();
-        int iterations = decoder.lastIterations();
-        bool used_perturbation = false;  // Track if this CW needed perturbation retry
 
-        // Multi-strategy LDPC retry when decode fails:
-        // Uses decoder diversity (varying min-sum factor) + LLR perturbation
-        // to break trapping sets from multiple angles.
-        if (!success) {
-            // Use data-dependent seed for unique perturbation per CW
-            uint32_t data_hash = 0;
-            for (size_t j = 0; j < std::min(cw_bits.size(), size_t(16)); j++) {
-                union { float f; uint32_t u; } conv;
-                conv.f = cw_bits[j];
-                data_hash ^= conv.u + 0x9e3779b9 + (data_hash << 6) + (data_hash >> 2);
-            }
-
-            // Phase 0: Pure decoder diversity (4 attempts)
-            // Try different min-sum normalization factors on UNMODIFIED LLRs.
-            // Different factors change message-passing dynamics fundamentally,
-            // breaking trapping sets that 0.875 gets stuck in.
-            // Initial decode uses 0.9375, so try 0.875, 0.75, 0.625, 0.5 here.
-            {
-                static constexpr float factors[] = {0.875f, 0.75f, 0.625f, 0.5f};
-                for (int retry = 0; retry < 4 && !success; retry++) {
-                    decoder.setMinSumFactor(factors[retry]);
-                    {
-                        ultra::timing::ScopedTimer _ldpc_(
-                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
-                        decoded = decoder.decodeSoft(cw_bits);
-                    }
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (factor=%.4f, iters=%d)", cw, factors[retry], iterations);
-                    }
+        // Phase F — exact FRESH-ONLY rescue. The previous three-pass subset
+        // could still make combining harmful: an ordinary fresh observation
+        // receives primary + four factor + five perturbation attempts, while a
+        // fresh copy behind a failed sum did not. Use the identical schedule so
+        // enabling HARQ cannot suppress a decode the normal path would find.
+        if (!success && !fresh_cw_bits.empty()) {
+            auto fresh_result = decodeWithFullFixedFrameSchedule(
+                decoder, fresh_cw_bits, /*profile_timing=*/true);
+            iterations = fresh_result.iterations;
+            final_unsatisfied = fresh_result.unsatisfied_checks;
+            const bool fresh_has_bytes =
+                fresh_result.success && fresh_result.decoded.size() >= bytes_per_cw;
+            harq_fresh_evaluated[static_cast<size_t>(cw)] = true;
+            harq_fresh_decoded[static_cast<size_t>(cw)] = fresh_has_bytes;
+            harq_fresh_iterations[static_cast<size_t>(cw)] = fresh_result.iterations;
+            harq_fresh_unsatisfied[static_cast<size_t>(cw)] =
+                fresh_result.unsatisfied_checks;
+            harq_fresh_used_perturbation[static_cast<size_t>(cw)] =
+                fresh_result.used_perturbation ? 1 : 0;
+            if (fresh_has_bytes) {
+                harq_fresh_data[static_cast<size_t>(cw)].assign(
+                    fresh_result.decoded.begin(),
+                    fresh_result.decoded.begin() + bytes_per_cw);
+                decoded = std::move(fresh_result.decoded);
+                success = true;
+                used_perturbation = fresh_result.used_perturbation;
+                decoder_soft_bits[static_cast<size_t>(cw)] = fresh_cw_bits;
+                harq_selected_fresh[static_cast<size_t>(cw)] = true;
+                llr_sum = 0.0f;
+                for (float llr : fresh_cw_bits) {
+                    llr_sum += llr;
                 }
-                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);  // restore default
-            }
-
-            // Phase 1: Perturbation with decoder diversity (5 attempts)
-            // With ARQ, fast failure + retransmit beats slow recovery.
-            // Excessive perturbation (was 44 attempts across 6 phases) caused:
-            //   - 200ms per failed frame → decoder falls behind real-time
-            //   - High LDPC false positive rate (random noise → wrong codewords)
-            //   - 5-10s audio backlog → sync detection degradation
-            // Reduced to 5 perturbation attempts (was 34) + 4 factor retries = 9 total.
-            if (!success) {
-                static constexpr float sigmas1[] = {0.3f, 0.7f, 1.0f, 1.5f, 2.0f};
-                static constexpr float factors1[] = {0.75f, 0.625f, 0.875f, 0.75f, 0.625f};
-                for (int retry = 0; retry < 5 && !success; retry++) {
-                    decoder.setMinSumFactor(factors1[retry]);
-                    std::mt19937 rng(data_hash + retry * 997 + retry * 31);
-                    std::normal_distribution<float> noise(0.0f, sigmas1[retry]);
-                    auto perturbed = cw_bits;
-                    for (float& llr : perturbed) {
-                        llr += noise(rng);
-                    }
-                    {
-                        ultra::timing::ScopedTimer _ldpc_(
-                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
-                        decoded = decoder.decodeSoft(perturbed);
-                    }
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        used_perturbation = true;
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (perturb σ=%.1f f=%.3f, iters=%d)", cw, sigmas1[retry], factors1[retry], iterations);
-                    }
-                }
-                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
-            }
-            // Phases 2-6 REMOVED (2026-03-15): excessive perturbation caused false
-            // positives and decoder backlog. ARQ handles frame loss more efficiently.
-
-            // Phase F — FRESH-ONLY rescue (2026-07-01, the rig poison-loop fix):
-            // when this CW was COMBINED and every attempt on the sum failed, give
-            // the un-combined fresh copy a bounded shot (primary + 2 factor
-            // retries). If the stored accumulation is poisoned (wrong-keyed or
-            // confidently-wrong prior LLRs — real rig fades produce the latter),
-            // the fresh copy may decode where the sum cannot; on success the
-            // finalize drop() purges the poisoned entry. This bounds HARQ's
-            // downside at ~3 extra LDPC passes per combined-and-failed CW and
-            // makes combining strictly non-harmful.
-            if (!success && !fresh_cw_bits.empty()) {
-                static constexpr float fresh_factors[] = {
-                    kFixedFrameDefaultMinSumFactor, 0.875f, 0.75f};
-                for (int retry = 0; retry < 3 && !success; retry++) {
-                    decoder.setMinSumFactor(fresh_factors[retry]);
-                    {
-                        ultra::timing::ScopedTimer _ldpc_(
-                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
-                        decoded = decoder.decodeSoft(fresh_cw_bits);
-                    }
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        ultra::timing::globalDecoderProfile()
-                            .harq_fresh_rescue.fetch_add(1,
-                                                         std::memory_order_relaxed);
-                        LOG_MODEM(INFO,
-                                  "CW[%d]: FRESH-ONLY RESCUE (combined sum failed; "
-                                  "factor=%.4f, iters=%d) — stored accumulation "
-                                  "was hurting",
-                                  cw, fresh_factors[retry], iterations);
-                    }
-                }
-                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
-                // If BOTH the sum and the fresh copy failed under a PROVISIONAL
-                // (unverified) key, retain the FRESH bits instead of the sum:
-                // resetting a suspect accumulator to the latest copy caps poison
+                llr_avg = fresh_cw_bits.empty()
+                              ? 0.0f
+                              : llr_sum / fresh_cw_bits.size();
+                llr_summary = summarizeAbsLlrs(fresh_cw_bits);
+                LOG_MODEM(INFO,
+                          "CW[%d]: FRESH-ONLY CANDIDATE (sum syndrome failed; "
+                          "fresh syndrome passed factor=%.4f sigma=%.1f "
+                          "iters=%d provisional=%d) — awaiting frame CRC",
+                          cw, fresh_result.winning_factor,
+                          fresh_result.winning_sigma, iterations,
+                          harq_key_provisional ? 1 : 0);
+            } else {
+                // If BOTH the sum and fresh copy failed under a PROVISIONAL
+                // (unverified) key, retain FRESH instead of the sum. Resetting
+                // a suspect accumulator to the latest copy caps poison
                 // persistence at one round. Header-verified keys keep the sum
-                // (their accumulations are trustworthy Chase state).
-                if (!success && harq_key_provisional) {
+                // because their Chase identity is authoritative.
+                if (harq_key_provisional) {
                     decoder_soft_bits[static_cast<size_t>(cw)] = fresh_cw_bits;
                 }
             }
         }
 
-        if (used_perturbation && success) perturbation_cw_count++;
+        // Default-OFF causal shadow. A successful combined sum alone does not
+        // prove HARQ helped because the fresh observation may also have passed.
+        // This only captures the candidate here; classification is deferred to
+        // full header+frame-CRC validation below.
+        if (combined_sum_success && harqShadowFreshEnabled()) {
+            FullScheduleDecodeResult shadow;
+            {
+                ultra::timing::ScopedTimer timer(
+                    ultra::timing::globalDecoderProfile()
+                        .harq_shadow_fresh_decode);
+                LDPCDecoder& shadow_decoder =
+                    shadowFixedFrameDecoderForRate(rate, lifting_z);
+                shadow = decodeWithFullFixedFrameSchedule(
+                    shadow_decoder, fresh_cw_bits, /*profile_timing=*/false);
+            }
+            const bool fresh_has_bytes =
+                shadow.success && shadow.decoded.size() >= bytes_per_cw;
+            harq_fresh_evaluated[static_cast<size_t>(cw)] = true;
+            harq_fresh_decoded[static_cast<size_t>(cw)] = fresh_has_bytes;
+            harq_fresh_iterations[static_cast<size_t>(cw)] = shadow.iterations;
+            harq_fresh_unsatisfied[static_cast<size_t>(cw)] =
+                shadow.unsatisfied_checks;
+            harq_fresh_used_perturbation[static_cast<size_t>(cw)] =
+                shadow.used_perturbation ? 1 : 0;
+            if (fresh_has_bytes) {
+                harq_fresh_data[static_cast<size_t>(cw)].assign(
+                    shadow.decoded.begin(), shadow.decoded.begin() + bytes_per_cw);
+            }
+            const auto cw_key = keyForCodeword(cw);
+            LOG_MODEM(INFO,
+                      "HARQ_SHADOW seq=%u cw=%d/%u attempts=%d sum_pass=1 "
+                      "fresh_syndrome=%d provisional=%d fresh_iters=%d "
+                      "class=pending_frame_crc",
+                      cw_key.seq, cw, cw_key.cw_count,
+                      harq_attempts[static_cast<size_t>(cw)],
+                      fresh_has_bytes ? 1 : 0,
+                      harq_key_provisional ? 1 : 0,
+                      shadow.iterations);
+        }
 
-        const int final_iterations = decoder.lastIterations();
-        const int final_unsatisfied = decoder.lastUnsatisfiedChecks();
+        const int final_iterations = iterations;
 
         LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, unsat=%d, llr_avg=%.2f, |llr|=mean %.2f p10 %.2f p50 %.2f p90 %.2f)",
                   cw, success ? "OK" : "FAIL", final_iterations, final_unsatisfied,
@@ -2326,11 +2499,23 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         if (harq_active) {
             const auto cw_key = keyForCodeword(cw);
             if (harq_attempts[static_cast<size_t>(cw)] > 1 && harqDebugKeySelected(cw_key)) {
+                const char* winner = combined_sum_success
+                                         ? "sum"
+                                         : (harq_selected_fresh[static_cast<size_t>(cw)]
+                                                ? "fresh"
+                                                : "none");
                 LOG_MODEM(WARN,
-                          "HARQ_DEBUG decode_after_combine seq=%u cw=%d/%u attempts=%d success=%d iters=%d mean_abs=%.3f perturbation=%d",
+                          "HARQ_DEBUG decode_after_combine seq=%u cw=%d/%u "
+                          "attempts=%d sum_success=%d final_success=%d "
+                          "winner=%s iters=%d selected_mean_abs=%.3f "
+                          "perturbation=%d provisional=%d",
                           cw_key.seq, cw, cw_key.cw_count,
-                          harq_attempts[static_cast<size_t>(cw)], success ? 1 : 0,
-                          iterations, meanAbsLlr(cw_bits), used_perturbation ? 1 : 0);
+                          harq_attempts[static_cast<size_t>(cw)],
+                          combined_sum_success ? 1 : 0, success ? 1 : 0,
+                          winner, iterations,
+                          meanAbsLlr(decoder_soft_bits[static_cast<size_t>(cw)]),
+                          used_perturbation ? 1 : 0,
+                          harq_key_provisional ? 1 : 0);
             }
         }
 
@@ -2353,110 +2538,341 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     }
 
     // ========================================================================
-    // LDPC FALSE POSITIVE RECOVERY
+    // FRAME-VALIDATED FALSE-POSITIVE RECOVERY + HARQ COUNTERFACTUAL
     // ========================================================================
-    // LDPC min-sum can rarely converge to a wrong-but-valid codeword (syndrome
-    // passes but information bits are wrong). Detect via frame CRC and attempt
-    // recovery using CRC-guided bit-flip search and LDPC re-decode.
-    if (status.allSuccess()) {
-        auto frame_data = status.reassemble();
-        bool frame_valid = false;
-        if (!frame_data.empty()) {
-            auto hdr = parseHeader(frame_data);
-            if (hdr.valid) {
-                if (hdr.is_control) {
-                    frame_valid = ControlFrame::deserialize(frame_data).has_value();
+    // LDPC syndrome success is not payload correctness. Every production and
+    // all-fresh verdict below is gated by the complete header and frame CRC.
+    // This helper is the historical frame-level recovery, parameterized by the
+    // observation set so the HARQ counterfactual receives exactly the same
+    // treatment as the normal path.
+    auto recoverFrameCandidate = [&](CodewordStatus& candidate,
+                                     const std::vector<std::vector<float>>& soft_bits,
+                                     const char* label,
+                                     LDPCDecoder& recovery_decoder,
+                                     ultra::timing::PhaseStats* recovery_timing) -> bool {
+        if (!candidate.allSuccess()) {
+            return false;
+        }
+        if (fixedFramePayloadIsValid(candidate.reassemble())) {
+            return true;
+        }
+
+        int candidate_perturbed_cws = 0;
+        for (uint8_t used : candidate.used_perturbation) {
+            candidate_perturbed_cws += used != 0 ? 1 : 0;
+        }
+        LOG_MODEM(WARN,
+                  "LDPC false positive (%s): all CW syndromes passed but frame "
+                  "CRC failed (perturbed_cws=%d)",
+                  label, candidate_perturbed_cws);
+
+        // A perturbation-produced wrong codeword is random code-space output;
+        // preserve the existing integrity rule and never search around it.
+        if (candidate_perturbed_cws > 0) {
+            LOG_MODEM(WARN,
+                      "LDPC false positive (%s): perturbation involved; "
+                      "marking frame failed",
+                      label);
+            for (auto&& decoded_ok : candidate.decoded) {
+                decoded_ok = false;
+            }
+            return false;
+        }
+
+        // Bit-flip salvage remains deliberately removed: a syndrome-valid
+        // wrong LDPC codeword differs by at least the code distance, while the
+        // old CRC-syndrome search delivered a byte-corrupt file. Re-decoding
+        // an entire CW under four deterministic factors is the only fallback.
+        static constexpr std::array<float, 4> recovery_factors = {
+            0.75f, 0.625f, 0.5f, 0.875f};
+        for (float factor : recovery_factors) {
+            for (int cw = 0; cw < cw_count; ++cw) {
+                const auto& candidate_bits = soft_bits[static_cast<size_t>(cw)];
+                const auto original_data = candidate.data[static_cast<size_t>(cw)];
+                recovery_decoder.setMinSumFactor(factor);
+                std::vector<uint8_t> re_decoded;
+                if (recovery_timing) {
+                    // The caller times the complete counterfactual frame
+                    // evaluation, including cache construction, CRC, and every
+                    // recovery call. Do not double-count individual LDPC calls.
+                    re_decoded = recovery_decoder.decodeSoft(candidate_bits);
                 } else {
-                    frame_valid = DataFrame::deserialize(frame_data).has_value();
+                    ultra::timing::ScopedTimer timer(
+                        ultra::timing::globalDecoderProfile().ldpc_cw_total);
+                    re_decoded = recovery_decoder.decodeSoft(candidate_bits);
                 }
+                if (!recovery_decoder.lastDecodeSuccess() ||
+                    re_decoded.size() < bytes_per_cw) {
+                    continue;
+                }
+                Bytes replacement(re_decoded.begin(),
+                                  re_decoded.begin() + bytes_per_cw);
+                if (replacement == original_data) {
+                    continue;
+                }
+                candidate.data[static_cast<size_t>(cw)] = std::move(replacement);
+                if (fixedFramePayloadIsValid(candidate.reassemble())) {
+                    recovery_decoder.setMinSumFactor(
+                        kFixedFrameDefaultMinSumFactor);
+                    LOG_MODEM(INFO,
+                              "CW[%d]: FALSE POSITIVE RECOVERED (%s factor=%.3f)",
+                              cw, label, factor);
+                    return true;
+                }
+                candidate.data[static_cast<size_t>(cw)] = original_data;
+            }
+        }
+        recovery_decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+
+        LOG_MODEM(WARN,
+                  "LDPC false positive (%s): recovery FAILED, marking frame "
+                  "as decode failure",
+                  label);
+        for (auto&& decoded_ok : candidate.decoded) {
+            decoded_ok = false;
+        }
+        return false;
+    };
+
+    const bool had_combine_hit = std::any_of(
+        harq_fresh_observations.begin(), harq_fresh_observations.end(),
+        [](const auto& bits) { return !bits.empty(); });
+    // Avoid deep-copying every CW LLR vector on the default/no-hit path. These
+    // snapshots exist only to build a real HARQ counterfactual.
+    CodewordStatus pre_recovery_status;
+    std::vector<std::vector<float>> pre_recovery_soft_bits;
+    if (had_combine_hit) {
+        pre_recovery_status = status;
+        pre_recovery_soft_bits = decoder_soft_bits;
+    }
+    bool production_frame_valid =
+        recoverFrameCandidate(status, decoder_soft_bits, "production",
+                              decoder,
+                              /*recovery_timing=*/nullptr);
+
+    const bool selected_fresh_candidate =
+        had_combine_hit && std::any_of(
+                               harq_selected_fresh.begin(),
+                               harq_selected_fresh.end(),
+                               [](bool selected) { return selected; });
+    const bool evaluate_all_fresh =
+        had_combine_hit && (!production_frame_valid || harqShadowFreshEnabled());
+
+    CodewordStatus all_fresh_status;
+    std::vector<std::vector<float>> all_fresh_soft_bits;
+    bool all_fresh_frame_valid = false;
+    if (evaluate_all_fresh) {
+        // Complete any counterfactual CWs not already evaluated by failed-sum
+        // fallback or the eager default-OFF shadow diagnostic.
+        for (int cw = 0; cw < cw_count; ++cw) {
+            const size_t idx = static_cast<size_t>(cw);
+            if (harq_fresh_observations[idx].empty() ||
+                harq_fresh_evaluated[idx]) {
+                continue;
+            }
+            FullScheduleDecodeResult fresh_result;
+            {
+                ultra::timing::ScopedTimer timer(
+                    ultra::timing::globalDecoderProfile()
+                        .harq_lazy_fresh_decode);
+                LDPCDecoder& counterfactual_decoder =
+                    shadowFixedFrameDecoderForRate(rate, lifting_z);
+                fresh_result = decodeWithFullFixedFrameSchedule(
+                    counterfactual_decoder, harq_fresh_observations[idx],
+                    /*profile_timing=*/false);
+            }
+            const bool fresh_has_bytes =
+                fresh_result.success && fresh_result.decoded.size() >= bytes_per_cw;
+            harq_fresh_evaluated[idx] = true;
+            harq_fresh_decoded[idx] = fresh_has_bytes;
+            harq_fresh_iterations[idx] = fresh_result.iterations;
+            harq_fresh_unsatisfied[idx] = fresh_result.unsatisfied_checks;
+            harq_fresh_used_perturbation[idx] =
+                fresh_result.used_perturbation ? 1 : 0;
+            if (fresh_has_bytes) {
+                harq_fresh_data[idx].assign(
+                    fresh_result.decoded.begin(),
+                    fresh_result.decoded.begin() + bytes_per_cw);
             }
         }
 
-        if (!frame_valid) {
-            LOG_MODEM(WARN, "LDPC false positive detected: all CWs decoded but frame invalid (perturbed_cws=%d)",
-                      perturbation_cw_count);
-            bool recovered = false;
-
-            // If any CW used perturbation retry, the false positive is almost certainly
-            // from the random noise injection finding a wrong-but-valid LDPC codeword.
-            // Skip expensive bit-flip recovery — it can't fix random garbage and risks
-            // producing wrong "recovered" data that passes CRC by coincidence.
-            if (perturbation_cw_count > 0) {
-                LOG_MODEM(WARN, "LDPC false positive: %d CWs used perturbation, skipping recovery",
-                          perturbation_cw_count);
-                for (int cw = 0; cw < cw_count; ++cw) {
-                    status.decoded[cw] = false;
-                }
-                finalize_harq(status);
-                return status;
+        all_fresh_status = pre_recovery_status;
+        all_fresh_soft_bits = pre_recovery_soft_bits;
+        for (int cw = 0; cw < cw_count; ++cw) {
+            const size_t idx = static_cast<size_t>(cw);
+            if (harq_fresh_observations[idx].empty()) {
+                continue;
             }
+            all_fresh_soft_bits[idx] = harq_fresh_observations[idx];
+            all_fresh_status.decoded[idx] = harq_fresh_decoded[idx];
+            all_fresh_status.data[idx] = harq_fresh_data[idx];
+            all_fresh_status.iterations[idx] = harq_fresh_iterations[idx];
+            all_fresh_status.unsatisfied_checks[idx] = harq_fresh_unsatisfied[idx];
+            all_fresh_status.used_perturbation[idx] =
+                harq_fresh_used_perturbation[idx];
+            const auto summary =
+                summarizeAbsLlrs(harq_fresh_observations[idx]);
+            all_fresh_status.llr_abs_mean[idx] = summary.mean;
+            all_fresh_status.llr_abs_min[idx] = summary.min;
+            all_fresh_status.llr_abs_p10[idx] = summary.p10;
+            all_fresh_status.llr_abs_p50[idx] = summary.p50;
+            all_fresh_status.llr_abs_p90[idx] = summary.p90;
+        }
+        auto& frame_eval_stats = production_frame_valid
+                                     ? ultra::timing::globalDecoderProfile()
+                                           .harq_shadow_frame_evaluation
+                                     : ultra::timing::globalDecoderProfile()
+                                           .harq_lazy_frame_evaluation;
+        {
+            ultra::timing::ScopedTimer timer(frame_eval_stats);
+            LDPCDecoder& all_fresh_recovery_decoder =
+                shadowFixedFrameDecoderForRate(rate, lifting_z);
+            all_fresh_frame_valid = recoverFrameCandidate(
+                all_fresh_status, all_fresh_soft_bits,
+                "all-fresh HARQ baseline", all_fresh_recovery_decoder,
+                &frame_eval_stats);
+        }
+    }
 
-            // Helper: verify assembled frame without logging
-            auto verifyFrame = [](const Bytes& assembled) -> bool {
-                if (assembled.empty()) return false;
-                auto h = parseHeader(assembled);
-                if (!h.valid) return false;
-                if (h.is_control) return ControlFrame::deserialize(assembled).has_value();
-                return DataFrame::deserialize(assembled).has_value();
-            };
+    auto& harq_profile = ultra::timing::globalDecoderProfile();
+    auto countProvisional = [&](std::atomic<uint64_t>& total,
+                                std::atomic<uint64_t>& provisional) {
+        total.fetch_add(1, std::memory_order_relaxed);
+        if (harq_key_provisional) {
+            provisional.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    auto classificationIdentityMatches = [&](const CodewordStatus& candidate) {
+        if (!harq_key_provisional) {
+            return true;
+        }
+        if (!candidate.allSuccess()) {
+            return false;
+        }
+        const Bytes bytes = candidate.reassemble();
+        if (!fixedFramePayloadIsValid(bytes)) {
+            return false;
+        }
+        const auto header = parseHeader(bytes);
+        if (isOFDMBurstPadHeader(header)) {
+            return false;
+        }
+        const bool physical_tail =
+            bytes.size() > 3 &&
+            (bytes[3] & Flags::PHYSICAL_BURST_END) != 0;
+        return header.valid && !header.is_control &&
+               fec::SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+                   *harq_key, header.src_hash, header.dst_hash, header.seq,
+                   header.total_cw, physical_tail);
+    };
+    const bool production_identity_matches =
+        production_frame_valid && classificationIdentityMatches(status);
+    const bool all_fresh_identity_matches =
+        all_fresh_frame_valid &&
+        classificationIdentityMatches(all_fresh_status);
 
-            // ═══ BIT-FLIP SALVAGE REMOVED (BUG-FILE-CRC-MISMATCH, 2026-07-05) ═══
-            // The 1-bit / CRC-bit / 2-bit-suspect searches (and the Case-1 CW0
-            // header search) are gone. This branch runs under status.allSuccess()
-            // — every CW is a VALID LDPC codeword — so the true error pattern is a
-            // codeword DIFFERENCE (>= d_min, tens of bits per CW). A small-bit-flip
-            // "repair" can never be genuine in this state; matching the 16-bit CRC
-            // syndrome across ~5k candidate positions is a ~7.8% collision lottery,
-            // and it paid out: a "FALSE POSITIVE RECOVERED (1-bit flip)" delivered
-            // a corrupted 616-byte chunk into a file that assembled 51200/51200
-            // with a wrong CRC (preserved run 2026-07-05; the 3/4-bit searches were
-            // already removed 2026-03-15 for the same corruption, with the 1-bit
-            // search wrongly exempted as "exact"). The min-sum re-decode fallback
-            // below is the only legitimate recovery — it can converge to the TRUE
-            // codeword and the full frame CRC gates it. Everything else fails the
-            // frame; ARQ resends.
-            // ===========================================================
-            // Fallback: LDPC re-decode with different min-sum factors
-            // ===========================================================
-            if (!recovered) {
-                static constexpr float recovery_factors[] = {0.75f, 0.625f, 0.5f, 0.875f};
-                for (int attempt = 0; attempt < 4 && !recovered; ++attempt) {
-                    for (int cw = 0; cw < cw_count && !recovered; ++cw) {
-                        const auto& cw_bits = decoder_soft_bits[static_cast<size_t>(cw)];
-                        auto original_data = status.data[cw];
-
-                        decoder.setMinSumFactor(recovery_factors[attempt]);
-                        std::vector<uint8_t> re_decoded;
-                        {
-                            ultra::timing::ScopedTimer _ldpc_(
-                                ultra::timing::globalDecoderProfile().ldpc_cw_total);
-                            re_decoded = decoder.decodeSoft(cw_bits);
-                        }
-                        if (decoder.lastDecodeSuccess() && re_decoded.size() >= bytes_per_cw) {
-                            Bytes new_cw_data(re_decoded.begin(), re_decoded.begin() + bytes_per_cw);
-                            if (new_cw_data != original_data) {
-                                status.data[cw] = new_cw_data;
-                                auto trial = status.reassemble();
-                                if (verifyFrame(trial)) {
-                                    LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (re-decode factor=%.3f)",
-                                              cw, recovery_factors[attempt]);
-                                    recovered = true;
-                                } else {
-                                    status.data[cw] = original_data;
-                                }
-                            }
-                        }
-                    }
+    bool used_all_fresh_frame_rescue = false;
+    if (had_combine_hit && selected_fresh_candidate && production_frame_valid) {
+        // At least one combined sum had no valid LDPC codeword, and replacing
+        // it with the exact fresh baseline produced a CRC-valid frame.
+        if (production_identity_matches) {
+            countProvisional(harq_profile.harq_fresh_rescue,
+                             harq_profile.harq_fresh_rescue_provisional);
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=fresh_rescue provisional=%d seq=%u "
+                      "reason=sum_syndrome_failed",
+                      harq_key_provisional ? 1 : 0, harq_key->seq);
+        } else {
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=identity_rejected provisional=1 seq=%u "
+                      "candidate=hybrid_fresh_rescue",
+                      harq_key->seq);
+        }
+    } else if (had_combine_hit && !production_frame_valid &&
+               all_fresh_frame_valid) {
+        // Covers the subtle wrong-but-syndrome-valid sum: production failed
+        // complete frame validation, while the lazily evaluated all-fresh path
+        // passed the same decoder and frame-recovery schedule.
+        status = std::move(all_fresh_status);
+        decoder_soft_bits = std::move(all_fresh_soft_bits);
+        production_frame_valid = true;
+        used_all_fresh_frame_rescue = true;
+        if (all_fresh_identity_matches) {
+            countProvisional(harq_profile.harq_fresh_rescue,
+                             harq_profile.harq_fresh_rescue_provisional);
+            countProvisional(
+                harq_profile.harq_all_fresh_frame_rescue,
+                harq_profile.harq_all_fresh_frame_rescue_provisional);
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=fresh_rescue provisional=%d seq=%u "
+                      "reason=combined_frame_crc_failed",
+                      harq_key_provisional ? 1 : 0, harq_key->seq);
+        } else {
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=identity_rejected provisional=1 seq=%u "
+                      "candidate=all_fresh_frame_rescue",
+                      harq_key->seq);
+        }
+    } else if (had_combine_hit && !production_frame_valid &&
+               evaluate_all_fresh && !all_fresh_frame_valid) {
+        countProvisional(harq_profile.harq_double_fail,
+                         harq_profile.harq_double_fail_provisional);
+        // A provisional accumulator is not authoritative. On a double-fail,
+        // retain the current fresh evidence rather than persisting a suspect
+        // sum into the next retry. Verified keys keep their Chase sum.
+        if (harq_key_provisional) {
+            decoder_soft_bits = all_fresh_soft_bits;
+        } else {
+            // A fresh syndrome candidate may have temporarily replaced the
+            // selected decode input before the complete frame CRC failed. For
+            // a header-verified key the Chase identity is authoritative: retain
+            // the accumulated sum, never silently downgrade it to one fresh
+            // observation on a hybrid-frame double failure.
+            for (int cw = 0; cw < cw_count; ++cw) {
+                const size_t idx = static_cast<size_t>(cw);
+                if (!harq_combined_observations[idx].empty()) {
+                    decoder_soft_bits[idx] = harq_combined_observations[idx];
                 }
-                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
             }
+        }
+        LOG_MODEM(INFO,
+                  "HARQ_FRAME class=double_fail provisional=%d seq=%u",
+                  harq_key_provisional ? 1 : 0, harq_key->seq);
+    }
 
-            if (!recovered) {
-                LOG_MODEM(WARN, "LDPC false positive: recovery FAILED, marking as decode failure");
-                for (int cw = 0; cw < cw_count; ++cw) {
-                    status.decoded[cw] = false;
-                }
-            }
+    // Only frames whose production decision used successful sums throughout
+    // are eligible for the shadow both/combine-only question. Fresh-rescued
+    // production frames answer the opposite direction and are counted above.
+    if (had_combine_hit && harqShadowFreshEnabled() &&
+        !selected_fresh_candidate && production_frame_valid &&
+        production_identity_matches && evaluate_all_fresh &&
+        !used_all_fresh_frame_rescue) {
+        countProvisional(harq_profile.harq_shadow_eligible,
+                         harq_profile.harq_shadow_eligible_provisional);
+        const Bytes production_bytes = status.reassemble();
+        const Bytes fresh_bytes =
+            all_fresh_frame_valid ? all_fresh_status.reassemble() : Bytes{};
+        if (!all_fresh_frame_valid) {
+            countProvisional(harq_profile.harq_shadow_combine_only,
+                             harq_profile.harq_shadow_combine_only_provisional);
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=combine_only provisional=%d seq=%u",
+                      harq_key_provisional ? 1 : 0, harq_key->seq);
+        } else if (all_fresh_identity_matches &&
+                   fresh_bytes == production_bytes) {
+            countProvisional(harq_profile.harq_shadow_both_pass,
+                             harq_profile.harq_shadow_both_pass_provisional);
+            LOG_MODEM(INFO,
+                      "HARQ_FRAME class=both_pass provisional=%d seq=%u",
+                      harq_key_provisional ? 1 : 0, harq_key->seq);
+        } else {
+            // Two distinct CRC-valid frames are not causal evidence; preserve
+            // production but flag the ambiguity rather than calling it a win.
+            countProvisional(harq_profile.harq_shadow_divergent,
+                             harq_profile.harq_shadow_divergent_provisional);
+            LOG_MODEM(ERROR,
+                      "HARQ_FRAME class=divergent_valid provisional=%d seq=%u",
+                      harq_key_provisional ? 1 : 0, harq_key->seq);
         }
     }
 

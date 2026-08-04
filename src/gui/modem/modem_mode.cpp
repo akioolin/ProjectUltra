@@ -157,6 +157,11 @@ void ModemEngine::setConnected(bool connected) {
         // Config must be set above BEFORE propagating here
         if (streaming_decoder_) {
             streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
+            // CONNECT_ACK is not authoritative until the peer proves receipt
+            // with a post-handshake frame.  Keep the decoder's bounded
+            // MC-DPSK duplicate-CONNECT recovery alive during that half-open
+            // responder interval.
+            streaming_decoder_->setHandshakeConfirmationPending(true);
 
             // For OFDM modes, propagate the correct config (with proper pilot settings)
             if (protocol::isOFDMMode(waveform_mode_)) {
@@ -220,6 +225,7 @@ void ModemEngine::setConnected(bool connected) {
         // by the App layer around this call (see app.cpp connection-changed
         // callback).
         if (streaming_decoder_) {
+            streaming_decoder_->setHandshakeConfirmationPending(false);
             streaming_decoder_->reset();
             streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);
             streaming_decoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
@@ -246,6 +252,10 @@ void ModemEngine::setHandshakeComplete(bool complete) {
     if (handshake_complete_ == complete) return;
 
     handshake_complete_ = complete;
+    if (streaming_decoder_) {
+        streaming_decoder_->setHandshakeConfirmationPending(
+            connected_ && !complete);
+    }
 
     if (complete) {
         LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",

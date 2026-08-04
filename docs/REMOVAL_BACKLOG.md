@@ -253,7 +253,9 @@ default-off; none is reachable on the v0.5.1 default path.
 - `ULTRA_ADAPTIVE_RTO` + the `adaptive_floor` parameter on `updateRTO`. Hypothesis RETRACTED:
   the adaptive floor moves the RTO 0-20%, not 7.5x, because measured srtt (~11-14 s) already
   sits at the configured value.
-- `ULTRA_CONNECT_ACK_RESCUE_DEFER` block. FALSIFIED (3/3 handshake deadlocks vs ~1-in-20).
+- `ULTRA_CONNECT_ACK_RESCUE_DEFER` block. **Removed 2026-08-03.** Its proactive full-ACK
+  timer was falsified (3/3 handshake deadlocks vs ~1-in-20); authoritative confirmation plus
+  cache-only reactive duplicate-CONNECT replay now closes the underlying defect without a knob.
 
 **KEEP — the anti-footgun list. Do NOT over-cut:**
 - `snapRungIndexDownToEnabled` and every call site. F145 is a REAL 50 s deadlock (commit
@@ -264,8 +266,9 @@ default-off; none is reachable on the v0.5.1 default path.
   controller's known next gap (its table is ITU-Good-only).
 - `rungClassAnchorDb` — it has a SECOND caller in `connection.cpp` beyond the deleted knob.
 - `updateRTO` itself and the RFC6298 estimator: only the `adaptive_floor` parameter goes.
-- The CONNECT_ACK rescue **defect is still OPEN** — a sync correlation is not proof the peer
-  decoded our ACK. Deleting the failed fix must not delete the KNOWN_BUGS record of the bug.
+- Keep the CONNECT_ACK half-open incident record. The defect is code-closed by the 2026-08-03
+  authoritative-confirmation and cross-mode reactive replay design, but its fresh IONOS
+  end-to-end validation is still pending.
 
 **Blocker:** none. All six are unreachable on the default path.
 

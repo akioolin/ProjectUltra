@@ -164,6 +164,12 @@ inline bool isValidCallsign(const std::string& call) {
 
 namespace v2 {
 
+// Physical-only DATA padding used to keep an OFDM burst descriptor-bearing or
+// to complete an interleave group. These frames are deliberately addressed
+// away from the receiver and never participate in SR-ARQ identity.
+inline constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
+inline constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
+
 // ============================================================================
 // ULTRA Protocol v2 - Optimized for per-codeword recovery
 // ============================================================================
@@ -1013,6 +1019,11 @@ struct HeaderInfo {
 };
 HeaderInfo parseHeader(const Bytes& first_codeword_data);
 
+inline bool isOFDMBurstPadHeader(const HeaderInfo& header) {
+    return header.valid && !header.is_control &&
+           header.dst_hash == hashCallsign(kOFDMBurstPadCallsign);
+}
+
 inline bool isAddressedToCallsign(const HeaderInfo& header, const std::string& local_call) {
     if (local_call.empty()) {
         return true;
@@ -1239,9 +1250,9 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 int lifting_z = 27,  // 27 -> n=648 (default), 81 -> n=1944 (file class)
                                 // harq_key was position-PREDICTED (CW0 undecodable), not
                                 // header-verified: retains are tagged provisional, and a
-                                // successful decode whose header seq contradicts the key
-                                // skips finalize entirely (never drop/pollute the real
-                                // seq's accumulation on a misprediction).
+                                // successful decode whose full header identity
+                                // contradicts the key skips finalize entirely (never
+                                // drop/pollute another destination or seq's accumulation).
                                 bool harq_key_provisional = false);
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 

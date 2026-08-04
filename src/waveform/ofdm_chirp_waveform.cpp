@@ -1143,6 +1143,11 @@ float OFDMChirpWaveform::getEvmSnrDbEstimate() const {
     return demodulator_ ? demodulator_->getEvmSnrDb() : 0.0f;
 }
 
+bool OFDMChirpWaveform::takeEvmSnrEstimate(float& evm_snr_db,
+                                           size_t& carrier_count) {
+    return demodulator_ && demodulator_->takeEvmSnr(evm_snr_db, carrier_count);
+}
+
 float OFDMChirpWaveform::estimatedCFO() const {
     if (std::abs(last_cfo_) > 0.1f) {
         return last_cfo_;

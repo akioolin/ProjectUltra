@@ -247,6 +247,11 @@ public:
     // constellation's own error vector. Parallel/logged Stage 1; non-OFDM = false.
     virtual bool hasEvmSnrEstimate() const { return false; }
     virtual float getEvmSnrDbEstimate() const { return 0.0f; }
+    // Consume one finalized physical-frame observation.  Non-OFDM waveforms
+    // never publish one.  The one-shot contract prevents an erasure path that
+    // did not run the demodulator from inheriting a prior frame's value.
+    virtual bool takeEvmSnrEstimate(float& /*evm_snr_db*/,
+                                    size_t& /*carrier_count*/) { return false; }
 
     // Estimated CFO from current signal (Hz)
     virtual float estimatedCFO() const = 0;

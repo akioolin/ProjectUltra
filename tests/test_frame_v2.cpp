@@ -7,8 +7,11 @@
 #include <utility>
 #include <vector>
 #include "ultra/fec.hpp"
+#include "ultra/timing_profiler.hpp"
+#include "../src/fec/frame_interleaver.hpp"
 #include "../src/protocol/frame_v2.hpp"
 #include "../src/protocol/file_stream_header.hpp"
+#include "env_compat.hpp"
 
 using namespace ultra::protocol;
 using namespace ultra::protocol::v2;
@@ -998,6 +1001,385 @@ void test_fixed_frame_long_lift_repeated_roundtrip() {
     }
 }
 
+void test_provisional_harq_destination_and_ulpad_finalize_guards() {
+    TEST("provisional HARQ destination and ULPAD finalize guards") {
+        constexpr CodeRate rate = CodeRate::R1_2;
+        constexpr int cw_count = 4;
+        constexpr int lifting_z = 27;
+        constexpr size_t bits_per_symbol = 106;
+        const std::string sender = "K2DEF";
+        const std::string local = "W1ABC";
+        const uint32_t sender_hash = hashCallsign(sender);
+        const uint32_t local_hash = hashCallsign(local);
+        const size_t payload_capacity =
+            getFixedFramePayloadCapacityZ(rate, cw_count, lifting_z);
+
+        auto run_arm = [&](const std::string& actual_dst, uint16_t seq,
+                           bool physical_tail, bool expect_pad,
+                           uint64_t expected_mismatch_delta,
+                           size_t expected_entries_after) {
+            Bytes payload(payload_capacity, 0x5A);
+            auto frame = makeFixedDataFrame(sender, actual_dst, seq, payload,
+                                            rate, cw_count, lifting_z);
+            if (physical_tail) {
+                frame.flags |= Flags::PHYSICAL_BURST_END;
+            }
+            const auto serialized = frame.serialize();
+            const auto header = parseHeader(serialized);
+            assert(header.valid);
+            assert(isOFDMBurstPadHeader(header) == expect_pad);
+
+            const auto encoded = encodeFixedFrame(
+                serialized, rate, cw_count,
+                /*use_channel_interleave=*/false, bits_per_symbol, lifting_z);
+            const auto soft_bits = bytesToSoftBits(encoded);
+
+            ultra::fec::SoftCombineBuffer buffer;
+            buffer.setEnabled(true);
+            ultra::fec::SoftCombineBuffer::Key predicted;
+            predicted.sender_hash = sender_hash;
+            predicted.dst_hash = local_hash;
+            predicted.seq = seq;
+            predicted.rate = rate;
+            predicted.cw_count = cw_count;
+            predicted.lifting_z = lifting_z;
+            predicted.modulation = Modulation::QPSK;
+            predicted.channel_interleave = 0;
+            predicted.physical_burst_end = physical_tail ? 1 : 0;
+            predicted.carrier_count_hash = 0x1234;
+            for (int cw = 0; cw < cw_count; ++cw) {
+                auto cw_key = predicted;
+                cw_key.cw_index = static_cast<uint8_t>(cw);
+                buffer.retain(cw_key,
+                              std::vector<float>(ultra::fec::FrameInterleaver::BITS_PER_CODEWORD,
+                                                 0.0f),
+                              /*provisional=*/true);
+            }
+            assert(buffer.size() == static_cast<size_t>(cw_count));
+
+            auto& profile = ultra::timing::globalDecoderProfile();
+            const uint64_t mismatch_before =
+                profile.harq_prediction_mismatch.load(std::memory_order_relaxed);
+            const auto status = decodeFixedFrame(
+                soft_bits, rate, cw_count,
+                /*use_channel_deinterleave=*/false, bits_per_symbol,
+                &buffer, &predicted, lifting_z,
+                /*harq_key_provisional=*/true);
+            const uint64_t mismatch_after =
+                profile.harq_prediction_mismatch.load(std::memory_order_relaxed);
+
+            assert(status.allSuccess());
+            assert(status.reassemble() == serialized);
+            assert(mismatch_after - mismatch_before == expected_mismatch_delta);
+            assert(buffer.size() == expected_entries_after);
+        };
+
+        // Control: exact destination authorizes normal finalize, so successful
+        // CWs drop the four pre-existing entries.
+        run_arm(local, /*seq=*/77, /*physical_tail=*/false,
+                /*expect_pad=*/false, /*mismatch_delta=*/0,
+                /*entries_after=*/0);
+
+        // Same source/seq/geometry but another destination must not finalize
+        // against the predicted local-session key.
+        run_arm("W9ZZZ", /*seq=*/77, /*physical_tail=*/false,
+                /*expect_pad=*/false, /*mismatch_delta=*/1,
+                /*entries_after=*/cw_count);
+
+        // ULPAD is outside ARQ. Deliberately hold source+seq+geometry+tail
+        // constant so its destination classification is the only reason it is
+        // ignored: no mismatch metric and no drop/retain under the prediction.
+        run_arm(kOFDMBurstPadCallsign, kOFDMBurstPadSeq,
+                /*physical_tail=*/true, /*expect_pad=*/true,
+                /*mismatch_delta=*/0, /*entries_after=*/cw_count);
+
+        // The reserved-looking sequence alone is not padding.
+        auto normal_reserved_seq = makeFixedDataFrame(
+            sender, local, kOFDMBurstPadSeq, Bytes(payload_capacity, 0x33),
+            rate, cw_count, lifting_z);
+        assert(!isOFDMBurstPadHeader(parseHeader(normal_reserved_seq.serialize())));
+        assert(!isOFDMBurstPadHeader(HeaderInfo{}));
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_harq_frame_validated_counterfactual() {
+    TEST("HARQ frame-validated all-fresh counterfactual") {
+        constexpr auto rate = CodeRate::R3_4;
+        constexpr int cw_count = 1;
+        constexpr int lifting_z = 27;
+        constexpr size_t bits_per_symbol = 106;
+        const std::string sender = "W1ABC";
+        const std::string local = "VA2MVR";
+
+        Bytes payload(24, 0xA5);
+        const auto frame = makeFixedDataFrame(
+            sender, local, /*seq=*/91, payload, rate, cw_count, lifting_z);
+        const Bytes serialized = frame.serialize();
+        const Bytes encoded = encodeFixedFrame(
+            serialized, rate, cw_count,
+            /*use_channel_interleave=*/false, bits_per_symbol, lifting_z);
+        const auto clean = bytesToSoftBits(encoded);
+        std::vector<float> zero(clean.size(), 0.0f);
+        auto inverted = clean;
+        for (float& llr : inverted) {
+            llr = -llr;
+        }
+
+        ultra::fec::SoftCombineBuffer::Key key;
+        key.sender_hash = hashCallsign(sender);
+        key.dst_hash = hashCallsign(local);
+        key.seq = 91;
+        key.rate = rate;
+        key.cw_count = cw_count;
+        key.cw_index = 0;
+        key.lifting_z = lifting_z;
+        key.modulation = Modulation::QPSK;
+        key.channel_interleave = 0;
+        key.physical_burst_end = 0;
+        key.carrier_count_hash = 0x4242;
+
+        struct Snapshot {
+            uint64_t eligible;
+            uint64_t both;
+            uint64_t combine_only;
+            uint64_t rescue;
+            uint64_t allfresh_rescue;
+            uint64_t double_fail;
+            uint64_t eligible_p;
+            uint64_t both_p;
+            uint64_t combine_only_p;
+            uint64_t rescue_p;
+            uint64_t double_fail_p;
+            uint64_t mismatch;
+            uint64_t shadow_calls;
+        };
+        auto snapshot = [] {
+            const auto& p = ultra::timing::globalDecoderProfile();
+            return Snapshot{
+                p.harq_shadow_eligible.load(),
+                p.harq_shadow_both_pass.load(),
+                p.harq_shadow_combine_only.load(),
+                p.harq_fresh_rescue.load(),
+                p.harq_all_fresh_frame_rescue.load(),
+                p.harq_double_fail.load(),
+                p.harq_shadow_eligible_provisional.load(),
+                p.harq_shadow_both_pass_provisional.load(),
+                p.harq_shadow_combine_only_provisional.load(),
+                p.harq_fresh_rescue_provisional.load(),
+                p.harq_double_fail_provisional.load(),
+                p.harq_prediction_mismatch.load(),
+                p.harq_shadow_fresh_decode.count.load()};
+        };
+
+        auto decode_arm = [&](const std::vector<float>* retained,
+                              const std::vector<float>& incoming,
+                              bool shadow, bool provisional,
+                              size_t* buffer_size_after = nullptr,
+                              std::vector<float>* retained_probe = nullptr) {
+            if (shadow) {
+                setenv("ULTRA_HARQ_SHADOW_FRESH", "1", 1);
+            } else {
+                unsetenv("ULTRA_HARQ_SHADOW_FRESH");
+            }
+            ultra::fec::SoftCombineBuffer buffer;
+            buffer.setEnabled(true);
+            if (retained) {
+                buffer.retain(key, *retained, provisional);
+            }
+            const auto result = decodeFixedFrame(
+                incoming, rate, cw_count,
+                /*use_channel_deinterleave=*/false, bits_per_symbol,
+                &buffer, &key, lifting_z, provisional);
+            if (buffer_size_after) {
+                *buffer_size_after = buffer.size();
+            }
+            if (retained_probe && buffer.size() != 0) {
+                std::vector<float> zero_probe(incoming.size(), 0.0f);
+                const int attempts =
+                    buffer.combine(key, zero_probe, *retained_probe);
+                assert(attempts > 1);
+            }
+            return result;
+        };
+
+        // A combine miss returns the incoming vector but is not a combine hit:
+        // no fallback, shadow, or counterfactual timing may run.
+        auto before = snapshot();
+        const auto miss = decode_arm(nullptr, clean, /*shadow=*/true,
+                                     /*provisional=*/false);
+        auto after = snapshot();
+        assert(miss.allSuccess());
+        assert(miss.reassemble() == serialized);
+        assert(miss.harq_attempts[0] == 1);
+        assert(after.eligible == before.eligible);
+        assert(after.shadow_calls == before.shadow_calls);
+
+        // Retained zero evidence leaves the clean observation unchanged. Both
+        // complete frames pass and contain identical bytes.
+        before = snapshot();
+        const auto both = decode_arm(&zero, clean, /*shadow=*/true,
+                                     /*provisional=*/false);
+        after = snapshot();
+        assert(both.allSuccess());
+        assert(both.reassemble() == serialized);
+        assert(both.harq_attempts[0] > 1);
+        assert(after.eligible - before.eligible == 1);
+        assert(after.both - before.both == 1);
+        assert(after.combine_only == before.combine_only);
+
+        // Fresh all-zero LLRs decode to the all-zero LDPC codeword (valid
+        // syndrome, invalid frame CRC), while retained clean evidence makes the
+        // sum exact. This is a frame-proven combine-only result, not merely a
+        // per-CW syndrome comparison.
+        before = snapshot();
+        const auto combine_only = decode_arm(
+            &clean, zero, /*shadow=*/true, /*provisional=*/false);
+        after = snapshot();
+        assert(combine_only.allSuccess());
+        assert(combine_only.reassemble() == serialized);
+        assert(after.eligible - before.eligible == 1);
+        assert(after.combine_only - before.combine_only == 1);
+
+        // A CRC-valid shadow result is not provisional evidence until its full
+        // protected identity matches the prediction. Wrong destination must be
+        // rejected from eligible/both/combine counters, then handled by the
+        // existing finalize mismatch guard.
+        {
+            const auto wrong_frame = makeFixedDataFrame(
+                sender, "W9ZZZ", /*seq=*/91, payload, rate, cw_count,
+                lifting_z);
+            const Bytes wrong_serialized = wrong_frame.serialize();
+            const auto wrong_encoded = encodeFixedFrame(
+                wrong_serialized, rate, cw_count,
+                /*use_channel_interleave=*/false, bits_per_symbol, lifting_z);
+            const auto wrong_clean = bytesToSoftBits(wrong_encoded);
+            std::vector<float> wrong_zero(wrong_clean.size(), 0.0f);
+            before = snapshot();
+            const auto wrong_identity = decode_arm(
+                &wrong_zero, wrong_clean, /*shadow=*/true,
+                /*provisional=*/true);
+            after = snapshot();
+            assert(wrong_identity.allSuccess());
+            assert(wrong_identity.reassemble() == wrong_serialized);
+            assert(after.eligible_p == before.eligible_p);
+            assert(after.both_p == before.both_p);
+            assert(after.combine_only_p == before.combine_only_p);
+            assert(after.rescue_p == before.rescue_p);
+            assert(after.mismatch - before.mismatch == 1);
+        }
+
+        // Exact regression for the wrong-syndrome hole: retained inverted LLRs
+        // cancel the clean fresh observation to all-zero. The sum reports a
+        // valid LDPC codeword but fails frame CRC; with shadow OFF, the lazy
+        // production all-fresh baseline must still recover the exact frame.
+        before = snapshot();
+        const auto rescued = decode_arm(
+            &inverted, clean, /*shadow=*/false, /*provisional=*/false);
+        after = snapshot();
+        assert(rescued.allSuccess());
+        assert(rescued.reassemble() == serialized);
+        assert(after.rescue - before.rescue == 1);
+        assert(after.allfresh_rescue - before.allfresh_rescue == 1);
+        assert(after.eligible == before.eligible);
+
+        // Same combine-only control under a provisional key proves the subset
+        // counters do not conflate ordinary verified HARQ with the experiment.
+        before = snapshot();
+        const auto provisional = decode_arm(
+            &clean, zero, /*shadow=*/true, /*provisional=*/true);
+        after = snapshot();
+        assert(provisional.allSuccess());
+        assert(provisional.reassemble() == serialized);
+        assert(after.eligible_p - before.eligible_p == 1);
+        assert(after.combine_only_p - before.combine_only_p == 1);
+
+        // Distinct-vector retention is part of the safety contract. If both
+        // complete frames fail, a verified key retains its accumulated Chase
+        // sum; a provisional key discards that suspect sum and keeps fresh.
+        size_t retained_after = 0;
+        std::vector<float> verified_retained;
+        before = snapshot();
+        const auto verified_failed = decode_arm(
+            &inverted, zero, /*shadow=*/false, /*provisional=*/false,
+            &retained_after, &verified_retained);
+        after = snapshot();
+        assert(!verified_failed.allSuccess());
+        assert(after.double_fail - before.double_fail == 1);
+        assert(after.double_fail_p == before.double_fail_p);
+        assert(retained_after == 1);
+        assert(verified_retained == inverted);
+
+        std::vector<float> provisional_retained;
+        before = snapshot();
+        const auto provisional_failed = decode_arm(
+            &inverted, zero, /*shadow=*/false, /*provisional=*/true,
+            &retained_after, &provisional_retained);
+        after = snapshot();
+        assert(!provisional_failed.allSuccess());
+        assert(after.double_fail - before.double_fail == 1);
+        assert(after.double_fail_p - before.double_fail_p == 1);
+        assert(retained_after == 1);
+        assert(provisional_retained == zero);
+
+        // Multi-CW hybrid: only CW0 has stored evidence, while CW1 is a normal
+        // combine miss. Cancelling CW0 to zero must still reconstruct the exact
+        // two-CW frame through the all-fresh path without disturbing CW1.
+        {
+            constexpr int multi_cw_count = 2;
+            Bytes multi_payload(64, 0x3C);
+            const auto multi_frame = makeFixedDataFrame(
+                sender, local, /*seq=*/92, multi_payload, rate,
+                multi_cw_count, lifting_z);
+            const Bytes multi_serialized = multi_frame.serialize();
+            const Bytes multi_encoded = encodeFixedFrame(
+                multi_serialized, rate, multi_cw_count,
+                /*use_channel_interleave=*/false, bits_per_symbol, lifting_z);
+            const auto multi_clean = bytesToSoftBits(multi_encoded);
+            const auto multi_fresh_cws =
+                ultra::fec::FrameInterleaver::deinterleave(
+                    multi_clean, multi_cw_count,
+                    ultra::fec::FrameInterleaver::BITS_PER_CODEWORD);
+            auto retained_cw0 = multi_fresh_cws[0];
+            for (float& llr : retained_cw0) {
+                llr = -llr;
+            }
+
+            auto multi_key = key;
+            multi_key.seq = 92;
+            multi_key.cw_count = multi_cw_count;
+            multi_key.cw_index = 0;
+            ultra::fec::SoftCombineBuffer multi_buffer;
+            multi_buffer.setEnabled(true);
+            multi_buffer.retain(multi_key, retained_cw0,
+                                /*provisional=*/false);
+
+            unsetenv("ULTRA_HARQ_SHADOW_FRESH");
+            before = snapshot();
+            const auto multi_status = decodeFixedFrame(
+                multi_clean, rate, multi_cw_count,
+                /*use_channel_deinterleave=*/false, bits_per_symbol,
+                &multi_buffer, &multi_key, lifting_z,
+                /*harq_key_provisional=*/false);
+            after = snapshot();
+            assert(multi_status.allSuccess());
+            assert(multi_status.reassemble() == multi_serialized);
+            assert(multi_status.harq_attempts[0] > 1);
+            assert(multi_status.harq_attempts[1] == 1);
+            assert(after.rescue - before.rescue == 1);
+        }
+
+        unsetenv("ULTRA_HARQ_SHADOW_FRESH");
+        PASS();
+    } catch (const std::exception& e) {
+        unsetenv("ULTRA_HARQ_SHADOW_FRESH");
+        FAIL(e.what());
+    }
+}
+
 void test_fixed_frame_r34_long_lift_roundtrip() {
     TEST("fixed frame QPSK-rate R3/4 cw3/Z81 clean roundtrip") {
         constexpr CodeRate rate = CodeRate::R3_4;
@@ -1602,6 +1984,8 @@ int main() {
     test_fixed_frame_reassemble_preserves_marker_boundary_byte();
     test_fixed_frame_variable_cw_roundtrip_per_rate();
     test_fixed_frame_long_lift_repeated_roundtrip();
+    test_provisional_harq_destination_and_ulpad_finalize_guards();
+    test_harq_frame_validated_counterfactual();
     test_fixed_frame_r34_long_lift_roundtrip();
     test_fixed_frame_encoder_cache_wire_identity();
     test_codeword_status();

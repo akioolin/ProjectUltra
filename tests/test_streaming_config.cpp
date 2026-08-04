@@ -4,8 +4,11 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -225,6 +228,13 @@ void test_connected_ofdm_config_arms_full_anchor() {
 }
 
 void test_burst_header_current_anchor_controls_receiver_search() {
+    struct DescriptorOutcome {
+        bool descriptor_matches = false;
+        bool expects_full_anchor = false;
+        bool warm_cfo_certified = false;
+        bool poisoned_before_decode = false;
+        float final_cfo_hz = 0.0f;
+    };
     auto run = [](bool announce_full) {
         constexpr Modulation kMod = Modulation::QPSK;
         constexpr CodeRate kRate = CodeRate::R3_4;
@@ -254,26 +264,47 @@ void test_burst_header_current_anchor_controls_receiver_search() {
                                      cfg, kMod, kRate);
         decoder.applyPendingConfigForTesting();
         constexpr size_t kChunk = 1200;
+        bool poisoned_before_decode = false;
         for (size_t pos = 0; pos < audio.size() && !decoder.hasBurstDescriptor();
              pos += kChunk) {
             const size_t n = std::min(kChunk, audio.size() - pos);
             decoder.feedAudio(audio.data() + pos, n);
             decoder.processBuffer();
+            if (!poisoned_before_decode &&
+                decoder.stateForTesting() == DecoderState::SYNC_FOUND) {
+                // Reproduce the live failure's lifecycle: a preceding crater left
+                // a stale -0.70 Hz tracker value, while this valid descriptor's
+                // own pilot-refined CFO is near zero. Certification without the
+                // control-first feedback store would preserve the poison.
+                decoder.setKnownCFO(-0.70f);
+                poisoned_before_decode = true;
+            }
         }
         const auto parsed = decoder.lastBurstDescriptor();
-        return std::pair<bool, bool>{
+        return DescriptorOutcome{
             decoder.hasBurstDescriptor() &&
                 parsed.current_group_full_anchor == announce_full,
-            decoder.expectsFullOFDMAnchorForTesting()};
+            decoder.expectsFullOFDMAnchorForTesting(),
+            decoder.warmCFOCertifiedForTesting(),
+            poisoned_before_decode,
+            decoder.getLastCFO()};
     };
 
     const auto light = run(/*announce_full=*/false);
-    CHECK(light.first && !light.second,
+    CHECK(light.descriptor_matches && !light.expects_full_anchor,
           "legacy/same-mode descriptor must retain the warm light-LTS handoff");
+    CHECK(light.warm_cfo_certified,
+          "valid light BURST_HEADER must certify the classic OFDM CFO before DATA");
+    CHECK(light.poisoned_before_decode && std::abs(light.final_cfo_hz) < 0.25f,
+          "light BURST_HEADER must replace stale -0.70 Hz CFO with its own near-zero estimate");
 
     const auto full = run(/*announce_full=*/true);
-    CHECK(full.first && full.second,
+    CHECK(full.descriptor_matches && full.expects_full_anchor,
           "current-group FULL descriptor bit must arm full chirp+LTS acquisition");
+    CHECK(full.warm_cfo_certified,
+          "valid full BURST_HEADER must restore the CFO certificate before DATA");
+    CHECK(full.poisoned_before_decode && std::abs(full.final_cfo_hz) < 0.25f,
+          "full BURST_HEADER must replace stale -0.70 Hz CFO before DATA acquisition");
 }
 
 void test_per_request_full_anchor_matches_descriptor_and_phy() {
@@ -306,16 +337,29 @@ void test_per_request_full_anchor_matches_descriptor_and_phy() {
     StreamingEncoder request_encoder;
     configure(request_encoder);
     const auto normal = request_encoder.encodeBurstLight(frames);
+    const auto descriptor_only_repair = request_encoder.encodeBurstLight(
+        frames, BurstAnchorOptions{/*force_full_group_start=*/false,
+                                   /*keep_skip_streak=*/false,
+                                   /*force_full_descriptor=*/true});
     const auto repair = request_encoder.encodeBurstLight(
         frames, BurstAnchorOptions{/*force_full_group_start=*/true,
                                    /*keep_skip_streak=*/false});
     const auto next_normal = request_encoder.encodeBurstLight(frames);
 
-    CHECK(!normal.empty() && !repair.empty(),
-          "normal and repair descriptor bursts must both encode");
+    CHECK(!normal.empty() && !descriptor_only_repair.empty() && !repair.empty(),
+          "normal and both repair descriptor bursts must encode");
+    CHECK(descriptor_only_repair.size() == normal.size(),
+          "descriptor-only repair must retain the normal light DATA-group geometry");
     CHECK(repair.size() > normal.size() &&
               repair.size() - normal.size() >= 20000,
           "per-request repair must emit a physical full chirp at the DATA group start");
+    const size_t exact_group_chirp_samples =
+        request_encoder.getWaveform()->generatePreamble().size() -
+        2u * static_cast<size_t>(
+                 request_encoder.getWaveform()->getSamplesPerSymbol());
+    CHECK(repair.size() - descriptor_only_repair.size() ==
+              exact_group_chirp_samples,
+          "descriptor-only repair must save exactly the second DATA-group chirp");
     CHECK(next_normal.size() == normal.size(),
           "per-request full anchor must not leak into the next encoder call");
 
@@ -359,6 +403,53 @@ void test_per_request_full_anchor_matches_descriptor_and_phy() {
           "repair descriptor must announce CURRENT_GROUP_FULL_ANCHOR");
     CHECK(decoder.expectsFullOFDMAnchorForTesting(),
           "announced repair must arm full-anchor acquisition for its DATA group");
+
+    // Positive decode path for the new split ownership: its robust full descriptor
+    // must announce LIGHT for the immediately-following DATA group, and that group
+    // must decode under the production warm handoff with exact geometry provenance.
+    std::vector<float> descriptor_only_audio(4800, 0.0f);
+    descriptor_only_audio.insert(descriptor_only_audio.end(),
+                                 descriptor_only_repair.begin(),
+                                 descriptor_only_repair.end());
+    descriptor_only_audio.resize(descriptor_only_audio.size() + 192000, 0.0f);
+
+    StreamingDecoder light_decoder;
+    light_decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                       cfg, kMod, kRate);
+    light_decoder.applyPendingConfigForTesting();
+    bool light_group_fired = false;
+    bool light_group_ok = false;
+    bool light_geometry_proven = false;
+    uint16_t light_group_mask = 0;
+    bool light_saw_descriptor = false;
+    bool light_descriptor_announced_full = false;
+    light_decoder.setBurstGroupCallback(
+        [&](uint16_t, const std::vector<Bytes>&, bool all_ok, float,
+            uint16_t frame_mask, bool, uint8_t, bool geometry_proven) {
+            light_group_fired = true;
+            light_group_ok = all_ok;
+            light_group_mask = frame_mask;
+            light_geometry_proven = geometry_proven;
+        });
+    constexpr size_t kLightChunk = 4800;
+    for (size_t pos = 0;
+         pos < descriptor_only_audio.size() && !light_group_fired;
+         pos += kLightChunk) {
+        const size_t n = std::min(kLightChunk,
+                                  descriptor_only_audio.size() - pos);
+        light_decoder.feedAudio(descriptor_only_audio.data() + pos, n);
+        light_decoder.processBuffer();
+        if (light_decoder.hasBurstDescriptor()) {
+            light_saw_descriptor = true;
+            light_descriptor_announced_full =
+                light_decoder.lastBurstDescriptor().current_group_full_anchor;
+        }
+    }
+    CHECK(light_saw_descriptor && !light_descriptor_announced_full,
+          "descriptor-only repair must decode a robust descriptor that announces LIGHT DATA");
+    CHECK(light_group_fired && light_group_ok && light_geometry_proven &&
+              light_group_mask == 0x0003,
+          "descriptor-only repair's light DATA group must decode with exact 2/2 provenance");
 }
 
 void test_repair_burst_recovers_weaker_descriptor_before_stronger_full_group() {
@@ -699,6 +790,150 @@ void test_burst_descriptor_regrids_equal_capacity_8psk_profiles() {
     }
 }
 
+void test_8psk_cw4_z81_bi1_energy_erasure_reaches_group_callback() {
+    constexpr Modulation kMod = Modulation::QAM8;
+    constexpr CodeRate kRate = CodeRate::R2_3;
+    constexpr int kCw = 4;
+    constexpr uint8_t kZ = 81;
+    constexpr int kGroup = 5;
+    const auto cfg = makeOFDMConfig(kMod, kRate);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(kMod, kRate);
+    encoder.setFixedFrameCodewords(kCw);
+    encoder.setLDPCLiftingZ(kZ);
+    encoder.setBurstInterleave(true);
+    encoder.setBurstInterleaveGroupSize(kGroup);
+    encoder.setBurstDescriptorEnabled(true);
+    encoder.setBurstDescriptorIdentity("ALPHA", "BRAVO");
+    encoder.setBurstGroupSeq(41);
+
+    std::vector<Bytes> frames;
+    for (uint16_t seq = 0; seq < kGroup; ++seq) {
+        frames.push_back(protocol::v2::makeFixedDataFrame(
+            "ALPHA", "BRAVO", seq,
+            Bytes(64, static_cast<uint8_t>(0x81 + seq)), kRate, kCw, kZ)
+                             .serialize());
+    }
+    auto burst = encoder.encodeBurstLight(
+        frames, BurstAnchorOptions{/*force_full_group_start=*/true,
+                                   /*keep_skip_streak=*/false,
+                                   /*force_full_descriptor=*/true});
+    CHECK(!burst.empty(), "cw4/Z81 BI1 erasure fixture must encode");
+
+    // Remove one complete continuation member while preserving the descriptor and
+    // group-start anchor. RX must synthesize one 7776-LLR Z81 erasure, deinterleave,
+    // and produce a group verdict rather than throwing on the old 2592-LLR Z27 size.
+    const size_t member_samples = static_cast<size_t>(
+        encoder.getWaveform()->getMinSamplesForCWCount(kCw));
+    const size_t light_preamble =
+        encoder.getWaveform()->generateDataPreamble().size();
+    const size_t full_preamble = encoder.getWaveform()->generatePreamble().size();
+    CHECK(member_samples > light_preamble,
+          "cw4/Z81 member must contain data after its light preamble");
+    const size_t data_samples = member_samples - light_preamble;
+    const size_t first_member_samples = full_preamble + data_samples;
+    const size_t group_samples =
+        first_member_samples + static_cast<size_t>(kGroup - 1) * member_samples;
+    CHECK(burst.size() > group_samples,
+          "BI1 fixture must contain a descriptor before the DATA group");
+    const size_t descriptor_samples = burst.size() - group_samples;
+    const size_t erased_member_start = descriptor_samples + first_member_samples;
+    CHECK(erased_member_start + member_samples <= burst.size(),
+          "continuation erasure must stay inside the encoded burst");
+    std::fill(burst.begin() + static_cast<std::ptrdiff_t>(erased_member_start),
+              burst.begin() + static_cast<std::ptrdiff_t>(
+                                  erased_member_start + member_samples),
+              0.0f);
+
+    StreamingDecoder decoder;
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 cfg, kMod, kRate);
+    decoder.setFixedFrameCodewords(12);  // stale fallback; descriptor must re-grid it
+    decoder.setBurstInterleave(false);   // descriptor bit must engage BI1
+    decoder.setBurstInterleaveGroupSize(2);
+    decoder.applyPendingConfigForTesting();
+
+    bool callback_fired = false;
+    bool callback_interleaved = false;
+    bool callback_geometry_proven = false;
+    uint8_t callback_group_size = 0;
+    decoder.setBurstGroupCallback(
+        [&](uint16_t, const std::vector<Bytes>&, bool, float, uint16_t,
+            bool interleaved, uint8_t group_size, bool geometry_proven) {
+            callback_fired = true;
+            callback_interleaved = interleaved;
+            callback_group_size = group_size;
+            callback_geometry_proven = geometry_proven;
+        });
+
+    std::vector<float> audio(48000, 0.0f);
+    audio.insert(audio.end(), burst.begin(), burst.end());
+    audio.resize(audio.size() + 192000, 0.0f);
+    constexpr size_t kChunk = 4800;
+    for (size_t pos = 0; pos < audio.size() && !callback_fired; pos += kChunk) {
+        const size_t n = std::min(kChunk, audio.size() - pos);
+        decoder.feedAudio(audio.data() + pos, n);
+        decoder.processBuffer();
+    }
+
+    CHECK(callback_fired && callback_interleaved && callback_geometry_proven &&
+              callback_group_size == kGroup,
+          "cw4/Z81 BI1 physical erasure must still reach one proven group callback");
+    const auto descriptor = decoder.lastBurstDescriptor();
+    CHECK(descriptor.burst_interleave && descriptor.cw_per_frame == kCw &&
+              descriptor.lifting_z == kZ,
+          "energy-erasure arm must have engaged exact BI1 cw4/Z81 wire geometry");
+}
+
+void test_8psk_cw4_z81_bi1_malformed_soft_fails_closed_with_callback() {
+    constexpr int kCw = 4;
+    constexpr int kGroup = 2;
+    constexpr size_t kZ81Bits = static_cast<size_t>(kCw * 1944);
+    constexpr size_t kWrongZ27Bits = static_cast<size_t>(kCw * 648);
+
+    StreamingDecoder decoder;
+    decoder.setFixedFrameCodewords(kCw);
+    decoder.setLDPCLiftingZForTesting(81);
+    decoder.setBurstInterleave(true);
+    decoder.setBurstInterleaveGroupSize(kGroup);
+    CHECK(decoder.burstErasureSoftBitsForTesting() == kZ81Bits,
+          "central burst erasure helper must allocate cw4/Z81 as 7776 LLRs");
+
+    bool callback_fired = false;
+    bool callback_ok = true;
+    bool callback_interleaved = false;
+    bool callback_geometry_proven = false;
+    uint16_t callback_mask = 0xffff;
+    uint8_t callback_group_size = 0;
+    size_t callback_frames = 99;
+    decoder.setBurstGroupCallback(
+        [&](uint16_t, const std::vector<Bytes>& frames, bool all_ok, float,
+            uint16_t frame_mask, bool interleaved, uint8_t group_size,
+            bool geometry_proven) {
+            callback_fired = true;
+            callback_ok = all_ok;
+            callback_interleaved = interleaved;
+            callback_geometry_proven = geometry_proven;
+            callback_mask = frame_mask;
+            callback_group_size = group_size;
+            callback_frames = frames.size();
+        });
+
+    std::vector<std::vector<float>> malformed{
+        std::vector<float>(kZ81Bits, 0.0f),
+        std::vector<float>(kWrongZ27Bits, 0.0f),
+    };
+    decoder.finalizeMalformedBurstForTesting(std::move(malformed), kGroup);
+
+    CHECK(callback_fired && !callback_ok && callback_interleaved &&
+              callback_geometry_proven && callback_mask == 0 &&
+              callback_group_size == kGroup && callback_frames == 0,
+          "deinterleave size exception must emit one proven 0/N group callback");
+}
+
 void test_z81_descriptor_mode_hop_preserves_live_geometry() {
 #ifdef _WIN32
     _putenv_s("ULTRA_DESCRIPTOR_MODE_SWITCH", "1");
@@ -838,6 +1073,8 @@ void test_z81_timeout_abort_restores_default_geometry_before_callback() {
     bool callback_geometry_proven = false;
     int z_at_callback = 0;
     size_t samples_at_callback = 0;
+    float cfo_at_callback = 99.0f;
+    bool warm_cfo_at_callback = true;
     decoder.setBurstGroupCallback(
         [&](uint16_t, const std::vector<Bytes>&, bool all_ok, float,
             uint16_t, bool, uint8_t, bool geometry_proven) {
@@ -846,6 +1083,8 @@ void test_z81_timeout_abort_restores_default_geometry_before_callback() {
             callback_geometry_proven = geometry_proven;
             z_at_callback = decoder.activeBurstLiftingZ();
             samples_at_callback = decoder.waveformFrameSamplesForTesting(kCw);
+            cfo_at_callback = decoder.getLastCFO();
+            warm_cfo_at_callback = decoder.warmCFOCertifiedForTesting();
         });
 
     bool armed = false;
@@ -862,6 +1101,13 @@ void test_z81_timeout_abort_restores_default_geometry_before_callback() {
           "timeout fixture must first arm from the wire Z81 descriptor");
     CHECK(decoder.waveformFrameSamplesForTesting(kCw) > z27_samples,
           "armed Z81 group must use long live waveform sizing");
+    CHECK(decoder.warmCFOCertifiedForTesting(),
+          "valid descriptor must establish the timeout fixture's CFO snapshot");
+
+    // A timed-out group may already have ingested unverified pilot residuals.
+    // Poison the mutable value exactly like the live partial-group incident and
+    // require reconciliation before the synchronous failed-group callback.
+    decoder.setKnownCFO(-0.79f);
 
     decoder.expireBurstTimeoutForTesting();
     const float zero = 0.0f;
@@ -872,6 +1118,8 @@ void test_z81_timeout_abort_restores_default_geometry_before_callback() {
           "descriptor-backed timeout must emit one proven failed-group callback");
     CHECK(z_at_callback == 27 && samples_at_callback == z27_samples,
           "timeout must restore Z27 live geometry before its synchronous callback");
+    CHECK(std::abs(cfo_at_callback) < 0.25f && !warm_cfo_at_callback,
+          "timeout callback must observe restored numeric CFO with warm trust revoked");
     CHECK(decoder.stateForTesting() == DecoderState::SEARCHING &&
               !decoder.hasBurstDescriptor() &&
               decoder.activeBurstLiftingZ() == 27,
@@ -1013,6 +1261,294 @@ void test_decoder_lifecycle_clears_anchored_backstop_epoch() {
           "connection epoch transition must clear the absolute arm timestamp");
 }
 
+void test_control_only_teardown_accepts_control_and_rejects_data_fallback() {
+    constexpr Modulation kDataMod = Modulation::QAM8;
+    constexpr CodeRate kDataRate = CodeRate::R2_3;
+    constexpr int kDataCw = 12;
+    const auto cfg = makeOFDMConfig(kDataMod, kDataRate);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(kDataMod, kDataRate);
+    encoder.setFixedFrameCodewords(kDataCw);
+
+    const Bytes data = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 9, Bytes(64, 0x5A), kDataRate, kDataCw).serialize();
+    const Bytes ack = protocol::v2::ControlFrame::makeAck(
+        "ALPHA", "BRAVO", 9).serialize();
+    const auto data_tx = encoder.encodeFrame(data);
+    const auto ack_tx = encoder.encodeFrame(ack);
+    CHECK(!data_tx.empty() && !ack_tx.empty(),
+          "teardown fixture must encode both DATA and hardened control frames");
+
+    auto feed_one = [&](const std::vector<float>& tx, int& data_callbacks,
+                        int& ack_callbacks) {
+        StreamingDecoder decoder;
+        decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                     cfg, kDataMod, kDataRate);
+        decoder.setFixedFrameCodewords(kDataCw);
+        decoder.applyPendingConfigForTesting();
+        decoder.setControlOnlyReceive(true);
+        decoder.expectFullOFDMAnchorOnce();
+        decoder.setFrameCallback([&](const DecodeResult& result) {
+            if (!result.success) return;
+            const auto hdr = protocol::v2::parseHeader(result.frame_data);
+            if (!hdr.valid) return;
+            if (hdr.type == protocol::v2::FrameType::DATA) {
+                ++data_callbacks;
+            } else if (protocol::v2::isControlFrame(hdr.type)) {
+                ++ack_callbacks;
+            }
+        });
+
+        std::vector<float> audio(48000, 0.0f);
+        audio.insert(audio.end(), tx.begin(), tx.end());
+        audio.resize(audio.size() + 192000, 0.0f);
+        constexpr size_t kChunk = 4800;
+        for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+            const size_t n = std::min(kChunk, audio.size() - pos);
+            decoder.feedAudio(audio.data() + pos, n);
+            decoder.processBuffer();
+        }
+        CHECK(decoder.controlOnlyReceiveForTesting(),
+              "teardown control-only receive gate must remain armed");
+    };
+
+    int data_callbacks = 0;
+    int ack_callbacks = 0;
+    feed_one(data_tx, data_callbacks, ack_callbacks);
+    CHECK(data_callbacks == 0 && ack_callbacks == 0,
+          "a valid connected DATA waveform must not fall through during teardown");
+
+    feed_one(ack_tx, data_callbacks, ack_callbacks);
+    CHECK(data_callbacks == 0 && ack_callbacks == 1,
+          "teardown must still decode the hardened QPSK R1/4 control profile");
+}
+
+void test_control_only_transition_retires_stale_data_wait_for_disconnect_ack() {
+    constexpr Modulation kDataMod = Modulation::QAM8;
+    constexpr CodeRate kDataRate = CodeRate::R2_3;
+    constexpr int kDataCw = 12;
+    const auto cfg = makeOFDMConfig(kDataMod, kDataRate);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(kDataMod, kDataRate);
+    encoder.setFixedFrameCodewords(kDataCw);
+
+    const Bytes data = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 41, Bytes(64, 0xA5), kDataRate, kDataCw).serialize();
+    const Bytes disconnect_ack = protocol::v2::ControlFrame::makeAck(
+        "ALPHA", "BRAVO", protocol::v2::DISCONNECT_SEQ).serialize();
+    const auto data_tx = encoder.encodeFrameLight(data);
+    const auto ack_light_reference = encoder.encodeFrameLight(disconnect_ack);
+    const auto ack_tx = encoder.encodeFrame(disconnect_ack);
+    CHECK(!data_tx.empty() && !ack_light_reference.empty() && !ack_tx.empty(),
+          "transition fixture must encode DATA and hardened disconnect ACK");
+
+    StreamingDecoder decoder;
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 cfg, kDataMod, kDataRate);
+    decoder.setFixedFrameCodewords(kDataCw);
+    decoder.applyPendingConfigForTesting();
+    decoder.clearFullOFDMAnchorExpectation();
+
+    int data_callbacks = 0;
+    int disconnect_ack_callbacks = 0;
+    decoder.setFrameCallback([&](const DecodeResult& result) {
+        if (!result.success) return;
+        const auto hdr = protocol::v2::parseHeader(result.frame_data);
+        if (!hdr.valid) return;
+        if (hdr.type == protocol::v2::FrameType::DATA) {
+            ++data_callbacks;
+        } else if (hdr.type == protocol::v2::FrameType::ACK &&
+                   hdr.seq == protocol::v2::DISCONNECT_SEQ) {
+            ++disconnect_ack_callbacks;
+        }
+    });
+
+    // Drive one decoder through a connected DATA control-first rejection and
+    // stop as soon as its fixed-CW continuation is armed.  The remainder of the
+    // DATA frame is deliberately never supplied: this models teardown beginning
+    // while the decoder is waiting on stale DATA geometry.
+    std::vector<float> candidate_audio(2400, 0.0f);
+    const size_t candidate_prefix =
+        std::min(data_tx.size(), ack_light_reference.size());
+    candidate_audio.insert(candidate_audio.end(), data_tx.begin(),
+                           data_tx.begin() + candidate_prefix);
+    candidate_audio.resize(candidate_audio.size() + 4800, 0.0f);
+    constexpr size_t kChunk = 2400;
+    decoder.feedAudio(candidate_audio.data(), candidate_audio.size());
+    decoder.processBuffer();
+
+    // Search may need a few state-machine wakeups after the deliberately short
+    // candidate stops.  One-sample ticks advance the decoder without supplying
+    // anything close to the missing fixed-CW body.
+    const float silence = 0.0f;
+    for (int tick = 0;
+         tick < 128 && decoder.pendingTotalCodewordsForTesting() == 0;
+         ++tick) {
+        decoder.feedAudio(&silence, 1);
+        decoder.processBuffer();
+    }
+    CHECK(decoder.pendingTotalCodewordsForTesting() == kDataCw &&
+              decoder.stateForTesting() == DecoderState::SYNC_FOUND,
+          "connected DATA candidate must arm the 12-CW continuation before teardown");
+    CHECK(data_callbacks == 0 && disconnect_ack_callbacks == 0,
+          "truncated DATA candidate must not emit a frame callback");
+
+    decoder.setControlOnlyReceive(true);
+
+    // Two one-sample wakeups are enough to cross readiness and reject the old
+    // candidate as illegal teardown traffic.  This assertion is the regression:
+    // the decoder must not wait for the missing 12-CW DATA body before it can
+    // return to SEARCHING for the disconnect ACK.
+    decoder.feedAudio(&silence, 1);
+    decoder.processBuffer();
+    CHECK(decoder.pendingTotalCodewordsForTesting() == 0 &&
+              decoder.stateForTesting() == DecoderState::DECODING,
+          "control-only transition must retire stale DATA geometry at readiness");
+    decoder.feedAudio(&silence, 1);
+    decoder.processBuffer();
+    CHECK(decoder.stateForTesting() == DecoderState::SEARCHING,
+          "failed pre-transition DATA candidate must return directly to control search");
+    CHECK(data_callbacks == 0 && disconnect_ack_callbacks == 0,
+          "control-only transition must not surface the failed DATA candidate");
+
+    decoder.expectFullOFDMAnchorOnce();
+    std::vector<float> teardown_audio(48000, 0.0f);
+    teardown_audio.insert(teardown_audio.end(), ack_tx.begin(), ack_tx.end());
+    teardown_audio.resize(teardown_audio.size() + 192000, 0.0f);
+    for (size_t pos = 0; pos < teardown_audio.size(); pos += kChunk) {
+        const size_t n = std::min(kChunk, teardown_audio.size() - pos);
+        decoder.feedAudio(teardown_audio.data() + pos, n);
+        decoder.processBuffer();
+    }
+
+    CHECK(data_callbacks == 0,
+          "teardown transition must never fall back to DATA delivery");
+    CHECK(disconnect_ack_callbacks == 1,
+          "same decoder must deliver the hardened disconnect ACK exactly once");
+    CHECK(decoder.controlOnlyReceiveForTesting(),
+          "control-only receive must remain armed throughout teardown");
+}
+
+std::vector<float> makeEvmLifecycleFrame(const ModemConfig& cfg,
+                                         float noise_amplitude,
+                                         uint32_t seed) {
+    OFDMChirpWaveform tx(cfg);
+    Bytes encoded(81);  // one Z27 LDPC-sized air block
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        encoded[i] = static_cast<uint8_t>(0x31u + 37u * i);
+    }
+    auto samples = tx.generateDataPreamble();
+    const auto data = tx.modulate(encoded);
+    samples.insert(samples.end(), data.begin(), data.end());
+
+    // Deterministic zero-mean broadband perturbation. It is deliberately added
+    // after TX generation so the two fixtures differ only in received scatter.
+    for (float& sample : samples) {
+        seed = seed * 1664525u + 1013904223u;
+        const float u = static_cast<float>((seed >> 8) & 0x00ffffffu) /
+                        static_cast<float>(0x01000000u);
+        sample += noise_amplitude * (2.0f * u - 1.0f);
+    }
+    return samples;
+}
+
+void test_evm_is_finalized_and_consumed_on_its_own_frame() {
+    const auto cfg = makeOFDMConfig(Modulation::QPSK, CodeRate::R1_2);
+    const auto clean = makeEvmLifecycleFrame(cfg, 0.0002f, 0x13579BDFu);
+    const auto noisy = makeEvmLifecycleFrame(cfg, 0.5000f, 0x2468ACE1u);
+
+    OFDMChirpWaveform rx(cfg);
+    CHECK(rx.process(SampleSpan(clean.data(), clean.size())),
+          "clean EVM lifecycle frame must finish demodulation");
+    float clean_db = 0.0f;
+    size_t clean_carriers = 0;
+    CHECK(rx.takeEvmSnrEstimate(clean_db, clean_carriers) &&
+              std::isfinite(clean_db) && clean_carriers > 0,
+          "frame 1 must publish its finalized post-EQ EVM immediately");
+    float duplicate_db = 0.0f;
+    size_t duplicate_carriers = 0;
+    CHECK(!rx.takeEvmSnrEstimate(duplicate_db, duplicate_carriers),
+          "a finalized frame-local EVM observation must be one-shot");
+
+    CHECK(rx.process(SampleSpan(noisy.data(), noisy.size())),
+          "noisy EVM lifecycle frame must finish demodulation");
+    float noisy_db = 0.0f;
+    size_t noisy_carriers = 0;
+    CHECK(rx.takeEvmSnrEstimate(noisy_db, noisy_carriers) &&
+              std::isfinite(noisy_db) && noisy_carriers == clean_carriers,
+          "frame 2 must publish its own finalized EVM with matching geometry");
+    CHECK(clean_db > noisy_db + 1.0f,
+          "immediate EVM readings must align clean frame 1 above noisy frame 2");
+
+    // Leave a fresh value unread, then begin an invalid pass. The invalid pass
+    // must revoke it before returning: erasure/no-process callers cannot borrow
+    // the preceding frame's metric.
+    CHECK(rx.process(SampleSpan(clean.data(), clean.size())),
+          "third EVM lifecycle frame must finish demodulation");
+    const float too_short = 0.0f;
+    CHECK(!rx.process(SampleSpan(&too_short, 1)),
+          "too-short EVM lifecycle pass must fail demodulation");
+    CHECK(!rx.takeEvmSnrEstimate(duplicate_db, duplicate_carriers),
+          "failed pass must invalidate an unread predecessor observation");
+}
+
+void test_group_evm_requires_complete_coverage_and_includes_tail() {
+    StreamingDecoder decoder;
+    std::vector<DecodeResult> metrics(3);
+    const float db[] = {20.0f, 14.0f, 5.0f};
+    const size_t carriers[] = {100, 200, 400};
+    double weighted_error = 0.0;
+    size_t total_carriers = 0;
+    for (size_t i = 0; i < metrics.size(); ++i) {
+        metrics[i].has_evm_snr_db = true;
+        metrics[i].evm_snr_db = db[i];
+        metrics[i].evm_carrier_count = carriers[i];
+        weighted_error += static_cast<double>(carriers[i]) *
+                          std::pow(10.0, -static_cast<double>(db[i]) / 10.0);
+        total_carriers += carriers[i];
+    }
+    const float expected = static_cast<float>(
+        -10.0 * std::log10(weighted_error / static_cast<double>(total_carriers)));
+
+    decoder.finalizeGroupEvmForTesting(metrics, /*geometry_proven=*/true, 3);
+    CHECK(decoder.hasLastEvmSnr() &&
+              std::abs(decoder.getLastEvmSnrDb() - expected) < 1.0e-4f,
+          "group EVM must pool every fresh frame in linear error-energy space");
+    const auto& frame_db = decoder.getLastGroupEvmSnrFrames();
+    const auto& frame_counts = decoder.getLastGroupEvmCarrierCounts();
+    CHECK(frame_db.size() == 3 && frame_counts.size() == 3 &&
+              frame_db[2] == db[2] && frame_counts[2] == carriers[2],
+          "group EVM coverage must retain the finalized tail observation");
+    const float without_tail = static_cast<float>(-10.0 * std::log10(
+        (100.0 * std::pow(10.0, -2.0) +
+         200.0 * std::pow(10.0, -1.4)) / 300.0));
+    CHECK(std::abs(decoder.getLastEvmSnrDb() - without_tail) > 1.0f,
+          "group EVM scalar must materially include, not omit, the tail frame");
+
+    auto missing_tail = metrics;
+    missing_tail.pop_back();
+    decoder.finalizeGroupEvmForTesting(missing_tail, /*geometry_proven=*/true, 3);
+    CHECK(!decoder.hasLastEvmSnr(),
+          "missing physical tail must invalidate the group EVM scalar");
+
+    auto erased_tail = metrics;
+    erased_tail.back().has_evm_snr_db = false;
+    erased_tail.back().evm_carrier_count = 0;
+    decoder.finalizeGroupEvmForTesting(erased_tail, /*geometry_proven=*/true, 3);
+    CHECK(!decoder.hasLastEvmSnr(),
+          "no-process tail erasure must invalidate rather than survivor-average EVM");
+
+    decoder.finalizeGroupEvmForTesting(metrics, /*geometry_proven=*/false, 3);
+    CHECK(!decoder.hasLastEvmSnr(),
+          "unproven group geometry must not publish an EVM scalar");
+}
+
 }  // namespace
 
 int main() {
@@ -1031,10 +1567,16 @@ int main() {
     test_measurement_lifting_z_override_survives_reset();
     test_connected_ofdm_r34_cw3_z81_waits_for_full_frame();
     test_burst_descriptor_regrids_equal_capacity_8psk_profiles();
+    test_8psk_cw4_z81_bi1_energy_erasure_reaches_group_callback();
+    test_8psk_cw4_z81_bi1_malformed_soft_fails_closed_with_callback();
     test_z81_descriptor_mode_hop_preserves_live_geometry();
     test_z81_timeout_abort_restores_default_geometry_before_callback();
     test_z81_headnull_abort_restores_default_geometry_before_callback();
     test_decoder_lifecycle_clears_anchored_backstop_epoch();
+    test_control_only_teardown_accepts_control_and_rejects_data_fallback();
+    test_control_only_transition_retires_stale_data_wait_for_disconnect_ack();
+    test_evm_is_finalized_and_consumed_on_its_own_frame();
+    test_group_evm_requires_complete_coverage_and_includes_tail();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)

@@ -102,6 +102,7 @@ struct DecodeResult {
     float ofdm_broadband_snr_db = 0.0f;     // Historical field name; OFDM in-band SNR.
     bool has_evm_snr_db = false;
     float evm_snr_db = 0.0f;                 // Radio-agnostic decision-directed EVM SNR (Stage 1).
+    size_t evm_carrier_count = 0;             // Fresh post-EQ decisions behind evm_snr_db.
     // #58 BUG-CONNECT-SNR-VARIANCE: both MC-DPSK in-band estimates, surfaced so
     // consumers/tests can compare spreads. training = ~170 ms preamble snapshot
     // (ONE fade state); data_aided = whole-frame differential estimate
@@ -340,16 +341,18 @@ public:
         return sync_controller_.last_burst_descriptor_;
     }
 
-    // Single RX source of truth for the active LDPC lifting Z: the value the
-    // sender announced in the BURST_HEADER descriptor (payload[5]). 81 (n=1944)
-    // inside a long-LDPC burst, else 27 (n=648) — legacy / cold-start / control.
+    // Single RX source of truth for the active LDPC lifting Z: normally the value
+    // announced in BURST_HEADER (payload[5]); narrowly, the temporary classic
+    // fallback restores an earlier wire-learned Z81 tuple for one candidate.
+    // 81 means n=1944; 27 means n=648 (legacy / cold-start / control).
     // NO env: the descriptor is the wire contract. A frame decoded before its
     // group's descriptor arrives correctly falls back to 27. Owned by the
     // SyncController (§7.6); replaces 5 scattered getenv("ULTRA_LDPC_Z") reads.
     int activeBurstLiftingZ() const {
         return testing_lifting_z_override_ != 0
             ? testing_lifting_z_override_
-            : sync_controller_.activeBurstLiftingZ();
+            : (classic_long_geometry_recovery_active_ ? 81
+                                                       : sync_controller_.activeBurstLiftingZ());
     }
 
     // Get current mode
@@ -405,6 +408,15 @@ public:
     void setBareChirpExpected(bool v) {
         bare_chirp_expected_.store(v, std::memory_order_relaxed);
     }
+    // DISCONNECTING is still a connected coherent-OFDM receive phase, but only
+    // hardened control frames are legal.  The protocol/GUI thread writes this;
+    // the decode thread reads it while sizing and routing an acquired frame.
+    void setControlOnlyReceive(bool enabled) {
+        control_only_receive_.store(enabled, std::memory_order_release);
+    }
+    bool controlOnlyReceiveForTesting() const {
+        return control_only_receive_.load(std::memory_order_acquire);
+    }
     void setLogPrefix(const std::string& prefix) {
         log_prefix_ = prefix;
         sync_controller_.setLogPrefix(prefix);  // warm-sync logs now emit from the controller
@@ -444,6 +456,14 @@ public:
     // Seed the learned rung->geometry table without a wire descriptor (tests only —
     // production populates it ONLY from decoded BURST_HEADER descriptors).
     void seedRungGeometryForTesting(Modulation mod, CodeRate rate, int cw, int lifting_z);
+    // One synchronized snapshot so a lifecycle/concurrency regression can verify
+    // that session-boundary clearing never exposes a torn cw/Z tuple.
+    std::array<int, 2> learnedRungGeometryForTesting(Modulation mod,
+                                                     CodeRate rate) const;
+    uint64_t learnedRungGeometrySessionEpochForTesting() const;
+    bool seedRungGeometryForSessionForTesting(Modulation mod, CodeRate rate,
+                                              int cw, int lifting_z,
+                                              uint64_t session_epoch);
     // Force the active LDPC lifting size without a wire descriptor (tests/tools
     // only). The override persists across reset(), matching a measure_ack_fer
     // session that reuses one configured decoder for many independent frames.
@@ -463,7 +483,26 @@ public:
         return truncation_hold_sync_pos_ != 0 || truncation_hold_frame_len_ != 0;
     }
     uint32_t commandedGeometryArmsForTesting() const { return commanded_geometry_arms_; }
+    uint32_t classicLongGeometryArmsForTesting() const {
+        return classic_long_geometry_arms_;
+    }
+    bool classicLongGeometryActiveForTesting() const {
+        return classic_long_geometry_recovery_active_;
+    }
+    // Exercise only the eligibility predicate. The integration trial below this
+    // hook still drives the real sync/control-first/data path; this hook keeps
+    // negative correlation/provenance cases deterministic rather than depending
+    // on a particular noisy LTS realization landing in a narrow correlation band.
+    bool classicLongGeometryEligibleForTesting(
+        float correlation, bool burst_latched,
+        uint64_t prior_group_start_abs = 0,
+        uint64_t anchor_abs = 0,
+        uint64_t candidate_abs = 1);
+    uint64_t commandedGeometryAirGateSpanAtArmForTesting() const {
+        return commanded_geometry_air_gate_span_at_arm_;
+    }
     DecoderState stateForTesting() const { return state_; }
+    int pendingTotalCodewordsForTesting() const { return pending_total_cw_; }
     size_t waveformFrameSamplesForTesting(int cw_count) const {
         return waveform_
             ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(cw_count))
@@ -472,6 +511,26 @@ public:
     void expireBurstTimeoutForTesting() {
         burst_start_time_ = std::chrono::steady_clock::now() -
                             std::chrono::hours(1);
+    }
+    size_t burstErasureSoftBitsForTesting() const {
+        return makeActiveBurstErasure().size();
+    }
+    void finalizeMalformedBurstForTesting(
+        std::vector<std::vector<float>> physical_soft,
+        int exact_physical_group_size) {
+        burst_soft_buffer_ = std::move(physical_soft);
+        burst_arm_provenance_ = BurstArmProvenance::DESCRIPTOR;
+        finalizeBurstGroup(exact_physical_group_size);
+        burst_soft_buffer_.clear();
+        burst_predecoded_.clear();
+        burst_metric_templates_.clear();
+        descriptor_group_size_locked_ = false;
+    }
+    void finalizeGroupEvmForTesting(const std::vector<DecodeResult>& metrics,
+                                    bool geometry_proven,
+                                    int expected_physical_frames) {
+        burst_metric_templates_ = metrics;
+        finalizeGroupEvmSnr(geometry_proven, expected_physical_frames);
     }
 
     // ========================================================================
@@ -487,11 +546,23 @@ public:
     // Set known CFO (for testing or when CFO is known from other source)
     void setKnownCFO(float cfo_hz) { cfo_tracker_.store(cfo_hz); }
 
+    // Outcome-side CFO contract probe: a CRC/LDPC-valid connected control-first
+    // OFDM frame must restore this certificate after a 0/N group revoked it.
+    bool warmCFOCertifiedForTesting() const { return cfo_tracker_.pilotSeeded(); }
+
     // Expect the next connected OFDM frame to carry full chirp+LTS preamble.
     // This bootstraps OFDM-specific timing after an MC-DPSK handshake.
     void expectFullOFDMAnchorOnce();
     void clearFullOFDMAnchorExpectation();
     bool expectsFullOFDMAnchorForTesting() const;
+
+    // The connection layer has entered the negotiated OFDM mode, but the peer
+    // has not yet proved that it received our CONNECT_ACK.  During this short
+    // responder-side half-open interval a repeated CONNECT still rides the
+    // fixed MC-DPSK control PHY.  Keep one bounded cross-mode recovery candidate
+    // for a true expected dual-chirp anchor; clear it as soon as an authoritative
+    // post-handshake frame arrives.
+    void setHandshakeConfirmationPending(bool pending);
 
     // §14.36: setConnectedOFDMMode / descriptor rate changes are DEFERRED to the
     // safe top-of-processBuffer boundary (they rebuild waveform_ and must not race
@@ -615,6 +686,12 @@ public:
     }
     float getLastEvmSnrDb() const {
         return last_evm_snr_db_.load();
+    }
+    const std::vector<float>& getLastGroupEvmSnrFrames() const {
+        return last_group_evm_snr_frames_;  // decode-thread/group-callback scope
+    }
+    const std::vector<size_t>& getLastGroupEvmCarrierCounts() const {
+        return last_group_evm_carrier_counts_;  // decode-thread/group-callback scope
     }
 
     bool hasIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.hasEstimate(); }
@@ -816,6 +893,17 @@ private:
     // Search for sync in recent samples
     void searchForSync();
 
+    // A repeated fixed-profile CONNECT has the same dual-chirp timing anchor as
+    // connected OFDM, but its 4-CW MC-DPSK body is much longer than the first
+    // OFDM decode attempt.  Poll the retained raw ring asynchronously and make
+    // one MC-DPSK attempt after the complete body is resident.  Returns true
+    // only when a CONNECT was delivered (the caller must end this decode tick).
+    struct PendingHandshakeMCDPSKConnect;
+    bool tryDecodePendingHandshakeMCDPSKConnect();
+    bool resetFalseOFDMStateAfterRecoveredConnect(
+        const PendingHandshakeMCDPSKConnect& candidate,
+        size_t frame_end_abs);
+
     // Check if we have enough samples to decode
     void checkIfReadyToDecode();
 
@@ -891,6 +979,10 @@ private:
     // the wire ended before stale fallback geometry. Zero keeps descriptor/configured
     // geometry (including late-join head-erasure reconstruction).
     void finalizeBurstGroup(int exact_physical_group_size = 0);
+    // Every synthetic physical-frame erasure must use the descriptor-owned lifting Z.
+    // The legacy BurstInterleaver default is Z27/81 bytes per CW; relying on it inside
+    // a cw4/Z81 group creates 2592 LLRs where deinterleave requires 7776.
+    std::vector<float> makeActiveBurstErasure() const;
     // LATE-JOIN (ULTRA_DESC_ARMED_ACCUM, docs/DESC_ARMED_ACCUMULATION_DESIGN_2026_07_05.md):
     // arm accumulation from a mid-group member sync when the group HEAD died (the
     // BUG-BURST-HEADNULL-DROP recovery). Returns false when a full data frame is not
@@ -950,6 +1042,44 @@ private:
         size_t warm_narrow_end_abs = 0;
         size_t warm_narrow_candidate_span_samples = 0;
     } deferred_future_sync_;
+
+    // BUG-HALFOPEN-CONNECT: CONNECT and the first connected OFDM burst share the
+    // full dual-chirp timing anchor.  If CONNECT_ACK was lost, an OFDM-only
+    // responder otherwise accepts the repeated CONNECT chirp as OFDM, fails its
+    // body as a synthetic 0/N group, and never reaches Connection's duplicate-
+    // CONNECT ACK replay.  Protected by ring_.buffer_mutex_; the pending flag is
+    // also written by the protocol/GUI thread.
+    static constexpr size_t kPhysicalSnrRing = 8;
+
+    struct HalfOpenMeasurementSnapshot {
+        // A repeated MC-DPSK CONNECT can spend several seconds in the false
+        // OFDM path before its complete body is resident.  Failed OFDM member
+        // attempts still update physical-SNR/display atomics. Preserve the
+        // state at the START of the responder's half-open interval (before even
+        // weak OFDM fallbacks can run) and restore it only when a later anchor
+        // is proven to be CONNECT. A genuine first OFDM frame confirms the
+        // handshake and discards this snapshot without restoring it.
+        bool valid = false;
+        std::array<float, kPhysicalSnrRing> physical_ring_db{};
+        size_t physical_ring_count = 0;
+        bool ofdm_snr_valid = false;
+        float ofdm_snr_db = 0.0f;
+        bool evm_snr_valid = false;
+        float evm_snr_db = 0.0f;
+        float fading_index = 0.0f;
+    } half_open_measurement_snapshot_;
+
+    struct PendingHandshakeMCDPSKConnect {
+        bool valid = false;
+        uint32_t generation = 0;
+        size_t training_abs = 0;
+        size_t required_samples = 0;
+        float cfo_hz = 0.0f;
+        float correlation = 0.0f;
+        MultiCarrierDPSKConfig config;
+        HalfOpenMeasurementSnapshot measurements;
+    } pending_handshake_mcdpsk_connect_;
+    std::atomic<bool> handshake_confirmation_pending_{false};
     size_t samples_since_sync_ = 0;   // How many samples collected since sync
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // Chirp sync-quality score
@@ -975,7 +1105,6 @@ private:
     // fade average — dB-averaging under-reads by the Jensen penalty), spread
     // as the dB standard deviation. ~8 readings ≈ 15-40 s of frames ≈ several
     // coherence times on Good.
-    static constexpr size_t kPhysicalSnrRing = 8;
     mutable std::mutex physical_ring_mutex_;
     mutable std::array<float, kPhysicalSnrRing> physical_ring_db_{};
     mutable size_t physical_ring_count_ = 0;
@@ -1215,21 +1344,26 @@ private:
     size_t burst_substantive_members_ = 0;
     uint64_t burst_unproven_start_abs_ = 0;
     // A sign-only negated-LTS decision can classify a standalone repair/noise as a
-    // group head. Such an arm earns group semantics only after a second substantive
-    // physical member arrives at the declared stride.
-    bool abandonUnprovenMarkerGroup(const char* reason);
+    // group head. Likewise, commanded geometry can restore mod/rate/cw/Z but cannot
+    // restore physical N. Process-valid soft grids at a guessed stride are not
+    // transmitter-owned geometry; only a decoded descriptor or CRC-valid physical
+    // tail may authorize a group outcome/reverse transmission.
+    bool abandonUnprovenGeometryGroup(const char* reason);
     // HARQ provisional keys (2026-07-01, restricted design — fable_analysis/09 §3.4):
     // when a burst logical frame's CW0 peek fails, key its soft bits by the
     // POSITION-PREDICTED seq (receiver's ARQ mirror, pulled once per group via
     // harq_context_callback_) so the resend can chase-combine. The default-off
-    // experiment is restricted to descriptor-proven QPSK R3/4, non-interleaved,
-    // non-tail members. Warm-cadence, prediction-consistency and session-context
-    // gates remain mandatory; late-join and timeout groups are excluded.
+    // experiment is restricted to descriptor-proven QPSK R3/4 or the measured
+    // 8PSK R2/3 cw4/Z81 tuple and non-interleaved groups. Tail headers may
+    // validate the prediction but never use a provisional key. Known warm
+    // cadence, one current-group identity match, prediction consistency and
+    // session context remain mandatory; late-join and timeout groups are excluded.
     int burst_logical_index_ = -1;
     std::optional<fec::SoftCombineBuffer::ProvisionalContext> burst_harq_ctx_;
     bool burst_harq_ctx_pulled_ = false;
     bool burst_harq_prediction_invalid_ = false;
-    bool burst_group_full_anchor_ = false;
+    bool burst_harq_prediction_validated_ = false;
+    bool burst_harq_cadence_blocked_ = true;
     uint32_t last_burst_src_hash_ = 0;
     uint64_t last_descriptor_abs_sample_ = 0;  // sample-clock gap gate (D2)
 
@@ -1249,6 +1383,11 @@ private:
     // taken it — and cleared when the command changes or the sender adopts it.
     std::atomic<bool> commanded_rung_declined_{false};
 
+    // Connection lifecycle phase that cannot be represented by connected_: while
+    // true, robust OFDM control decode stays enabled but DATA/fixed-CW fallback is
+    // forbidden.  See setControlOnlyReceive().
+    std::atomic<bool> control_only_receive_{false};
+
     // Learned rung -> frame geometry. cw/frame is NOT rate-derivable: it depends on
     // ULTRA_QAM16_CW16 / the 8PSK ladder (connection_policy::recommendCWCount) and is
     // then walked DOWN against the SENDER's own measured coherence time
@@ -1256,13 +1395,21 @@ private:
     // it LEARNS the tuple from descriptors it has already decoded — wire truth.
     // A rung with no entry is a MISS -> fall back to today's behaviour; never
     // substitute a neighbour rung's cw.
-    // Decode-thread only (written at descriptor consume, read at the group marker)
-    // => plain member, no atomic.
+    // Descriptor consume and both resolver reads normally run on the decode thread,
+    // but a true connected->disconnected lifecycle transition runs setMode() on the
+    // protocol/GUI thread. Protect the complete table with one mutex so that session
+    // clearing is synchronized with every reader and a cw/Z tuple is copied as one
+    // coherent value. The mutex is intentionally distinct from ring_.buffer_mutex_:
+    // decode/search releases the ring lock before calling these resolvers. The
+    // session epoch rejects a descriptor decode that began before teardown but
+    // reaches the table only after the protocol thread cleared it.
     struct LearnedRungGeometry {
         uint8_t cw_per_frame = 0;
         uint8_t lifting_z = 27;
     };
+    mutable std::mutex learned_rung_geometry_mutex_;
     std::array<LearnedRungGeometry, protocol::kRungIdxCount> learned_rung_geometry_{};
+    uint64_t learned_rung_geometry_session_epoch_ = 0;
 
     // Non-zero only when an explicitly test-only caller needs to exercise the
     // long-LDPC frame path without first sending a production BURST_HEADER.
@@ -1275,7 +1422,7 @@ private:
     // the fix in exactly the repeat case this bug produces.
     uint64_t last_group_start_abs_ = 0;
 
-    // Resolved geometry for a group whose descriptor was missed.
+    // Resolved per-frame geometry after a descriptor was missed.
     struct CommandedGeometry {
         bool armed = false;
         Modulation mod = Modulation::QPSK;
@@ -1287,7 +1434,17 @@ private:
     // Non-const: it takes the ring lock for the cadence reference. It mutates no
     // decoder state (the arm itself happens at the call site).
     CommandedGeometry resolveCommandedGeometry(bool is_ofdm, bool burst_latched);
-    void learnRungGeometry(Modulation mod, CodeRate rate, int cw, int lifting_z);
+    CommandedGeometry resolveClassicLongGeometry(bool is_ofdm,
+                                                 bool burst_latched,
+                                                 uint64_t frame_sync_abs);
+    void armClassicLongGeometry(const CommandedGeometry& geometry);
+    void clearClassicLongGeometry();
+    LearnedRungGeometry learnedRungGeometrySnapshot(uint8_t idx) const;
+    uint64_t learnedRungGeometrySessionEpochSnapshot() const;
+    void clearLearnedRungGeometryAtSessionBoundary();
+    bool learnRungGeometry(
+        Modulation mod, CodeRate rate, int cw, int lifting_z,
+        std::optional<uint64_t> expected_session_epoch = std::nullopt);
     void noteDescriptorRungObserved(Modulation mod, CodeRate rate);
     // Absolute sample index of the current sync position (brief ring-lock read).
     uint64_t absoluteForSyncPosition();
@@ -1305,6 +1462,15 @@ private:
 
     uint32_t truncated_burst_holds_ = 0;    // guard (A) fired (episodes, not retries)
     uint32_t commanded_geometry_arms_ = 0;  // guard (B) armed
+    // Narrow BI0 recovery for a descriptor + marked-head loss after an accepted
+    // full anchor. This is deliberately not represented as a descriptor: cw/Z are
+    // wire-learned, but physical N is unknown and must never be fabricated.
+    bool classic_long_geometry_recovery_active_ = false;
+    size_t classic_long_geometry_sync_pos_ = 0;  // sync_position_ + 1; 0 = none
+    uint32_t classic_long_geometry_arms_ = 0;
+    // Conservative unknown-N physical span was published in the same arm
+    // transaction, before control returns to the event loop.
+    uint64_t commanded_geometry_air_gate_span_at_arm_ = 0;
     // sync_position_ + 1 of the current hold episode (0 = none), so a multi-retry
     // deferral counts and logs ONCE.
     size_t truncation_hold_sync_pos_ = 0;
@@ -1343,8 +1509,14 @@ private:
     std::vector<double> burst_gamma_sum_;
     size_t burst_gamma_frames_ = 0;
     std::vector<float> last_group_carrier_gammas_;
+    // Per-physical-frame finalized EVM observations for the last group. Missing
+    // provenance is retained as NaN at its physical position; the group scalar
+    // is published only with complete, geometry-proven coverage.
+    std::vector<float> last_group_evm_snr_frames_;
+    std::vector<size_t> last_group_evm_carrier_counts_;
     void accumulateBurstCarrierGamma();
     void finalizeGroupCarrierGammas();
+    void finalizeGroupEvmSnr(bool geometry_proven, int expected_physical_frames);
     // F176 GEOMETRIC ACK GATE: absolute sample at which the burst currently
     // being received stops ARRIVING. An accepted expected full anchor first
     // publishes a conservative provisional ceiling; descriptor/marker-backed

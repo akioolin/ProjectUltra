@@ -80,6 +80,10 @@ public:
     // For OFDM fixed frames, call setMaxChunkPayload() to match frame capacity
     static constexpr size_t DEFAULT_CHUNK_SIZE = 250;
     static constexpr size_t FILE_DATA_OVERHEAD = 5;  // TYPE(1) + OFFSET(4)
+    static constexpr size_t FILE_START_FIXED_OVERHEAD = 10;  // TYPE+FLAGS+SIZE+CRC
+    // FILE_START has no explicit filename length; at least one filename byte is
+    // required because the receiver rejects payloads shorter than 11 bytes.
+    static constexpr size_t MIN_FILE_START_PAYLOAD = FILE_START_FIXED_OVERHEAD + 1;
     static constexpr size_t FILE_BLOCK_FIXED_OVERHEAD = 15;  // TYPE+FLAGS+SIZE+TX_SIZE+CRC+NAME_LEN
 
     // Callbacks
@@ -94,6 +98,7 @@ public:
     // Set max payload per ARQ frame (call before startSend).
     // Chunk data size = max_payload - FILE_DATA_OVERHEAD (5 bytes for type+offset)
     void setMaxChunkPayload(size_t max_payload) {
+        max_chunk_payload_ = max_payload;
         if (max_payload > FILE_DATA_OVERHEAD) {
             chunk_size_ = max_payload - FILE_DATA_OVERHEAD;
         }
@@ -194,6 +199,11 @@ public:
 private:
     FileTransferState state_ = FileTransferState::IDLE;
     size_t chunk_size_ = DEFAULT_CHUNK_SIZE;
+    // Keep the physical payload bound separately from FILE_DATA's usable bytes.
+    // A profile may carry FILE_DATA (>=6 B) yet be too small for FILE_START (<11 B).
+    // Recording it lets startSend fail cleanly without disabling an already-started
+    // transfer that later moves to a small but still usable FILE_DATA geometry.
+    size_t max_chunk_payload_ = DEFAULT_CHUNK_SIZE + FILE_DATA_OVERHEAD;
     std::function<bool()> completion_gate_;  // F218: ARQ-idle required
 
     void skipDeliveredRanges();  // F163 FIX-4

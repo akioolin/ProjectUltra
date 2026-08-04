@@ -691,7 +691,11 @@ add_test(NAME ChannelIdleNoiseSNRCalibration COMMAND test_idle_noise_snr_calibra
 # sanitizer-only red alongside WattersonProof. Raise to an ASAN-safe backstop.
 set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
     TIMEOUT 1800
-    LABELS regression)
+    LABELS regression
+    # The test loads a tracked real-HF noise bed from recordings/.  Make that
+    # source-relative contract explicit so it also works when the build tree is
+    # a sibling of the source tree (the immutable IONOS campaign layout).
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # MC-DPSK ACK turnaround timing — protocol-only (ultra_core), not SimulatedStation.
 add_executable(test_mcdpsk_ack_turnaround test_mcdpsk_ack_turnaround.cpp)

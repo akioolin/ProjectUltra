@@ -336,6 +336,14 @@ public:
     void setConnected(bool connected);
     bool isConnected() const { return connected_; }
 
+    // Teardown keeps the negotiated OFDM receiver live for ACK/control frames but
+    // forbids speculative fallback into the connected DATA geometry.
+    void setControlOnlyReceive(bool enabled) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setControlOnlyReceive(enabled);
+        }
+    }
+
     void setUseConnectedWaveformOnce() { use_connected_waveform_once_ = true; }
 
     void setConnectWaveform(protocol::WaveformMode mode);
@@ -534,7 +542,10 @@ private:
     void stopRxDecodeThread();
 
     // RX decode helpers (implemented in modem_rx_decode.cpp)
-    void deliverFrame(const Bytes& frame_data, bool physical_turn_complete = false);
+    // Returns false when a valid frame is addressed to another station (including
+    // our own reflected TX).  Callers must suppress protocol/UI/diagnostic receive
+    // notifications for such frames.
+    bool deliverFrame(const DecodeResult& result);
     void notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type);
     void updateStats(std::function<void(LoopbackStats&)> updater);
 

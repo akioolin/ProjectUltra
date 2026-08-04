@@ -168,7 +168,6 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             (frame.src_hash != 0 && frame.src_hash == v2::hashCallsign(remote_call_)) ||
             (remote_hash_ != 0 && frame.src_hash == remote_hash_);
         if (same_peer && !connect_ack_frame_.empty()) {
-            connect_ack_retransmit_ms_ = connectAckRetransmitMs();
             LOG_MODEM(WARN,
                       "Connection: Duplicate CONNECT from %s while responder ACK unconfirmed; re-sending cached CONNECT_ACK",
                       remote_call_.c_str());
@@ -593,22 +592,14 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                   ack_data.size(), snr_db, snrSourceToString(snr_source));
         transmitFrame(ack_data);
 
-        // Cache the ACK for proactive retransmission. ALPHA can fail to decode
-        // the single MC-DPSK CONNECT_ACK on faded seeds, leaving handshake stuck.
-        // We re-send periodically until handshake is confirmed by first frame.
+        // Cache the ACK for collision-safe reactive replay.  Never key this full
+        // 8.3 s control frame on a timer: it overlaps the initiator's CONNECT
+        // retry on a half-duplex channel. A decoded duplicate CONNECT is the
+        // only proof that the peer's retry body has ended and replay is safe.
         connect_ack_frame_ = ack_data;
-        connect_ack_retransmit_ms_ = connectAckRetransmitMs();
-        // F225: budget for ALL modes — the rescue exists precisely because a single
-        // MC-DPSK CONNECT_ACK dies on faded seeds, and MC-DPSK is negotiated exactly
-        // at the low SNRs where that loss is most likely. The old OFDM_CHIRP-only
-        // gate left one un-rescued shot through a fading channel -> guaranteed
-        // half-open (rig F225: Mac ACK faded at the Pi5, 0 retries, 240 s timeout).
-        // Interval/budget are already airtime-/config-derived, mode-agnostic.
-        connect_ack_retx_remaining_ = connectAckRetxBudget();
         const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
         LOG_MODEM(INFO,
-                  "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining, carrier-sense gated)",
-                  connect_ack_retransmit_ms_ / 1000.0f, connect_ack_retx_remaining_);
+                  "Connection: CONNECT_ACK cached for reactive duplicate-CONNECT replay (no timer)");
 
         // Preserve an operator-forced modulation/rate exactly. Establish the gate
         // before on_connected can synchronously start payload transmission.
@@ -761,13 +752,19 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
 
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
     disconnect_ack_frame_ = ack.serialize();
-    transmitFrame(disconnect_ack_frame_);
 
     if (disconnect_pending_) {
-        // Already in grace period from a previous DISCONNECT — re-sent ACK, reset timer
+        // Already in grace period from a previous DISCONNECT — reset first so
+        // synchronous host callbacks always observe the renewed close lifetime.
         LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
-        disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
-        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+        disconnect_pending_ms_ = disconnectResponderGraceMs();
+        disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
+        disconnect_ack_epoch_elapsed_ms_ = 0;
+        disconnect_ack_repeat_count_ = crossed_close
+            ? disconnectAckMaxProactiveRepeats()
+            : 0;
+        setDisconnectTeardownActive(true);
+        transmitFrame(disconnect_ack_frame_);
         return;
     }
 
@@ -779,15 +776,26 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
         stats_.disconnects++;
     }
     disconnect_pending_ = true;
-    disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
-    disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    disconnect_pending_ms_ = disconnectResponderGraceMs();
+    disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
+    disconnect_ack_epoch_elapsed_ms_ = 0;
+    disconnect_ack_repeat_count_ = crossed_close
+        ? disconnectAckMaxProactiveRepeats()
+        : 0;
+    setDisconnectTeardownActive(true);
+    transmitFrame(disconnect_ack_frame_);
     if (crossed_close) {
         LOG_MODEM(INFO,
                   "Connection: Crossed DISCONNECT received; suppressing local retries "
                   "during mutual-close grace");
     }
-    LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
-              DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
+    LOG_MODEM(INFO,
+              "Connection: Disconnect ACK sent, grace period %ums "
+              "(up to %d proactive repeats every %ums; duplicate re-ACK reactive)",
+              disconnect_pending_ms_, crossed_close
+                  ? 0
+                  : disconnectAckMaxProactiveRepeats(),
+              disconnect_ack_retransmit_ms_);
 }
 
 void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -802,13 +810,18 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
     // Send ACK for the disconnect
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
     disconnect_ack_frame_ = ack.serialize();
-    transmitFrame(disconnect_ack_frame_);
 
     if (disconnect_pending_) {
-        // Already in grace period — re-sent ACK, reset timer
+        // Already in grace period — reset before re-sending (see control form above).
         LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
-        disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
-        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+        disconnect_pending_ms_ = disconnectResponderGraceMs();
+        disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
+        disconnect_ack_epoch_elapsed_ms_ = 0;
+        disconnect_ack_repeat_count_ = crossed_close
+            ? disconnectAckMaxProactiveRepeats()
+            : 0;
+        setDisconnectTeardownActive(true);
+        transmitFrame(disconnect_ack_frame_);
         return;
     }
 
@@ -817,15 +830,26 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
         stats_.disconnects++;
     }
     disconnect_pending_ = true;
-    disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
-    disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    disconnect_pending_ms_ = disconnectResponderGraceMs();
+    disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
+    disconnect_ack_epoch_elapsed_ms_ = 0;
+    disconnect_ack_repeat_count_ = crossed_close
+        ? disconnectAckMaxProactiveRepeats()
+        : 0;
+    setDisconnectTeardownActive(true);
+    transmitFrame(disconnect_ack_frame_);
     if (crossed_close) {
         LOG_MODEM(INFO,
                   "Connection: Crossed DISCONNECT received; suppressing local retries "
                   "during mutual-close grace");
     }
-    LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
-              DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
+    LOG_MODEM(INFO,
+              "Connection: Disconnect ACK sent, grace period %ums "
+              "(up to %d proactive repeats every %ums; duplicate re-ACK reactive)",
+              disconnect_pending_ms_, crossed_close
+                  ? 0
+                  : disconnectAckMaxProactiveRepeats(),
+              disconnect_ack_retransmit_ms_);
 }
 
 // =============================================================================
@@ -1055,8 +1079,9 @@ void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::stri
 
 void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
                                     float measured_snr, uint8_t reason) {
-    if (state_ != ConnectionState::CONNECTED) {
-        LOG_MODEM(WARN, "Connection: Cannot request mode change (not connected)");
+    if (state_ != ConnectionState::CONNECTED || disconnect_teardown_active_) {
+        LOG_MODEM(WARN,
+                  "Connection: Cannot request mode change (link is not data-ready)");
         return;
     }
 

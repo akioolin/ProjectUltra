@@ -761,6 +761,80 @@ bool test_disconnect() {
     return true;
 }
 
+bool test_disconnected_disconnect_does_not_emit_stale_state() {
+    TEST("Disconnected close request does not emit stale DISCONNECTING state");
+
+    ProtocolEngine station;
+    station.setLocalCallsign("W1ABC");
+
+    std::vector<ConnectionState> states;
+    station.setConnectionChangedCallback(
+        [&](ConnectionState state, const std::string&) { states.push_back(state); });
+
+    station.disconnect();
+
+    if (station.getState() != ConnectionState::DISCONNECTED) {
+        FAIL("No-op disconnect changed the underlying connection state");
+    }
+    if (std::find(states.begin(), states.end(), ConnectionState::DISCONNECTING) !=
+        states.end()) {
+        FAIL("ProtocolEngine emitted DISCONNECTING after a terminal/no-op close");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_teardown_purges_earlier_deferred_protocol_tx() {
+    TEST("Teardown purges non-close TX queued earlier in the same RX callback");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    SimulatedChannel channel(stationA, stationB);
+    if (!stationA.connect("K2DEF")) {
+        FAIL("Connection setup did not start");
+    }
+    channel.run(50, 100);
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection setup did not complete");
+    }
+
+    std::vector<Bytes> emitted;
+    stationB.setTxDataCallback(
+        [&](const Bytes& data, bool) { emitted.push_back(data); });
+
+    const Bytes mode_change = v2::ControlFrame::makeModeChange(
+        "W1ABC", "K2DEF", 77, Modulation::QPSK, CodeRate::R1_2,
+        20.0f, 0.50f, 0).serialize();
+    const Bytes disconnect =
+        v2::ControlFrame::makeDisconnect("W1ABC", "K2DEF").serialize();
+    Bytes same_callback = mode_change;
+    same_callback.insert(same_callback.end(), disconnect.begin(), disconnect.end());
+
+    // MODE_CHANGE first queues an ordinary ACK because onRxData() defers host TX.
+    // DISCONNECT later in this same callback activates teardown and must evict it,
+    // while retaining the sentinel close ACK generated for the second frame.
+    stationB.onRxData(same_callback, true);
+    stationB.tick(1);
+
+    if (emitted.size() != 1) {
+        FAIL("Deferred non-close response escaped (or close ACK was lost)");
+    }
+    const auto header = v2::parseHeader(emitted.front());
+    if (!header.valid || header.type != v2::FrameType::ACK ||
+        header.seq != v2::DISCONNECT_SEQ) {
+        FAIL("Only the reserved DISCONNECT ACK may survive teardown activation");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_crossed_disconnect_converges_without_acks() {
     TEST("Crossed disconnect converges through mutual-close grace");
 
@@ -805,9 +879,9 @@ bool test_crossed_disconnect_converges_without_acks() {
     if (channel.getDisconnectCountA() != 1 || channel.getDisconnectCountB() != 1) {
         FAIL("Local DISCONNECT retransmitted after peer close intent was decoded");
     }
-    if (channel.getDisconnectAckCountA() < 2 ||
-        channel.getDisconnectAckCountB() < 2) {
-        FAIL("Mutual-close grace did not keep the peer ACK alive");
+    if (channel.getDisconnectAckCountA() != 1 ||
+        channel.getDisconnectAckCountB() != 1) {
+        FAIL("Crossed close must use one reactive ACK without symmetric repeat trains");
     }
     if (stationA.getStats().disconnects != 1 || stationB.getStats().disconnects != 1) {
         FAIL("Crossed close was double-counted in disconnect statistics");
@@ -1300,6 +1374,8 @@ int main() {
     test_environment_force_handshake_precedence();
     test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_disconnect();
+    test_disconnected_disconnect_does_not_emit_stale_state();
+    test_teardown_purges_earlier_deferred_protocol_tx();
     test_crossed_disconnect_converges_without_acks();
     test_manual_accept();
 

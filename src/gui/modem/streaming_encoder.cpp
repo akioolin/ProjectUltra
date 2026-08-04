@@ -504,6 +504,8 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         anchor_options.force_full_group_start;
     const bool current_group_keep_skip_streak =
         current_group_full_anchor && anchor_options.keep_skip_streak;
+    const bool current_descriptor_full_anchor =
+        current_group_full_anchor || anchor_options.force_full_descriptor;
 
     // The ARQ owns logical frames; physical grouping belongs to this encoder call.
     // Sanitize a private copy on every emission so a seq regrouped by selective
@@ -669,7 +671,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         // that crawled K=3). Resends are reactive (can't be announced); the RX's K-gated fast §16.4
         // escalation catches those. Computed BEFORE makeBurstHeader so the flag lands in the payload.
         const bool warm_descriptor =
-            !(force_full_preamble_once_ || current_group_full_anchor);
+            !(force_full_preamble_once_ || current_descriptor_full_anchor);
         static const int kAnchorSkipK = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
             return (e && *e) ? std::max(1, std::atoi(e)) : 1;  // reliability default; =2 opt-in

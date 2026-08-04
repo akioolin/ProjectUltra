@@ -122,6 +122,7 @@ public:
     float getLastOFDMBroadbandSNREstimate() const override;
     bool hasEvmSnrEstimate() const override;
     float getEvmSnrDbEstimate() const override;
+    bool takeEvmSnrEstimate(float& evm_snr_db, size_t& carrier_count) override;
     float estimatedCFO() const override;
     float getFadingIndex() const override;  // From demodulator pilot variance
     float getLastPilotFrequencyCV() const override;

@@ -3,6 +3,8 @@
 #include "sync/signal_policy.hpp"   // PilotCFOUpdate (return type of ingestPilotResidual)
 
 #include <atomic>
+#include <cmath>
+#include <mutex>
 
 namespace ultra {
 namespace sync {
@@ -28,6 +30,13 @@ namespace sync {
 // + the store live here instead of being woven through the decode paths.
 class CFOTracker {
 public:
+    enum class BurstOutcomeAction {
+        CERTIFIED,
+        REVOKED,
+        ROLLED_BACK_WARM,
+        ROLLED_BACK_COLD,
+    };
+
     // The current tracked CFO (Hz). Read on acquisition (as the known CFO) and before each demod.
     float tracked() const { return cfo_.load(); }
 
@@ -51,7 +60,9 @@ public:
     float seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
                                        const char* log_prefix) const;
 
-    // True once ingestPilotResidual refined the estimate since the last reset.
+    // True once a successful decode outcome certified the estimate since the
+    // last reset. Pilot feedback alone is not proof: failed demodulations also
+    // publish residuals and can move the tracked value.
     bool pilotSeeded() const { return pilot_seeded_.load(); }
 
     // BUG-ANCHOR-CFO-KILL completion: the warm-keep is only safe while the warm
@@ -59,14 +70,19 @@ public:
     // verdict exists (cross-frame interleave decodes at group end), so a crater
     // stretch feeds the tracker noise and it random-walks (measured -0.10 ->
     // +0.29 across a crater run once the chirp stopped re-centering it). A
-    // DELIVERED group certifies the warm estimate; a 0/N group revokes the
-    // certificate, so the next full anchor takes the chirp again and re-centers.
-    void certifyWarm() {
-        certified_cfo_.store(cfo_.load());  // snapshot the PROVEN CFO (this group decoded with it)
-        has_certified_.store(true);
-        pilot_seeded_.store(true);
+    // DELIVERED group certifies the warm estimate; a 0/N group restores the last
+    // proven numeric reference and revokes the certificate, so the next full
+    // anchor takes the chirp again without comparing it to a poisoned reference.
+    // A partial group restores the last certified numeric value because its
+    // final pre-verdict residual is not authoritative (applyBurstDecodeOutcome).
+    bool certifyWarm() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return certifyWarmLocked();
     }
-    void revokeWarm() { pilot_seeded_.store(false); }
+    void revokeWarm() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        pilot_seeded_.store(false);
+    }
 
     // CHEAP RE-ANCHOR (ULTRA_CHEAP_REANCHOR): restore the last CERTIFIED CFO — the value
     // a delivered group proved — WITHOUT a full dual-chirp re-anchor. A fade is an
@@ -76,9 +92,66 @@ public:
     // last proven value un-poisons it for free, so warm sync can retry the next group
     // without the chirp tax. Returns false if nothing certified yet (keep current).
     bool rollbackToCertified() {
-        if (!has_certified_.load()) return false;
-        cfo_.store(certified_cfo_.load());
-        return true;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return rollbackToCertifiedLocked();
+    }
+
+    // Reconcile mutable pilot tracking with the burst's authoritative LDPC
+    // outcome.  Pilot residuals are published before the cross-frame decode
+    // verdict, so a partial group can contain both useful frames and a late
+    // fade-driven residual that walked `cfo_` away from the value which acquired
+    // the burst.  It proves neither the final mutable value (all-good) nor total
+    // loss of timing (0/N): restore the last proven snapshot.  If no snapshot
+    // exists, remain cold so the next full anchor trusts its chirp.
+    BurstOutcomeAction applyBurstDecodeOutcome(int logical_ok, int group_size) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const bool valid = group_size > 0 && logical_ok >= 0 && logical_ok <= group_size;
+        if (valid && logical_ok == group_size) {
+            if (certifyWarmLocked()) {
+                return BurstOutcomeAction::CERTIFIED;
+            }
+            const bool restored = rollbackToCertifiedLocked();
+            if (!restored) cfo_.store(0.0f);
+            pilot_seeded_.store(false);
+            return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
+                            : BurstOutcomeAction::REVOKED;
+        }
+        if (valid && logical_ok > 0) {
+            const bool was_warm = pilot_seeded_.load();
+            if (rollbackToCertifiedLocked()) {
+                return was_warm ? BurstOutcomeAction::ROLLED_BACK_WARM
+                                : BurstOutcomeAction::ROLLED_BACK_COLD;
+            }
+            cfo_.store(0.0f);
+            pilot_seeded_.store(false);
+            return BurstOutcomeAction::REVOKED;
+        }
+        // A proven 0/N outcome, or malformed counts, cannot leave the mutable
+        // pilot walk as the connected-cold drift reference: the cold chirp clamp
+        // would otherwise compare against (and potentially retain) the poison.
+        const bool restored = rollbackToCertifiedLocked();
+        if (!restored) cfo_.store(0.0f);
+        pilot_seeded_.store(false);
+        return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
+                        : BurstOutcomeAction::REVOKED;
+    }
+
+    // No authoritative LDPC outcome exists (unproven geometry, hard process
+    // abort). Discard any mutable pilot walk and preserve prior warm trust only
+    // when an older certified snapshot actually exists.
+    BurstOutcomeAction reconcileUncertainBurstEnd() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const bool was_warm = pilot_seeded_.load();
+        if (rollbackToCertifiedLocked()) {
+            return was_warm ? BurstOutcomeAction::ROLLED_BACK_WARM
+                            : BurstOutcomeAction::ROLLED_BACK_COLD;
+        }
+        // There is no trustworthy numeric reference. Leaving a mutable pilot
+        // walk here would let connected-cold chirp sanity compare against it and
+        // clamp a valid re-acquisition back to the same unproven value.
+        cfo_.store(0.0f);
+        pilot_seeded_.store(false);
+        return BurstOutcomeAction::REVOKED;
     }
 
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
@@ -91,10 +164,20 @@ public:
 
     // Store a CFO value — the chirp seed, or the post-demod pilot-corrected feedback (the invariant).
     // ATOMIC: touched by the RX + control threads, exactly like the former SyncController::last_cfo_.
-    void store(float cfo_hz) { cfo_.store(cfo_hz); }
+    void store(float cfo_hz) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!std::isfinite(cfo_hz)) {
+            // Never replace a finite tracked value with NaN/Inf. The estimator
+            // result is not proof, so also force the next anchor onto cold rules.
+            pilot_seeded_.store(false);
+            return;
+        }
+        cfo_.store(cfo_hz);
+    }
 
     // Reset to 0 for a new connection / mode change (clears the pilot-refined mark).
     void reset() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         cfo_.store(0.0f);
         pilot_seeded_.store(false);
         has_certified_.store(false);
@@ -102,6 +185,35 @@ public:
     }
 
 private:
+    bool certifyWarmLocked() {
+        const float current = cfo_.load();
+        if (!std::isfinite(current)) {
+            pilot_seeded_.store(false);
+            return false;
+        }
+        certified_cfo_.store(current);
+        has_certified_.store(true);
+        pilot_seeded_.store(true);
+        return true;
+    }
+
+    bool rollbackToCertifiedLocked() {
+        if (!has_certified_.load()) return false;
+        const float certified = certified_cfo_.load();
+        if (!std::isfinite(certified)) {
+            has_certified_.store(false);
+            pilot_seeded_.store(false);
+            return false;
+        }
+        cfo_.store(certified);
+        return true;
+    }
+
+    // Serializes compound certificate/reset transitions. The individual values
+    // remain atomic for the frequent read-only telemetry path, but reset cannot
+    // interleave halfway through certify/rollback and manufacture a cross-session
+    // warm certificate.
+    mutable std::mutex state_mutex_;
     std::atomic<float> cfo_{0.0f};
     std::atomic<bool> pilot_seeded_{false};
     std::atomic<float> certified_cfo_{0.0f};  // last DELIVERED-group CFO (cheap re-anchor)

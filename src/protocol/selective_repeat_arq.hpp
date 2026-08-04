@@ -146,6 +146,13 @@ public:
     // repair ACK even though it contributes no new ARQ progress.
     bool onToneBurstAck(uint8_t group_seq6, uint32_t bitmap, uint8_t move_epoch);
 
+    // Side-effect-free exact-identity query for Connection's immediately preceding
+    // physical round.  A frame is counted only while the same serialized DATA
+    // identity is still active and unACKed; SACKed or cumulatively retired frames
+    // therefore count as delivered.  Full identity matching is intentional: a bare
+    // 16-bit seq can be reused after wrap and must not authorize a light repair.
+    size_t countUnackedFrameIdentities(const std::vector<Bytes>& frames) const;
+
     // Side-effect-free counterpart used by the PHY monitor before it commits a
     // CRC-valid timing candidate. Checks sequence/epoch support and rejects bitmap
     // claims for frames this sender has not emitted. The stateful onToneBurstAck()

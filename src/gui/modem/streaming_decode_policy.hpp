@@ -62,6 +62,21 @@ inline bool commandedGeometryEnabled() {
 // cadence guard) so they cannot drift apart.
 inline constexpr uint64_t kBurstCadenceRtoGapSamples = 15ull * 48000ull;
 
+// Keep the timeout discriminator independent from anchor choice. A selective
+// repair is intentionally announced with a FULL current-group anchor, but it is
+// still a steady-cadence ARQ repair and remains safe for a descriptor-proven
+// provisional HARQ key. A real sample-clock gap blocks that key path; unknown
+// or non-forward cadence also fails closed.
+inline constexpr bool burstCadenceBlocksProvisionalHarq(
+    uint64_t previous_descriptor_abs, uint64_t current_descriptor_abs) {
+    // Unknown or non-forward time is not evidence of steady cadence. The first
+    // descriptor seeds the reference; the following prompt repair may qualify.
+    return previous_descriptor_abs == 0 ||
+           current_descriptor_abs <= previous_descriptor_abs ||
+           (current_descriptor_abs - previous_descriptor_abs) >
+               kBurstCadenceRtoGapSamples;
+}
+
 // A decoded descriptor normally hands its trusted timing directly to the
 // following light-LTS DATA marker. A sender-announced full current-group anchor
 // is an explicit exception: retaining the light prediction would point inside
@@ -79,32 +94,63 @@ inline constexpr bool keepDescriptorWarmHandoff(bool phase_is_warm,
 
 // ULTRA_HARQ_PROVISIONAL remains a deliberately narrow, default-off experiment.
 // A failed CW0 hides both the ARQ identity and PHYSICAL_BURST_END.  The receiver
-// may predict the identity only for the one currently-authorized profile, and
-// only where the descriptor proves this is a non-tail physical member.  Keeping
-// the last member out is important: a retry may regroup the same ARQ seq at a
-// different physical position, and tail/non-tail DATA frames have different
-// protected bits.
+// may predict the identity only for the currently-authorized profiles. A tail
+// member may be observed to validate the mirror, but may never use a provisional
+// key: a retry can regroup the same ARQ seq at another physical position, and
+// tail/non-tail DATA frames have different protected bits.
 //
 // This helper contains every cheap gate that is known before pulling the ARQ
 // mirror callback.  The caller separately verifies that the returned context is
 // valid and contains this logical position.
-inline constexpr bool allowProvisionalHarq(bool opt_in,
-                                           bool burst_transport,
-                                           bool exact_descriptor_proven,
-                                           bool burst_interleave,
-                                           bool rto_gap_context,
-                                           bool prediction_invalid,
-                                           bool context_callback_available,
-                                           Modulation modulation,
-                                           CodeRate rate,
-                                           int logical_index,
-                                           int declared_group_size) {
+inline constexpr bool allowProvisionalHarqContext(
+    bool opt_in,
+    bool burst_transport,
+    bool exact_descriptor_proven,
+    bool burst_interleave,
+    bool cadence_blocked,
+    bool prediction_invalid,
+    bool context_callback_available,
+    Modulation modulation,
+    CodeRate rate,
+    int frame_cw_count,
+    int lifting_z,
+    int logical_index,
+    int declared_group_size) {
+    const bool qpsk_r34_profile =
+        modulation == Modulation::QPSK && rate == CodeRate::R3_4;
+    // The new 8PSK authorization deliberately matches only the live profile
+    // that exposed the repeated CW0 holes. Keep cw12/Z27 and any future 8PSK
+    // geometry outside this experiment until measured independently.
+    const bool psk8_long_profile =
+        modulation == Modulation::QAM8 && rate == CodeRate::R2_3 &&
+        frame_cw_count == 4 && lifting_z == 81;
+    const bool authorized_profile = qpsk_r34_profile || psk8_long_profile;
     return opt_in && burst_transport && exact_descriptor_proven &&
-           !burst_interleave && !rto_gap_context && !prediction_invalid &&
-           context_callback_available && modulation == Modulation::QPSK &&
-           rate == CodeRate::R3_4 && logical_index >= 0 &&
+           !burst_interleave && !cadence_blocked && !prediction_invalid &&
+           context_callback_available && authorized_profile && logical_index >= 0 &&
+           declared_group_size >= 2 &&
+           logical_index < declared_group_size;
+}
+
+// A profile/cadence-eligible context is still only a prediction. Do not use it
+// as a soft-combine key until at least one real CW0 header in this physical group
+// has matched the mirror. This closes the all-unknown-prefix contamination path.
+inline constexpr bool allowProvisionalHarqKey(bool context_allowed,
+                                              bool prediction_validated,
+                                              int logical_index,
+                                              int declared_group_size) {
+    return context_allowed && prediction_validated && logical_index >= 0 &&
            declared_group_size >= 2 &&
            logical_index < declared_group_size - 1;
+}
+
+inline constexpr bool provisionalHarqPredictionMatchesHeader(
+    uint32_t predicted_sender_hash, uint32_t predicted_dst_hash,
+    uint16_t predicted_seq, uint32_t actual_sender_hash,
+    uint32_t actual_dst_hash, uint16_t actual_seq) {
+    return predicted_sender_hash == actual_sender_hash &&
+           predicted_dst_hash == actual_dst_hash &&
+           predicted_seq == actual_seq;
 }
 
 inline constexpr bool provisionalHarqContextCoversPosition(

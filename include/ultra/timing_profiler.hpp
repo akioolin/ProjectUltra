@@ -145,6 +145,15 @@ struct DecoderProfile {
     PhaseStats cw0_peek_1cw;
     PhaseStats ofdm_cw0_probe_decode;
     PhaseStats failed_4cw_after_peek;
+    // Default-OFF HARQ counterfactual decoder-region timing. Each sample is
+    // one full-schedule CW call (including cache construction); frame-evaluation
+    // samples cover assembly, CRC, cache lookup, and any factor recovery for one
+    // counterfactual frame. The outer decode_fixed_frame_total remains the
+    // authoritative end-to-end RX-worker wall time including all bookkeeping.
+    PhaseStats harq_shadow_fresh_decode;
+    PhaseStats harq_shadow_frame_evaluation;
+    PhaseStats harq_lazy_fresh_decode;
+    PhaseStats harq_lazy_frame_evaluation;
     std::atomic<uint64_t> low_llr_escalation_skipped{0};
 
     // Per-call-site retry-attempt histograms for robustDecodeSingleCW().
@@ -180,10 +189,33 @@ struct DecoderProfile {
     // key revealed a different seq (finalize guard). The default-ON decision
     // for provisional keys rides on this staying ~0 across multi-seed runs.
     std::atomic<uint64_t> harq_prediction_mismatch{0};
-    // Fresh-only rescue fired: a combined LLR sum failed every decode attempt
-    // but the un-combined fresh copy decoded — direct evidence the stored
-    // accumulation was hurting (poisoned or confidently-wrong prior copy).
+    // Frame-validated fresh-only rescue: at least one failed combined CW was
+    // replaced by its exact fresh schedule and the resulting (possibly hybrid)
+    // frame passed complete header+CRC. Counted per frame, never on syndrome
+    // alone. all_fresh_frame_rescue is the strict all-fresh subset where the
+    // production frame failed CRC and the complete all-fresh baseline passed.
     std::atomic<uint64_t> harq_fresh_rescue{0};
+    std::atomic<uint64_t> harq_fresh_rescue_provisional{0};
+    std::atomic<uint64_t> harq_all_fresh_frame_rescue{0};
+    std::atomic<uint64_t> harq_all_fresh_frame_rescue_provisional{0};
+    // Default-OFF causal shadow: after a combined sum decodes, run the exact
+    // production schedule on the fresh observation with a separate decoder.
+    // These counters distinguish "both would pass" from a proven
+    // combine-only win without changing the production verdict; two distinct
+    // CRC-valid byte strings are reported as divergent/inconclusive.
+    std::atomic<uint64_t> harq_shadow_eligible{0};
+    std::atomic<uint64_t> harq_shadow_both_pass{0};
+    std::atomic<uint64_t> harq_shadow_combine_only{0};
+    std::atomic<uint64_t> harq_shadow_divergent{0};
+    std::atomic<uint64_t> harq_shadow_eligible_provisional{0};
+    std::atomic<uint64_t> harq_shadow_both_pass_provisional{0};
+    std::atomic<uint64_t> harq_shadow_combine_only_provisional{0};
+    std::atomic<uint64_t> harq_shadow_divergent_provisional{0};
+    // Neither production nor the exact all-fresh counterfactual produced a
+    // valid frame. Recorded lazily on failed combined frames even with the
+    // shadow diagnostic off.
+    std::atomic<uint64_t> harq_double_fail{0};
+    std::atomic<uint64_t> harq_double_fail_provisional{0};
 
     void reset() {
         detect_data_sync.reset();
@@ -197,6 +229,10 @@ struct DecoderProfile {
         cw0_peek_1cw.reset();
         ofdm_cw0_probe_decode.reset();
         failed_4cw_after_peek.reset();
+        harq_shadow_fresh_decode.reset();
+        harq_shadow_frame_evaluation.reset();
+        harq_lazy_fresh_decode.reset();
+        harq_lazy_frame_evaluation.reset();
         low_llr_escalation_skipped.store(0);
         robust_cw_control_first.reset();
         robust_cw_cw0_peek.reset();
@@ -211,6 +247,19 @@ struct DecoderProfile {
         harq_key_build_provisional.store(0);
         harq_prediction_mismatch.store(0);
         harq_fresh_rescue.store(0);
+        harq_fresh_rescue_provisional.store(0);
+        harq_all_fresh_frame_rescue.store(0);
+        harq_all_fresh_frame_rescue_provisional.store(0);
+        harq_shadow_eligible.store(0);
+        harq_shadow_both_pass.store(0);
+        harq_shadow_combine_only.store(0);
+        harq_shadow_divergent.store(0);
+        harq_shadow_eligible_provisional.store(0);
+        harq_shadow_both_pass_provisional.store(0);
+        harq_shadow_combine_only_provisional.store(0);
+        harq_shadow_divergent_provisional.store(0);
+        harq_double_fail.store(0);
+        harq_double_fail_provisional.store(0);
     }
 };
 

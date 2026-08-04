@@ -13,7 +13,8 @@ Usage:
 
 Clock alignment: each log stamps [SSS.SSS] seconds since ITS OWN process start, so the two
 are offset. We select a multi-burst consensus of measured sender burst ends and receiver
-group callbacks, then report its support and residual so the offset can be sanity-checked.
+pre-decode group-air-end markers, then report its support and residual so the offset can be
+sanity-checked. Legacy logs without that marker fall back to post-decode group callbacks.
 """
 
 import argparse
@@ -80,6 +81,47 @@ def ack_keydown_seconds(data):
         return int(data['_keyed_samples']) / 48000.0
     # Legacy render-only logs contain the raw modem waveform, not the wrapper.
     return int(data.get('s') or 0) / 48000.0 + LEAD_IN_S + TAIL_S
+
+
+def drive_transition_summary(events):
+    """Summarize in-session ALC movement without treating resets as steering.
+
+    ``events`` contains ``(time, groupdict)`` entries parsed from ``ALC:
+    tx_drive`` lines.  Current logs name lifecycle transitions as ``reset: ...``;
+    historical logs have no reason and remain classified as operational moves.
+    """
+    if not events:
+        return None
+
+    def is_reset(data):
+        return (data.get('reason') or '').strip().lower().startswith('reset:')
+
+    operational = [(t, d) for t, d in events if not is_reset(d)]
+    resets = [(t, d) for t, d in events if is_reset(d)]
+    first_data = operational[0][1] if operational else events[0][1]
+    start = float(first_data['a'])
+    values = [start]
+    values.extend(float(d['b']) for _, d in operational)
+    final = values[-1]
+    minimum = min(values)
+    peak = max(values)
+
+    import math
+    def db_ratio(value):
+        if start <= 0.0 or value <= 0.0:
+            return None
+        return 20.0 * math.log10(value / start)
+
+    return {
+        'start': start,
+        'minimum': minimum,
+        'peak': peak,
+        'final_before_reset': final,
+        'advisory_moves': len(operational),
+        'lifecycle_resets': len(resets),
+        'peak_db_from_start': db_ratio(peak),
+        'final_db_from_start': db_ratio(final),
+    }
 
 
 def transfer_time_bases(t_done, app_duration_s, first_keydown_t,
@@ -213,15 +255,29 @@ SENDER_PATTERNS = {
     'commit':      re.compile(r'DESC-SWITCH commit (?P<rung>\S+ \S+)'),
     'full_chirp':  re.compile(r'Full chirp\+LTS preamble emitted'),
     'light_lts':   re.compile(r's16-warm-handoff: light LTS'),
+    # Keep the structured form before the broad historical fallback: parse()
+    # records only the first matching kind for a line.  The cause is the exact
+    # distinction the hardware campaign needs (prompt SACK repair versus RTO).
+    'retx_detail': re.compile(
+        r'SR-ARQ: Retransmitting seq=(?P<seq>\d+).*?cause=(?P<cause>[A-Za-z0-9_-]+)'),
     'retx':        re.compile(r'(?i)retransmit|resend'),
     'timeout':     re.compile(r'(?i)SR-ARQ.*timeout|RTO'),
-    'drive':       re.compile(r'ALC: tx_drive (?P<a>[\d.]+) -> (?P<b>[\d.]+)'),
+    'drive':       re.compile(
+        r'ALC: tx_drive (?P<a>[\d.]+) -> (?P<b>[\d.]+)'
+        r'(?: \((?P<reason>[^)]*)\))?'),
     'arqcfg':      re.compile(r'ARQ window=\d+.*?data=(?P<data_ms>\d+)ms'),
 }
 
 RECEIVER_PATTERNS = {
     'regrade':     re.compile(r'RX-AUTHORITY crater REGRADED to hold \(idx (?P<idx>\d+) delivered=(?P<deliv>[0-9.]+) >= break-even=(?P<be>[0-9.]+)'),
 
+    # This marker is emitted after the complete physical group has been buffered
+    # but before deinterleaving and LDPC work. It is therefore the receiver-side
+    # air-end anchor. The later `group` callback can move by hundreds of
+    # milliseconds when BI1 defers a hard decode to group end; using that callback
+    # for cross-host clock alignment mistakes decoder CPU time for radio timing.
+    'group_physical_end': re.compile(
+        r'Burst group complete \((?P<tot>\d+) frames\), deinterleaving'),
     'group':       re.compile(r'Burst (?:#(?P<ord>\d+) )?\(?group_seq=(?P<g>\d+)\)? delivered as unit: (?P<ok>\d+)/(?P<tot>\d+) logical OK \(all_ok=(?P<all>\d)\) max_iters=(?P<it>\d+) quality=(?P<q>[\d.]+)'),
     'frame':       re.compile(r'Burst logical frame (?P<i>\d+)/(?P<n>\d+): (?P<res>OK|FAIL)'),
     'ack_tx':      re.compile(r'TX ToneBurstAck: group_seq=(?P<g>\d+) type=(?P<ty>\S+) frame_mask=(?P<fm>0x[0-9A-Fa-f]+) samples=(?P<s>\d+)'),
@@ -422,10 +478,14 @@ def reconstruct_ack_transmissions(receiver_events):
 def align(sender, receiver):
     """Offset to ADD to sender times to put them on the receiver clock.
 
-    Build every plausible burst-end -> group-callback offset, then choose the offset
+    Build every plausible burst-end -> pre-decode group-air-end offset, then choose the offset
     supported by the largest one-to-one consensus across the complete transfer.  A
     first-TX -> first-group anchor is unsafe: the first physical burst can be lost before
     producing any group callback, shifting every later association by one burst.
+
+    New logs provide a `Burst group complete` marker before deinterleaving and LDPC.
+    Prefer it because post-decode callbacks include data-dependent decoder latency. Fall
+    back to group callbacks only for legacy logs and name that provenance explicitly.
 
     The descriptor's group size and the callback's logical total are independent evidence
     for the same physical geometry, so exact geometry matches lead the candidate score.
@@ -435,7 +495,12 @@ def align(sender, receiver):
     """
     txs = [(t, d) for t, k, d in sender if k == 'tx_burst']
     groups = [(t, d) for t, k, d in receiver if k == 'group']
-    if not txs or not groups:
+    physical_ends = [
+        (t, d) for t, k, d in receiver if k == 'group_physical_end'
+    ]
+    anchors = physical_ends if physical_ends else groups
+    anchor_kind = 'physical-end' if physical_ends else 'group-callback'
+    if not txs or not anchors:
         return 0.0, 'none (missing anchors)'
 
     # Pair each descriptor with its nearby emitted-sample record.  Keep the legacy
@@ -458,17 +523,17 @@ def align(sender, receiver):
     proposals = {
         round(tg - (tt + air_s), 6)
         for tt, air_s in zip((t for t, _ in txs), signal_airtimes)
-        for tg, _ in groups
+        for tg, _ in anchors
     }
     best = None
     for proposed_off in proposals:
         refined_off = proposed_off
         by_tx = {}
-        unmatched = groups
+        unmatched = anchors
         for _ in range(2):
             shifted = [(t + refined_off, d) for t, d in txs]
             by_tx, unmatched = associate_groups_to_bursts(
-                shifted, signal_airtimes, groups)
+                shifted, signal_airtimes, anchors)
             if not by_tx:
                 break
             support_offsets = [
@@ -481,7 +546,7 @@ def align(sender, receiver):
 
         shifted = [(t + refined_off, d) for t, d in txs]
         by_tx, unmatched = associate_groups_to_bursts(
-            shifted, signal_airtimes, groups)
+            shifted, signal_airtimes, anchors)
         residuals = [
             group[0] - (shifted[ti][0] + signal_airtimes[ti])
             for ti, group in by_tx.items()
@@ -524,9 +589,9 @@ def align(sender, receiver):
     )
     return off, (
         f'multi-burst consensus {len(by_tx)}/{len(txs)} TX, '
-        f'{len(groups) - len(unmatched)}/{len(groups)} groups; '
+        f'{len(anchors) - len(unmatched)}/{len(anchors)} groups; '
         f'first matched TX #{first_matched_tx}; max residual {max_residual:.3f}s; '
-        f'{airtime_note}'
+        f'{airtime_note}; anchor={anchor_kind}'
     )
 
 
@@ -540,6 +605,47 @@ def main():
     S = parse(a.sender, SENDER_PATTERNS)
     R = parse(a.receiver, RECEIVER_PATTERNS)
     off, how = align(S, R)
+    # align() deliberately retains its stable two-value public API for the unit
+    # tests and downstream imports.  Export the human-readable consensus as
+    # structured JSON as well, so an automated hardware runner can reject a
+    # finite-but-poor cross-host alignment instead of silently scoring it.
+    alignment_match = re.fullmatch(
+        r'multi-burst consensus (?P<tx_support>\d+)/(?P<tx_total>\d+) TX, '
+        r'(?P<group_support>\d+)/(?P<group_total>\d+) groups; '
+        r'first matched TX #(?P<first_tx>\d+); max residual '
+        r'(?P<max_residual>[0-9.]+)s; '
+        r'(?:(?:measured airtime (?P<airtime_measured>\d+)/'
+        r'(?P<airtime_total>\d+) bursts)|(?:ASSUMED 9\.0s airtime .*?))'
+        r'(?:; anchor=(?P<anchor_kind>physical-end|group-callback))?',
+        how)
+    alignment_meta = {
+        'clock_alignment_provenance': how,
+        'clock_alignment_tx_support': None,
+        'clock_alignment_tx_total': None,
+        'clock_alignment_group_support': None,
+        'clock_alignment_group_total': None,
+        'clock_alignment_first_matched_tx': None,
+        'clock_alignment_max_residual_s': None,
+        'clock_alignment_measured_airtimes': 0,
+        'clock_alignment_airtime_total': None,
+        'clock_alignment_anchor_kind': None,
+    }
+    if alignment_match:
+        values = alignment_match.groupdict()
+        alignment_meta.update({
+            'clock_alignment_tx_support': int(values['tx_support']),
+            'clock_alignment_tx_total': int(values['tx_total']),
+            'clock_alignment_group_support': int(values['group_support']),
+            'clock_alignment_group_total': int(values['group_total']),
+            'clock_alignment_first_matched_tx': int(values['first_tx']),
+            'clock_alignment_max_residual_s': float(values['max_residual']),
+            'clock_alignment_measured_airtimes': int(
+                values['airtime_measured'] or 0),
+            'clock_alignment_airtime_total': int(
+                values['airtime_total'] or values['tx_total']),
+            'clock_alignment_anchor_kind': (
+                values['anchor_kind'] or 'group-callback'),
+        })
     Sa = [(t + off, k, d) for t, k, d in S]   # sender on receiver clock
 
     print("=" * 78)
@@ -902,6 +1008,10 @@ def main():
 
 
     print("\n## RETRANSMISSIONS — what and why")
+    detailed_retx = [d for t, k, d in Sa
+                     if k == 'retx_detail' and
+                     (t_done is None or t <= t_done)]
+    retx_causes = Counter(d['cause'].lower() for d in detailed_retx)
     rq = [(t, d) for t, k, d in Sa
           if k == 'requeue' and (t_done is None or t <= t_done)]
     partials = [(t, d) for t, d in groups if d['all'] == '0' and d['ok'] != '0']
@@ -1107,16 +1217,26 @@ def main():
 
     # ---------- CHANNEL CLASS + DRIVE ----------
     ep = [(t, d['e']) for t, k, d in Sa if k == 'epoch']
-    dr = [(t, d['a'], d['b']) for t, k, d in Sa if k == 'drive']
+    dr = [(t, d) for t, k, d in Sa if k == 'drive']
+    drive_summary = drive_transition_summary(dr)
     if ep or dr:
         print("\n## ARQ EPOCHS + TX DRIVE")
         for t, e in ep:
             print(f"  t={t:7.2f}s  MOVE-EPOCH -> {e}   (seq space regridded; in-flight frames abandoned)")
-        if dr:
-            import math as _m
-            a0, b1 = float(dr[0][1]), float(dr[-1][2])
-            db = 20.0 * _m.log10(b1 / a0) if a0 > 0 and b1 > 0 else float('nan')
-            print(f"  tx_drive: {a0:.3f} -> {b1:.3f} over {len(dr)} steps ({db:+.2f} dB)")
+        if drive_summary:
+            peak_db = drive_summary['peak_db_from_start']
+            final_db = drive_summary['final_db_from_start']
+            peak_db_text = f"{peak_db:+.2f} dB" if peak_db is not None else "n/a"
+            final_db_text = f"{final_db:+.2f} dB" if final_db is not None else "n/a"
+            print(
+                "  tx_drive operational: "
+                f"start={drive_summary['start']:.3f} "
+                f"min={drive_summary['minimum']:.3f} "
+                f"peak={drive_summary['peak']:.3f} "
+                f"final-before-reset={drive_summary['final_before_reset']:.3f}; "
+                f"{drive_summary['advisory_moves']} advisory move(s), "
+                f"peak excursion {peak_db_text}, net {final_db_text}; "
+                f"{drive_summary['lifecycle_resets']} lifecycle reset(s) excluded")
 
     # ---------- EFFICIENCY ----------
     physical_span_kbps = None
@@ -1185,6 +1305,10 @@ def main():
                 },
                 'requeues': len(rq), 'requeued_chunks': sum(int(x['n']) for _, x in rq),
                 'requeued_bytes': sum(int(x['bytes']) for _, x in rq if x.get('bytes')),
+                'retransmission_entries': len(detailed_retx),
+                'retransmission_causes': dict(retx_causes),
+                'nack_retransmission_entries': retx_causes.get('nack', 0),
+                'timeout_retransmission_entries': retx_causes.get('timeout', 0),
                 'crater_regrades': len([1 for t, k, _ in R
                                         if k == 'regrade' and (t_done is None or t <= t_done)]),
                 'partial_groups': len(partials), 'full_craters': len(zeros),
@@ -1206,7 +1330,9 @@ def main():
                 'non_keyed_gap_headroom_kbps': non_keyed_gap_headroom_kbps,
                 'rung_state_announcements': len(rungs),
                 'physical_transfer_rung_transitions': len(rung_transitions),
+                'tx_drive': drive_summary,
                 'kbps': float(done[-1]['kbps']) if done else 0.0,
+                **alignment_meta,
             }, fh, indent=1)
         print(f"\n(json -> {a.json})")
 

@@ -587,6 +587,24 @@ static bool test_evm_demote_inert_when_supported() {
     return true;
 }
 
+static bool test_missing_group_evm_clears_prior_observation() {
+    TEST("missing group EVM explicitly clears a prior low observation");
+    setenv("ULTRA_EVM_DEMOTE", "1", 1);
+    Connection c;
+    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
+    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
+    c.setBurstEvmObservation(5.0f);  // would force a deep demote if reused
+    c.clearBurstEvmObservation();    // this group has incomplete/no-process coverage
+    TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
+    const uint8_t got = TA::rxCmd(c);
+    unsetenv("ULTRA_EVM_DEMOTE");
+    if (got < kRungIdxQam16R23)
+        FAIL("invalid current-group EVM must not reuse the prior low scalar (idx " +
+             std::to_string(got) + ")");
+    PASS();
+    return true;
+}
+
 // CONFIDENCE-GATED EVM DEMOTE (ULTRA_EVM_DEMOTE_CONFIDENT). The per-group EVM estimate
 // has measured sd 3.1-4.4 dB while adjacent rung floors are 1.2-3.1 dB apart, so ONE
 // sample cannot resolve a rung. Property under test: a single low sample must NOT fire
@@ -886,6 +904,7 @@ int main() {
     ok &= test_evm_floor_table_and_mapping();
     ok &= test_evm_demote_strips_overcommit();
     ok &= test_evm_demote_inert_when_supported();
+    ok &= test_missing_group_evm_clears_prior_observation();
     ok &= test_evm_demote_confidence_gate();
     ok &= test_goodput_break_even_is_rate_ratio();
     ok &= test_crater_grading_is_default_on();

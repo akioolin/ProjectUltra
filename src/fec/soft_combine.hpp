@@ -14,6 +14,7 @@ class SoftCombineBuffer {
 public:
     struct Key {
         uint32_t sender_hash = 0;
+        uint32_t dst_hash = 0;
         uint16_t seq = 0;
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
@@ -42,6 +43,7 @@ public:
 
         bool operator==(const Key& other) const {
             return sender_hash == other.sender_hash &&
+                   dst_hash == other.dst_hash &&
                    seq == other.seq &&
                    rate == other.rate &&
                    cw_count == other.cw_count &&
@@ -53,6 +55,21 @@ public:
                    carrier_count_hash == other.carrier_count_hash;
         }
     };
+
+    // A decoded CW0 is the authority for the provisional key's protected DATA
+    // identity. Compare every header-visible key field that can change protected
+    // bits, not only seq: a sender can reuse a sequence number in another
+    // destination session, and regrouping can change tail status.
+    static constexpr bool provisionalHeaderIdentityMatchesKey(
+        const Key& key, uint32_t actual_sender_hash, uint32_t actual_dst_hash,
+        uint16_t actual_seq, uint8_t actual_cw_count,
+        bool actual_physical_burst_end) {
+        return key.sender_hash == actual_sender_hash &&
+               key.dst_hash == actual_dst_hash && key.seq == actual_seq &&
+               key.cw_count == actual_cw_count &&
+               key.physical_burst_end ==
+                   static_cast<uint8_t>(actual_physical_burst_end ? 1 : 0);
+    }
 
     struct KeyHash {
         size_t operator()(const Key& key) const;
@@ -66,6 +83,7 @@ public:
     // include with the protocol layer).
     struct HarqKeyInputs {
         uint32_t sender_hash = 0;
+        uint32_t dst_hash = 0;
         uint16_t seq = 0;
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
@@ -79,7 +97,11 @@ public:
     };
 
     struct ProvisionalContext {
+        // Both ends of the connected session are part of the protected frame
+        // identity. Source-only keying can alias same-seq traffic that the peer
+        // sends to another station on a shared channel.
         uint32_t sender_hash = 0;
+        uint32_t dst_hash = 0;
         uint16_t seq = 0;
         size_t window_size = 0;
         // #58-follow-on (HARQ provisional keys, 2026-07-01): the receiver's
@@ -91,7 +113,7 @@ public:
         std::vector<uint16_t> predicted_seqs;
 
         bool valid() const {
-            return sender_hash != 0 && window_size > 0;
+            return sender_hash != 0 && dst_hash != 0 && window_size > 0;
         }
     };
 

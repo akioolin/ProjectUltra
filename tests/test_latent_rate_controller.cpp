@@ -60,6 +60,52 @@ LatentRateController::RungGeometryTable productionGeometry(int frames) {
     return table;
 }
 
+LatentRateController::RungGeometryTable mpg20SelectorGeometry(uint8_t incumbent) {
+    // Exact selector policy for the completed 8PSK MPG@20 run: its runner set the
+    // base PA ceiling to 11.5 s and enabled only ULTRA_8PSK_LONG_LDPC. QPSK R3/4
+    // therefore remains cw8/Z27. Alternatives include the descriptor-switch full
+    // group-start anchor; the incumbent does not.
+    constexpr uint32_t kCampaignBaseCeilingMs = 11500;
+    LatentRateController::RungGeometryTable table{};
+    for (uint8_t rung = kRungIdxQpskR14; rung < kRungIdxCount; ++rung) {
+        const auto candidate = coherentRungFromIndex(rung);
+        if (!coherentRungLocallyEnabled(candidate.mod, candidate.rate)) continue;
+
+        const int logical_cw = connection_policy::recommendCWCount(
+            candidate.mod, candidate.rate, WaveformMode::OFDM_CHIRP);
+        int physical_cw = logical_cw;
+        int lifting_z = 27;
+        if (rung == kRungIdxQam8R23 && logical_cw == 12) {
+            physical_cw = 4;
+            lifting_z = 81;
+        }
+        const bool force_full_group_start = rung != incumbent;
+        const size_t window = connection_policy::ofdmWindowSize(
+            candidate.mod, candidate.rate, /*near_awgn_ofdm=*/false);
+        const size_t frames = connection_policy::wideOFDMBurstFrameBudget(
+            candidate.mod, candidate.rate, physical_cw, window,
+            kCampaignBaseCeilingMs,
+            /*continuation_reanchor_ms=*/0, lifting_z,
+            force_full_group_start
+                ? connection_policy::kWideOFDMFullAnchorExtraMs
+                : 0u);
+        const size_t capacity = v2::getFixedFramePayloadCapacityZ(
+            candidate.rate, physical_cw, lifting_z);
+        uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
+            candidate.mod, candidate.rate, frames, physical_cw,
+            /*continuation_reanchor_ms=*/0, lifting_z);
+        if (force_full_group_start && frames > 1) {
+            burst_ms += connection_policy::kWideOFDMFullAnchorExtraMs;
+        }
+        table[rung] = {
+            static_cast<float>(capacity - FileTransferController::FILE_DATA_OVERHEAD),
+            static_cast<int>(frames),
+            static_cast<float>(burst_ms + kNonDataCycleMs) / 1000.0f,
+        };
+    }
+    return table;
+}
+
 LatentRateController::Pick pick(LatentRateController& c, int frames = kFramesPerGroup,
                                 bool allow_probe = false) {
     return c.best(productionGeometry(frames), kRungIdxNone, allow_probe);
@@ -260,6 +306,50 @@ void test_correlated_frames_are_tempered() {
           "tempered evidence sharpens more slowly than treating frames as independent");
 }
 
+// Trace-conditioned controller replay of the completed MPG@20 8PSK cw4/Z81
+// outcomes through its first severe fade. This exercises posterior update and
+// candidate ranking only; Connection command adoption, ACK loss, timers, and
+// switch execution have separate integration coverage. A group spans roughly
+// three coherence times, so its post-decode outcome describes the group that
+// ended, not the next transmission. The tempered posterior must absorb one 1/8
+// event without a snapshot-style rung chase.
+void test_mpg20_trace_conditioned_fade_does_not_chase_next_group() {
+    LatentRateController c;
+    c.seedPrior(latentThetaForRung(kRungIdxQam8R23), 3.0f);
+    const auto geometry = mpg20SelectorGeometry(kRungIdxQam8R23);
+
+    for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+        if (coherentRungLocallyEnabled(coherentRungFromIndex(r).mod,
+                                      coherentRungFromIndex(r).rate)) {
+            CHECK(geometry[r].frames_per_cycle > 0 && geometry[r].cycle_s > 0.0f,
+                  "MPG trace replay must compete against every enabled production rung");
+        }
+    }
+
+    const int prefix[][2] = {
+        {8, 8}, {8, 8}, {7, 8}, {5, 7}, {3, 7}, {7, 7},
+    };
+    for (const auto& outcome : prefix) {
+        c.observe(kRungIdxQam8R23, outcome[0], outcome[1]);
+        c.relax(0.35f);
+    }
+    CHECK(c.best(geometry).rung == kRungIdxQam8R23,
+          "precondition: trace prefix cruises on 8PSK with exact MPG@20 runner geometry");
+
+    c.observe(kRungIdxQam8R23, /*delivered=*/1, /*group=*/8);
+    c.relax(0.35f);
+    const auto after_fade = c.best(geometry);
+    CHECK(after_fade.rung == kRungIdxQam8R23,
+          "one completed 1/8 fade must not demote the next MPG group using stale evidence");
+
+    // The real next trusted group was 7/7.  Feed it only after it completes; no EVM,
+    // SNR, or future/same-frame oracle is part of this replay.
+    c.observe(kRungIdxQam8R23, /*delivered=*/7, /*group=*/7);
+    c.relax(0.35f);
+    CHECK(c.best(geometry).rung == kRungIdxQam8R23,
+          "post-fade recovery remains on the measured higher-goodput rung");
+}
+
 
 // ── 8. TIE-BREAK UPWARD — the counterweight to the pessimism ──────────────────
 // Rig-motivated: deciding from the 25th percentile cost 1.2 dB (mean 16.2 vs p25 15.0),
@@ -376,6 +466,10 @@ void test_operator_constraints_cover_latent_early_return() {
 
 int main() {
     std::cout << "=== Latent Rate Controller Tests ===\n";
+    unsetenv("ULTRA_MAX_BURST_AIRTIME_MS");
+    unsetenv("ULTRA_BURST_ESC_STREAK");
+    unsetenv("ULTRA_BURST_ESCALATION");
+    unsetenv("ULTRA_COHERENT_WINDOW");
     test_evidence_survives_rung_change();
     test_common_mode_calibration_error_cancels();
     test_exact_production_geometry_and_no_eta_double_count();
@@ -383,6 +477,7 @@ int main() {
     test_dead_and_capped_probabilities();
     test_relax_widens_and_is_the_only_forgetting();
     test_correlated_frames_are_tempered();
+    test_mpg20_trace_conditioned_fade_does_not_chase_next_group();
     test_tie_break_probes_upward();
     test_reset_clears_qso_state_and_probe_phase();
     test_operator_constraints_cover_latent_early_return();

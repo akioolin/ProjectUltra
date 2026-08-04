@@ -91,7 +91,12 @@ SoftCombineBuffer::Key key(uint32_t sender, uint16_t seq,
                            CodeRate rate = CodeRate::R1_2,
                            uint8_t cw_count = 6,
                            uint8_t cw_index = 0) {
-    auto k = SoftCombineBuffer::Key{sender, seq, rate, cw_count};
+    SoftCombineBuffer::Key k;
+    k.sender_hash = sender;
+    k.dst_hash = 0x0D0E0F;
+    k.seq = seq;
+    k.rate = rate;
+    k.cw_count = cw_count;
     k.cw_index = cw_index;
     return k;
 }
@@ -363,6 +368,8 @@ void test_key_disambiguation() {
 
     const auto base = key(0x010203, 42, CodeRate::R1_2, 6);
     const auto other_sender = key(0x0A0B0C, 42, CodeRate::R1_2, 6);
+    auto other_dst = base;
+    other_dst.dst_hash = 0x0A0B0C;
     const auto other_rate = key(0x010203, 42, CodeRate::R3_4, 6);
     const auto other_cw = key(0x010203, 42, CodeRate::R1_2, 8);
     const auto other_cw_index = key(0x010203, 42, CodeRate::R1_2, 6, 2);
@@ -371,15 +378,18 @@ void test_key_disambiguation() {
     // not the saturation cap.
     buffer.combine(base, {1.0f}, out); buffer.retain(base, out);
     buffer.combine(other_sender, {2.0f}, out); buffer.retain(other_sender, out);
+    buffer.combine(other_dst, {3.0f}, out); buffer.retain(other_dst, out);
     buffer.combine(other_rate, {4.0f}, out); buffer.retain(other_rate, out);
     buffer.combine(other_cw, {8.0f}, out); buffer.retain(other_cw, out);
     buffer.combine(other_cw_index, {16.0f}, out); buffer.retain(other_cw_index, out);
 
-    CHECK(buffer.size() == 5, "distinct keys should occupy distinct entries");
+    CHECK(buffer.size() == 6, "distinct keys should occupy distinct entries");
     CHECK(buffer.combine(base, {3.0f}, out) == 2 && vecNear(out, {4.0f}),
           "base key should combine only with base entry (sum: 1+3)");
     CHECK(buffer.combine(other_sender, {3.0f}, out) == 2 && vecNear(out, {5.0f}),
           "sender hash should disambiguate same seq (sum: 2+3)");
+    CHECK(buffer.combine(other_dst, {5.0f}, out) == 2 && vecNear(out, {8.0f}),
+          "destination hash must isolate same-sender/same-seq LLR history");
     CHECK(buffer.combine(other_rate, {3.0f}, out) == 2 && vecNear(out, {7.0f}),
           "code rate should disambiguate same sender/seq (sum: 4+3)");
     CHECK(buffer.combine(other_cw, {3.0f}, out) == 2 && vecNear(out, {11.0f}),
@@ -525,6 +535,7 @@ void test_empty_llrs_retain_is_noop() {
 void test_makeKey_basic_field_propagation() {
     SoftCombineBuffer::HarqKeyInputs in;
     in.sender_hash = 0xCAFEBABE;
+    in.dst_hash = 0x00ABCDEF;
     in.seq = 0x1234;
     in.rate = CodeRate::R2_3;
     in.cw_count = 4;
@@ -537,6 +548,7 @@ void test_makeKey_basic_field_propagation() {
     in.ofdm_data_carriers = 30;
     auto k = SoftCombineBuffer::makeKey(in);
     CHECK(k.sender_hash == 0xCAFEBABE, "sender_hash");
+    CHECK(k.dst_hash == 0x00ABCDEF, "dst_hash");
     CHECK(k.seq == 0x1234, "seq");
     CHECK(k.rate == CodeRate::R2_3, "rate");
     CHECK(k.cw_count == 4, "cw_count");
@@ -675,6 +687,35 @@ void test_makeKey_lifting_variant_separates_llr_history() {
     pass("lifting geometry partitions HARQ LLR history");
 }
 
+void test_provisional_header_identity_guard() {
+    SoftCombineBuffer::Key expected;
+    expected.sender_hash = 0x010203;
+    expected.dst_hash = 0x0D0E0F;
+    expected.seq = 77;
+    expected.cw_count = 4;
+    expected.physical_burst_end = 0;
+
+    CHECK(SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+              expected, 0x010203, 0x0D0E0F, 77, 4, false),
+          "exact decoded header identity must match its provisional key");
+    CHECK(!SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+               expected, 0x010204, 0x0D0E0F, 77, 4, false),
+          "same seq from another sender must be rejected");
+    CHECK(!SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+               expected, 0x010203, 0x0A0B0C, 77, 4, false),
+          "same sender and seq for another destination must be rejected");
+    CHECK(!SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+               expected, 0x010203, 0x0D0E0F, 78, 4, false),
+          "wrong seq must be rejected");
+    CHECK(!SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+               expected, 0x010203, 0x0D0E0F, 77, 3, false),
+          "wrong codeword geometry must be rejected");
+    CHECK(!SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+               expected, 0x010203, 0x0D0E0F, 77, 4, true),
+          "tail regrouping must be rejected under a non-tail provisional key");
+    pass("provisional header guard checks source, destination, seq, CW count, and tail");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
@@ -703,6 +744,7 @@ int main() {
     test_makeKey_channel_interleave_false_is_zero();
     test_makeKey_physical_tail_variant_separates_llr_history();
     test_makeKey_lifting_variant_separates_llr_history();
+    test_provisional_header_identity_guard();
 
     std::cout << "\nSoftCombineBuffer tests: " << tests_passed << " passed, "
               << tests_failed << " failed\n";

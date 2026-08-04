@@ -15,6 +15,18 @@ namespace ultra {
 namespace protocol {
 namespace connection_policy {
 
+inline constexpr uint32_t kScriptedDisconnectLogGraceMs = 2000;
+
+// Hardware scenario lifecycle policy: elapsed time since DISCONNECT TX is not
+// completion evidence.  The connection-state callback must first observe the
+// terminal transition; only then may the runner apply a short log-flush grace.
+inline constexpr bool scriptedDisconnectQuitReady(
+    bool completion_observed,
+    uint64_t elapsed_since_completion_ms,
+    uint32_t grace_ms = kScriptedDisconnectLogGraceMs) {
+    return completion_observed && elapsed_since_completion_ms >= grace_ms;
+}
+
 // ═══════ OFDM LEGACY ANCHOR SCALE (2026-07-07 — RETIRE after anchor re-measure) ═══════
 // The OFDM in-band SNR estimator was recalibrated 2026-07-07: a structural
 // +2.758 dB conversion error (it credited the OFDM waveform with the PING-chirp
@@ -131,6 +143,13 @@ inline constexpr int64_t kDescriptorLostReverseTxHoldMs =
 inline constexpr uint32_t kWideOFDMFFTSamples = 1024;
 inline constexpr uint32_t kWideOFDMLongCPSamples = 128;
 inline constexpr uint32_t kWideOFDMSymbolSamples = kWideOFDMFFTSamples + kWideOFDMLongCPSamples;
+// The production ModemEngine installs presets::balanced() in StreamingEncoder:
+// 1024 FFT + the live MEDIUM CP (96 samples).  kWideOFDMSymbolSamples above is
+// retained for the legacy conservative airtime-ceiling policy; physical play-head
+// accounting must use the samples the encoder actually returns.
+inline constexpr uint32_t kWideOFDMWireCPSamples = 96;
+inline constexpr uint32_t kWideOFDMWireSymbolSamples =
+    kWideOFDMFFTSamples + kWideOFDMWireCPSamples;
 inline constexpr uint32_t kWideOFDMCarriers = 59;
 inline constexpr uint32_t kWideOFDMChirpDurationMs = 500;
 inline constexpr uint32_t kWideOFDMChirpGapMs = 100;
@@ -139,6 +158,85 @@ inline constexpr uint32_t kWideOFDMFullAnchorExtraSamples =
     2 * ((kOFDMSampleRate * kWideOFDMChirpGapMs) / 1000);
 inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
     (kWideOFDMFullAnchorExtraSamples * 1000 + kOFDMSampleRate - 1) / kOFDMSampleRate;
+// ModemEngine::postProcessTx() wraps every ordinary DATA waveform in these
+// configurable zero-sample guards.  Keep the defaults and the sample rounding in
+// this protocol-neutral timing helper so the audio producer and Connection's
+// half-duplex play-head cannot acquire two different definitions of key-down.
+inline constexpr int kDefaultTxLeadInMs = 150;
+inline constexpr int kDefaultTxTailMs = 50;
+
+inline int configuredTxLeadInMs() {
+    static const int value = [] {
+        const char* e = std::getenv("ULTRA_TX_LEADIN_MS");
+        return (e && *e) ? std::max(0, std::atoi(e)) : kDefaultTxLeadInMs;
+    }();
+    return value;
+}
+
+inline int configuredTxTailMs() {
+    static const int value = [] {
+        const char* e = std::getenv("ULTRA_TX_TAIL_MS");
+        return (e && *e) ? std::max(0, std::atoi(e)) : kDefaultTxTailMs;
+    }();
+    return value;
+}
+
+inline uint64_t txGuardSamplesForMs(
+        int duration_ms,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    return static_cast<uint64_t>(sample_rate) *
+           static_cast<uint64_t>(std::max(0, duration_ms)) / 1000u;
+}
+
+inline uint64_t txPostProcessGuardSamples(
+        int lead_in_ms = -1,
+        int tail_ms = -1,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    const int lead = lead_in_ms >= 0 ? lead_in_ms : configuredTxLeadInMs();
+    const int tail = tail_ms >= 0 ? tail_ms : configuredTxTailMs();
+    // This deliberately matches ModemEngine's integer sample arithmetic exactly.
+    return txGuardSamplesForMs(lead, sample_rate) +
+           txGuardSamplesForMs(tail, sample_rate);
+}
+
+inline uint32_t sampleDurationCeilMs(
+        uint64_t samples,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        (samples * 1000u + sample_rate - 1u) / sample_rate,
+        0xFFFFFFFFull));
+}
+
+inline uint64_t postProcessedTxSamples(
+        uint64_t waveform_samples,
+        int lead_in_ms = -1,
+        int tail_ms = -1,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    return waveform_samples +
+           txPostProcessGuardSamples(lead_in_ms, tail_ms, sample_rate);
+}
+
+inline uint32_t postProcessedTxDurationFromSamplesMs(
+        uint64_t waveform_samples,
+        int lead_in_ms = -1,
+        int tail_ms = -1,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    return sampleDurationCeilMs(
+        postProcessedTxSamples(
+            waveform_samples, lead_in_ms, tail_ms, sample_rate),
+        sample_rate);
+}
+
+inline uint32_t postProcessedTxDurationMs(
+        uint32_t waveform_ms,
+        int lead_in_ms = -1,
+        int tail_ms = -1,
+        uint32_t sample_rate = kOFDMSampleRate) {
+    const uint64_t waveform_samples =
+        static_cast<uint64_t>(sample_rate) * waveform_ms / 1000u;
+    return postProcessedTxDurationFromSamplesMs(
+        waveform_samples, lead_in_ms, tail_ms, sample_rate);
+}
 inline constexpr uint32_t kWideOFDMShortReanchorDefaultMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMinMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMaxMs = 300;
@@ -350,10 +448,16 @@ inline constexpr int kCarrierSenseAckRepeatCount = 1;
 inline bool shouldHoldSilentAckRepeatForBroadSignal(WaveformMode mode,
                                                      int64_t now_ms,
                                                      int64_t signal_ms,
+                                                     int64_t armed_signal_ms,
                                                      int64_t hold_ms =
                                                          kDescriptorLostReverseTxHoldMs) {
     (void)mode;
-    return signal_ms > 0 &&
+    // The signal that produced the ACK is necessarily fresh when the repeat is
+    // armed. It must not hold its own diversity copy for the full 13-second
+    // descriptor-loss guard (which can extend beyond the sender's RTO). Only a
+    // NEW post-arm broad stamp is evidence that another inbound waveform may be
+    // in progress. This mirrors the existing arm-relative substantive gate.
+    return signal_ms > armed_signal_ms && signal_ms > 0 &&
            now_ms >= signal_ms && now_ms - signal_ms < hold_ms;
 }
 
@@ -1306,6 +1410,53 @@ inline uint32_t wideOFDMSymbolsForCodewords(Modulation mod, CodeRate rate, int c
     return 2 + data_symbols;
 }
 
+// Sample-exact counterpart to wideOFDMFrameTimingForCodewords() for the live
+// ModemEngine/StreamingEncoder geometry.  The returned extent includes the two
+// LTS symbols that connectedDataPreambleForFrame() emits, but not a chirp.
+inline uint64_t wideOFDMWireFrameSamplesForCodewords(
+        Modulation mod,
+        CodeRate rate,
+        int codewords,
+        int lifting_z = 27) {
+    return static_cast<uint64_t>(wideOFDMSymbolsForCodewords(
+               mod, rate, std::clamp(codewords, 1, 255), lifting_z)) *
+           kWideOFDMWireSymbolSamples;
+}
+
+// Exact default descriptor-bearing burst shape emitted by encodeBurstLight().
+// A singleton has no descriptor and goes through encodeFrame().  Every
+// multi-frame turn has one full QPSK-R1/4 descriptor; a repair/mode-switch can
+// additionally replace the DATA group-start's light LTS with a full chirp.
+inline uint64_t wideOFDMWireBurstSamples(
+        Modulation data_mod,
+        CodeRate data_rate,
+        size_t frame_count,
+        int cw_count = v2::kDefaultFixedFrameCodewords,
+        int data_lifting_z = 27,
+        bool force_full_group_start = false,
+        Modulation control_mod = Modulation::QPSK,
+        uint32_t continuation_reanchor_ms = 0) {
+    if (frame_count == 0) return 0;
+
+    uint64_t samples = kWideOFDMFullAnchorExtraSamples;
+    if (frame_count > 1) {
+        samples += wideOFDMWireFrameSamplesForCodewords(
+            control_mod, CodeRate::R1_4, 1, 27);
+    }
+    samples += static_cast<uint64_t>(frame_count) *
+               wideOFDMWireFrameSamplesForCodewords(
+                   data_mod, data_rate, cw_count, data_lifting_z);
+    if (frame_count > 1) {
+        samples += static_cast<uint64_t>(frame_count - 1) *
+                   txGuardSamplesForMs(
+                       static_cast<int>(continuation_reanchor_ms));
+        if (force_full_group_start) {
+            samples += kWideOFDMFullAnchorExtraSamples;
+        }
+    }
+    return samples;
+}
+
 inline uint32_t wideOFDMShortReanchorChirpDurationMs() {
     static const uint32_t duration_ms = [] {
         const char* value = std::getenv("ULTRA_SHORT_REANCHOR_CHIRP_MS");
@@ -1453,7 +1604,8 @@ inline size_t wideOFDMBurstFrameBudget(Modulation mod,
                                        size_t max_frames,
                                        uint32_t ceiling_ms,
                                        uint32_t continuation_reanchor_ms = 0,
-                                       int data_lifting_z = 27) {
+                                       int data_lifting_z = 27,
+                                       uint32_t group_start_extra_ms = 0) {
     if (max_frames <= 1) {
         return std::max<size_t>(1, max_frames);
     }
@@ -1462,7 +1614,9 @@ inline size_t wideOFDMBurstFrameBudget(Modulation mod,
         const uint32_t airtime_ms = wideOFDMBurstAirtimeMs(
             mod, rate, frames + 1, cw_count,
             continuation_reanchor_ms, data_lifting_z);
-        if (airtime_ms > ceiling_ms) {
+        const uint64_t physical_signal_ms =
+            static_cast<uint64_t>(airtime_ms) + group_start_extra_ms;
+        if (physical_signal_ms > ceiling_ms) {
             break;
         }
         ++frames;
@@ -1837,11 +1991,15 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
                                          uint32_t reanchor_ms = 0) {
     const int sanitized_cw = v2::sanitizeFixedFrameCodewords(cw_count);
     const size_t frames = std::max<size_t>(1, burst_frames);
-    const OFDMFrameTiming timing =
-        wideOFDMFrameTiming(data_mod, data_rate, sanitized_cw, data_lifting_z);
-    // (1) actual on-air burst airtime (frames + first-frame anchor), mod/rate/cw/z-derived.
-    const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
-        data_mod, data_rate, frames, sanitized_cw, reanchor_ms, data_lifting_z);
+    const uint64_t frame_samples = wideOFDMWireFrameSamplesForCodewords(
+        data_mod, data_rate, sanitized_cw, data_lifting_z);
+    // (1) exact default StreamingEncoder output plus ModemEngine's configured
+    // lead/tail samples. This includes the descriptor control frame for N>1.
+    const uint64_t waveform_samples = wideOFDMWireBurstSamples(
+        data_mod, data_rate, frames, sanitized_cw, data_lifting_z,
+        /*force_full_group_start=*/false, control_mod, reanchor_ms);
+    const uint32_t burst_ms =
+        postProcessedTxDurationFromSamplesMs(waveform_samples);
     // (2) receiver response envelope — RE-DERIVED 2026-07-02 (closes
     // BUG-ACK-TIMEOUT-DOUBLECOUNT). Rig calibration (124 groups across 4 MPG@20
     // transfers) measured the CLEAN-path group-end->SACK hold at 0-1 ms — the
@@ -1857,12 +2015,12 @@ inline uint32_t unifiedBurstAckTimeoutMs(Modulation data_mod,
     // window-hold arming, which the burst-path receiver does not apply); the
     // parameter stays for call-site stability.
     (void)configured_sack_delay_ms;
-    const uint64_t remaining_data_ms =
-        static_cast<uint64_t>(frames - 1) * timing.data_ms;
+    const uint64_t remaining_data_samples =
+        static_cast<uint64_t>(frames - 1) * frame_samples;
     return unifiedBurstAckTimeoutFromPhysicalGeometryMs(
         burst_ms,
-        static_cast<uint32_t>(std::min<uint64_t>(remaining_data_ms, 0xFFFFFFFFull)),
-        timing.data_ms, control_mod,
+        sampleDurationCeilMs(remaining_data_samples),
+        sampleDurationCeilMs(frame_samples), control_mod,
         frames > 1 ? kWideOFDMFullAnchorExtraMs : 0u,
         reanchor_ms);
 }

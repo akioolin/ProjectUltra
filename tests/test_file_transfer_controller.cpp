@@ -305,6 +305,73 @@ void test_single_block_payload_round_trip() {
     CHECK(readFile(received_path) == original, "block received content matches");
 }
 
+void test_file_start_requires_eleven_bytes_but_later_data_may_use_eight() {
+    TransferDirs dirs("ultra_file_transfer_min_metadata_test");
+    CHECK(dirs.ready, "create minimum-metadata temp directories");
+
+    const Bytes original = {0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98};
+    const std::filesystem::path src_path = dirs.tx_dir / "minimum.bin";
+    CHECK(writeFile(src_path, original), "write minimum-metadata source file");
+
+    FileTransferController too_small_8;
+    too_small_8.setMaxChunkPayload(8);
+    CHECK(!too_small_8.startSend(src_path.string()),
+          "8-byte payload can carry FILE_DATA but must reject a new FILE_START");
+    CHECK(too_small_8.getState() == FileTransferState::IDLE &&
+              too_small_8.getNextChunk().empty(),
+          "rejected 8-byte start must remain idle and emit no malformed metadata");
+
+    FileTransferController too_small_10;
+    too_small_10.setMaxChunkPayload(10);
+    CHECK(!too_small_10.startSend(src_path.string()),
+          "10-byte payload without a filename byte must reject FILE_START");
+    CHECK(too_small_10.getState() == FileTransferState::IDLE &&
+              too_small_10.getNextChunk().empty(),
+          "rejected 10-byte start must remain idle and emit no nameless metadata");
+
+    FileTransferController tx;
+    tx.setMaxChunkPayload(FileTransferController::MIN_FILE_START_PAYLOAD);
+    CHECK(tx.startSend(src_path.string()), "11-byte payload is the minimum valid file start");
+    const Bytes metadata = tx.getNextChunk();
+    CHECK(metadata.size() == FileTransferController::MIN_FILE_START_PAYLOAD &&
+              metadata[0] == static_cast<uint8_t>(PayloadType::FILE_START),
+          "minimum FILE_START must fill exactly 11 bytes");
+    CHECK(metadata[10] == static_cast<uint8_t>(src_path.filename().string().front()),
+          "minimum FILE_START must retain one filename byte");
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(dirs.rx_dir.string());
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+    CHECK(rx.processPayload(metadata, true), "minimum FILE_START is accepted by receiver");
+
+    // Once metadata is established, an 8-byte geometry remains useful: its
+    // 5-byte FILE_DATA header leaves three file bytes per frame.
+    tx.setMaxChunkPayload(8);
+    size_t data_frames = 0;
+    while (tx.hasMoreChunks()) {
+        const Bytes data = tx.getNextChunk();
+        CHECK(!data.empty() && data.size() >= 6 && data.size() <= 8 &&
+                  data[0] == static_cast<uint8_t>(PayloadType::FILE_DATA),
+              "post-metadata 8-byte geometry must emit bounded non-empty FILE_DATA");
+        const bool more_data = tx.hasMoreChunks();
+        CHECK(rx.processPayload(data, more_data), "8-byte FILE_DATA is accepted");
+        ++data_frames;
+    }
+
+    CHECK(data_frames == 3, "nine bytes should use three 3-byte FILE_DATA frames");
+    CHECK(callback_called && callback_success,
+          "minimum metadata plus later 8-byte FILE_DATA must complete");
+    CHECK(readFile(received_path) == original,
+          "minimum metadata plus small DATA geometry must preserve exact bytes");
+}
+
 uint32_t dataPayloadOffset(const Bytes& payload) {
     // FILE_DATA: TYPE(1) + OFFSET(4, big-endian) + DATA
     return (static_cast<uint32_t>(payload[1]) << 24) |
@@ -573,6 +640,7 @@ int main() {
     test_compressed_final_chunk_out_of_order_finalizes();
     test_duplicate_filename_in_dotted_receive_directory();
     test_single_block_payload_round_trip();
+    test_file_start_requires_eleven_bytes_but_later_data_may_use_eight();
     test_requeue_resumes_exact_offset_across_chunk_size_changes();
     test_receiver_merges_straddling_resend_and_drains_covered_buffered();
 

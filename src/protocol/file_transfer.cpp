@@ -113,7 +113,7 @@ FileTransferController::~FileTransferController() {
 }
 
 bool FileTransferController::startSend(const std::string& filepath) {
-    if (isBusy()) {
+    if (isBusy() || max_chunk_payload_ < MIN_FILE_START_PAYLOAD) {
         return false;
     }
 
@@ -183,8 +183,10 @@ Bytes FileTransferController::getNextChunk() {
 
     if (!tx_metadata_sent_) {
         payload = buildMetadataPayload();
-        tx_metadata_sent_ = true;  // Mark sent immediately (ARQ handles retries)
-        is_metadata = true;
+        if (!payload.empty()) {
+            tx_metadata_sent_ = true;  // Mark sent immediately (ARQ handles retries)
+            is_metadata = true;
+        }
     } else if (tx_offset_ < tx_data_.size()) {
         chunk_offset = tx_offset_;  // buildDataPayload advances tx_offset_
         payload = buildDataPayload();
@@ -419,8 +421,16 @@ void FileTransferController::cancel(const std::string& error) {
 
 Bytes FileTransferController::buildMetadataPayload() {
     // Format: TYPE(1) + FLAGS(1) + ORIGINAL_SIZE(4) + CRC32(4) + FILENAME(variable)
+    // startSend() rejects this geometry, but keep this private builder fail-closed
+    // too: metadata may be requeued after a mid-transfer geometry change.
+    if (max_chunk_payload_ < MIN_FILE_START_PAYLOAD) {
+        return {};
+    }
+
+    const size_t max_name_len = max_chunk_payload_ - FILE_START_FIXED_OVERHEAD;
+    const size_t name_len = std::min(tx_filename_.size(), max_name_len);
     Bytes payload;
-    payload.reserve(1 + 1 + 4 + 4 + tx_filename_.size());
+    payload.reserve(FILE_START_FIXED_OVERHEAD + name_len);
 
     // Type byte
     payload.push_back(static_cast<uint8_t>(PayloadType::FILE_START));
@@ -442,9 +452,7 @@ Bytes FileTransferController::buildMetadataPayload() {
 
     // Filename (truncate if too long to fit in one frame)
     // Metadata overhead: TYPE(1) + FLAGS(1) + SIZE(4) + CRC32(4) = 10 bytes
-    size_t max_name_len = chunk_size_ + FILE_DATA_OVERHEAD - 10;
-    std::string name = tx_filename_.substr(0, max_name_len);
-    payload.insert(payload.end(), name.begin(), name.end());
+    payload.insert(payload.end(), tx_filename_.begin(), tx_filename_.begin() + name_len);
 
     return payload;
 }

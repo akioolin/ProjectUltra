@@ -1,3 +1,4 @@
+#include "sync/cfo_tracker.hpp"
 #include "sync/signal_policy.hpp"
 
 #include <cmath>
@@ -282,6 +283,115 @@ void test_pilot_cfo_update() {
                 "negative pilot CFO clamp should step from reference");
 }
 
+void test_burst_outcome_cfo_reconciliation() {
+    using ultra::sync::CFOTracker;
+    using Action = CFOTracker::BurstOutcomeAction;
+
+    // Exact MPG@20 failure: the descriptor/control frame proved +0.05 Hz, but
+    // fade-corrupted pilot feedback late in a partially decoded group walked
+    // the mutable tracker to -0.79 Hz. The partial verdict must restore the
+    // proven value before the next anchor or synchronous retry callback.
+    CFOTracker tracker;
+    tracker.store(0.05f);
+    CHECK(tracker.applyBurstDecodeOutcome(8, 8) == Action::CERTIFIED,
+          "all-good burst should certify the current CFO");
+    CHECK(tracker.pilotSeeded(), "all-good burst should arm warm CFO");
+
+    tracker.store(-0.79f);
+    CHECK(tracker.applyBurstDecodeOutcome(2, 8) == Action::ROLLED_BACK_WARM,
+          "partial burst should roll mutable CFO back to the proven snapshot");
+    CHECK_CLOSE(tracker.tracked(), 0.05f, 0.0001f,
+                "partial burst should restore the exact certified CFO");
+    CHECK(tracker.pilotSeeded(),
+          "partial rollback should preserve an existing warm certificate");
+    const auto next_anchor = connectedAnchorCFOSeed(
+        0.20f, tracker.tracked(), 0.79f, tracker.pilotSeeded());
+    CHECK_CLOSE(next_anchor.accepted_cfo, 0.05f, 0.0001f,
+                "next connected anchor should consume the restored warm CFO");
+
+    tracker.store(-0.79f);
+    CHECK(tracker.applyBurstDecodeOutcome(0, 7) == Action::ROLLED_BACK_COLD,
+          "zero-good burst should restore the proven reference and revoke warm CFO");
+    CHECK_CLOSE(tracker.tracked(), 0.05f, 0.0001f,
+                "zero-good burst must not leave poison as the cold chirp reference");
+    CHECK(!tracker.pilotSeeded(), "zero-good burst should force cold re-acquisition");
+
+    // No prior proof: a partial group cannot create a certificate from its own
+    // ambiguous residual history. It must also clear the numeric reference: a
+    // >1 Hz pilot walk would otherwise clamp the next connected-cold chirp back
+    // to poison.
+    CFOTracker fresh;
+    fresh.store(2.75f);
+    CHECK(fresh.applyBurstDecodeOutcome(1, 2) == Action::REVOKED,
+          "partial burst without a snapshot should remain cold");
+    CHECK_CLOSE(fresh.tracked(), 0.0f, 0.0001f,
+                "partial burst without proof should clear its unproven CFO reference");
+    CHECK(!fresh.pilotSeeded(),
+          "partial burst without proof must not manufacture a warm certificate");
+
+    CFOTracker no_snapshot_crater;
+    no_snapshot_crater.store(-2.75f);
+    CHECK(no_snapshot_crater.applyBurstDecodeOutcome(0, 8) == Action::REVOKED,
+          "zero-good burst without a snapshot should remain cold");
+    CHECK_CLOSE(no_snapshot_crater.tracked(), 0.0f, 0.0001f,
+                "zero-good burst without proof should clear the cold-clamp reference");
+
+    CFOTracker no_snapshot_abort;
+    no_snapshot_abort.store(2.75f);
+    CHECK(no_snapshot_abort.reconcileUncertainBurstEnd() == Action::REVOKED,
+          "uncertain burst without a snapshot should remain cold");
+    CHECK_CLOSE(no_snapshot_abort.tracked(), 0.0f, 0.0001f,
+                "uncertain burst without proof should clear the cold-clamp reference");
+
+    // A historical snapshot may still be useful numerically after 0/N revoked
+    // warm trust, but restoring it must not silently re-certify it.
+    CFOTracker historical;
+    historical.store(0.05f);
+    historical.applyBurstDecodeOutcome(8, 8);
+    historical.applyBurstDecodeOutcome(0, 8);
+    historical.store(-0.79f);
+    CHECK(historical.applyBurstDecodeOutcome(1, 2) == Action::ROLLED_BACK_COLD,
+          "partial burst may restore the last historical proven value");
+    CHECK_CLOSE(historical.tracked(), 0.05f, 0.0001f,
+                "historical rollback should restore the proven numeric CFO");
+    CHECK(!historical.pilotSeeded(),
+          "historical rollback must preserve the revoked cold state");
+
+    // Unknown terminal: restore the numeric snapshot, but preserve whether that
+    // snapshot was still trusted before the ambiguous receive attempt.
+    CFOTracker uncertain;
+    uncertain.store(0.05f);
+    uncertain.applyBurstDecodeOutcome(8, 8);
+    uncertain.store(-0.79f);
+    CHECK(uncertain.reconcileUncertainBurstEnd() == Action::ROLLED_BACK_WARM,
+          "uncertain abort should restore and preserve prior warm proof");
+    CHECK_CLOSE(uncertain.tracked(), 0.05f, 0.0001f,
+                "uncertain abort should discard mutable pilot walk");
+    CHECK(uncertain.pilotSeeded(),
+          "uncertain abort must not revoke unrelated prior proof");
+
+    // Malformed outcomes fail closed, and reset atomically clears both the warm
+    // flag and historical snapshot.
+    uncertain.store(-0.79f);
+    CHECK(uncertain.applyBurstDecodeOutcome(9, 8) == Action::ROLLED_BACK_COLD,
+          "invalid decoded count should restore the snapshot and fail cold");
+    CHECK(!uncertain.pilotSeeded(), "invalid outcome must revoke warm trust");
+    uncertain.reset();
+    uncertain.store(-0.79f);
+    CHECK(uncertain.applyBurstDecodeOutcome(1, 2) == Action::REVOKED,
+          "reset must clear the historical certificate transactionally");
+
+    // Non-finite estimates can never become a warm anchor or replace a finite
+    // tracked reference.
+    CFOTracker finite;
+    finite.store(0.05f);
+    finite.applyBurstDecodeOutcome(8, 8);
+    finite.store(std::numeric_limits<float>::quiet_NaN());
+    CHECK_CLOSE(finite.tracked(), 0.05f, 0.0001f,
+                "non-finite store should retain the finite tracked CFO");
+    CHECK(!finite.pilotSeeded(), "non-finite store should revoke warm trust");
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +404,7 @@ int main() {
     test_cfo_drift_limit();
     test_connected_anchor_cfo_seed();
     test_pilot_cfo_update();
+    test_burst_outcome_cfo_reconciliation();
 
     if (tests_failed != 0) {
         std::cout << "StreamingSignalPolicy: " << (tests_run - tests_failed)

@@ -58,6 +58,12 @@ struct EncoderConfig {
 struct BurstAnchorOptions {
     bool force_full_group_start = false;
     bool keep_skip_streak = false;  // mode-switch/config anchor, not delivery failure
+    // Force the BURST_HEADER descriptor itself to use its robust full chirp and
+    // recool delivery-earned descriptor skipping, without necessarily forcing a
+    // second full chirp at the following DATA group start.  Kept separate from
+    // force_full_group_start so an exact, progress-bearing partial-SACK repair can
+    // re-establish the receiver's acquisition state at one anchor cost.
+    bool force_full_descriptor = false;
 };
 
 class StreamingEncoder {

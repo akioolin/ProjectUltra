@@ -134,8 +134,11 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         result.ofdm_internal_snr_db = waveform_->estimatedSNR();
         result.has_ofdm_broadband_snr_db = waveform_->hasLastOFDMBroadbandSNREstimate();
         result.ofdm_broadband_snr_db = waveform_->getLastOFDMBroadbandSNREstimate();
-        result.has_evm_snr_db = waveform_->hasEvmSnrEstimate();
-        result.evm_snr_db = waveform_->getEvmSnrDbEstimate();
+        // One finalized, one-shot observation from THIS physical demodulation
+        // pass.  A no-process erasure therefore cannot reuse the preceding
+        // frame's EVM, and the group tail is available before its callback.
+        result.has_evm_snr_db = waveform_->takeEvmSnrEstimate(
+            result.evm_snr_db, result.evm_carrier_count);
         result.lts_fading_index = waveform_->getFadingIndex();
         result.lts_timing_offset_samples = waveform_->getLastTimingOffsetSamples();
         result.pilot_frequency_cv = waveform_->getLastPilotFrequencyCV();
@@ -230,14 +233,12 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
             result.snr_source = SNRSource::OFDM_BROADBAND;
             last_ofdm_broadband_snr_db_valid_.store(true);
             last_ofdm_broadband_snr_db_.store(result.ofdm_broadband_snr_db);
-            // Radio-agnostic EVM SNR (Stage 1): capture at decode time, same as the
-            // broadband value, so it survives the per-burst demod reset. Nothing
-            // consumes the atomic yet — parallel source for tests/logging/Stage 2.
-            if (result.has_evm_snr_db) {
-                last_evm_snr_db_valid_.store(true);
-                last_evm_snr_db_.store(result.evm_snr_db);
-            }
         }
+        // Frame-local EVM provenance is independent of whether the broadband
+        // estimator happened to publish.  Always overwrite validity so a failed
+        // or no-process frame cannot leave a previous value live.
+        last_evm_snr_db_valid_.store(result.has_evm_snr_db);
+        last_evm_snr_db_.store(result.has_evm_snr_db ? result.evm_snr_db : 0.0f);
         LOG_MODEM(DEBUG, "[%s] OFDM quality: sync_quality=%.1f dB "
                   "ofdm_broadband=%s%.1f dB ofdm_internal=%.1f dB "
                   "idle_in_band=%s%.1f dB routed_snr=%.1f dB (%s) fading=%.3f",
@@ -953,6 +954,47 @@ void StreamingDecoder::searchForSync() {
         if (waveform_) {
             waveform_->setAbsoluteTrainingPosition(abs_training_pos);
         }
+
+        // BUG-HALFOPEN-CONNECT: during the responder's half-open interval the
+        // expected first OFDM full anchor may instead be the initiator repeating
+        // its fixed-profile MC-DPSK CONNECT because CONNECT_ACK was lost.  Both
+        // PHYs intentionally share the dual chirps and therefore the exact
+        // training origin.  Retain only a REAL expected dual-chirp lock (never a
+        // weak LTS/data fallback); processBuffer will make one bounded raw-ring
+        // MC decode after all four fixed codewords have arrived.
+        if (last_sync_expected_full_anchor_ &&
+            handshake_confirmation_pending_.load(std::memory_order_acquire)) {
+            MultiCarrierDPSKConfig fallback_config = mc_dpsk_config_;
+            fallback_config.bits_per_symbol = 1;  // fixed handshake profile = DBPSK
+            const size_t coded_bits =
+                static_cast<size_t>(v2::kDefaultFixedFrameCodewords) *
+                v2::LDPC_CODEWORD_BITS;
+            const size_t bits_per_symbol = static_cast<size_t>(
+                std::max(1, fallback_config.num_carriers));
+            const size_t data_symbols =
+                (coded_bits + bits_per_symbol - 1) / bits_per_symbol;
+            const size_t required_samples =
+                (static_cast<size_t>(std::max(0, fallback_config.training_symbols)) +
+                 1 + data_symbols) *
+                static_cast<size_t>(
+                    std::max(1, fallback_config.samples_per_symbol));
+
+            pending_handshake_mcdpsk_connect_.valid = true;
+            pending_handshake_mcdpsk_connect_.generation = gen_at_start;
+            pending_handshake_mcdpsk_connect_.training_abs = abs_training_pos;
+            pending_handshake_mcdpsk_connect_.required_samples = required_samples;
+            pending_handshake_mcdpsk_connect_.cfo_hz = sync_result.cfo_hz;
+            pending_handshake_mcdpsk_connect_.correlation =
+                sync_result.correlation;
+            pending_handshake_mcdpsk_connect_.config = fallback_config;
+            pending_handshake_mcdpsk_connect_.measurements =
+                half_open_measurement_snapshot_;
+            LOG_MODEM(INFO,
+                      "[%s] Half-open CONNECT fallback armed at training_abs=%zu "
+                      "for %zu raw samples (corr=%.3f CFO=%.2f)",
+                      log_prefix_.c_str(), abs_training_pos, required_samples,
+                      sync_result.correlation, sync_result.cfo_hz);
+        }
         const bool provisional_already_active =
             burst_air_end_provisional_.load(std::memory_order_relaxed);
         if (use_full_ofdm_anchor_search &&
@@ -1060,6 +1102,7 @@ void StreamingDecoder::searchForSync() {
 
 void StreamingDecoder::checkIfReadyToDecode() {
     if (!waveform_) {
+        clearClassicLongGeometry();
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -1084,10 +1127,28 @@ void StreamingDecoder::checkIfReadyToDecode() {
 
     // Calculate how much we need — must match decodeCurrentFrame() buffer sizing.
     bool is_ofdm_here = protocol::isOFDMMode(mode_);
+    const bool control_only_receive =
+        is_ofdm_here && connected_ &&
+        control_only_receive_.load(std::memory_order_acquire);
+    // The lifecycle may enter DISCONNECTING after a connected DATA peek has
+    // armed a fixed-CW continuation but before the rest of that DATA geometry
+    // arrives.  Waiting for the obsolete length here prevents decodeCurrentFrame
+    // from reaching its control-only cleanup and can strand the real hardened
+    // DISCONNECT ACK behind that wait.  Retire decoder-owned DATA continuation at
+    // this readiness boundary; decodeCurrentFrame repeats the guard to cover a
+    // phase change between these two processBuffer iterations.
+    if (control_only_receive && pending_total_cw_ > 0) {
+        LOG_MODEM(INFO,
+                  "[%s] Control-only RX readiness: discarding pending %d-CW DATA escalation",
+                  log_prefix_.c_str(), pending_total_cw_);
+        pending_total_cw_ = 0;
+        clearClassicLongGeometry();
+    }
     // 2026-05-29 channel-adaptive interleaver (RX decouple): mirror streaming_ofdm_decode —
     // burst_latched = group-start marker detected (interleave-independent); the
     // ConnectedOFDMBurst full-frame sizing is keyed on the marker + the burst regime.
-    bool burst_latched = waveform_ && waveform_->wasBurstInterleaved();
+    bool burst_latched =
+        !control_only_receive && waveform_ && waveform_->wasBurstInterleaved();
     const bool burst_regime_active = use_burst_interleave_ || burst_transport_rx_;
     const size_t pending_samples = pending_total_cw_ > 0
         ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
@@ -1137,6 +1198,8 @@ void StreamingDecoder::checkIfReadyToDecode() {
     if (elapsed > frame_timeout_ms) {
         LOG_MODEM(WARN, "[%s] Frame timeout after %lld ms (need=%zu samples, timeout=%d ms)",
                   log_prefix_.c_str(), (long long)elapsed, requirement.samples, frame_timeout_ms);
+        pending_total_cw_ = 0;
+        clearClassicLongGeometry();
         state_ = DecoderState::SEARCHING;
         return;
     }

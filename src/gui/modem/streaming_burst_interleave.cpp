@@ -42,6 +42,39 @@ const char* boolDigit(bool value) {
     return value ? "1" : "0";
 }
 
+const char* burstCFOActionName(sync::CFOTracker::BurstOutcomeAction action) {
+    using Action = sync::CFOTracker::BurstOutcomeAction;
+    switch (action) {
+        case Action::CERTIFIED: return "certified";
+        case Action::REVOKED: return "revoke-no-certificate";
+        case Action::ROLLED_BACK_WARM: return "rollback-certified-warm";
+        case Action::ROLLED_BACK_COLD: return "rollback-certified-cold";
+    }
+    return "unknown";
+}
+
+int descriptorlessTailSearchLimit(Modulation modulation,
+                                  CodeRate rate,
+                                  int codewords,
+                                  int lifting_z) {
+    // A missed descriptor loses N. Bound the BI0 tail search with the same pure
+    // airtime model and absolute ceiling that bound the sender, plus the 16-bit
+    // tone-ACK window ceiling. Omitting descriptor overhead makes this an upper
+    // bound: it may inspect one conservative extra member, but can never stop short
+    // of a policy-valid sender group. The CRC-protected PHYSICAL_BURST_END remains
+    // the only completion authority.
+    const size_t limit = protocol::connection_policy::wideOFDMBurstFrameBudget(
+        modulation, rate, codewords,
+        protocol::connection_policy::kToneBurstAckWindowCapFrames,
+        protocol::connection_policy::kMaxBurstAirtimeCeilingMs,
+        /*continuation_reanchor_ms=*/0,
+        lifting_z,
+        /*group_start_extra_ms=*/0);
+    return std::clamp(static_cast<int>(limit), 2,
+                      static_cast<int>(
+                          protocol::connection_policy::kToneBurstAckWindowCapFrames));
+}
+
 std::string burstFrameTypeAndSeq(const DecodeResult& result) {
     if (!result.success || result.frame_data.empty()) {
         return "frame_type=- seq=-";
@@ -176,29 +209,66 @@ void StreamingDecoder::logBurstDiagnosticsAbort(const char* reason,
     ultra::phyDiagLine(oss.str());
 }
 
-bool StreamingDecoder::abandonUnprovenMarkerGroup(const char* reason) {
-    if (burst_arm_provenance_ != BurstArmProvenance::UNPROVEN_MARKER ||
-        burst_substantive_members_ >= 2) {
+std::vector<float> StreamingDecoder::makeActiveBurstErasure() const {
+    const int bytes_per_cw = activeBurstLiftingZ() == 81 ? 243 : 81;
+    return std::vector<float>(
+        static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(
+            fixed_frame_codewords_, bytes_per_cw)),
+        0.0f);
+}
+
+bool StreamingDecoder::abandonUnprovenGeometryGroup(const char* reason) {
+    const bool marker_only =
+        burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER;
+    const bool commanded_without_descriptor =
+        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY;
+    if (!marker_only && !commanded_without_descriptor) {
         return false;
     }
 
-    // A marker is only the sign of one LTS correlation. With no decoded descriptor,
-    // commanded geometry, or second physical member, it cannot distinguish a real group
-    // from a standalone repair whose noisy phase happened to flip that sign. Never turn
-    // the following silence into N erasures and a synthetic 0/N SACK/rate verdict.
+    // A marker is only the sign of one LTS correlation.  Even two or more
+    // above-energy/process-valid slices do not prove the transmitter's frame
+    // geometry: a missed long-LDPC descriptor can leave the receiver slicing
+    // cw3/Z81 air as cw3/Z27, and those short, misaligned slices still produce
+    // non-empty soft grids.  Treating that as group proof finalized the configured
+    // N about four seconds before the real burst ended and keyed its ACK over the
+    // sender.  Only a decoded descriptor or CRC-valid PHYSICAL_BURST_END owns the
+    // physical boundary.  The latter finalizes before this helper is reached.
+    //
+    // Commanded geometry is stronger than a sign-only marker for mod/rate/cw/Z,
+    // but it still does not prove N. It may search beyond stale configured N up to
+    // the sender's policy-derived ceiling; without a CRC-valid tail it has the same
+    // fail-closed outcome. Never turn guessed geometry (or trailing silence) into a
+    // synthetic group verdict/reverse transmission.
     LOG_MODEM(WARN,
-              "[%s] Unproven burst marker abandoned (%s): %zu substantive member(s); "
-              "no group callback/ACK emitted",
-              log_prefix_.c_str(), reason, burst_substantive_members_);
-    logBurstDiagnosticsAbort("unproven_marker", burst_soft_buffer_.size());
+              "[%s] Unproven burst %s abandoned (%s): %zu process-valid "
+              "slice(s), no descriptor/CRC tail; no group callback/synchronous "
+              "ACK emitted",
+              log_prefix_.c_str(),
+              commanded_without_descriptor ? "commanded geometry" : "marker",
+              reason, burst_substantive_members_);
+    logBurstDiagnosticsAbort(commanded_without_descriptor
+                                 ? "commanded_geometry_unproven"
+                                 : "unproven_marker",
+                             burst_soft_buffer_.size());
+    const float cfo_before = cfo_tracker_.tracked();
+    const auto cfo_action = cfo_tracker_.reconcileUncertainBurstEnd();
+    LOG_MODEM(WARN,
+              "[%s] Uncertain burst CFO reconcile: action=%s tracked %.2f -> %.2f Hz warm=%d",
+              log_prefix_.c_str(), burstCFOActionName(cfo_action), cfo_before,
+              cfo_tracker_.tracked(), cfo_tracker_.pilotSeeded() ? 1 : 0);
     if (burst_outcome_unknown_callback_) {
         // Do not manufacture a group verdict from a sign-only marker. The protocol
         // still needs to clear any one-shot startup probe whose target outcome is now
         // unknowable, or its stale UP command could ride a later unrelated ACK.
         burst_outcome_unknown_callback_();
     }
-    anchored_burst_backstop_armed_ = false;
-    anchored_burst_payload_seen_ = false;
+    // The group candidate is unproven, but the no-group backstop is not: it was
+    // armed independently by an accepted expected FULL chirp.  Keep that anchor
+    // epoch alive so the asynchronous, CCA-gated cumulative SACK can recover the
+    // sender if no CRC tail/group callback survived.  This preserves neither N nor
+    // group sequence (both remain unknown), and every real physical completion or
+    // decoder/session lifecycle transition still retires the backstop elsewhere.
     burst_air_end_provisional_.store(false, std::memory_order_relaxed);
     provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
     provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
@@ -229,6 +299,15 @@ bool StreamingDecoder::abandonUnprovenMarkerGroup(const char* reason) {
 
 void StreamingDecoder::accumulateBurstFrames() {
     const int burst_group_size = std::max(2, burst_group_size_);
+    const bool commanded_n_unknown =
+        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY;
+    const int collection_limit = commanded_n_unknown
+        ? descriptorlessTailSearchLimit(
+              sync_controller_.last_burst_descriptor_.modulation,
+              sync_controller_.last_burst_descriptor_.code_rate,
+              sync_controller_.last_burst_descriptor_.cw_per_frame,
+              sync_controller_.last_burst_descriptor_.lifting_z)
+        : burst_group_size;
     // Group timeout — AIRTIME-DERIVED (2026-07-02, replaces the fixed
     // BURST_TIMEOUT_MS_BASE x group/4 wall-clock constant, an adaptivity-rule
     // violation: it ignored mod/rate/cw/z, over-budgeting short 16QAM frames
@@ -241,13 +320,13 @@ void StreamingDecoder::accumulateBurstFrames() {
     const int burst_timeout_ms = [&]() -> int {
         if (burst_min_block_ > 0) {
             const float remaining_ms =
-                static_cast<float>(burst_group_size - 1) *
+                static_cast<float>(collection_limit - 1) *
                 (static_cast<float>(burst_min_block_) * 1000.0f / 48000.0f);
             return std::max(static_cast<int>(BURST_TIMEOUT_MS_BASE),
                             static_cast<int>(remaining_ms * 1.5f + 3000.0f));
         }
         return static_cast<int>(BURST_TIMEOUT_MS_BASE *
-                                (burst_group_size / 4.0f));
+                                (collection_limit / 4.0f));
     }();
 
     // LATE-JOIN group-end inference (design §3.4 + F1): a late-joined group's true end
@@ -288,12 +367,19 @@ void StreamingDecoder::accumulateBurstFrames() {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - burst_start_time_).count();
     if (elapsed > burst_timeout_ms) {
-        if (abandonUnprovenMarkerGroup("timeout")) {
+        if (abandonUnprovenGeometryGroup("timeout")) {
             return;
         }
         LOG_MODEM(WARN, "[%s] Burst group timeout: got %zu/%d frames",
                   log_prefix_.c_str(), burst_soft_buffer_.size(), burst_group_size);
         logBurstDiagnosticsAbort("timeout", burst_soft_buffer_.size());
+        const float cfo_before = cfo_tracker_.tracked();
+        const auto cfo_action =
+            cfo_tracker_.applyBurstDecodeOutcome(/*logical_ok=*/0, burst_group_size);
+        LOG_MODEM(WARN,
+                  "[%s] Timed-out burst CFO reconcile: action=%s tracked %.2f -> %.2f Hz warm=%d",
+                  log_prefix_.c_str(), burstCFOActionName(cfo_action), cfo_before,
+                  cfo_tracker_.tracked(), cfo_tracker_.pilotSeeded() ? 1 : 0);
         // FAST-NACK (ULTRA_UNIFIED_SEQ): a timed-out group means we decoded the
         // BURST_HEADER but couldn't acquire/decode the data frames behind it (a fade
         // landed on the data-frame window). DELIVER a FAILED group (0 frames) so the
@@ -308,6 +394,7 @@ void StreamingDecoder::accumulateBurstFrames() {
             const bool geometry_proven =
                 burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR ||
                 burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR_LATE_JOIN;
+            finalizeGroupEvmSnr(geometry_proven, burst_group_size);
             burst_group_callback_(last_burst_group_seq_, std::vector<Bytes>{},
                                   /*all_ok=*/false, /*quality=*/0.0f, /*frame_mask=*/0,
                                   use_burst_interleave_,
@@ -345,7 +432,7 @@ void StreamingDecoder::accumulateBurstFrames() {
     // demod-lock-free). reset_generation_ is re-checked inside tryDemodulateNextBurstFrame each call.
     const auto drain_start = std::chrono::steady_clock::now();
     constexpr long kBurstDrainWallBudgetMs = 30;
-    for (int drained = 0; drained < burst_group_size; ++drained) {
+    for (int drained = 0; drained < collection_limit; ++drained) {
         auto result = tryDemodulateNextBurstFrame();
 
         if (result == BurstFrameResult::FAILED) {
@@ -353,6 +440,12 @@ void StreamingDecoder::accumulateBurstFrames() {
             LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
                       log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
             logBurstDiagnosticsAbort("hard_failure", burst_soft_buffer_.size() + 1);
+            const float cfo_before = cfo_tracker_.tracked();
+            const auto cfo_action = cfo_tracker_.reconcileUncertainBurstEnd();
+            LOG_MODEM(WARN,
+                      "[%s] Aborted burst CFO reconcile: action=%s tracked %.2f -> %.2f Hz warm=%d",
+                      log_prefix_.c_str(), burstCFOActionName(cfo_action), cfo_before,
+                      cfo_tracker_.tracked(), cfo_tracker_.pilotSeeded() ? 1 : 0);
             {
                 std::lock_guard<std::mutex> slock(stats_mutex_);
                 stats_.frames_failed += burst_group_size;
@@ -405,9 +498,31 @@ void StreamingDecoder::accumulateBurstFrames() {
             state_ = DecoderState::SEARCHING;
             return;
         }
-        // Check if group complete
+        // A commanded tuple proves mod/rate/cw/Z but NOT physical N. Never
+        // finalize it merely because the stale configured count was reached.
+        // Continue through that count until a CRC-valid tail (handled above), or
+        // fail closed at the sender-policy ceiling. This covers both directions:
+        // previous N8/current N7 finalizes early at the tail, while previous
+        // N7/current N8 continues safely through member 8.
+        if (commanded_n_unknown) {
+            if (static_cast<int>(burst_soft_buffer_.size()) >= collection_limit) {
+                abandonUnprovenGeometryGroup(
+                    "tail-search ceiling reached without CRC physical tail");
+                return;
+            }
+            if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
+                LOG_MODEM(INFO,
+                          "[%s] Commanded geometry reached stale configured N=%d "
+                          "without CRC tail — continuing unknown-N search to %d",
+                          log_prefix_.c_str(), burst_group_size, collection_limit);
+            }
+            continue;
+        }
+
+        // Descriptor-proven group, or a marker-only candidate at its guessed span.
         if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
-            if (abandonUnprovenMarkerGroup("declared span contained only erasures/noise")) {
+            if (abandonUnprovenGeometryGroup(
+                    "declared span contained no CRC physical tail")) {
                 return;
             }
             finalizeBurstGroup();
@@ -518,9 +633,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(), join_rms,
                                    pre_cfo, residual, burst_cfo_);
     } else {
-        burst_soft_buffer_.emplace_back(
-            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
-            0.0f);
+        burst_soft_buffer_.push_back(makeActiveBurstErasure());
         burst_predecoded_.emplace_back();  // erasure: no pre-decode
         DecodeResult m;
         populateDecodeMetrics(m, protocol::isOFDMMode(mode_), 0.0f);
@@ -564,9 +677,17 @@ void StreamingDecoder::refreshBurstAirEnd() {
     burst_air_end_provisional_.store(false, std::memory_order_relaxed);
     provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
     provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+    const int physical_span =
+        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY
+            ? descriptorlessTailSearchLimit(
+                  sync_controller_.last_burst_descriptor_.modulation,
+                  sync_controller_.last_burst_descriptor_.code_rate,
+                  sync_controller_.last_burst_descriptor_.cw_per_frame,
+                  sync_controller_.last_burst_descriptor_.lifting_z)
+            : std::max(2, burst_group_size_);
     burst_air_end_abs_.store(
         burst_data_start_abs_ +
-            static_cast<uint64_t>(std::max(2, burst_group_size_)) *
+            static_cast<uint64_t>(physical_span) *
                 static_cast<uint64_t>(burst_min_block_),
         std::memory_order_relaxed);
 }
@@ -659,6 +780,67 @@ void StreamingDecoder::finalizeGroupCarrierGammas() {
     last_group_carrier_gammas_ = std::move(mean);
     burst_gamma_sum_.clear();
     burst_gamma_frames_ = 0;
+}
+
+void StreamingDecoder::finalizeGroupEvmSnr(bool geometry_proven,
+                                           int expected_physical_frames) {
+    // The Connection consumes one scalar per group. Preserve the estimator's
+    // physical meaning by pooling normalized error energy, not dB values:
+    //   epsilon_i = 10^(-EVM_i/10)
+    //   epsilon_group = Sum(n_i * epsilon_i) / Sum(n_i)
+    // where n_i is the number of post-equalizer carrier decisions. This is the
+    // exact equal-energy-frame reduction and the accepted carrier-count-weighted
+    // approximation for normalized constellations. Equal per-frame EVM remains
+    // byte-for-byte on the existing calibration scale.
+    //
+    // Scope/provenance is structural: burst_metric_templates_ is cleared at every
+    // group start/abort and appended in physical order under one descriptor-locked
+    // profile. Require descriptor/CRC-tail geometry plus every expected position;
+    // any no-process erasure, missing tail, or non-finite value invalidates the
+    // scalar instead of survivor-averaging or carrying a prior group.
+    last_evm_snr_db_valid_.store(false);
+    last_evm_snr_db_.store(0.0f);
+    last_group_evm_snr_frames_.assign(
+        static_cast<size_t>(std::max(0, expected_physical_frames)),
+        std::numeric_limits<float>::quiet_NaN());
+    last_group_evm_carrier_counts_.assign(
+        static_cast<size_t>(std::max(0, expected_physical_frames)), 0);
+
+    if (!geometry_proven || expected_physical_frames <= 0 ||
+        burst_metric_templates_.size() !=
+            static_cast<size_t>(expected_physical_frames)) {
+        return;
+    }
+
+    double weighted_error = 0.0;
+    size_t total_carriers = 0;
+    for (int i = 0; i < expected_physical_frames; ++i) {
+        const auto& metric = burst_metric_templates_[static_cast<size_t>(i)];
+        if (!metric.has_evm_snr_db || !std::isfinite(metric.evm_snr_db) ||
+            metric.evm_carrier_count == 0) {
+            return;
+        }
+        last_group_evm_snr_frames_[static_cast<size_t>(i)] = metric.evm_snr_db;
+        last_group_evm_carrier_counts_[static_cast<size_t>(i)] =
+            metric.evm_carrier_count;
+        const double error_ratio =
+            std::pow(10.0, -static_cast<double>(metric.evm_snr_db) / 10.0);
+        weighted_error +=
+            static_cast<double>(metric.evm_carrier_count) * error_ratio;
+        total_carriers += metric.evm_carrier_count;
+    }
+
+    if (total_carriers == 0 || !(weighted_error > 0.0) ||
+        !std::isfinite(weighted_error)) {
+        return;
+    }
+    const float group_db = static_cast<float>(
+        -10.0 * std::log10(weighted_error / static_cast<double>(total_carriers)));
+    if (!std::isfinite(group_db)) {
+        return;
+    }
+    last_evm_snr_db_.store(group_db);
+    last_evm_snr_db_valid_.store(true);
 }
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
@@ -794,9 +976,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
                   burst_group_size, next_rms, erase_thresh,
                   kBurstErasureAnchorFrac, burst_anchor_rms_);
-        burst_soft_buffer_.emplace_back(
-            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
-            0.0f);
+        burst_soft_buffer_.push_back(makeActiveBurstErasure());
         burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(0.0f);
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
@@ -861,9 +1041,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (!ok) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
-        burst_soft_buffer_.emplace_back(
-            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
-            0.0f);
+        burst_soft_buffer_.push_back(makeActiveBurstErasure());
         burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(0.0f);
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
@@ -949,9 +1127,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (soft.empty()) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: empty soft bits, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
-        burst_soft_buffer_.emplace_back(
-            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
-            0.0f);
+        burst_soft_buffer_.push_back(makeActiveBurstErasure());
         burst_predecoded_.emplace_back();  // erasure: no pre-decode
         pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
         accumulateBurstCarrierGamma();
@@ -1014,6 +1190,16 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         PredecodedFrame pre;
         pre.result = decodeFrame(burst_soft_buffer_.back(), burst_snr_, burst_cfo_);
         pre.valid = true;
+        if (pre.result.success && anchored_burst_backstop_armed_ &&
+            v2::isDataFrame(pre.result.frame_type) &&
+            pre.result.frame_type != v2::FrameType::DATA_REPAIR) {
+            // Descriptorless BI0 accumulation has decoded exact DATA even though
+            // its physical N is still unknowable.  Preserve the same positive
+            // evidence used by the classic fallback: if the CRC tail dies, the
+            // timer may re-confirm the cumulative window but must not fabricate a
+            // 0/N crater observation for the selector.
+            anchored_burst_payload_seen_ = true;
+        }
         physical_tail = frame_policy::hasPhysicalBurstEndMarker(
             pre.result.success, connected_, protocol::isOFDMMode(mode_),
             burst_transport_rx_, pre.result.frame_data);
@@ -1206,10 +1392,7 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
         const size_t declared = static_cast<size_t>(burst_group_size);
         if (burst_soft_buffer_.size() < declared) {
             const size_t missing = declared - burst_soft_buffer_.size();
-            const std::vector<float> erasure(
-                static_cast<size_t>(
-                    fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
-                0.0f);
+            const std::vector<float> erasure = makeActiveBurstErasure();
             burst_soft_buffer_.insert(burst_soft_buffer_.begin(), missing, erasure);
             DecodeResult m;
             populateDecodeMetrics(m, protocol::isOFDMMode(mode_), 0.0f);
@@ -1229,8 +1412,19 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
         }
     }
 
-    LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
-              log_prefix_.c_str(), burst_group_size);
+    // The exact phrase below is also the transfer analyzer's receiver-side
+    // physical-air-end anchor. Publish it only when N is wire- or tail-proven.
+    // A configured-span fallback can be useful inside an explicitly enabled
+    // experiment, but it is not evidence that the transmitter actually ended there.
+    if (geometry_proven) {
+        LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
+                  log_prefix_.c_str(), burst_group_size);
+    } else {
+        LOG_MODEM(INFO,
+                  "[%s] Burst configured-span complete (%d frames, geometry "
+                  "unproven), deinterleaving...",
+                  log_prefix_.c_str(), burst_group_size);
+    }
 
     // Software-ALC: fold this group's level accumulation into a fresh verdict BEFORE
     // the group callback below — the callback chain feeds it to the Connection, which
@@ -1243,6 +1437,53 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
     // (activeBurstLiftingZ()); falls back to z=27 if no descriptor decoded.
     const int ldpc_z_for_burst = activeBurstLiftingZ();
     const int bytes_per_cw_rx = (ldpc_z_for_burst == 81) ? 243 : 81;
+
+    // A malformed physical-soft vector is an internal geometry failure, not an
+    // unknown-air event: this group already has descriptor/CRC-tail provenance.
+    // Fail closed as a proven 0/N outcome so the Connection emits its current SACK
+    // immediately. Silent clear+return strands the sender until its full RTO.
+    const auto fail_deinterleave_group = [&](const char* reason) {
+        logBurstDiagnosticsAbort(reason, burst_soft_buffer_.size());
+        last_group_carrier_gammas_.clear();
+        burst_gamma_sum_.clear();
+        burst_gamma_frames_ = 0;
+        finalizeGroupEvmSnr(/*geometry_proven=*/false, burst_group_size);
+        burst_air_end_provisional_.store(false, std::memory_order_relaxed);
+        provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+        provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+        burst_air_end_abs_.store(0, std::memory_order_relaxed);
+        burst_data_start_abs_ = 0;
+        cfo_tracker_.applyBurstDecodeOutcome(/*logical_ok=*/0, burst_group_size);
+        anchored_burst_backstop_armed_ = false;
+        anchored_burst_payload_seen_ = false;
+        burst_harq_ctx_.reset();
+        burst_harq_ctx_pulled_ = false;
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.frames_failed += burst_group_size;
+        }
+        if (geometry_proven) {
+            sync_controller_.noteGroupDelivered(
+                last_burst_group_seq_, /*retransmission_required=*/true);
+        }
+        // The callback may synchronously key a SACK/retry. Retire Z81 and the
+        // descriptor lock before handing control across that boundary.
+        clearActiveBurstDescriptorGeometry();
+        burst_arm_provenance_ = BurstArmProvenance::NONE;
+        if (geometry_proven && burst_transport_rx_ && burst_group_callback_) {
+            ++burst_group_ordinal_;
+            LOG_MODEM(ERROR,
+                      "[%s] Burst #%u (group_seq=%u) deinterleave abort: "
+                      "emitting proven 0/%d group callback",
+                      log_prefix_.c_str(), burst_group_ordinal_,
+                      last_burst_group_seq_, burst_group_size);
+            burst_group_callback_(last_burst_group_seq_, std::vector<Bytes>{},
+                                  /*all_ok=*/false, /*quality=*/0.0f,
+                                  /*frame_mask=*/0, use_burst_interleave_,
+                                  static_cast<uint8_t>(burst_group_size),
+                                  /*geometry_proven=*/true);
+        }
+    };
 
     // 2026-05-28: wrap the deinterleave call so a size-mismatch throw (e.g.,
     // the OFDM stream processor's LDPC_BLOCK_SIZE=648 gate returned the
@@ -1282,26 +1523,17 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
         LOG_MODEM(ERROR,
                   "[%s] BurstInterleaver::deinterleave THREW '%s' — "
                   "z=%d cw=%d bytes_per_cw=%d expected_bits_per_frame=%d "
-                  "n_frames=%d soft_buffer_min=%zu max=%zu — group dropped",
+                  "n_frames=%d soft_buffer_min=%zu max=%zu — failing closed",
                   log_prefix_.c_str(), e.what(),
                   ldpc_z_for_burst, fixed_frame_codewords_, bytes_per_cw_rx,
                   expected_bits, n_frames, min_size, max_size);
-        // Bail out — finalize as a 0/N group failure so the burst transport
-        // controller resends. Without this catch the thread dies silently
-        // and the entire RX side stops responding.
-        clearActiveBurstDescriptorGeometry();
-        burst_soft_buffer_.clear();
-        burst_predecoded_.clear();
-        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
+        fail_deinterleave_group("deinterleave_size_mismatch");
         return;
     } catch (...) {
         LOG_MODEM(ERROR,
-                  "[%s] BurstInterleaver::deinterleave threw UNKNOWN exception — group dropped",
+                  "[%s] BurstInterleaver::deinterleave threw UNKNOWN exception — failing closed",
                   log_prefix_.c_str());
-        clearActiveBurstDescriptorGeometry();
-        burst_soft_buffer_.clear();
-        burst_predecoded_.clear();
-        descriptor_group_size_locked_ = false;  // group ended/aborted — cfg writes may apply again
+        fail_deinterleave_group("deinterleave_unknown_exception");
         return;
     }
     }  // end interleave-on deinterleave branch
@@ -1375,6 +1607,9 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
             result.idle_in_band_snr_db = metrics.idle_in_band_snr_db;
             result.has_ofdm_broadband_snr_db = metrics.has_ofdm_broadband_snr_db;
             result.ofdm_broadband_snr_db = metrics.ofdm_broadband_snr_db;
+            result.has_evm_snr_db = metrics.has_evm_snr_db;
+            result.evm_snr_db = metrics.evm_snr_db;
+            result.evm_carrier_count = metrics.evm_carrier_count;
             result.ofdm_internal_snr_db = metrics.ofdm_internal_snr_db;
             result.sync_quality_db = metrics.sync_quality_db;
             result.lts_fading_index = metrics.lts_fading_index;
@@ -1500,24 +1735,36 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
     }
 
     finalizeGroupCarrierGammas();  // ready BEFORE the group callback reads it
+    finalizeGroupEvmSnr(geometry_proven, burst_group_size);
     burst_air_end_provisional_.store(false, std::memory_order_relaxed);
     provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
     provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
     burst_air_end_abs_.store(0, std::memory_order_relaxed);  // F176: group over
     burst_data_start_abs_ = 0;
+    // Deliver the whole interleaved burst as a unit. all_ok requires every
+    // logical frame of the group to have decoded — a partial group is
+    // undecodable for reassembly and must be whole-burst-resent (no SACK).
+    const bool all_ok = (logical_ok == burst_group_size);
+    // §14.36: quality = decode headroom in [0,1]; 0 if the group failed. Worst-CW
+    // iteration headroom against a fixed reference (clean decodes ~0-2 iters,
+    // marginal ~40-70). The sender maps this to a rate via the controller.
+    constexpr float kIterRef = 80.0f;
+    const float quality =
+        all_ok ? std::clamp(1.0f - static_cast<float>(group_max_iters) / kIterRef,
+                            0.0f, 1.0f)
+               : 0.0f;
+    const float cfo_before_outcome = cfo_tracker_.tracked();
+    const auto cfo_outcome =
+        cfo_tracker_.applyBurstDecodeOutcome(logical_ok, burst_group_size);
+    if (!all_ok && logical_ok > 0) {
+        LOG_MODEM(WARN,
+                  "[%s] Partial burst CFO reconcile: %d/%d logical, action=%s "
+                  "tracked %.2f -> %.2f Hz warm=%d",
+                  log_prefix_.c_str(), logical_ok, burst_group_size,
+                  burstCFOActionName(cfo_outcome), cfo_before_outcome,
+                  cfo_tracker_.tracked(), cfo_tracker_.pilotSeeded() ? 1 : 0);
+    }
     if (burst_transport_rx_ && burst_group_callback_) {
-        // Deliver the whole interleaved burst as a unit. all_ok requires every
-        // logical frame of the group to have decoded — a partial group is
-        // undecodable for reassembly and must be whole-burst-resent (no SACK).
-        const bool all_ok = (logical_ok == burst_group_size);
-        // §14.36: quality = decode headroom in [0,1]; 0 if the group failed. Worst-CW
-        // iteration headroom against a fixed reference (clean decodes ~0-2 iters,
-        // marginal ~40-70). The sender maps this to a rate via the controller.
-        constexpr float kIterRef = 80.0f;
-        const float quality =
-            all_ok ? std::clamp(1.0f - static_cast<float>(group_max_iters) / kIterRef,
-                                0.0f, 1.0f)
-                   : 0.0f;
         // #%u ordinal = monotonic delivered-group counter (see burst_group_ordinal_):
         // group_seq is 0 for every group on the unified-seq path, so the ordinal is what
         // tells you the transfer is ADVANCING rather than wedged.
@@ -1527,33 +1774,77 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
                   "max_iters=%d quality=%.2f",
                   log_prefix_.c_str(), burst_group_ordinal_, last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
-        // BUG-ANCHOR-CFO-KILL: group outcome owns the warm-CFO certificate. A
-        // delivered group PROVES the tracked CFO (its frames decoded with it); a
-        // 0/N group revokes it — the per-frame pilot residuals were ingested
-        // before any LDPC verdict and may have walked the tracker (measured
-        // -0.10 -> +0.29 across a crater stretch), so the next full anchor must
-        // re-center from the chirp (cold arm) instead of keeping a poisoned warm
-        // value. Partial groups leave the certificate untouched.
-        if (all_ok) {
-            cfo_tracker_.certifyWarm();
-        } else if (logical_ok == 0) {
-            cfo_tracker_.revokeWarm();
-        }
+        // BUG-ANCHOR-CFO-KILL: the authoritative three-way CFO transition above
+        // runs before this callback. Pilot residuals arrive before LDPC verdicts;
+        // no synchronous ACK/retry may observe their unreconciled mutable tail.
         anchored_burst_backstop_armed_ = false;  // F165: standard ack path ran
         anchored_burst_payload_seen_ = false;
-        // HARQ key telemetry (cumulative since start) — the provisional-key
-        // default-ON decision rides on mismatch staying ~0 (design review).
+        // HARQ key telemetry (cumulative since start). The provisional-key
+        // experiment remains default-OFF; an ON arm is valid only when this
+        // proves engagement and mismatch remains near zero.
         {
             const auto& prof = ultra::timing::globalDecoderProfile();
             LOG_MODEM(INFO,
                       "[%s] [HARQ] keys real=%llu failed=%llu provisional=%llu "
-                      "mismatch=%llu fresh_rescue=%llu",
+                      "mismatch=%llu fresh_rescue=%llu shadow_both=%llu "
+                      "shadow_combine_only=%llu double_fail=%llu "
+                      "fresh_rescue_p=%llu allfresh_rescue=%llu/%llu "
+                      "shadow_eligible=%llu "
+                      "shadow_divergent=%llu shadow_p=%llu/%llu/%llu/%llu "
+                      "double_fail_p=%llu shadow_decode=%llu/%llu/%llu "
+                      "shadow_frame=%llu/%llu/%llu "
+                      "lazy_decode=%llu/%llu/%llu lazy_frame=%llu/%llu/%llu",
                       log_prefix_.c_str(),
                       static_cast<unsigned long long>(prof.harq_key_build_success.load()),
                       static_cast<unsigned long long>(prof.harq_key_build_failed.load()),
                       static_cast<unsigned long long>(prof.harq_key_build_provisional.load()),
                       static_cast<unsigned long long>(prof.harq_prediction_mismatch.load()),
-                      static_cast<unsigned long long>(prof.harq_fresh_rescue.load()));
+                      static_cast<unsigned long long>(prof.harq_fresh_rescue.load()),
+                      static_cast<unsigned long long>(prof.harq_shadow_both_pass.load()),
+                      static_cast<unsigned long long>(prof.harq_shadow_combine_only.load()),
+                      static_cast<unsigned long long>(prof.harq_double_fail.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_fresh_rescue_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_all_fresh_frame_rescue.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_all_fresh_frame_rescue_provisional.load()),
+                      static_cast<unsigned long long>(prof.harq_shadow_eligible.load()),
+                      static_cast<unsigned long long>(prof.harq_shadow_divergent.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_eligible_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_both_pass_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_combine_only_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_divergent_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_double_fail_provisional.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_fresh_decode.count.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_fresh_decode.total_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_fresh_decode.max_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_frame_evaluation.count.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_frame_evaluation.total_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_shadow_frame_evaluation.max_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_fresh_decode.count.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_fresh_decode.total_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_fresh_decode.max_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_frame_evaluation.count.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_frame_evaluation.total_us.load()),
+                      static_cast<unsigned long long>(
+                          prof.harq_lazy_frame_evaluation.max_us.load()));
         }
         // Per-group provisional context is stale once the group is delivered
         // (the ARQ state advances on this very delivery) — drop it.

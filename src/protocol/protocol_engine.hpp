@@ -55,6 +55,7 @@ public:
     using MessageTxStatusEvent = Connection::MessageTxStatusEvent;
     using MessageTxStatusCallback = Connection::MessageTxStatusCallback;
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
+    using DisconnectTeardownCallback = Connection::DisconnectTeardownCallback;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
     using DataReceivedCallback = Connection::DataReceivedCallback;
 
@@ -81,6 +82,10 @@ public:
     void setMessageReceivedCallback(MessageReceivedCallback cb);
     void setMessageTxStatusCallback(MessageTxStatusCallback cb);
     void setConnectionChangedCallback(ConnectionChangedCallback cb);
+    // Fine-grained close phase, including responder grace where ConnectionState
+    // intentionally remains CONNECTED. Frontends use this to restrict the PHY
+    // and their own egress queues to DISCONNECT / sentinel-ACK traffic only.
+    void setDisconnectTeardownCallback(DisconnectTeardownCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
     void setDataReceivedCallback(DataReceivedCallback cb);
 
@@ -251,6 +256,9 @@ public:
     // decision-directed EVM usable-SNR (dB) to the Connection. Call BEFORE
     // onBurstGroupReceived so the demote clamp rides that group's ACK.
     void setBurstEvmObservation(float evm_snr_db);
+    // Explicit invalid observation for a group without complete physical-frame
+    // EVM coverage. Prevents reuse of the preceding group's scalar.
+    void clearBurstEvmObservation();
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
 
@@ -347,6 +355,7 @@ private:
     MessageReceivedCallback on_message_received_;
     MessageTxStatusCallback on_message_tx_status_;
     ConnectionChangedCallback on_connection_changed_;
+    DisconnectTeardownCallback on_disconnect_teardown_;
     IncomingCallCallback on_incoming_call_;
     DataReceivedCallback on_data_received_;
 

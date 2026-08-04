@@ -2105,6 +2105,14 @@ bool SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap,
     return handleAckFrame(ack);
 }
 
+size_t SelectiveRepeatARQ::countUnackedFrameIdentities(
+    const std::vector<Bytes>& frames) const {
+    return static_cast<size_t>(std::count_if(
+        frames.begin(), frames.end(), [this](const Bytes& frame) {
+            return matchingLiveTXSlot(frame).has_value();
+        }));
+}
+
 void SelectiveRepeatARQ::endGroupReceiveAndAck() {
     group_ack_deferred_ = false;
     // MOVE-EPOCH unanchored interregnum: total ack silence (see sendSack) — skip the

@@ -31,13 +31,25 @@ bool envFlagEnabled(const char* name) {
 
 }  // namespace
 
+void OFDMDemodulator::Impl::beginEvmSnrFrame() {
+    evm_dd_accum_ = 0.0;
+    evm_ee_accum_ = 0.0;
+    evm_de_accum_ = 0.0;
+    evm_carrier_count_ = 0;
+    last_evm_snr_valid_ = false;
+    last_evm_snr_db_ = 0.0f;
+    last_evm_carrier_count_ = 0;
+}
+
 void OFDMDemodulator::Impl::finalizeAndResetEvmSnr() {
-    // Radio-agnostic decision-directed EVM SNR (Stage 1): finalize the just-completed
-    // burst's gain-corrected EVM (S_dd, S_ee, S_de) into last_evm_snr_db_ + log it next to
-    // the LTS SNR line for comparison, then clear the accumulators for the next burst.
+    // Radio-agnostic decision-directed EVM SNR (Stage 1): finalize THIS pass's
+    // gain-corrected EVM (S_dd, S_ee, S_de) before its caller can publish frame
+    // metrics.  The old lifecycle finalized frame j when frame j+1 began, which
+    // made the log one frame late and left the group tail unfinalized at callback.
     if (evm_carrier_count_ > 0) {
         last_evm_snr_db_ = currentEvmSnrDb();
         last_evm_snr_valid_ = true;
+        last_evm_carrier_count_ = evm_carrier_count_;
         LOG_DEMOD(INFO, "EVM SNR estimate: %.1f dB (decision-directed, %zu carriers)",
                   last_evm_snr_db_, evm_carrier_count_);
     }
@@ -48,7 +60,6 @@ void OFDMDemodulator::Impl::finalizeAndResetEvmSnr() {
 }
 
 void OFDMDemodulator::Impl::resetFailureAttributionDiagnostics() {
-    finalizeAndResetEvmSnr();  // per-burst boundary: finalize the prior burst's EVM SNR
     current_data_symbol_index_ = 0;
     failure_diag_carriers_.clear();
     failure_diag_symbols_.clear();
@@ -685,11 +696,21 @@ float OFDMDemodulator::getLastOFDMBroadbandSNREstimate() const {
 // Radio-agnostic decision-directed EVM SNR (Stage 1). Live on-demand value from the
 // current burst's accumulation (no lag); no reference power / offset / noise-shape.
 bool OFDMDemodulator::hasEvmSnr() const {
-    return impl_->evm_carrier_count_ > 0 || impl_->last_evm_snr_valid_;
+    return impl_->last_evm_snr_valid_;
 }
 
 float OFDMDemodulator::getEvmSnrDb() const {
-    return impl_->currentEvmSnrDb();
+    return impl_->last_evm_snr_db_;
+}
+
+bool OFDMDemodulator::takeEvmSnr(float& evm_snr_db, size_t& carrier_count) {
+    if (!impl_->last_evm_snr_valid_) {
+        return false;
+    }
+    evm_snr_db = impl_->last_evm_snr_db_;
+    carrier_count = impl_->last_evm_carrier_count_;
+    impl_->last_evm_snr_valid_ = false;
+    return true;
 }
 
 float OFDMDemodulator::getFrequencyOffset() const {
@@ -913,6 +934,9 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     // This mirrors the Schmidl-Cox approach: LTS for channel est, then data.
     // The chirp replaces STS for more robust timing sync at low SNR.
 
+    // This call owns exactly one physical-frame EVM observation.  Invalidate
+    // the prior pass before every exit, including the too-short-input path.
+    impl_->beginEvmSnrFrame();
     if (samples.size() < impl_->symbol_samples) {
         return false;
     }
@@ -921,7 +945,6 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->soft_bits.clear();
     impl_->demod_data.clear();
     impl_->rx_buffer.clear();
-    impl_->resetFailureAttributionDiagnostics();
     impl_->synced_symbol_count.store(0);
     impl_->idle_call_count.store(0);
     impl_->mixer.reset();
@@ -932,8 +955,6 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->estimated_snr_linear = 1.0f;
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
-    impl_->last_evm_snr_valid_ = false;  // fresh connection: drop any stale EVM SNR
-    impl_->last_evm_snr_db_ = 0.0f;
     impl_->noise_variance = 0.1f;
     impl_->resetPilotFadingStats();
 
@@ -1205,7 +1226,15 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     LOG_DEMOD(DEBUG, "OFDM processPresynced: %d symbols, %zu soft bits, need %d",
               impl_->synced_symbol_count.load(), impl_->soft_bits.size(), impl_->active_ldpc_block_size);
 
-    return impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
+    const bool ready = impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
+    if (ready) {
+        // Publish only after the last data symbol in this physical frame has
+        // contributed.  A non-ready pass remains invalid (fail closed).
+        impl_->finalizeAndResetEvmSnr();
+    } else {
+        impl_->beginEvmSnrFrame();
+    }
+    return ready;
 }
 
 void OFDMDemodulator::reset() {
@@ -1220,8 +1249,7 @@ void OFDMDemodulator::reset() {
     impl_->estimated_snr_linear = 1.0f;
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
-    impl_->last_evm_snr_valid_ = false;  // fresh connection: drop any stale EVM SNR
-    impl_->last_evm_snr_db_ = 0.0f;
+    impl_->beginEvmSnrFrame();  // fresh connection: drop any stale/partial EVM SNR
     impl_->noise_variance = 0.1f;
     impl_->resetPilotFadingStats();
     impl_->last_lts_signal_power = 1.0f;

@@ -359,6 +359,10 @@ private:
     CodeRate data_code_rate_ = CodeRate::R1_4;
 
     std::atomic<bool> running_{false};
+    // Mirrors Connection's explicit close phase. It is checked again at the
+    // physical queue boundary so a ProtocolEngine tick/RX race cannot leak a
+    // previously-drained DATA frame after teardown activation.
+    std::atomic<bool> disconnect_teardown_active_{false};
     std::mutex input_audio_mutex_;
     bool input_enabled_ = false;
     bool output_enabled_ = false;
@@ -481,10 +485,30 @@ private:
             modem_.expectFullOFDMAnchorOnce();
         });
 
+        // The responder remains logically CONNECTED while it holds the final
+        // DISCONNECT ACK grace. Follow Connection's explicit close phase rather
+        // than the coarse state enum so both initiator and responder restrict
+        // acquisition to the hardened one-codeword control geometry.
+        engine_.setDisconnectTeardownCallback([this](bool active) {
+            disconnect_teardown_active_.store(active, std::memory_order_release);
+            modem_.setControlOnlyReceive(active);
+        });
+
         engine_.setTxDataCallback([this](const Bytes& data,
                                          bool expect_full_ofdm_anchor_after_tx) {
+            const auto header = v2::parseHeader(data);
+            const bool disconnect_control =
+                header.valid && header.seq == v2::DISCONNECT_SEQ &&
+                (header.type == v2::FrameType::DISCONNECT ||
+                 header.type == v2::FrameType::ACK);
+            if (disconnect_teardown_active_.load(std::memory_order_acquire) &&
+                !disconnect_control) {
+                LOG_WARN("AUDIO",
+                         "Teardown egress: dropped non-close TNC protocol frame");
+                return;
+            }
             auto samples = transmitFrame(data);
-            queueTx(samples);
+            queueTx(samples, disconnect_control);
             if (!samples.empty() && expect_full_ofdm_anchor_after_tx) {
                 modem_.expectFullOFDMAnchorOnce();
             }
@@ -493,10 +517,21 @@ private:
         engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
                                                 uint16_t group_seq,
                                                 uint8_t anchor_reason) {
-            const ultra::gui::BurstAnchorOptions anchor_options{
-                anchor_reason != ultra::protocol::Connection::kAnchorReasonNone,
+            if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                LOG_WARN("AUDIO", "Teardown egress: dropped TNC DATA burst");
+                return;
+            }
+            const bool full_group_anchor =
                 anchor_reason ==
-                    ultra::protocol::Connection::kAnchorReasonModeSwitch};
+                    ultra::protocol::Connection::kAnchorReasonResend ||
+                anchor_reason ==
+                    ultra::protocol::Connection::kAnchorReasonModeSwitch;
+            const ultra::gui::BurstAnchorOptions anchor_options{
+                full_group_anchor,
+                anchor_reason ==
+                    ultra::protocol::Connection::kAnchorReasonModeSwitch,
+                anchor_reason !=
+                    ultra::protocol::Connection::kAnchorReasonNone};
             queueTx(transmitBurst(frames, group_seq, anchor_options));
         });
 
@@ -507,6 +542,10 @@ private:
         engine_.setTransmitToneBurstAckCallback(
             [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba,
                    bool inbound_group_complete) {
+                if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                    LOG_WARN("AUDIO", "Teardown egress: dropped TNC tone ACK");
+                    return;
+                }
                 const bool recent_rx = modem_.rxSignalActive(
                     ultra::protocol::connection_policy::
                         kDescriptorLostReverseTxHoldMs);
@@ -538,12 +577,20 @@ private:
         });
 
         engine_.setPingTxCallback([this]() {
+            if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                LOG_WARN("AUDIO", "Teardown egress: dropped TNC PING");
+                return;
+            }
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "ping.tx", "{\"kind\":\"ping\"}");
             queueTx(transmitPing());
         });
 
         engine_.setPingReceivedCallback([this]() {
+            if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                LOG_WARN("AUDIO", "Teardown egress: dropped TNC PONG");
+                return;
+            }
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "ping.tx", "{\"kind\":\"pong\"}");
             queueTx(transmitPing());
@@ -787,8 +834,13 @@ private:
         return modem_.transmitPing();
     }
 
-    void queueTx(std::vector<float> samples) {
+    void queueTx(std::vector<float> samples, bool disconnect_control = false) {
         if (samples.empty() || !output_enabled_) {
+            return;
+        }
+        if (disconnect_teardown_active_.load(std::memory_order_acquire) &&
+            !disconnect_control) {
+            LOG_WARN("AUDIO", "Teardown egress: blocked TNC TX at audio commit");
             return;
         }
 

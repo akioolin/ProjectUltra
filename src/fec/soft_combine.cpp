@@ -90,9 +90,10 @@ void logHarqVector(const char* event, const SoftCombineBuffer::Key& key,
         return;
     }
     LOG_MODEM(WARN,
-              "HARQ_DEBUG %s key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
+              "HARQ_DEBUG %s key={sender=0x%06X dst=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
               "attempts=%d len=%zu mean_abs=%.3f first16=%s",
-              event, key.sender_hash, key.seq, static_cast<int>(key.rate),
+              event, key.sender_hash, key.dst_hash, key.seq,
+              static_cast<int>(key.rate),
               key.cw_index, key.cw_count, key.lifting_z, key.modulation,
               key.channel_interleave,
               key.physical_burst_end, key.carrier_count_hash, attempts, llrs.size(),
@@ -108,10 +109,11 @@ void logHarqCombineHit(const SoftCombineBuffer::Key& key, int attempts,
         return;
     }
     LOG_MODEM(WARN,
-              "HARQ_DEBUG combine_hit key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
+              "HARQ_DEBUG combine_hit key={sender=0x%06X dst=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u} "
               "attempts=%d len=%zu sign_disagree=%zu mean_abs_retained=%.3f mean_abs_new=%.3f "
               "mean_abs_sum=%.3f retained16=%s new16=%s sum16=%s",
-              key.sender_hash, key.seq, static_cast<int>(key.rate), key.cw_index,
+              key.sender_hash, key.dst_hash, key.seq,
+              static_cast<int>(key.rate), key.cw_index,
               key.cw_count, key.lifting_z, key.modulation, key.channel_interleave,
               key.physical_burst_end, key.carrier_count_hash,
               attempts, incoming.size(), signDisagreements(retained, incoming),
@@ -125,6 +127,7 @@ void logHarqCombineHit(const SoftCombineBuffer::Key& key, int attempts,
 SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
     Key k;
     k.sender_hash = in.sender_hash;
+    k.dst_hash = in.dst_hash;
     k.seq = in.seq;
     k.rate = in.rate;
     k.cw_count = in.cw_count;
@@ -146,6 +149,7 @@ SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
 
 size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     size_t h = static_cast<size_t>(key.sender_hash);
+    h ^= static_cast<size_t>(key.dst_hash) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_count) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_index) + 0x9e3779b9u + (h << 6) + (h >> 2);
@@ -177,8 +181,9 @@ int SoftCombineBuffer::combine(const Key& key, const std::vector<float>& incomin
     if (entry.llrs.size() != incoming_llrs.size()) {
         if (harqDebugKeySelected(key)) {
             LOG_MODEM(WARN,
-                      "HARQ_DEBUG combine_size_mismatch key={sender=0x%06X seq=%u cw=%u/%u} retained_len=%zu new_len=%zu",
-                      key.sender_hash, key.seq, key.cw_index, key.cw_count,
+                      "HARQ_DEBUG combine_size_mismatch key={sender=0x%06X dst=0x%06X seq=%u cw=%u/%u} retained_len=%zu new_len=%zu",
+                      key.sender_hash, key.dst_hash, key.seq, key.cw_index,
+                      key.cw_count,
                       entry.llrs.size(), incoming_llrs.size());
         }
         eraseLocked(key);
@@ -262,8 +267,9 @@ void SoftCombineBuffer::drop(const Key& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (harqDebugKeySelected(key)) {
         LOG_MODEM(WARN,
-                  "HARQ_DEBUG drop key={sender=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u}",
-                  key.sender_hash, key.seq, static_cast<int>(key.rate),
+                  "HARQ_DEBUG drop key={sender=0x%06X dst=0x%06X seq=%u rate=%d cw=%u/%u z=%u mod=%u ch_int=%u tail=%u geom=%u}",
+                  key.sender_hash, key.dst_hash, key.seq,
+                  static_cast<int>(key.rate),
                   key.cw_index, key.cw_count, key.lifting_z, key.modulation,
                   key.channel_interleave,
                   key.physical_burst_end, key.carrier_count_hash);

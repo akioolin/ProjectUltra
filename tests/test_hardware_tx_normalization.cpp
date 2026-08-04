@@ -97,9 +97,10 @@ std::vector<uint8_t> payload(size_t n, uint32_t seed) {
 
 void configureConnectedEngine(gui::ModemEngine& engine,
                               ultra::CodeRate rate,
-                              int cw_count) {
+                              int cw_count,
+                              ultra::Modulation modulation = ultra::Modulation::DQPSK) {
     engine.setWaveformMode(protocol::WaveformMode::OFDM_CHIRP);
-    engine.setDataMode(ultra::Modulation::DQPSK, rate);
+    engine.setDataMode(modulation, rate);
     engine.setConnected(true);
     engine.setHandshakeComplete(true);
     engine.setFixedFrameCodewords(cw_count);
@@ -334,6 +335,90 @@ void proof5_pathDisjointness() {
           "Proof5 simulator output independent of hardware path");
 }
 
+void proof6_keyedDurationMatchesConnectionSampleModel() {
+    constexpr ultra::Modulation kMod = ultra::Modulation::QAM8;
+    constexpr ultra::CodeRate kRate = ultra::CodeRate::R2_3;
+    constexpr int kCW = 12;
+
+    auto frames = [=](size_t count, uint16_t base_seq) {
+        std::vector<std::vector<uint8_t>> out;
+        out.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(fixedDataFrame(
+                kRate, kCW, static_cast<uint16_t>(base_seq + i),
+                0x6000u + static_cast<uint32_t>(i)));
+        }
+        return out;
+    };
+
+    gui::ModemEngine engine;
+    configureConnectedEngine(engine, kRate, kCW, kMod);
+    // Connected entry deliberately forces the first group-start full. Consume
+    // that one-shot so the next request is the ordinary descriptor+light-DATA
+    // shape Connection models for a first-attempt round.
+    (void)engine.transmitBurst(frames(5, 0), 0);
+
+    const auto light_n5 = engine.transmitBurst(frames(5, 10), 1);
+    const auto full_n5 = engine.transmitBurst(
+        frames(5, 20), 2, gui::BurstAnchorOptions{true, false});
+    const auto light_n8 = engine.transmitBurst(frames(8, 30), 3);
+    const auto full_n8 = engine.transmitBurst(
+        frames(8, 40), 4, gui::BurstAnchorOptions{true, false});
+
+    CHECK(light_n5.size() == 374080,
+          "Proof6 emitted light N5 equals descriptor + 5 data slots + guards");
+    CHECK(full_n5.size() == 431680,
+          "Proof6 emitted full N5 adds exactly one 57,600-sample anchor");
+    CHECK(light_n8.size() == 552160,
+          "Proof6 emitted light N8 equals descriptor + 8 data slots + guards");
+    CHECK(full_n8.size() == 609760,
+          "Proof6 emitted full N8 adds exactly one 57,600-sample anchor");
+
+    const uint64_t model_n5 =
+        protocol::connection_policy::postProcessedTxSamples(
+            protocol::connection_policy::wideOFDMWireBurstSamples(
+                kMod, kRate, 5, kCW, 27, false, ultra::Modulation::QPSK));
+    const uint64_t model_n8_full =
+        protocol::connection_policy::postProcessedTxSamples(
+            protocol::connection_policy::wideOFDMWireBurstSamples(
+                kMod, kRate, 8, kCW, 27, true, ultra::Modulation::QPSK));
+    CHECK(model_n5 == light_n5.size() && model_n8_full == full_n8.size(),
+          "Proof6 shared policy helper matches ModemEngine returned sample counts");
+}
+
+void proof7_disconnectAckUsesFullAnchor() {
+    constexpr ultra::Modulation kMod = ultra::Modulation::QPSK;
+    constexpr ultra::CodeRate kRate = ultra::CodeRate::R3_4;
+    constexpr int kCW = 3;
+
+    gui::ModemEngine engine;
+    configureConnectedEngine(engine, kRate, kCW, kMod);
+
+    // Consume connected entry's one-shot anchor so every length below is caused
+    // by the frame classifier itself, not by session-start state.
+    (void)engine.transmit(fixedDataFrame(kRate, kCW, 1, 0x7000u));
+
+    const auto ordinary_ack = engine.transmit(
+        v2::ControlFrame::makeAck("BRAVO", "ALPHA", 1).serialize());
+    const auto disconnect_ack = engine.transmit(
+        v2::ControlFrame::makeAck(
+            "BRAVO", "ALPHA", v2::DISCONNECT_SEQ).serialize());
+    const auto disconnect_request = engine.transmit(
+        v2::ControlFrame::makeDisconnect("BRAVO", "ALPHA").serialize());
+    const auto ordinary_ack_after = engine.transmit(
+        v2::ControlFrame::makeAck("BRAVO", "ALPHA", 2).serialize());
+
+    CHECK(!ordinary_ack.empty() && !disconnect_ack.empty() &&
+              !disconnect_request.empty(),
+          "Proof7 connected teardown controls must encode");
+    CHECK(disconnect_ack.size() == disconnect_request.size(),
+          "Proof7 sentinel ACK and DISCONNECT request must use the same full anchor");
+    CHECK(disconnect_ack.size() >= ordinary_ack.size() + 20000,
+          "Proof7 sentinel ACK must carry a chirp+LTS anchor, not ordinary light ACK sync");
+    CHECK(ordinary_ack_after.size() == ordinary_ack.size(),
+          "Proof7 full teardown ACK classification must not leak into later ACKs");
+}
+
 }  // namespace
 
 int main() {
@@ -344,6 +429,8 @@ int main() {
     proof3_burstBoundaryInvariant();
     proof4_burstTypePeakConsistency();
     proof5_pathDisjointness();
+    proof6_keyedDurationMatchesConnectionSampleModel();
+    proof7_disconnectAckUsesFullAnchor();
 
     if (tests_failed == 0) {
         std::cout << "\nPASS: TxBurstHardwareNormalization (" << tests_run

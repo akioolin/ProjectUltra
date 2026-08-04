@@ -47,6 +47,13 @@ static bool isInQsoDataFrame(const Bytes& frame) {
     return header.valid && protocol::v2::isDataFrame(header.type);
 }
 
+static bool isDisconnectTeardownControlFrame(const Bytes& frame) {
+    const auto header = protocol::v2::parseHeader(frame);
+    return header.valid && header.seq == protocol::v2::DISCONNECT_SEQ &&
+           (header.type == protocol::v2::FrameType::DISCONNECT ||
+            header.type == protocol::v2::FrameType::ACK);
+}
+
 static bool hasOperatorTimestampPrefix(const std::string& msg) {
     return msg.size() >= 11 &&
            msg[0] == '[' &&
@@ -591,6 +598,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             modem_.setDataMode(mod, rate);
             modem_.setWaveformMode(wf);
             modem_.setConnected(true);  // forces decoder into connected OFDM data path
+            modem_.setHandshakeComplete(true);  // monitor mode deliberately skips CONNECT/ACK
             // Post-handshake, OFDM data frames are fixed 4-CW. Without this the
             // decoder treats incoming as 1-CW control frames and falsely rejects
             // the data symbols past the first ~9 OFDM symbols as noise.
@@ -605,6 +613,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setTxDataCallback([this](const Bytes& data,
                                        bool expect_full_ofdm_anchor_after_tx) {
         const bool in_qso_data = isInQsoDataFrame(data);
+        const bool disconnect_control = isDisconnectTeardownControlFrame(data);
+        if (disconnect_teardown_active_.load(std::memory_order_acquire) &&
+            !disconnect_control) {
+            LOG_MODEM(WARN,
+                      "Teardown egress: dropped non-close protocol frame before encode");
+            return;
+        }
         if (in_qso_data && shouldDeferInQsoDataForTx()) {
             deferTxFrame(data, "TX audio", expect_full_ofdm_anchor_after_tx);
             return;
@@ -613,7 +628,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // When protocol layer wants to transmit, convert to audio
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
-            queueRealTxSamples(samples, "TX audio", in_qso_data);
+            queueRealTxSamples(samples, "TX audio", in_qso_data,
+                               disconnect_control);
             if (expect_full_ofdm_anchor_after_tx) {
                 modem_.expectFullOFDMAnchorOnce();
             }
@@ -624,13 +640,22 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
                                               uint16_t group_seq,
                                               uint8_t anchor_reason) {
+        if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+            LOG_MODEM(WARN,
+                      "Teardown egress: dropped queued DATA burst before encode");
+            return;
+        }
         // Bind the resend/mode-switch anchor to this exact physical request.
         // A shared encoder latch cannot be armed before CCA deferral: an older
         // queued burst could consume a newer repair's latch, or a purged request
         // could leak it into an unrelated future burst.
+        const bool full_group_anchor =
+            anchor_reason == protocol::Connection::kAnchorReasonResend ||
+            anchor_reason == protocol::Connection::kAnchorReasonModeSwitch;
         const BurstAnchorOptions anchor_options{
-            anchor_reason != protocol::Connection::kAnchorReasonNone,
-            anchor_reason == protocol::Connection::kAnchorReasonModeSwitch};
+            full_group_anchor,
+            anchor_reason == protocol::Connection::kAnchorReasonModeSwitch,
+            anchor_reason != protocol::Connection::kAnchorReasonNone};
         const bool in_qso_data = std::any_of(
             frames.begin(), frames.end(),
             [](const Bytes& frame) { return isInQsoDataFrame(frame); });
@@ -660,6 +685,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setTransmitToneBurstAckCallback(
         [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba,
                bool inbound_group_complete) {
+            if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                return;
+            }
             // §15.5 staircase: scale the ACK symbol duration to the latest in-band
             // SNR — a shorter ACK at high SNR cuts the per-turnaround airtime
             // (850 ms -> 408 ms at >=18 dB); a longer ACK at low SNR adds
@@ -856,6 +884,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         enqueueMessageTxStatus(event);
     });
 
+    protocol_.setDisconnectTeardownCallback(
+        [this](bool active) { setDisconnectTeardownActive(active); });
+
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         // Cache for the carrier-sense gate (read on the TX-callback path where
         // calling protocol_.getState() would re-enter the engine mutex).
@@ -881,6 +912,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // Stay "connected" during DISCONNECTING so we can receive the ACK via OFDM
         bool modem_connected = (state == protocol::ConnectionState::CONNECTED ||
                                 state == protocol::ConnectionState::DISCONNECTING);
+
+        // DISCONNECTING still needs the negotiated coherent OFDM receiver for the
+        // peer's hardened QPSK R1/4 ACK, but it must no longer speculate that a
+        // failed control candidate is a multi-codeword DATA frame.  A false lock
+        // on the final ACK tail previously escalated to the connected data geometry
+        // and occupied the decoder across the real disconnect ACK.  Publish the
+        // teardown phase separately from the coarse connected bit.
+        modem_.setControlOnlyReceive(
+            state == protocol::ConnectionState::DISCONNECTING ||
+            disconnect_teardown_active_.load(std::memory_order_acquire));
 
         // BUG-TNC-SESSION-001 fix (port from tools/ultra_tnc.cpp): on
         // transition to DISCONNECTED, quiesce the audio input producer
@@ -943,23 +984,36 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 break;
             case protocol::ConnectionState::DISCONNECTED:
                 connected_peer_snr_valid_ = false;
-                // Scripted responder auto-quit. The event-driven scenario quit only fires
-                // for the station that ISSUES the disconnect (scenario_disconnect_issued_,
-                // e.g. ALPHA). A station that RECEIVES a remote disconnect (e.g. BRAVO) had
-                // no trigger, so it idled until the conservative hard exit-after timer and
-                // the operator had to close the window by hand. Mirror the initiator path:
-                // once a real session ends (was-connected -> now-disconnected) during a
-                // scripted run, schedule the same grace-then-quit in tickScenario().
-                // wrap_audio_quiesce == (was connected && now disconnected), so this never
-                // fires on a failed/timed-out connect that was never established. Gated on
-                // scenario_active_ — a real interactive station stays up after a QSO.
-                if (scenario_active_ && !scenario_disconnect_issued_ && wrap_audio_quiesce) {
-                    scenario_disconnect_issued_ = true;
-                    scenario_disconnect_at_ = std::chrono::steady_clock::now();
-                    guiLog("[scenario] remote disconnect received; quitting after grace");
+                // A scripted endpoint may quit only after the protocol has actually
+                // completed teardown (ACK, responder grace, or protocol timeout).  A
+                // fixed delay from DISCONNECT TX is unsafe on the hardware path: fading
+                // acquisition plus the full control waveform can consume that entire
+                // delay before the peer's ACK even starts.  The callback may run on the
+                // RX thread, so publish a one-bit request for tickScenario() to consume.
+                // wrap_audio_quiesce proves this was a real connected session, not a
+                // failed connection attempt that never reached CONNECTED.
+                if (scenario_active_ && wrap_audio_quiesce) {
+                    scenario_disconnect_complete_pending_.store(
+                        true, std::memory_order_relaxed);
                 }
                 if (info.find("timeout") != std::string::npos) {
                     msg = "[FAILED] " + info;  // Make failures more visible
+                    // A scripted caller has already exhausted the protocol's
+                    // retry budget.  There is no payload or teardown left to
+                    // drive, so retain a short log-flush grace and exit.  The
+                    // old behavior kept the GUI/audio lease alive until the
+                    // conservative --exit-after deadline (900 s in the IONOS
+                    // runner), masking a known-dead test as a live transfer.
+                    // Never apply this to the responder or an interactive GUI.
+                    if (scenario_active_ && !options_.auto_connect.empty() &&
+                        scenario_connect_issued_ && !scenario_connected_seen_ &&
+                        !scenario_terminal_failure_) {
+                        scenario_terminal_failure_ = true;
+                        scenario_terminal_failure_at_ =
+                            std::chrono::steady_clock::now();
+                        guiLog("[scenario] terminal connect failure; quitting "
+                               "after log grace");
+                    }
                 } else {
                     msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 }
@@ -2859,6 +2913,10 @@ std::string App::testCat(AppSettings settings) {
 // fade draw decorrelated by >= the knob delay. Runs on the GUI tick; never touches
 // protocol_ (the §15.5 deadlock rule).
 void App::maybeFireAckRepeatIfSilent() {
+    if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+        clearPendingAckAudioForTeardown();
+        return;
+    }
     // CONTINUOUS-QUIET gate (F100 correction): a single CCA sample at the deadline
     // races the rig's 1.5-3 s turnaround — a momentarily-quiet instant fired 25
     // redundant repeats in F100 and their TX blanked inbound burst heads (13
@@ -2902,7 +2960,8 @@ void App::maybeFireAckRepeatIfSilent() {
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const int64_t sig_ms = modem_.lastRxSignalMs();
             if (protocol::connection_policy::shouldHoldSilentAckRepeatForBroadSignal(
-                    modem_.getWaveformMode(), now_ms, sig_ms)) {
+                    modem_.getWaveformMode(), now_ms, sig_ms,
+                    ack_repeat_armed_signal_ms_)) {
                 return;
             }
         }
@@ -2942,6 +3001,10 @@ void App::maybeFireAckRepeatIfSilent() {
 // the ACTUAL send, not the protocol event) and queue the audio. Factored so the
 // immediate path and the CCA-deferred path share it exactly.
 void App::submitToneAckSamples(const std::vector<float>& samples) {
+    if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+        clearPendingAckAudioForTeardown();
+        return;
+    }
     // ACK REPEAT-IF-SILENT (ULTRA_ACK_REPEAT_SILENT_MS, default OFF;
     // BUG-TONE-FADE residual, handoff §7.6): stash a decorrelated copy; the GUI
     // tick fires it only after an UNBROKEN quiet window (see
@@ -2960,13 +3023,25 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
         // through the peer's resends). An identical ack already has the RTO
         // and the backstop as its fallback; only NEW window state earns the
         // tone-fade echo.
-        if (samples != ack_repeat_last_armed_samples_) {
-        ack_repeat_last_armed_samples_ = samples;
-        ack_repeat_samples_ = samples;
-        ack_repeat_fire_time_ = std::chrono::steady_clock::now() +
-                                std::chrono::milliseconds(airtime_ms + kAckRepeatSilentMs);
-        ack_repeat_armed_rx_ms_ = modem_.lastRxSubstantiveMs();  // F143/F147 baseline
-        ack_repeat_pending_ = true;
+        const bool distinct_ack = samples != ack_repeat_last_armed_samples_;
+        const int64_t broad_baseline_ms = modem_.lastRxSignalMs();
+        const int64_t substantive_baseline_ms = modem_.lastRxSubstantiveMs();
+        LOG_MODEM(INFO,
+                  "ACK-REPEAT-SILENT: arm eligible=%d delay=%u ms airtime=%lld ms "
+                  "broad_baseline=%lld substantive_baseline=%lld",
+                  distinct_ack ? 1 : 0, kAckRepeatSilentMs,
+                  static_cast<long long>(airtime_ms),
+                  static_cast<long long>(broad_baseline_ms),
+                  static_cast<long long>(substantive_baseline_ms));
+        if (distinct_ack) {
+            ack_repeat_last_armed_samples_ = samples;
+            ack_repeat_samples_ = samples;
+            ack_repeat_fire_time_ = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(
+                                        airtime_ms + kAckRepeatSilentMs);
+            ack_repeat_armed_rx_ms_ = substantive_baseline_ms;  // F143/F147 baseline
+            ack_repeat_armed_signal_ms_ = broad_baseline_ms;
+            ack_repeat_pending_ = true;
         }
     }
     if (queueRealTxSamples(samples, "TX tone-burst ACK audio",
@@ -2985,6 +3060,10 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
 // than violating half duplex.  Descriptor-loss asynchronous ACKs retain a full
 // maximum-burst guard; physically-complete group ACKs bypass that RX stamp.
 void App::maybeFireDeferredAck() {
+    if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+        clearPendingAckAudioForTeardown();
+        return;
+    }
     std::vector<float> copy;
     std::vector<float> deadline_send;
     {
@@ -3053,6 +3132,38 @@ after_lock:
     }
 }
 
+void App::clearPendingAckAudioForTeardown() {
+    std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+    ack_repeat_pending_ = false;
+    ack_repeat_samples_.clear();
+    ack_repeat_last_armed_samples_.clear();
+    ack_repeat_fire_time_ = {};
+    ack_repeat_armed_rx_ms_ = 0;
+    ack_repeat_armed_signal_ms_ = 0;
+    ack_defer_pending_ = false;
+    ack_defer_samples_.clear();
+    ack_defer_deadline_ = {};
+    ack_defer_quiet_ticks_ = 0;
+    ack_defer_inbound_group_complete_ = false;
+}
+
+void App::setDisconnectTeardownActive(bool active) {
+    const bool previous = disconnect_teardown_active_.exchange(
+        active, std::memory_order_acq_rel);
+    modem_.setControlOnlyReceive(active);
+    if (active) {
+        // These are App-owned secondary ACK paths, outside Connection's central
+        // egress gate. They must not leak into the responder grace or collide
+        // with the peer's close retry.
+        clearPendingAckAudioForTeardown();
+    }
+    if (previous != active) {
+        guiLog("Disconnect teardown phase: %s (control-only RX%s)",
+               active ? "entered" : "left",
+               active ? ", non-close App TX suppressed" : " disabled");
+    }
+}
+
 void App::tickScenario() {
     if (!scenario_active_) {
         return;
@@ -3061,6 +3172,27 @@ void App::tickScenario() {
     if (!scenario_started_) {
         scenario_start_ = now;
         scenario_started_ = true;
+    }
+
+    if (scenario_disconnect_complete_pending_.exchange(
+            false, std::memory_order_relaxed)) {
+        const bool remote_owned_disconnect = !scenario_disconnect_issued_;
+        scenario_disconnect_issued_ = true;
+        scenario_disconnect_completed_ = true;
+        scenario_disconnect_completed_at_ = now;
+        guiLog(remote_owned_disconnect
+                   ? "[scenario] remote disconnect complete; quitting after log grace"
+                   : "[scenario] local disconnect handshake complete; quitting after log grace");
+    }
+
+    if (scenario_terminal_failure_ &&
+        now - scenario_terminal_failure_at_ >= std::chrono::seconds(2)) {
+        guiLog("[scenario] terminal failure grace complete; quitting");
+        scenario_active_ = false;
+        SDL_Event quit_event;
+        quit_event.type = SDL_QUIT;
+        SDL_PushEvent(&quit_event);
+        return;
     }
     // --disconnect-on-file-done: consume the request HERE, outside ProtocolEngineMutex. The
     // successful FileSent callback only sets the flag; calling protocol_ from inside it
@@ -3094,13 +3226,17 @@ void App::tickScenario() {
         return;
     }
 
-    // Event-driven quit: once the scripted disconnect has been issued, the run is
-    // done — exit after a short grace for the DISCONNECT handshake + final ACKs
-    // instead of idling out the conservative hard exit-after timer. Keeps batch
-    // sweeps from leaving finished GUIs open ~1 min each. The hard timer above
-    // remains the backstop if disconnect never completes.
-    if (scenario_disconnect_issued_ &&
-        now - scenario_disconnect_at_ >= std::chrono::seconds(8)) {
+    // Event-driven quit starts only after the connection state machine confirms
+    // teardown.  Keep a short post-completion grace so final protocol/diagnostic
+    // records are flushed; --exit-after remains the backstop for a stuck close.
+    const auto disconnect_complete_elapsed_ms =
+        scenario_disconnect_completed_
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now - scenario_disconnect_completed_at_).count()
+            : 0;
+    if (protocol::connection_policy::scriptedDisconnectQuitReady(
+            scenario_disconnect_completed_,
+            static_cast<uint64_t>(disconnect_complete_elapsed_ms))) {
         guiLog("[scenario] scripted disconnect complete; quitting");
         scenario_active_ = false;
         SDL_Event quit_event;
@@ -3383,8 +3519,14 @@ float App::effectiveTxDriveForContext(const char* context) const {
 }
 
 bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context,
-                             bool in_qso_data) {
+                             bool in_qso_data, bool disconnect_control) {
     if (samples.empty()) {
+        return false;
+    }
+    if (disconnect_teardown_active_.load(std::memory_order_acquire) &&
+        !disconnect_control) {
+        LOG_MODEM(WARN, "Teardown egress: dropped App TX audio (%s)",
+                  context ? context : "unknown");
         return false;
     }
 
@@ -3403,7 +3545,7 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
         return true;
     }
 
-    return doQueueRealTxSamples(samples, context);
+    return doQueueRealTxSamples(samples, context, disconnect_control);
 }
 
 bool App::shouldDeferInQsoDataForTx() const {
@@ -3570,6 +3712,15 @@ void App::purgeStaleDeferredDataTx() {
 }
 
 void App::flushDeferredTxIfReady() {
+    if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+        if (!deferred_tx_.empty()) {
+            guiLog("Teardown egress: purging %zu deferred non-close TX entr%s",
+                   deferred_tx_.size(), deferred_tx_.size() == 1 ? "y" : "ies");
+            deferred_tx_.clear();
+        }
+        deferred_tx_deadline_ = {};
+        return;
+    }
     purgeStaleDeferredDataTx();
     if (deferred_tx_.empty()) {
         return;
@@ -3656,8 +3807,17 @@ void App::flushDeferredTxIfReady() {
     doQueueRealTxSamples(samples, front.context.c_str());
 }
 
-bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* context) {
+bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* context,
+                               bool disconnect_control) {
     if (samples.empty()) {
+        return false;
+    }
+    // Re-check at the final physical queue boundary. The teardown callback may
+    // arrive on the RX thread after queueRealTxSamples() passed its first gate.
+    if (disconnect_teardown_active_.load(std::memory_order_acquire) &&
+        !disconnect_control) {
+        LOG_MODEM(WARN, "Teardown egress: blocked App TX at audio commit (%s)",
+                  context ? context : "unknown");
         return false;
     }
 
@@ -3797,8 +3957,27 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
     // (alc_tx_drive_, clamped [settings baseline, 0.85]); handshake/control/ACK/
     // MC-DPSK keep the configured settings_.tx_drive. One scalar per whole burst —
     // adjustments land between bursts, never inside one.
+    const float requested_peak = effectiveTxDriveForContext(context);
     const auto measurement = ultra::sim::normalizeTxBurstForHardware(
-        hardware_samples, effectiveTxDriveForContext(context));
+        hardware_samples, requested_peak);
+    if (protocol::connection_policy::softwareAlcEnabled() && context &&
+        std::strcmp(context, "TX burst audio") == 0) {
+        // This is the last software boundary before the samples enter the audio
+        // playback queue.  Log the measurement returned from the operation that
+        // actually scaled this burst, rather than merely logging alc_tx_drive_.
+        // The campaign can therefore distinguish "the controller moved" from
+        // "the transmitted sample vector moved", and any downstream sound-card,
+        // radio, or channel-simulator level normalization remains separately
+        // observable at the receiver.
+        LOG_MODEM(INFO,
+                  "ALC-TX-APPLIED: requested=%.3f target=%.3f peak_before=%.6f "
+                  "gain=%.6f peak_after=%.6f active=%zu samples=%zu fragment=%d",
+                  requested_peak, measurement.target_peak,
+                  measurement.peak_before_gain, measurement.gain_to_target,
+                  measurement.peak_after_gain, measurement.active_samples,
+                  hardware_samples.size(),
+                  measurement.burst_fragment_warning ? 1 : 0);
+    }
     if (measurement.burst_fragment_warning) {
         LOG_WARN("AUDIO",
                  "%s: hardware TX peak normalization bypassed fragment "

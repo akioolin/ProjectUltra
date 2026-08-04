@@ -3,6 +3,8 @@
 #include "sync/signal_policy.hpp"   // limitConnectedCFODrift + kMaxSyncCFODriftHz
 #include "ultra/logging.hpp"        // LOG_MODEM
 
+#include <cmath>
+
 namespace ultra {
 namespace sync {
 
@@ -14,6 +16,10 @@ namespace sync {
 float CFOTracker::seedFromChirp(float measured_cfo, float correlation, bool connected,
                                 const char* log_prefix) const {
     const float known = cfo_.load();
+    if (!std::isfinite(measured_cfo)) {
+        LOG_MODEM(WARN, "[%s] CFO sanity: non-finite chirp estimate rejected", log_prefix);
+        return std::isfinite(known) ? known : 0.0f;
+    }
     const auto decision =
         signal_policy::limitConnectedCFODrift(connected, measured_cfo, known, correlation);
     if (decision.clamped) {
@@ -34,8 +40,15 @@ float CFOTracker::seedFromChirp(float measured_cfo, float correlation, bool conn
 // (nothing reads the tracker in between).
 signal_policy::PilotCFOUpdate CFOTracker::ingestPilotResidual(
     float pre_correction, float residual, float current, bool clamp_drift) {
-    const auto update = signal_policy::combinePilotCFO(pre_correction, residual, current, clamp_drift);
-    cfo_.store(update.accepted_cfo);
+    auto update = signal_policy::combinePilotCFO(pre_correction, residual, current, clamp_drift);
+    if (!std::isfinite(update.accepted_cfo)) {
+        const float tracked_now = tracked();
+        update.accepted_cfo = std::isfinite(current)
+            ? current
+            : (std::isfinite(tracked_now) ? tracked_now : 0.0f);
+        update.clamped = true;
+    }
+    store(update.accepted_cfo);
     // NOTE (BUG-ANCHOR-CFO-KILL): ingest does NOT certify the warm value — burst
     // frames ingest residuals BEFORE any LDPC verdict exists, so a crater feeds
     // noise here. Certification is owned by decode OUTCOMES (certifyWarm on a
@@ -49,7 +62,12 @@ signal_policy::PilotCFOUpdate CFOTracker::ingestPilotResidual(
 // full-anchor groups killed at 16QAM vs 0% of warm-LTS groups over 4 gate runs).
 float CFOTracker::seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
                                                const char* log_prefix) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     const float known = cfo_.load();
+    if (!std::isfinite(measured_cfo)) {
+        LOG_MODEM(WARN, "[%s] Full-anchor CFO: non-finite chirp estimate rejected", log_prefix);
+        return std::isfinite(known) ? known : 0.0f;
+    }
     const auto seed = signal_policy::connectedAnchorCFOSeed(
         measured_cfo, known, correlation, pilot_seeded_.load());
     if (seed.used_warm) {

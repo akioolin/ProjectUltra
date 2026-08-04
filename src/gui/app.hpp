@@ -213,6 +213,11 @@ private:
     // deadlock). The connection-changed callback updates this atomic instead.
     std::atomic<protocol::ConnectionState> conn_state_cached_{
         protocol::ConnectionState::DISCONNECTED};
+    // ConnectionState cannot represent the responder's post-DISCONNECT ACK
+    // grace (it deliberately remains CONNECTED). Connection publishes this
+    // finer phase so every App TX chokepoint can reject stale DATA/ACK audio
+    // while still permitting the DISCONNECT/sentinel-ACK close exchange.
+    std::atomic<bool> disconnect_teardown_active_{false};
     // #70 STAGE2: after this station PONGs a PING it is a RESPONDER expecting the
     // initiator's CONNECT (a DATA frame), so the robust bare-chirp PING emit is disarmed
     // (bare_chirp_expected_=false) for the initiator's connect-attempt window — else a
@@ -240,6 +245,15 @@ private:
     bool scenario_file_cancel_timer_started_ = false;
     bool scenario_file_cancel_issued_ = false;
     bool scenario_disconnect_issued_ = false;
+    bool scenario_disconnect_completed_ = false;
+    // Connection callbacks can run on the RX/protocol thread.  Publish only a
+    // one-bit completion request there; tickScenario owns the scenario state and
+    // completion timestamp on the GUI thread.
+    std::atomic<bool> scenario_disconnect_complete_pending_{false};
+    // A scripted caller that exhausts CONNECT retries has no remaining work.
+    // Keep interactive stations open, but let automation flush its terminal
+    // log and release the audio device instead of idling to --exit-after.
+    bool scenario_terminal_failure_ = false;
     // --disconnect-on-file-done handshake. SET after successful outbound file completion
     // (the callback runs under ProtocolEngineMutex, so it must NOT touch protocol_) and
     // CONSUMED in tickScenario() outside the lock. The consumer enforces caller-only teardown
@@ -252,6 +266,8 @@ private:
     std::chrono::steady_clock::time_point scenario_file_done_at_;
     std::chrono::steady_clock::time_point scenario_file_cancel_started_at_;
     std::chrono::steady_clock::time_point scenario_disconnect_at_;  // when scripted disconnect issued
+    std::chrono::steady_clock::time_point scenario_disconnect_completed_at_;
+    std::chrono::steady_clock::time_point scenario_terminal_failure_at_;
     void tickScenario();
 
     // Modem/protocol callbacks can run on the RX decode / ARQ path. They must
@@ -308,6 +324,7 @@ private:
     std::chrono::steady_clock::time_point ack_repeat_fire_time_{};
     bool ack_repeat_pending_ = false;
     int64_t ack_repeat_armed_rx_ms_ = 0;  // F143: decoder stamp AT arm; cancel only on NEWER evidence
+    int64_t ack_repeat_armed_signal_ms_ = 0;  // broad-stamp baseline; same group must not self-hold
     void maybeFireAckRepeatIfSilent();
     // LISTEN-BEFORE-ACK (2026-07-05, F124 finding: 4 tone-ACKs keyed while the
     // sender's audio was actively arriving — a half-duplex violation that blanks
@@ -324,6 +341,8 @@ private:
     bool ack_defer_inbound_group_complete_ = false;
     void maybeFireDeferredAck();
     void submitToneAckSamples(const std::vector<float>& samples);
+    void setDisconnectTeardownActive(bool active);
+    void clearPendingAckAudioForTeardown();
     std::vector<float> ack_repeat_last_armed_samples_;  // F222: one repeat per distinct ack
 
     // ── Software-ALC sender state (BUG-QAM16-RIG-LEVEL-BUDGET, 2026-07-02) ──
@@ -475,8 +494,10 @@ private:
     // channel goes idle, bounded by kMaxTxDeferMs so a stuck-busy reading never
     // deadlocks TX. doQueueRealTxSamples() is the real key-up + send (bypasses the gate).
     bool queueRealTxSamples(const std::vector<float>& samples, const char* context,
-                            bool in_qso_data = false);
-    bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context);
+                            bool in_qso_data = false,
+                            bool disconnect_control = false);
+    bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context,
+                              bool disconnect_control = false);
     bool shouldDeferInQsoDataForTx() const;
     void deferTxSamples(const std::vector<float>& samples, const char* context,
                         bool in_qso_data,

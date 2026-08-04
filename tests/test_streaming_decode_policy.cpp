@@ -137,81 +137,160 @@ void test_qam16_control_peek_is_subfixed() {
           "three Z81 codewords are the complete cw3/Z81 frame");
 }
 
-void test_qpsk_r34_provisional_harq_scope() {
-    auto allowed = [](bool opt_in, bool exact_descriptor, bool interleaved,
-                      bool rto_gap, bool prediction_invalid, bool have_callback,
-                      Modulation mod, CodeRate rate, int index, int group_size) {
-        return allowProvisionalHarq(
+void test_provisional_harq_scope() {
+    auto context_allowed = [](bool opt_in, bool exact_descriptor, bool interleaved,
+                              bool cadence_blocked, bool prediction_invalid,
+                              bool have_callback, Modulation mod, CodeRate rate,
+                              int index, int group_size, int frame_cw_count = 0,
+                              int lifting_z = 81) {
+        const int resolved_cw = frame_cw_count != 0
+            ? frame_cw_count
+            : (mod == Modulation::QAM8 ? 4 : 3);
+        return allowProvisionalHarqContext(
             opt_in, /*burst_transport=*/true, exact_descriptor, interleaved,
-            rto_gap, prediction_invalid, have_callback, mod, rate, index,
-            group_size);
+            cadence_blocked, prediction_invalid, have_callback, mod, rate,
+            resolved_cw, lifting_z, index, group_size);
     };
 
-    CHECK(!allowProvisionalHarq(
+    CHECK(!allowProvisionalHarqContext(
                /*opt_in=*/false, /*burst_transport=*/true,
                /*exact_descriptor_proven=*/true,
-               /*burst_interleave=*/false, /*rto_gap_context=*/false,
+               /*burst_interleave=*/false, /*cadence_blocked=*/false,
                /*prediction_invalid=*/false,
                /*context_callback_available=*/true, Modulation::QPSK,
-               CodeRate::R3_4, /*logical_index=*/0,
+               CodeRate::R3_4, /*frame_cw_count=*/3, /*lifting_z=*/81,
+               /*logical_index=*/0,
                /*declared_group_size=*/4),
           "default-off provisional HARQ remains disabled");
 
-    CHECK(!allowProvisionalHarq(
+    CHECK(!allowProvisionalHarqContext(
                /*opt_in=*/true, /*burst_transport=*/false,
                /*exact_descriptor_proven=*/true,
-               /*burst_interleave=*/false, /*rto_gap_context=*/false,
+               /*burst_interleave=*/false, /*cadence_blocked=*/false,
                /*prediction_invalid=*/false,
                /*context_callback_available=*/true, Modulation::QPSK,
-               CodeRate::R3_4, /*logical_index=*/0,
+               CodeRate::R3_4, /*frame_cw_count=*/3, /*lifting_z=*/81,
+               /*logical_index=*/0,
                /*declared_group_size=*/4),
           "non-burst decoding must remain outside provisional HARQ");
 
-    CHECK(allowed(true, true, false, false, false, true,
-                  Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(context_allowed(true, true, false, false, false, true,
+                          Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "descriptor-proven QPSK R3/4 non-tail member should be eligible");
-    CHECK(allowed(true, true, false, false, false, true,
-                  Modulation::QPSK, CodeRate::R3_4, 2, 4),
+    CHECK(context_allowed(true, true, false, false, false, true,
+                          Modulation::QPSK, CodeRate::R3_4, 2, 4),
           "last non-tail QPSK R3/4 member should remain eligible");
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 3, 4),
-          "final physical member must be rejected because its tail bit is hidden in CW0");
+    CHECK(context_allowed(true, true, false, false, false, true,
+                          Modulation::QPSK, CodeRate::R3_4, 3, 4),
+          "tail header may validate the current ARQ prediction");
+    CHECK(!allowProvisionalHarqKey(
+               /*context_allowed=*/true, /*prediction_validated=*/true,
+               /*logical_index=*/3, /*declared_group_size=*/4),
+          "tail member must never use a provisional key");
+    CHECK(!allowProvisionalHarqKey(
+               /*context_allowed=*/true, /*prediction_validated=*/false,
+               /*logical_index=*/2, /*declared_group_size=*/4),
+          "a current-group real-header match is required before key use");
+    CHECK(allowProvisionalHarqKey(
+              /*context_allowed=*/true, /*prediction_validated=*/true,
+              /*logical_index=*/2, /*declared_group_size=*/4),
+          "validated non-tail member may use the provisional key");
+    CHECK(provisionalHarqPredictionMatchesHeader(
+              /*predicted_sender_hash=*/0x010203,
+              /*predicted_dst_hash=*/0x0D0E0F, /*predicted_seq=*/9,
+              /*actual_sender_hash=*/0x010203,
+              /*actual_dst_hash=*/0x0D0E0F, /*actual_seq=*/9),
+          "source, destination, and seq match validates the ARQ mirror");
+    CHECK(!provisionalHarqPredictionMatchesHeader(
+               /*predicted_sender_hash=*/0x010203,
+               /*predicted_dst_hash=*/0x0D0E0F, /*predicted_seq=*/9,
+               /*actual_sender_hash=*/0x010204,
+               /*actual_dst_hash=*/0x0D0E0F, /*actual_seq=*/9),
+          "same seq from another sender must invalidate the mirror");
+    CHECK(!provisionalHarqPredictionMatchesHeader(
+               /*predicted_sender_hash=*/0x010203,
+               /*predicted_dst_hash=*/0x0D0E0F, /*predicted_seq=*/9,
+               /*actual_sender_hash=*/0x010203,
+               /*actual_dst_hash=*/0x0A0B0C, /*actual_seq=*/9),
+          "same sender and seq for another destination must invalidate the mirror");
+    CHECK(!provisionalHarqPredictionMatchesHeader(
+               /*predicted_sender_hash=*/0x010203,
+               /*predicted_dst_hash=*/0x0D0E0F, /*predicted_seq=*/9,
+               /*actual_sender_hash=*/0x010203,
+               /*actual_dst_hash=*/0x0D0E0F, /*actual_seq=*/10),
+          "same sender with another seq must invalidate the mirror");
 
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R2_3, 0, 4),
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QPSK, CodeRate::R2_3, 0, 4),
           "QPSK at the wrong code rate must remain outside the experiment");
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QAM8, CodeRate::R2_3, 0, 4),
-          "8PSK/QAM8 must remain outside the QPSK-only experiment");
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QAM16, CodeRate::R3_4, 0, 4),
+    CHECK(context_allowed(true, true, false, false, false, true,
+                          Modulation::QAM8, CodeRate::R2_3, 0, 4),
+          "descriptor-proven 8PSK R2/3 non-tail member should be eligible");
+    CHECK(context_allowed(true, true, false, false, false, true,
+                          Modulation::QAM8, CodeRate::R2_3, 3, 4),
+          "final 8PSK member may validate context but remains key-ineligible");
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QAM8, CodeRate::R2_3, 0, 4,
+                           /*frame_cw_count=*/12, /*lifting_z=*/27),
+          "short-LDPC 8PSK must remain outside the measured cw4/Z81 profile");
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QAM8, CodeRate::R2_3, 0, 4,
+                           /*frame_cw_count=*/12, /*lifting_z=*/81),
+          "8PSK authorization must independently require physical cw4");
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QAM8, CodeRate::R2_3, 0, 4,
+                           /*frame_cw_count=*/4, /*lifting_z=*/27),
+          "8PSK authorization must require both the measured CW and Z geometry");
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QAM8, CodeRate::R3_4, 0, 4,
+                           /*frame_cw_count=*/4, /*lifting_z=*/81),
+          "8PSK authorization must remain restricted to R2/3");
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QAM16, CodeRate::R3_4, 0, 4),
           "dense modulations must not inherit the old broad provisional gate");
 
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, -1, 4),
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, -1, 4),
           "decode outside the burst logical loop must be rejected");
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 4, 4),
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, 4, 4),
           "logical index beyond the declared group must be rejected");
-    CHECK(!allowed(true, true, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 1),
+    CHECK(!context_allowed(true, true, false, false, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 1),
           "invalid singleton descriptor geometry must be rejected");
 
-    CHECK(!allowed(true, false, false, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(!context_allowed(true, false, false, false, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "late-join or unproven group provenance must be rejected");
-    CHECK(!allowed(true, true, true, false, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(!context_allowed(true, true, true, false, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "cross-frame interleaved groups are outside the experiment");
-    CHECK(!allowed(true, true, false, true, false, true,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(!context_allowed(true, true, false, true, false, true,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "post-RTO cadence context must retain the existing rejection gate");
-    CHECK(!allowed(true, true, false, false, true, true,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(!context_allowed(true, true, false, false, true, true,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "invalidated ARQ-mirror prediction must reject the rest of the group");
-    CHECK(!allowed(true, true, false, false, false, false,
-                   Modulation::QPSK, CodeRate::R3_4, 0, 4),
+    CHECK(!context_allowed(true, true, false, false, false, false,
+                           Modulation::QPSK, CodeRate::R3_4, 0, 4),
           "missing ARQ context callback must reject provisional keying");
+
+    CHECK(burstCadenceBlocksProvisionalHarq(
+              /*previous_descriptor_abs=*/0,
+              /*current_descriptor_abs=*/kBurstCadenceRtoGapSamples + 1),
+          "unknown first-descriptor cadence must block provisional keys");
+    CHECK(!burstCadenceBlocksProvisionalHarq(
+               /*previous_descriptor_abs=*/100,
+               /*current_descriptor_abs=*/100 + kBurstCadenceRtoGapSamples),
+          "the measured 15-second boundary remains steady cadence");
+    CHECK(burstCadenceBlocksProvisionalHarq(
+              /*previous_descriptor_abs=*/100,
+              /*current_descriptor_abs=*/101 + kBurstCadenceRtoGapSamples),
+          "only a sample-clock gap above 15 seconds is an RTO context");
+    CHECK(burstCadenceBlocksProvisionalHarq(
+              /*previous_descriptor_abs=*/1000,
+              /*current_descriptor_abs=*/100),
+          "a rewound sample clock must fail closed without unsigned underflow");
 
     CHECK(provisionalHarqContextCoversPosition(
               /*context_valid=*/true, /*logical_index=*/2,
@@ -264,7 +343,7 @@ int main() {
     test_robust_ofdm_control_samples();
     test_decode_sample_requirement_selection();
     test_qam16_control_peek_is_subfixed();
-    test_qpsk_r34_provisional_harq_scope();
+    test_provisional_harq_scope();
     test_descriptor_current_anchor_controls_warm_handoff();
 
     if (tests_failed != 0) {

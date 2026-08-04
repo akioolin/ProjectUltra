@@ -24,6 +24,7 @@
 #include <exception>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include "ultra/phy_diagnostics.hpp"
@@ -375,6 +376,24 @@ void StreamingDecoder::seedRungGeometryForTesting(Modulation mod, CodeRate rate,
     learnRungGeometry(mod, rate, cw, lifting_z);
 }
 
+std::array<int, 2> StreamingDecoder::learnedRungGeometryForTesting(
+        Modulation mod, CodeRate rate) const {
+    const uint8_t idx = protocol::coherentRungIndexFor(mod, rate);
+    const LearnedRungGeometry learned = learnedRungGeometrySnapshot(idx);
+    return {static_cast<int>(learned.cw_per_frame),
+            static_cast<int>(learned.lifting_z)};
+}
+
+uint64_t StreamingDecoder::learnedRungGeometrySessionEpochForTesting() const {
+    return learnedRungGeometrySessionEpochSnapshot();
+}
+
+bool StreamingDecoder::seedRungGeometryForSessionForTesting(
+        Modulation mod, CodeRate rate, int cw, int lifting_z,
+        uint64_t session_epoch) {
+    return learnRungGeometry(mod, rate, cw, lifting_z, session_epoch);
+}
+
 void StreamingDecoder::setLDPCLiftingZForTesting(int lifting_z) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     testing_lifting_z_override_ = (lifting_z == 81) ? 81 : 27;
@@ -402,15 +421,42 @@ void StreamingDecoder::setLDPCLiftingZForTesting(int lifting_z) {
         std::make_unique<ChannelInterleaver>(bps, codeword_bits);
 }
 
-void StreamingDecoder::learnRungGeometry(Modulation mod, CodeRate rate, int cw,
-                                         int lifting_z) {
+bool StreamingDecoder::learnRungGeometry(
+        Modulation mod, CodeRate rate, int cw, int lifting_z,
+        std::optional<uint64_t> expected_session_epoch) {
     const uint8_t idx = protocol::coherentRungIndexFor(mod, rate);
-    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return;
-    if (cw < 1) return;
-    learned_rung_geometry_[idx].cw_per_frame =
-        static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(cw));
-    learned_rung_geometry_[idx].lifting_z =
-        static_cast<uint8_t>((lifting_z == 81) ? 81 : 27);
+    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return false;
+    if (cw < 1) return false;
+    const LearnedRungGeometry learned{
+        static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(cw)),
+        static_cast<uint8_t>((lifting_z == 81) ? 81 : 27)};
+    std::lock_guard<std::mutex> lock(learned_rung_geometry_mutex_);
+    if (expected_session_epoch.has_value() &&
+        *expected_session_epoch != learned_rung_geometry_session_epoch_) {
+        return false;
+    }
+    learned_rung_geometry_[idx] = learned;
+    return true;
+}
+
+StreamingDecoder::LearnedRungGeometry
+StreamingDecoder::learnedRungGeometrySnapshot(uint8_t idx) const {
+    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) {
+        return LearnedRungGeometry{};
+    }
+    std::lock_guard<std::mutex> lock(learned_rung_geometry_mutex_);
+    return learned_rung_geometry_[idx];
+}
+
+uint64_t StreamingDecoder::learnedRungGeometrySessionEpochSnapshot() const {
+    std::lock_guard<std::mutex> lock(learned_rung_geometry_mutex_);
+    return learned_rung_geometry_session_epoch_;
+}
+
+void StreamingDecoder::clearLearnedRungGeometryAtSessionBoundary() {
+    std::lock_guard<std::mutex> lock(learned_rung_geometry_mutex_);
+    ++learned_rung_geometry_session_epoch_;
+    learned_rung_geometry_.fill(LearnedRungGeometry{});
 }
 
 // ADOPTION EVIDENCE (2026-07-28). A decoded descriptor is the sender telling us, on
@@ -453,7 +499,8 @@ void StreamingDecoder::noteDescriptorRungObserved(Modulation mod, CodeRate rate)
 StreamingDecoder::CommandedGeometry
 StreamingDecoder::resolveCommandedGeometry(bool is_ofdm, bool burst_latched) {
     CommandedGeometry cg;
-    if (!decode_policy::commandedGeometryEnabled()) return cg;   // opt-out
+    const bool broad_commanded_geometry =
+        decode_policy::commandedGeometryEnabled();
     if (!waveform_ || !is_ofdm || !connected_ || !burst_latched) return cg;
     if (mode_ != protocol::WaveformMode::OFDM_CHIRP) return cg;  // wideband scope
     if (!(use_burst_interleave_ || burst_transport_rx_)) return cg;  // burst regime
@@ -468,15 +515,53 @@ StreamingDecoder::resolveCommandedGeometry(bool is_ofdm, bool burst_latched) {
     if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return cg;
     // GATE 3 — the sender has told us on the wire that it is NOT on this rung.
     if (commanded_rung_declined_.load(std::memory_order_relaxed)) return cg;
-    const auto& learned = learned_rung_geometry_[idx];
+    const LearnedRungGeometry learned = learnedRungGeometrySnapshot(idx);
     if (learned.cw_per_frame < 1) return cg;  // table miss -> today's behaviour
 
     const auto pick = protocol::coherentRungFromIndex(idx);
+    const int active_lifting_z = activeBurstLiftingZ();
+    // LIVE Z81 RECOVERY (2026-08-04): keep the broad commanded-rung experiment
+    // default-OFF, but do not let that knob disable this narrowly proven BI0
+    // geometry correction. The receiver has already decoded a descriptor for one
+    // of the two exact transfer-scoped long profiles and therefore learned Z81 from
+    // the wire; its standing authority command names that same rung, and only the
+    // current descriptor is missing. In that state Z27 is not an alternate policy
+    // choice — it is stale geometry that collects cw*648 LLRs from a cw*1944-LLR
+    // member and mis-strides the group.
+    //
+    // This path MUST fail closed for BI1. A missed descriptor also loses physical N,
+    // and N is not rung-derivable. BI0 can prove the exact tail by decoding each
+    // member's CRC-protected PHYSICAL_BURST_END flag before finalization. BI1 cannot
+    // decode that flag until after group deinterleaving, which itself requires N.
+    // Reusing burst_group_size_ there fabricated stale N=8 for a live N=7 burst,
+    // declared air-end 2.38 s early, and caused the ACK to be dropped into inbound
+    // audio. BI1 recovery therefore needs an outer, independently decodable N/tail
+    // signal before this narrow default-active path can safely include it.
+    // All resolver gates above (connected wide burst, descriptor absent, authority,
+    // learned entry, not-declined) and the cadence gate below still apply.
+    const bool exact_long_file_profile =
+        (pick.mod == Modulation::QAM8 && pick.rate == CodeRate::R2_3 &&
+         learned.cw_per_frame == 4) ||
+        (pick.mod == Modulation::QPSK && pick.rate == CodeRate::R3_4 &&
+         learned.cw_per_frame == 3);
+    const bool same_rung_learned_z81_recovery =
+        !use_burst_interleave_ &&
+        exact_long_file_profile && learned.lifting_z == 81 &&
+        active_lifting_z == 27 &&
+        pick.mod == current_modulation_ && pick.rate == code_rate_ &&
+        static_cast<int>(learned.cw_per_frame) == fixed_frame_codewords_;
+    if (!broad_commanded_geometry && !same_rung_learned_z81_recovery) {
+        return cg;
+    }
+
     // Inert in steady state: only a genuine switch boundary is worth arming. If the
     // commanded rung IS what we are already configured for, the latched geometry is
-    // already correct and this must be a byte-identical no-op.
+    // already correct and this must be a byte-identical no-op. Lifting Z is part of
+    // that identity: equal mod/rate/cw with learned Z81 and active Z27 is the live
+    // lost-descriptor recovery case, not steady state.
     if (pick.mod == current_modulation_ && pick.rate == code_rate_ &&
-        static_cast<int>(learned.cw_per_frame) == fixed_frame_codewords_) {
+        static_cast<int>(learned.cw_per_frame) == fixed_frame_codewords_ &&
+        static_cast<int>(learned.lifting_z) == active_lifting_z) {
         return cg;
     }
 
@@ -533,8 +618,187 @@ StreamingDecoder::resolveCommandedGeometry(bool is_ofdm, bool burst_latched) {
     return cg;
 }
 
+// A descriptor and its marked DATA head can both disappear in one fade while a
+// later BI0 member's ordinary light-LTS remains perfectly usable. The control
+// hypothesis must run first (all connected controls are short Z27 QPSK R1/4),
+// but after that hypothesis fails we may recover the exact long DATA geometry
+// already learned from an earlier descriptor for the same commanded rung.
+//
+// This resolver intentionally returns only per-frame geometry. It does not and
+// cannot recover physical N, group sequence, or interleave provenance; callers
+// therefore decode through the classic per-frame path and require the frame's
+// CRC-protected PHYSICAL_BURST_END flag to prove the physical turn boundary.
+StreamingDecoder::CommandedGeometry
+StreamingDecoder::resolveClassicLongGeometry(bool is_ofdm,
+                                             bool burst_latched,
+                                             uint64_t frame_sync_abs) {
+    CommandedGeometry cg;
+    if (!waveform_ || !is_ofdm || !connected_ || burst_latched) return cg;
+    if (mode_ != protocol::WaveformMode::OFDM_CHIRP) return cg;
+    if (!burst_transport_rx_ || use_burst_interleave_) return cg;
+    if (control_only_receive_.load(std::memory_order_acquire)) return cg;
+    if (testing_lifting_z_override_ != 0) return cg;
+    if (!anchored_burst_backstop_armed_ ||
+        !sync_from_full_anchor_fallback_) {
+        return cg;
+    }
+    if (!std::isfinite(sync_correlation_) ||
+        sync_correlation_ < frame_policy::kMinSyncRecoveryCorrelation) {
+        return cg;
+    }
+    if (pending_total_cw_ > 0 || sync_controller_.have_burst_descriptor_) {
+        return cg;
+    }
+    if (!protocol::rxRateAuthorityEnabled()) return cg;
+
+    // Tie the candidate to the accepted anchor's PHYSICAL sample interval. The
+    // backstop timestamp is a decoder-feed watermark (total_fed_ at detection),
+    // which may already lie beyond this candidate under backlog and therefore is
+    // not an ordering key. The provisional gate retains the exact anchor training
+    // position and its conservative physical-turn end.
+    if (!burst_air_end_provisional_.load(std::memory_order_relaxed) ||
+        !provisional_burst_anchor_full_chirp_.load(std::memory_order_relaxed)) {
+        return cg;
+    }
+    const uint64_t anchor_abs =
+        provisional_burst_anchor_abs_.load(std::memory_order_relaxed);
+    const uint64_t physical_end_abs =
+        burst_air_end_abs_.load(std::memory_order_relaxed);
+    if (frame_sync_abs < anchor_abs || physical_end_abs <= anchor_abs ||
+        frame_sync_abs > physical_end_abs) {
+        return cg;
+    }
+
+    const uint8_t idx = commanded_rung_idx_.load(std::memory_order_relaxed);
+    if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) {
+        return cg;
+    }
+    if (commanded_rung_declined_.load(std::memory_order_relaxed)) return cg;
+    const LearnedRungGeometry learned = learnedRungGeometrySnapshot(idx);
+    const auto pick = protocol::coherentRungFromIndex(idx);
+    const bool exact_long_file_profile =
+        (pick.mod == Modulation::QAM8 && pick.rate == CodeRate::R2_3 &&
+         learned.cw_per_frame == 4) ||
+        (pick.mod == Modulation::QPSK && pick.rate == CodeRate::R3_4 &&
+         learned.cw_per_frame == 3);
+    if (!exact_long_file_profile || learned.lifting_z != 81) return cg;
+    if (activeBurstLiftingZ() != 27) return cg;
+    if (pick.mod != current_modulation_ || pick.rate != code_rate_ ||
+        static_cast<int>(learned.cw_per_frame) != fixed_frame_codewords_) {
+        return cg;
+    }
+
+    // Reuse the command-adoption cadence discriminator at the accepted ANCHOR,
+    // not this later member. A healthy long burst can put its tail >15 s after
+    // the previous group's head (the live recovery candidate was +15.55 s), even
+    // though the new turn's accepted anchor arrived at steady cadence (+10.73 s).
+    // A post-RTO ANCHOR may still be old Z27 after a lost authority ACK; applying
+    // learned Z81 there would turn a recoverable resend into a deterministic bad
+    // slice.
+    if (last_group_start_abs_ != 0 && anchor_abs > last_group_start_abs_ &&
+        (anchor_abs - last_group_start_abs_) >
+            decode_policy::kBurstCadenceRtoGapSamples) {
+        return cg;
+    }
+
+    cg.armed = true;
+    cg.mod = pick.mod;
+    cg.rate = pick.rate;
+    cg.cw = static_cast<int>(learned.cw_per_frame);
+    cg.lifting_z = 81;
+    cg.frame_samples = static_cast<size_t>(
+        ofdm_link_adaptation::minSamplesForCWCount(
+            cg.cw, cg.mod, cg.rate, cg.lifting_z, ofdm_carriers_,
+            std::max(1, waveform_->getSamplesPerSymbol())));
+    if (cg.frame_samples == 0) cg.armed = false;
+    return cg;
+}
+
+void StreamingDecoder::armClassicLongGeometry(
+        const CommandedGeometry& geometry) {
+    if (!geometry.armed || geometry.lifting_z != 81 || !waveform_) return;
+    classic_long_geometry_recovery_active_ = true;
+    classic_long_geometry_sync_pos_ = sync_position_ + 1;
+    pending_total_cw_ = geometry.cw;
+    // This accepted full-anchor epoch is the current physical group attempt.
+    // Advance the cadence reference even though its descriptor/marked head were
+    // lost; otherwise a second consecutive loss is measured from the last fully
+    // framed group and is falsely classified as post-RTO.
+    last_group_start_abs_ =
+        provisional_burst_anchor_abs_.load(std::memory_order_relaxed);
+    waveform_->setActiveLDPCLiftingZ(81);
+    rebuildFrameDecoderInterleaverForLiftingZ(81);
+    ++classic_long_geometry_arms_;
+    LOG_MODEM(WARN,
+              "[%s] [CLASSIC-LONG-Z] descriptor/head missed — retrying accepted "
+              "BI0 DATA fallback as %s %s cw=%d z=81 (%zu samples); physical N "
+              "remains unknown and only a CRC tail may close the turn. arm #%u",
+              log_prefix_.c_str(), modulationToString(geometry.mod),
+              codeRateToString(geometry.rate), geometry.cw,
+              geometry.frame_samples, classic_long_geometry_arms_);
+}
+
+void StreamingDecoder::clearClassicLongGeometry() {
+    if (!classic_long_geometry_recovery_active_) return;
+    classic_long_geometry_recovery_active_ = false;
+    classic_long_geometry_sync_pos_ = 0;
+    const int target_z = testing_lifting_z_override_ != 0
+        ? testing_lifting_z_override_
+        : sync_controller_.activeBurstLiftingZ();
+    if (waveform_) {
+        waveform_->setActiveLDPCLiftingZ(static_cast<uint8_t>(target_z));
+    }
+    rebuildFrameDecoderInterleaverForLiftingZ(target_z);
+}
+
+bool StreamingDecoder::classicLongGeometryEligibleForTesting(
+        float correlation, bool burst_latched,
+        uint64_t prior_group_start_abs,
+        uint64_t anchor_abs,
+        uint64_t candidate_abs) {
+    const bool saved_backstop = anchored_burst_backstop_armed_;
+    const size_t saved_arm_abs = anchored_burst_backstop_arm_abs_;
+    const bool saved_fallback = sync_from_full_anchor_fallback_;
+    const float saved_correlation = sync_correlation_;
+    const bool saved_provisional =
+        burst_air_end_provisional_.load(std::memory_order_relaxed);
+    const uint64_t saved_anchor =
+        provisional_burst_anchor_abs_.load(std::memory_order_relaxed);
+    const bool saved_full_chirp =
+        provisional_burst_anchor_full_chirp_.load(std::memory_order_relaxed);
+    const uint64_t saved_air_end =
+        burst_air_end_abs_.load(std::memory_order_relaxed);
+    const uint64_t saved_group_start = last_group_start_abs_;
+    anchored_burst_backstop_armed_ = true;
+    anchored_burst_backstop_arm_abs_ = 0;
+    sync_from_full_anchor_fallback_ = true;
+    sync_correlation_ = correlation;
+    burst_air_end_provisional_.store(true, std::memory_order_relaxed);
+    provisional_burst_anchor_abs_.store(anchor_abs, std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(true,
+                                               std::memory_order_relaxed);
+    burst_air_end_abs_.store(candidate_abs + 1, std::memory_order_relaxed);
+    last_group_start_abs_ = prior_group_start_abs;
+    const bool eligible = resolveClassicLongGeometry(
+        protocol::isOFDMMode(mode_), burst_latched, candidate_abs).armed;
+    anchored_burst_backstop_armed_ = saved_backstop;
+    anchored_burst_backstop_arm_abs_ = saved_arm_abs;
+    sync_from_full_anchor_fallback_ = saved_fallback;
+    sync_correlation_ = saved_correlation;
+    burst_air_end_provisional_.store(saved_provisional,
+                                     std::memory_order_relaxed);
+    provisional_burst_anchor_abs_.store(saved_anchor,
+                                        std::memory_order_relaxed);
+    provisional_burst_anchor_full_chirp_.store(saved_full_chirp,
+                                               std::memory_order_relaxed);
+    burst_air_end_abs_.store(saved_air_end, std::memory_order_relaxed);
+    last_group_start_abs_ = saved_group_start;
+    return eligible;
+}
+
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
+        clearClassicLongGeometry();
         {
             std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
             sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + 4800);
@@ -543,7 +807,32 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
+    // A classic-long arm spans two decode iterations: the first performs the
+    // hardened control-sized hypothesis and arms the exact long wait; the second
+    // owns the full Z81 slice. Keep the temporary geometry only while that same
+    // candidate explicitly returns to SYNC_FOUND awaiting more samples. Every
+    // terminal success/failure/search/reset path restores ordinary Z27 after all
+    // decode and consumed-stride calculations have finished.
+    const bool classic_long_on_entry =
+        classic_long_geometry_recovery_active_ &&
+        classic_long_geometry_sync_pos_ == sync_position_ + 1;
+    auto classic_long_cleanup = [this, classic_long_on_entry](void*) {
+        if (!classic_long_on_entry) return;
+        const bool same_candidate_still_waiting =
+            classic_long_geometry_recovery_active_ &&
+            classic_long_geometry_sync_pos_ == sync_position_ + 1 &&
+            state_ == DecoderState::SYNC_FOUND && pending_total_cw_ > 0;
+        if (!same_candidate_still_waiting) {
+            clearClassicLongGeometry();
+        }
+    };
+    std::unique_ptr<void, decltype(classic_long_cleanup)>
+        classic_long_scope(classic_long_on_entry ? static_cast<void*>(this) : nullptr,
+                           classic_long_cleanup);
+
     const uint32_t gen_at_start = reset_generation_.load(std::memory_order_acquire);
+    const uint64_t geometry_session_epoch_at_start =
+        learnedRungGeometrySessionEpochSnapshot();
     auto resetDuringDecode = [this, gen_at_start]() {
         return reset_generation_.load(std::memory_order_acquire) != gen_at_start;
     };
@@ -562,7 +851,22 @@ void StreamingDecoder::decodeCurrentFrame() {
     // latch + the burst regime. Without dropping the use_burst_interleave_ gate here, an
     // interleave-off group-start sized as a control peek, never decoded as data, and never
     // reached the burst-accumulation path — the whole group stalled (verified bi0_s1).
-    const bool burst_latched = waveform_ && waveform_->wasBurstInterleaved();
+    const bool control_only_receive =
+        is_ofdm && connected_ &&
+        control_only_receive_.load(std::memory_order_acquire);
+    // A speculative DATA peek may have armed a fixed-CW continuation immediately
+    // before the lifecycle entered DISCONNECTING.  Retire that decoder-owned
+    // continuation at this decode-thread boundary so teardown always starts with
+    // the normal hardened control peek.  Likewise, ignore a sign-only burst marker:
+    // DATA groups are not legal during this phase.
+    if (control_only_receive && pending_total_cw_ > 0) {
+        LOG_MODEM(INFO,
+                  "[%s] Control-only RX: discarding pending %d-CW DATA escalation",
+                  log_prefix_.c_str(), pending_total_cw_);
+        pending_total_cw_ = 0;
+    }
+    const bool burst_latched =
+        !control_only_receive && waveform_ && waveform_->wasBurstInterleaved();
     const bool burst_regime_active = use_burst_interleave_ || burst_transport_rx_;
     const size_t pending_samples = pending_total_cw_ > 0
         ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
@@ -1087,6 +1391,29 @@ void StreamingDecoder::decodeCurrentFrame() {
                     if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
                     auto hdr = v2::parseHeader(data_r14);
                     if (hdr.valid && hdr.total_cw == 1 && v2::isControlFrame(hdr.type)) {
+                        // BUG-CLASSIC-CFO-CERT (2026-08-04): the control-first path
+                        // returns before the common post-demod CFO feedback below.
+                        // That violated CFOTracker's feedback invariant and, more
+                        // importantly, left pilot_seeded=false after a preceding 0/N
+                        // group revoked the warm certificate.  A CRC/LDPC-valid
+                        // connected OFDM control frame proves both this demodulation
+                        // and its pilot-refined CFO.  Feed the residual back and
+                        // certify it before BURST_HEADER hands off to the following
+                        // DATA anchor (or a synchronous protocol callback can reset
+                        // the decoder).
+                        const float control_residual_cfo = waveform_->estimatedCFO();
+                        const float control_current_cfo = cfo_tracker_.tracked();
+                        const auto control_cfo_update = cfo_tracker_.ingestPilotResidual(
+                            frame_demodulator_.preCorrectionCfo(), control_residual_cfo,
+                            control_current_cfo, /*clamp_drift=*/true);
+                        sync_cfo_ = control_cfo_update.accepted_cfo;
+                        cfo_tracker_.certifyWarm();
+                        LOG_MODEM(INFO,
+                                  "[%s] Classic OFDM control CFO certified: %.2f Hz "
+                                  "(pre_corr=%.2f residual=%.2f)",
+                                  log_prefix_.c_str(), sync_cfo_,
+                                  frame_demodulator_.preCorrectionCfo(),
+                                  control_residual_cfo);
                         // Self-describing burst (design §14.17): a BURST_HEADER
                         // descriptor configures THIS receiver's group decode from
                         // the SENDER's declaration (group size, CW/frame, interleave
@@ -1174,8 +1501,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // not reproducible here, so the only honest source is
                                 // a descriptor we actually decoded. Used when a LATER
                                 // descriptor for this same rung is missed.
-                                learnRungGeometry(bi.modulation, bi.code_rate,
-                                                  bi.cw_per_frame, bi.lifting_z);
+                                learnRungGeometry(
+                                    bi.modulation, bi.code_rate,
+                                    bi.cw_per_frame, bi.lifting_z,
+                                    geometry_session_epoch_at_start);
                                 // ...and RECORD WHETHER THE SENDER TOOK OUR COMMAND.
                                 // This descriptor is the sender stating the rung it is
                                 // actually transmitting; if it is not the rung we
@@ -1221,18 +1550,20 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // commanded-geometry cadence guard
                                     // (BUG-BURST-STALE-GEOMETRY) so the two cannot
                                     // drift: streaming_decode_policy.hpp.
-                                    burst_group_full_anchor_ =
-                                        descriptor_current_group_full_anchor ||
-                                        (last_descriptor_abs_sample_ != 0 &&
-                                         frame_sync_abs > last_descriptor_abs_sample_ &&
-                                         (frame_sync_abs - last_descriptor_abs_sample_) >
-                                             decode_policy::kBurstCadenceRtoGapSamples);
+                                    // Do not conflate an announced FULL anchor with
+                                    // an RTO gap. Selective SACK repairs deliberately
+                                    // use FULL acquisition at steady cadence, and are
+                                    // exactly where CW0-loss combining is valuable.
+                                    burst_harq_cadence_blocked_ =
+                                        decode_policy::burstCadenceBlocksProvisionalHarq(
+                                            last_descriptor_abs_sample_, frame_sync_abs);
                                     last_descriptor_abs_sample_ = frame_sync_abs;
                                 }
                                 last_burst_src_hash_ = hdr.src_hash;
                                 burst_harq_ctx_.reset();
                                 burst_harq_ctx_pulled_ = false;
                                 burst_harq_prediction_invalid_ = false;
+                                burst_harq_prediction_validated_ = false;
                                 LOG_MODEM(INFO,
                                     "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d current_anchor=%s",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
@@ -1501,8 +1832,43 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
         }
 
+        const bool control_probe_saw_burst_marker =
+            waveform_->wasBurstInterleaved();
         if (switched_profile) {
             waveform_->configure(saved_mod, saved_rate);
+        }
+
+        // DISCONNECTING shares the connected OFDM waveform only so the hardened
+        // QPSK R1/4 ACK/control plane remains decodable.  Once that exact control
+        // decode has failed, the candidate is not legal teardown traffic.  Never
+        // fall through to the generic connected DATA path or arm fixed-CW
+        // escalation; advance just as for another false OFDM lock and keep looking
+        // for the real ACK.
+        if (control_only_receive) {
+            LOG_MODEM(INFO,
+                      "[%s] Control-only RX: invalid control candidate rejected; "
+                      "DATA fallback suppressed",
+                      log_prefix_.c_str());
+            pending_total_cw_ = 0;
+            advancePastFalseOFDMLock();
+            state_ = DecoderState::SEARCHING;
+            return;
+        }
+
+        // The descriptor and marked head can be lost in the accepted full-anchor
+        // fade while a later unmarked BI0 member survives. Only after the robust
+        // control hypothesis has failed may the learned long-DATA geometry take
+        // over. Re-enter SYNC_FOUND at the same training position so readiness and
+        // decode both wait for the full Z81 member; do not synthesize descriptor/N.
+        const bool candidate_burst_latched =
+            burst_latched || control_probe_saw_burst_marker;
+        const auto classic_long = resolveClassicLongGeometry(
+            is_ofdm, candidate_burst_latched,
+            static_cast<uint64_t>(frame_sync_abs));
+        if (classic_long.armed) {
+            armClassicLongGeometry(classic_long);
+            state_ = DecoderState::SYNC_FOUND;
+            return;
         }
 
         // The control-first peek ran and found no valid control frame. INSIDE an
@@ -1573,6 +1939,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                               log_prefix_.c_str(), declared);
                     headnull_resync_drop_count_ = 0;
                     clearActiveBurstDescriptorGeometry();
+                    finalizeGroupEvmSnr(/*geometry_proven=*/true, declared);
                     burst_group_callback_(/*group_seq=*/0, {}, /*all_ok=*/false,
                                           /*quality=*/0.0f, /*frame_mask=*/0,
                                           use_burst_interleave_,
@@ -1623,7 +1990,11 @@ void StreamingDecoder::decodeCurrentFrame() {
     // guard (use_burst_interleave_ || burst_transport_rx_) preserves the exact pre-decouple
     // behavior when interleave is on, and only extends accumulation to interleave-off
     // groups inside an actual burst file transfer (never a stray non-file frame).
-    bool burst_marker = connected_ && is_ofdm
+    // A classic-long candidate was explicitly accepted only after the short
+    // control probe saw no marker. Do not let a second demodulation's noisy sign
+    // decision promote it into group accumulation: this recovery knows cw/Z but
+    // deliberately knows no N. It must remain an independently decoded frame.
+    bool burst_marker = !classic_long_on_entry && connected_ && is_ofdm
                         && mode_ == protocol::WaveformMode::OFDM_CHIRP
                         && waveform_->wasBurstInterleaved()
                         && (use_burst_interleave_ || burst_transport_rx_);
@@ -1985,7 +2356,28 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_air_end_provisional_.store(false, std::memory_order_relaxed);
         provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
         provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
-        burst_air_end_abs_.store(0, std::memory_order_relaxed);
+        if (cg.armed) {
+            // The descriptorless tuple knows frame stride but not N. Publish the
+            // conservative sender-policy ceiling NOW, before returning to the event
+            // loop. Waiting for frame 2's refresh leaves one full long-Z member with
+            // burstAirSamplesRemaining()==0, during which an already-deferred SACK or
+            // timer control could key over the peer. Exact tail finalization clears
+            // this ceiling before the new group's own callback runs.
+            refreshBurstAirEnd();
+            const uint64_t armed_end =
+                burst_air_end_abs_.load(std::memory_order_relaxed);
+            commanded_geometry_air_gate_span_at_arm_ =
+                armed_end > burst_data_start_abs_
+                    ? armed_end - burst_data_start_abs_
+                    : 0;
+        } else {
+            // Descriptor-proven groups publish their exact N-based span after the
+            // first continuation establishes the live member stride. Commanded
+            // geometry deliberately skips this zero store: its acquisition-time
+            // provisional deadline must remain nonzero until refreshBurstAirEnd()
+            // atomically replaces it with the conservative unknown-N ceiling.
+            burst_air_end_abs_.store(0, std::memory_order_relaxed);
+        }
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
         burst_start_time_ = std::chrono::steady_clock::now();
@@ -3821,6 +4213,48 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
         bool built_key_provisional = false;  // set by buildHarqKey's fallback path
+        bool harq_key_intentionally_ineligible = false;
+        std::optional<fec::SoftCombineBuffer::Key> provisional_key_used;
+        auto validateHarqPrediction =
+            [&](uint32_t actual_sender_hash, uint32_t actual_dst_hash,
+                uint16_t actual_seq,
+                int logical_index, bool count_mismatch) -> bool {
+            if (logical_index < 0 || !burst_harq_ctx_pulled_ ||
+                !burst_harq_ctx_ || !burst_harq_ctx_->valid() ||
+                static_cast<size_t>(logical_index) >=
+                    burst_harq_ctx_->predicted_seqs.size()) {
+                return false;
+            }
+            const uint16_t predicted_seq =
+                burst_harq_ctx_->predicted_seqs[static_cast<size_t>(logical_index)];
+            const bool matches =
+                streaming_decode_policy::provisionalHarqPredictionMatchesHeader(
+                    burst_harq_ctx_->sender_hash, burst_harq_ctx_->dst_hash,
+                    predicted_seq, actual_sender_hash, actual_dst_hash,
+                    actual_seq);
+            if (!matches) {
+                if (!burst_harq_prediction_invalid_) {
+                    burst_harq_prediction_invalid_ = true;
+                    if (count_mismatch) {
+                        ultra::timing::globalDecoderProfile()
+                            .harq_prediction_mismatch.fetch_add(
+                                1, std::memory_order_relaxed);
+                    }
+                    LOG_MODEM(INFO,
+                              "[%s] HARQ prediction mismatch at pos=%d: "
+                              "predicted src=0x%06X dst=0x%06X seq=%u, "
+                              "actual src=0x%06X dst=0x%06X seq=%u — "
+                              "provisional keys disabled for this group",
+                              log_prefix_.c_str(), logical_index,
+                              burst_harq_ctx_->sender_hash,
+                              burst_harq_ctx_->dst_hash, predicted_seq,
+                              actual_sender_hash, actual_dst_hash, actual_seq);
+                }
+                return false;
+            }
+            burst_harq_prediction_validated_ = true;
+            return true;
+        };
         auto buildHarqKey = [&](int cw_count, fec::SoftCombineBuffer::Key& out_key) -> bool {
             if (!harq_buffer_ || !harq_buffer_->enabled()) {
                 return false;
@@ -3841,10 +4275,12 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 return false;
             }
 
-            auto fillKey = [&](uint32_t sender_hash, uint16_t seq, int total_cw,
+            auto fillKey = [&](uint32_t sender_hash, uint32_t dst_hash,
+                               uint16_t seq, int total_cw,
                                bool physical_burst_end) -> bool {
                 fec::SoftCombineBuffer::HarqKeyInputs ki;
                 ki.sender_hash = sender_hash;
+                ki.dst_hash = dst_hash;
                 ki.seq = seq;
                 ki.rate = rate;
                 ki.cw_count = static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(total_cw));
@@ -3867,6 +4303,42 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
             }
 
+            static const bool kProvisionalEnabled = [] {
+                const char* e = std::getenv("ULTRA_HARQ_PROVISIONAL");
+                return e && *e == '1';  // opt-IN
+            }();
+            // Exact DESCRIPTOR provenance only. A late-join group has a known
+            // declared size but not an independently proven absolute head
+            // position, so it is intentionally outside this experiment.
+            const bool exact_descriptor_proven =
+                burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR;
+            const bool provisional_harq_context_allowed =
+                streaming_decode_policy::allowProvisionalHarqContext(
+                    kProvisionalEnabled, burst_transport_rx_,
+                    exact_descriptor_proven, use_burst_interleave_,
+                    burst_harq_cadence_blocked_,
+                    burst_harq_prediction_invalid_,
+                    static_cast<bool>(harq_context_callback_),
+                    current_modulation_, rate, cw_count, active_lifting_z,
+                    burst_logical_index_, burst_group_size_);
+            // Pull before the first CW0 peek, not only after a failure. Every
+            // earlier header-verified position can then falsify a stale ARQ
+            // mirror before a later CW0-dead position would use it as a key.
+            if (provisional_harq_context_allowed && !burst_harq_ctx_pulled_) {
+                burst_harq_ctx_ = harq_context_callback_();
+                burst_harq_ctx_pulled_ = true;
+                LOG_MODEM(DEBUG,
+                          "[%s] [HARQKEY] ctx pulled: have=%d valid=%d pred_n=%zu "
+                          "src=0x%06X dst=0x%06X desc_src=0x%06X",
+                          log_prefix_.c_str(), burst_harq_ctx_ ? 1 : 0,
+                          (burst_harq_ctx_ && burst_harq_ctx_->valid()) ? 1 : 0,
+                          burst_harq_ctx_ ? burst_harq_ctx_->predicted_seqs.size()
+                                          : size_t{0},
+                          burst_harq_ctx_ ? burst_harq_ctx_->sender_hash : 0u,
+                          burst_harq_ctx_ ? burst_harq_ctx_->dst_hash : 0u,
+                          last_burst_src_hash_);
+            }
+
             auto [peek_ok, peek_data] = robustDecodeSingleCW(
                 cw0_bits.data(), cw0_bits.size(), rate, log_prefix_.c_str(),
                 ultra::timing::SingleCWCallSite::Cw0Peek,
@@ -3881,12 +4353,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 // receive-order guesses stay rejected (the original objection
                 // stands); the mirror is exact whenever the sender acted on our
                 // last SACK, and the gates + the finalize seq-match guard bound
-                // every divergence case. The current experiment is deliberately
-                // QPSK R3/4 only, descriptor-proven, non-interleaved, and excludes
-                // the final physical member (whose hidden PHYSICAL_BURST_END bit
-                // changes the protected DATA bytes). Warm cadence excludes escalated
-                // timeout batches, prediction mismatch disables the rest of the
-                // group, and the callback supplies the session peer identity.
+                // every divergence case. The experiment is restricted to the two
+                // measured constant-envelope profiles (QPSK R3/4 and 8PSK R2/3
+                // cw4/Z81), descriptor-proven, non-interleaved, and excludes the
+                // final physical member (whose hidden PHYSICAL_BURST_END bit changes
+                // the protected DATA bytes). Warm cadence excludes escalated timeout
+                // batches, prediction mismatch disables the rest of the group, and
+                // the callback supplies both session endpoint identities.
                 // DEFAULT-OFF (2026-07-01 rig verdict, flipped the same evening it
                 // shipped): on live IONOS MPG@20 the provisional path POISON-LOOPED —
                 // the stuck group re-failed 0/8 with 285 combines feeding it, while
@@ -3897,55 +4370,33 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 // fallback, frame_v2.cpp decode loop), and mismatch=0 cannot
                 // exonerate an 0/N loop (detection requires a decode). Sim measured
                 // 0/212 mispredictions — the divergence is the LLR character, a
-                // sim-fidelity gap. RE-ENABLE only after the structural fix:
-                // combine-then-fail retries the CW standalone (fresh-only), making
-                // combining harm-free by construction regardless of key correctness.
-                static const bool kProvisionalEnabled = [] {
-                    const char* e = std::getenv("ULTRA_HARQ_PROVISIONAL");
-                    return e && *e == '1';  // opt-IN
-                }();
-                // Exact DESCRIPTOR provenance only. A late-join group has a known
-                // declared size but not an independently proven absolute head
-                // position, so it is intentionally outside this experiment.
-                const bool exact_descriptor_proven =
-                    burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR;
+                // sim-fidelity gap. The structural fix now exists:
+                // combine-then-fail retries the CW standalone (fresh-only), and a
+                // provisional double-fail retains fresh rather than a suspect sum.
+                // The knob remains opt-in until a matched real-rig A/B proves value.
                 // Gate trace ([HARQKEY]): three gate designs in a row measured
                 // provisional=0 — never debug this blind again.
                 LOG_MODEM(DEBUG,
-                          "[%s] [HARQKEY] cw0-peek FAIL pos=%d gates: en=%d gap_block=%d "
-                          "invalid=%d burst=%d exact_desc=%d interleave=%d mod=%d "
+                          "[%s] [HARQKEY] cw0-peek FAIL pos=%d gates: en=%d cadence_block=%d "
+                          "invalid=%d validated=%d burst=%d exact_desc=%d interleave=%d mod=%d "
                           "rate=%d group=%d cb=%d",
                           log_prefix_.c_str(), burst_logical_index_,
-                          kProvisionalEnabled ? 1 : 0, burst_group_full_anchor_ ? 1 : 0,
+                          kProvisionalEnabled ? 1 : 0,
+                          burst_harq_cadence_blocked_ ? 1 : 0,
                           burst_harq_prediction_invalid_ ? 1 : 0,
+                          burst_harq_prediction_validated_ ? 1 : 0,
                           burst_transport_rx_ ? 1 : 0,
                           exact_descriptor_proven ? 1 : 0,
                           use_burst_interleave_ ? 1 : 0,
                           static_cast<int>(current_modulation_),
                           static_cast<int>(rate), burst_group_size_,
                           harq_context_callback_ ? 1 : 0);
-                if (streaming_decode_policy::allowProvisionalHarq(
-                        kProvisionalEnabled, burst_transport_rx_,
-                        exact_descriptor_proven, use_burst_interleave_,
-                        burst_group_full_anchor_, burst_harq_prediction_invalid_,
-                        static_cast<bool>(harq_context_callback_),
-                        current_modulation_, rate, burst_logical_index_,
+                if (streaming_decode_policy::allowProvisionalHarqKey(
+                        provisional_harq_context_allowed,
+                        burst_harq_prediction_validated_, burst_logical_index_,
                         burst_group_size_)) {
-                    if (!burst_harq_ctx_pulled_) {
-                        burst_harq_ctx_ = harq_context_callback_();
-                        burst_harq_ctx_pulled_ = true;
-                        LOG_MODEM(DEBUG,
-                                  "[%s] [HARQKEY] ctx pulled: have=%d valid=%d pred_n=%zu "
-                                  "src=0x%06X desc_src=0x%06X",
-                                  log_prefix_.c_str(), burst_harq_ctx_ ? 1 : 0,
-                                  (burst_harq_ctx_ && burst_harq_ctx_->valid()) ? 1 : 0,
-                                  burst_harq_ctx_ ? burst_harq_ctx_->predicted_seqs.size()
-                                                  : size_t{0},
-                                  burst_harq_ctx_ ? burst_harq_ctx_->sender_hash : 0u,
-                                  last_burst_src_hash_);
-                    }
-                    // sender_hash comes from the SESSION context (authoritative,
-                    // Connection::remote_call_). A descriptor-side src cross-check
+                    // Source and destination hashes come from the SESSION context
+                    // (Connection remote/local calls). A descriptor-side src cross-check
                     // was tried and REMOVED: the BURST_HEADER is a compact
                     // ControlFrame whose bytes parse differently from a data
                     // header, so the captured value never matched (measured
@@ -3960,7 +4411,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                         const uint16_t predicted_seq =
                             burst_harq_ctx_->predicted_seqs
                                 [static_cast<size_t>(burst_logical_index_)];
-                        if (fillKey(burst_harq_ctx_->sender_hash, predicted_seq,
+                        if (fillKey(burst_harq_ctx_->sender_hash,
+                                    burst_harq_ctx_->dst_hash, predicted_seq,
                                     cw_count, /*physical_burst_end=*/false)) {
                             built_key_provisional = true;
                             ultra::timing::globalDecoderProfile()
@@ -3992,32 +4444,31 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 return false;
             }
 
+            // ULPAD is physical geometry, not an SR-ARQ member. It must not
+            // validate or invalidate the ARQ mirror and has no useful HARQ
+            // history of its own. Decode it fresh and keep all HARQ telemetry
+            // and storage untouched.
+            if (v2::isOFDMBurstPadHeader(hdr)) {
+                harq_key_intentionally_ineligible = true;
+                LOG_MODEM(DEBUG,
+                          "[%s] [HARQKEY] physical ULPAD ignored at pos=%d "
+                          "seq=%u dst=0x%06X",
+                          log_prefix_.c_str(), burst_logical_index_, hdr.seq,
+                          hdr.dst_hash);
+                return false;
+            }
+
             // Prefix consistency (provisional-key gate): a header-verified seq that
             // contradicts the position prediction proves the mirror is wrong for
             // this group (lost SACK / stale-ack divergence) — disable provisional
             // keys for the REMAINING positions.
-            if (burst_logical_index_ >= 0 && burst_harq_ctx_pulled_ &&
-                burst_harq_ctx_ &&
-                static_cast<size_t>(burst_logical_index_) <
-                    burst_harq_ctx_->predicted_seqs.size() &&
-                burst_harq_ctx_->predicted_seqs
-                        [static_cast<size_t>(burst_logical_index_)] != hdr.seq) {
-                burst_harq_prediction_invalid_ = true;
-                ultra::timing::globalDecoderProfile()
-                    .harq_prediction_mismatch.fetch_add(1,
-                                                        std::memory_order_relaxed);
-                LOG_MODEM(INFO,
-                          "[%s] HARQ prediction mismatch at pos=%d: predicted=%u "
-                          "actual=%u — provisional keys disabled for this group",
-                          log_prefix_.c_str(), burst_logical_index_,
-                          burst_harq_ctx_->predicted_seqs
-                              [static_cast<size_t>(burst_logical_index_)],
-                          hdr.seq);
-            }
+            validateHarqPrediction(hdr.src_hash, hdr.dst_hash, hdr.seq,
+                                   burst_logical_index_,
+                                   /*count_mismatch=*/true);
 
             const bool physical_burst_end =
                 (peek_data[3] & v2::Flags::PHYSICAL_BURST_END) != 0;
-            return fillKey(hdr.src_hash, hdr.seq, hdr.total_cw,
+            return fillKey(hdr.src_hash, hdr.dst_hash, hdr.seq, hdr.total_cw,
                            physical_burst_end);
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
@@ -4026,6 +4477,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             fec::SoftCombineBuffer::Key* harq_key_ptr = nullptr;
             fec::SoftCombineBuffer* harq_buffer = nullptr;
             built_key_provisional = false;
+            harq_key_intentionally_ineligible = false;
+            provisional_key_used.reset();
             // Only count when HARQ is actually wanted (buffer enabled).
             // A "failed key build" only matters if HARQ would otherwise
             // have engaged — counting when HARQ is off would make every
@@ -4034,12 +4487,15 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             if (buildHarqKey(cw_count, harq_key)) {
                 harq_key_ptr = &harq_key;
                 harq_buffer = harq_buffer_;
+                if (built_key_provisional) {
+                    provisional_key_used = harq_key;
+                }
                 if (harq_active && !built_key_provisional) {
                     ultra::timing::globalDecoderProfile()
                         .harq_key_build_success.fetch_add(
                             1, std::memory_order_relaxed);
                 }
-            } else if (harq_active) {
+            } else if (harq_active && !harq_key_intentionally_ineligible) {
                 // Codex review #17: HARQ misses every frame whose
                 // first-attempt CW0 fails. Count these so we can
                 // measure whether a session-context fallback key
@@ -4059,6 +4515,46 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                                         built_key_provisional);
         };
         auto cw_status = decodeFixed(decode_cw_count);
+
+        auto validateRecoveredProvisionalHeader =
+            [&](const v2::CodewordStatus& status) {
+            if (!provisional_key_used || status.decoded.empty() ||
+                status.data.empty() || !status.decoded[0] ||
+                status.data[0].empty()) {
+                return;
+            }
+            const auto& cw0 = status.data[0];
+            const auto hdr = v2::parseHeader(cw0);
+            if (v2::isOFDMBurstPadHeader(hdr)) {
+                LOG_MODEM(INFO,
+                          "[%s] HARQ recovered physical ULPAD at pos=%d — "
+                          "ignored by ARQ prediction; provisional storage suppressed",
+                          log_prefix_.c_str(), burst_logical_index_);
+                return;
+            }
+            const bool actual_tail =
+                cw0.size() > 3 &&
+                (cw0[3] & v2::Flags::PHYSICAL_BURST_END) != 0;
+            const bool identity_matches =
+                hdr.valid && !hdr.is_control &&
+                fec::SoftCombineBuffer::provisionalHeaderIdentityMatchesKey(
+                    *provisional_key_used, hdr.src_hash, hdr.dst_hash, hdr.seq,
+                    hdr.total_cw, actual_tail);
+            if (!identity_matches) {
+                if (!burst_harq_prediction_invalid_) {
+                    burst_harq_prediction_invalid_ = true;
+                    // decodeFixedFrame's finalize guard owns the metric for a
+                    // recovered provisional header; do not double-count here.
+                    LOG_MODEM(INFO,
+                              "[%s] HARQ recovered-header identity mismatch at "
+                              "pos=%d — provisional keys disabled for this group",
+                              log_prefix_.c_str(), burst_logical_index_);
+                }
+                return;
+            }
+            burst_harq_prediction_validated_ = true;
+        };
+        validateRecoveredProvisionalHeader(cw_status);
 
         auto headerCwCount = [](const v2::CodewordStatus& status) -> int {
             if (status.decoded.empty() || status.data.empty() ||
@@ -4083,6 +4579,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                           log_prefix_.c_str(), header_cw_count, decode_cw_count);
                 decode_cw_count = header_cw_count;
                 cw_status = decodeFixed(decode_cw_count);
+                validateRecoveredProvisionalHeader(cw_status);
             }
         }
         copyCodewordDiagnostics(result, cw_status);

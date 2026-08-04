@@ -123,8 +123,10 @@ struct OFDMDemodulator::Impl {
     size_t evm_carrier_count_ = 0;
     bool last_evm_snr_valid_ = false;
     float last_evm_snr_db_ = 0.0f;
-    // EVM SNR (dB) from the LIVE accumulation (no lag); falls back to the last finalized
-    // value when nothing is currently accumulated. Zero residual clamps high (no div0).
+    size_t last_evm_carrier_count_ = 0;
+    // EVM SNR (dB) from the live accumulation.  This helper is private to the
+    // frame finalizer: public readers only see last_evm_snr_db_ after the pass
+    // that produced it has reached its own completion boundary.
     float currentEvmSnrDb() const {
         if (evm_carrier_count_ > 0 && evm_ee_accum_ > 0.0) {
             const double noise = evm_dd_accum_ - (evm_de_accum_ * evm_de_accum_) / evm_ee_accum_;
@@ -134,8 +136,10 @@ struct OFDMDemodulator::Impl {
         }
         return last_evm_snr_db_;
     }
-    // Finalize the just-completed burst's EVM SNR (into last_evm_snr_db_ + log) and reset
-    // the accumulators. Called at the per-burst boundary (resetFailureAttributionDiagnostics).
+    // Start/finalize one demodulation pass.  A new pass invalidates the previous
+    // one-shot observation immediately; only a complete pass publishes a value.
+    // This keeps a failed/erased frame from borrowing its predecessor's EVM.
+    void beginEvmSnrFrame();
     void finalizeAndResetEvmSnr();
 
     // Last LTS estimate quality. False training locks on silence/noise have

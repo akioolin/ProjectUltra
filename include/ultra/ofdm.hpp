@@ -95,6 +95,9 @@ public:
     // no noise-shape assumption, no per-bench offset. Parallel/logged in Stage 1.
     bool hasEvmSnr() const;
     float getEvmSnrDb() const;
+    // Move the just-completed frame's finalized observation to the caller.
+    // One-shot by design: a later erasure/no-process path cannot reuse it.
+    bool takeEvmSnr(float& evm_snr_db, size_t& carrier_count);
 
     // Get estimated frequency offset in Hz (from pilot phase tracking)
     float getFrequencyOffset() const;
